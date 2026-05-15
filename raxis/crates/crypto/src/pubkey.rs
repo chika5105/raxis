@@ -100,7 +100,9 @@ pub fn parse_ed25519_public_material(content: &str) -> Result<[u8; 32], PubkeyPa
     // hex, so this is the most common input.
     if trimmed.len() == 64 && trimmed.chars().all(|c| c.is_ascii_hexdigit()) {
         let vec = hex::decode(trimmed)?;
-        let arr: [u8; 32] = vec.try_into().expect("64 hex chars decode to exactly 32 bytes");
+        let arr: [u8; 32] = vec
+            .try_into()
+            .expect("64 hex chars decode to exactly 32 bytes");
         VerifyingKey::from_bytes(&arr)
             .map_err(|e| PubkeyParseError::InvalidPublicKey(e.to_string()))?;
         return Ok(arr);

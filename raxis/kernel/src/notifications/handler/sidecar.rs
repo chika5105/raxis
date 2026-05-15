@@ -147,14 +147,14 @@ impl SidecarChannelState {
         let avail = self.permits.available_permits() as u32;
         SidecarChannelSnapshot {
             in_flight: self.capacity.saturating_sub(avail),
-            capacity:  self.capacity,
-            circuit:   CircuitState::from_u8(self.circuit.load(Ordering::Acquire)),
+            capacity: self.capacity,
+            circuit: CircuitState::from_u8(self.circuit.load(Ordering::Acquire)),
             consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
             dropped_backpressure: self.dropped_backpressure.load(Ordering::Relaxed),
             dropped_circuit_open: self.dropped_circuit_open.load(Ordering::Relaxed),
-            last_success_at:      self.last_success_at.load(Ordering::Relaxed),
-            last_failure_at:      self.last_failure_at.load(Ordering::Relaxed),
-            opened_at_unix_secs:  self.opened_at_unix_secs.load(Ordering::Relaxed),
+            last_success_at: self.last_success_at.load(Ordering::Relaxed),
+            last_failure_at: self.last_failure_at.load(Ordering::Relaxed),
+            opened_at_unix_secs: self.opened_at_unix_secs.load(Ordering::Relaxed),
         }
     }
 
@@ -190,20 +190,22 @@ impl SidecarChannelState {
 
     fn record_success(&self) {
         self.consecutive_failures.store(0, Ordering::Relaxed);
-        self.last_success_at.store(raxis_runtime::unix_now_secs(), Ordering::Relaxed);
+        self.last_success_at
+            .store(raxis_runtime::unix_now_secs(), Ordering::Relaxed);
         self.opened_at_unix_secs.store(0, Ordering::Relaxed);
-        self.circuit.store(CircuitState::Closed as u8, Ordering::Release);
+        self.circuit
+            .store(CircuitState::Closed as u8, Ordering::Release);
     }
 
     fn record_failure(&self) {
         let n = self.consecutive_failures.fetch_add(1, Ordering::Relaxed) + 1;
-        self.last_failure_at.store(raxis_runtime::unix_now_secs(), Ordering::Relaxed);
+        self.last_failure_at
+            .store(raxis_runtime::unix_now_secs(), Ordering::Relaxed);
         if n >= CIRCUIT_OPEN_THRESHOLD as u64 {
-            self.opened_at_unix_secs.store(
-                raxis_runtime::unix_now_secs(),
-                Ordering::Relaxed,
-            );
-            self.circuit.store(CircuitState::Open as u8, Ordering::Release);
+            self.opened_at_unix_secs
+                .store(raxis_runtime::unix_now_secs(), Ordering::Relaxed);
+            self.circuit
+                .store(CircuitState::Open as u8, Ordering::Release);
         }
     }
 }
@@ -211,8 +213,8 @@ impl SidecarChannelState {
 /// Three-state circuit breaker (V2_GAPS.md §C4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CircuitState {
-    Closed   = 0,
-    Open     = 1,
+    Closed = 0,
+    Open = 1,
     HalfOpen = 2,
 }
 
@@ -227,8 +229,8 @@ impl CircuitState {
     /// Stable wire short-string for `raxis status` JSON.
     pub fn as_str(&self) -> &'static str {
         match self {
-            CircuitState::Closed   => "closed",
-            CircuitState::Open     => "circuit_open",
+            CircuitState::Closed => "closed",
+            CircuitState::Open => "circuit_open",
             CircuitState::HalfOpen => "half_open",
         }
     }
@@ -248,21 +250,18 @@ enum CircuitGate {
 #[derive(Debug, Clone, Serialize)]
 pub struct SidecarChannelSnapshot {
     pub in_flight: u32,
-    pub capacity:  u32,
+    pub capacity: u32,
     #[serde(serialize_with = "serialize_state")]
-    pub circuit:   CircuitState,
+    pub circuit: CircuitState,
     pub consecutive_failures: u64,
     pub dropped_backpressure: u64,
     pub dropped_circuit_open: u64,
-    pub last_success_at:      u64,
-    pub last_failure_at:      u64,
-    pub opened_at_unix_secs:  u64,
+    pub last_success_at: u64,
+    pub last_failure_at: u64,
+    pub opened_at_unix_secs: u64,
 }
 
-fn serialize_state<S: serde::Serializer>(
-    s: &CircuitState,
-    ser: S,
-) -> Result<S::Ok, S::Error> {
+fn serialize_state<S: serde::Serializer>(s: &CircuitState, ser: S) -> Result<S::Ok, S::Error> {
     ser.serialize_str(s.as_str())
 }
 
@@ -279,12 +278,16 @@ pub struct SidecarRegistry {
 }
 
 impl Default for SidecarRegistry {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl SidecarRegistry {
     pub fn new() -> Self {
-        Self { by_id: Mutex::new(HashMap::new()) }
+        Self {
+            by_id: Mutex::new(HashMap::new()),
+        }
     }
 
     /// Get-or-create the state for `channel.id`, materialising the
@@ -313,14 +316,14 @@ impl SidecarRegistry {
 /// JSON payload the kernel POSTs to a sidecar.
 #[derive(Debug, Serialize)]
 pub struct NotificationPayload<'a> {
-    pub event_kind:    &'a str,
-    pub event_id:      String,
-    pub event_seq:     u64,
+    pub event_kind: &'a str,
+    pub event_id: String,
+    pub event_seq: u64,
     pub initiative_id: Option<String>,
-    pub session_id:    Option<String>,
-    pub task_id:       Option<String>,
-    pub timestamp:     i64,
-    pub payload:       &'a serde_json::Value,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
+    pub timestamp: i64,
+    pub payload: &'a serde_json::Value,
     pub human_summary: String,
 }
 
@@ -347,7 +350,11 @@ pub struct SidecarSuccessResponse {
 /// audit events.
 #[derive(Debug)]
 pub enum SidecarOutcome {
-    Delivered { upstream_trace_id: Option<String>, attempts: u32, delivery_ms: u64 },
+    Delivered {
+        upstream_trace_id: Option<String>,
+        attempts: u32,
+        delivery_ms: u64,
+    },
     /// Concurrency cap reached; nothing was sent.
     Backpressure,
     /// Circuit breaker is Open; nothing was sent.
@@ -359,9 +366,9 @@ pub enum SidecarOutcome {
 /// POST one notification to `channel.target` with retry + backoff
 /// + circuit-breaker semantics.
 pub async fn deliver(
-    state:   &SidecarChannelState,
+    state: &SidecarChannelState,
     channel: &NotificationChannel,
-    event:   &AuditEvent,
+    event: &AuditEvent,
 ) -> SidecarOutcome {
     if channel.target.trim().is_empty() {
         return SidecarOutcome::Failed(DeliveryError::TargetInvalid, 0);
@@ -374,7 +381,7 @@ pub async fn deliver(
     // Circuit gate
     let gate = state.try_acquire_circuit();
     let is_probe = match gate {
-        CircuitGate::Pass          => false,
+        CircuitGate::Pass => false,
         CircuitGate::HalfOpenProbe => true,
         CircuitGate::Open => {
             state.dropped_circuit_open.fetch_add(1, Ordering::Relaxed);
@@ -386,7 +393,7 @@ pub async fn deliver(
     // get a permit immediately we drop with Backpressure instead of
     // queuing).
     let permit = match Arc::clone(&state.permits).try_acquire_owned() {
-        Ok(p)  => p,
+        Ok(p) => p,
         Err(_) => {
             state.dropped_backpressure.fetch_add(1, Ordering::Relaxed);
             return SidecarOutcome::Backpressure;
@@ -394,14 +401,14 @@ pub async fn deliver(
     };
 
     let body = NotificationPayload {
-        event_kind:    &event.event_kind,
-        event_id:      event.event_id.to_string(),
-        event_seq:     event.seq,
+        event_kind: &event.event_kind,
+        event_id: event.event_id.to_string(),
+        event_seq: event.seq,
         initiative_id: event.initiative_id.clone(),
-        session_id:    event.session_id.clone(),
-        task_id:       event.task_id.clone(),
-        timestamp:     event.emitted_at,
-        payload:       &event.payload,
+        session_id: event.session_id.clone(),
+        task_id: event.task_id.clone(),
+        timestamp: event.emitted_at,
+        payload: &event.payload,
         human_summary: summary::render(event),
     };
 
@@ -410,7 +417,7 @@ pub async fn deliver(
         .user_agent(concat!("raxis-kernel/", env!("CARGO_PKG_VERSION")))
         .build()
     {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
             drop(permit);
             return SidecarOutcome::Failed(
@@ -427,7 +434,15 @@ pub async fn deliver(
     let started_at = std::time::Instant::now();
     let mut last_err: Option<DeliveryError> = None;
     for attempt in 1..=max_attempts {
-        match send_one(&client, url, &body, &event.event_kind, &event.event_id.to_string()).await {
+        match send_one(
+            &client,
+            url,
+            &body,
+            &event.event_kind,
+            &event.event_id.to_string(),
+        )
+        .await
+        {
             Ok(trace_id) => {
                 state.record_success();
                 drop(permit);
@@ -439,17 +454,17 @@ pub async fn deliver(
                 };
             }
             Err(e) => {
-                let retryable = matches!(
-                    &e,
-                    DeliveryError::Network(_)
-                ) || match &e {
-                    // 5xx is treated as retryable; classify by
-                    // peeking at the leading "HTTP <code>" token.
-                    DeliveryError::UpstreamRejected(reason) => is_5xx_rejection(reason),
-                    _ => false,
-                };
+                let retryable = matches!(&e, DeliveryError::Network(_))
+                    || match &e {
+                        // 5xx is treated as retryable; classify by
+                        // peeking at the leading "HTTP <code>" token.
+                        DeliveryError::UpstreamRejected(reason) => is_5xx_rejection(reason),
+                        _ => false,
+                    };
                 last_err = Some(e);
-                if !retryable || attempt == max_attempts { break; }
+                if !retryable || attempt == max_attempts {
+                    break;
+                }
                 let backoff = RETRY_BACKOFF_BASE * (1 << (attempt - 1));
                 tokio::time::sleep(backoff).await;
             }
@@ -470,16 +485,17 @@ fn is_5xx_rejection(reason: &str) -> bool {
 }
 
 async fn send_one(
-    client:     &reqwest::Client,
-    url:        &str,
-    body:       &NotificationPayload<'_>,
+    client: &reqwest::Client,
+    url: &str,
+    body: &NotificationPayload<'_>,
     event_kind: &str,
-    event_id:   &str,
+    event_id: &str,
 ) -> Result<Option<String>, DeliveryError> {
-    let resp = client.post(url)
-        .header("Content-Type",       "application/json")
+    let resp = client
+        .post(url)
+        .header("Content-Type", "application/json")
         .header("X-RAXIS-Event-Kind", event_kind)
-        .header("X-RAXIS-Event-Id",   event_id)
+        .header("X-RAXIS-Event-Id", event_id)
         .json(body)
         .send()
         .await
@@ -501,7 +517,8 @@ async fn send_one(
         let n = bytes.len().min(MAX_RESPONSE_BODY_BYTES);
         let body_str = String::from_utf8_lossy(&bytes[..n]).into_owned();
         return Err(DeliveryError::UpstreamRejected(format!(
-            "HTTP {} from {url}: {body_str}", status.as_u16(),
+            "HTTP {} from {url}: {body_str}",
+            status.as_u16(),
         )));
     }
 
@@ -514,7 +531,7 @@ async fn send_one(
     }
     match serde_json::from_slice::<SidecarSuccessResponse>(&bytes) {
         Ok(env) => Ok(env.trace_id),
-        Err(_)  => Ok(None),
+        Err(_) => Ok(None),
     }
 }
 
@@ -533,21 +550,21 @@ mod tests {
     fn make_event(kind: &str, seq: u64, payload: serde_json::Value) -> AuditEvent {
         AuditEvent {
             seq,
-            event_id:      Uuid::new_v4(),
-            event_kind:    kind.to_owned(),
-            session_id:    None,
-            task_id:       None,
+            event_id: Uuid::new_v4(),
+            event_kind: kind.to_owned(),
+            session_id: None,
+            task_id: None,
             initiative_id: None,
             payload,
-            emitted_at:    1_700_000_000,
-            prev_sha256:   "0".repeat(64),
+            emitted_at: 1_700_000_000,
+            prev_sha256: "0".repeat(64),
         }
     }
 
     fn sidecar(target: impl Into<String>) -> NotificationChannel {
         NotificationChannel {
-            id:     "sc".into(),
-            kind:   NotificationChannelKind::Sidecar,
+            id: "sc".into(),
+            kind: NotificationChannelKind::Sidecar,
             target: target.into(),
             max_in_flight: 8,
         }
@@ -556,8 +573,8 @@ mod tests {
     #[tokio::test]
     async fn empty_target_fails_target_invalid() {
         let chan = sidecar("");
-        let st   = SidecarChannelState::new(8);
-        let e    = make_event("EscalationApproved", 1, json!({}));
+        let st = SidecarChannelState::new(8);
+        let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&st, &chan, &e).await {
             SidecarOutcome::Failed(DeliveryError::TargetInvalid, _) => {}
             other => panic!("expected TargetInvalid, got {other:?}"),
@@ -567,8 +584,8 @@ mod tests {
     #[tokio::test]
     async fn unreachable_target_returns_network_error() {
         let chan = sidecar("http://127.0.0.1:1/notify");
-        let st   = SidecarChannelState::new(8);
-        let e    = make_event("EscalationApproved", 1, json!({}));
+        let st = SidecarChannelState::new(8);
+        let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&st, &chan, &e).await {
             SidecarOutcome::Failed(DeliveryError::Network(_), attempts) => {
                 assert_eq!(attempts, MAX_ATTEMPTS);
@@ -588,8 +605,12 @@ mod tests {
             let mut buf = vec![0u8; 8192];
             loop {
                 let n = sock.read(&mut buf).await.unwrap();
-                if n == 0 { break; }
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             let body = b"{\"ok\":true,\"trace_id\":\"slack-1729-ts\"}";
             let resp = format!(
@@ -601,10 +622,14 @@ mod tests {
         });
 
         let chan = sidecar(format!("http://127.0.0.1:{port}/notify"));
-        let st   = SidecarChannelState::new(8);
-        let e    = make_event("EscalationApproved", 7, json!({"x":1}));
+        let st = SidecarChannelState::new(8);
+        let e = make_event("EscalationApproved", 7, json!({"x":1}));
         match deliver(&st, &chan, &e).await {
-            SidecarOutcome::Delivered { upstream_trace_id, attempts, .. } => {
+            SidecarOutcome::Delivered {
+                upstream_trace_id,
+                attempts,
+                ..
+            } => {
                 assert_eq!(upstream_trace_id.as_deref(), Some("slack-1729-ts"));
                 assert_eq!(attempts, 1);
             }
@@ -628,8 +653,12 @@ mod tests {
             let mut buf = vec![0u8; 8192];
             loop {
                 let n = sock.read(&mut buf).await.unwrap();
-                if n == 0 { break; }
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             let _ = sock.write_all(
                 b"HTTP/1.1 400 Bad Request\r\nContent-Length: 8\r\nConnection: close\r\n\r\nbad-shape",
@@ -637,8 +666,8 @@ mod tests {
         });
 
         let chan = sidecar(format!("http://127.0.0.1:{port}/notify"));
-        let st   = SidecarChannelState::new(8);
-        let e    = make_event("EscalationApproved", 1, json!({}));
+        let st = SidecarChannelState::new(8);
+        let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&st, &chan, &e).await {
             SidecarOutcome::Failed(DeliveryError::UpstreamRejected(reason), attempts) => {
                 assert!(reason.contains("400"));
@@ -659,7 +688,7 @@ mod tests {
         let st = SidecarChannelState::new(1);
         let _held = Arc::clone(&st.permits).try_acquire_owned().unwrap();
         let chan = sidecar("http://127.0.0.1:1/notify");
-        let e    = make_event("EscalationApproved", 1, json!({}));
+        let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&st, &chan, &e).await {
             SidecarOutcome::Backpressure => {
                 assert_eq!(st.dropped_backpressure.load(Ordering::Relaxed), 1);
@@ -671,7 +700,7 @@ mod tests {
     #[tokio::test]
     async fn circuit_opens_after_consecutive_failures() {
         let chan = sidecar("http://127.0.0.1:1/notify");
-        let st   = SidecarChannelState::new(8);
+        let st = SidecarChannelState::new(8);
         // Drive 5 failures (the threshold) — each call retries 3
         // times so this loop converges to circuit-open after the
         // 5th consecutive failure record. Keep the iteration count
@@ -699,19 +728,21 @@ mod tests {
 
     #[tokio::test]
     async fn registry_get_or_create_is_idempotent_per_channel_id() {
-        let reg  = SidecarRegistry::new();
+        let reg = SidecarRegistry::new();
         let chan = sidecar("http://localhost:1/notify");
-        let s1   = reg.get_or_create(&chan);
-        let s2   = reg.get_or_create(&chan);
-        assert!(Arc::ptr_eq(&s1, &s2),
-            "two get_or_create calls for the same channel id must return the same Arc");
+        let s1 = reg.get_or_create(&chan);
+        let s2 = reg.get_or_create(&chan);
+        assert!(
+            Arc::ptr_eq(&s1, &s2),
+            "two get_or_create calls for the same channel id must return the same Arc"
+        );
     }
 
     #[test]
     fn circuit_state_wire_strings_are_stable() {
         // Pin the `raxis status` JSON wire shape.
-        assert_eq!(CircuitState::Closed.as_str(),   "closed");
-        assert_eq!(CircuitState::Open.as_str(),     "circuit_open");
+        assert_eq!(CircuitState::Closed.as_str(), "closed");
+        assert_eq!(CircuitState::Open.as_str(), "circuit_open");
         assert_eq!(CircuitState::HalfOpen.as_str(), "half_open");
     }
 }

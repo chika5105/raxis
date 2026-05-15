@@ -33,11 +33,11 @@ pub struct SignedRequest {
     /// Value for the `Authorization` header.
     pub authorization: String,
     /// Value for the `X-Amz-Date` header.
-    pub amz_date:      String,
+    pub amz_date: String,
     /// SHA-256 of the request body, lowercase hex. The signer
     /// returns this so callers can pin the `X-Amz-Content-Sha256`
     /// header (some AWS services require it; STS does not).
-    pub body_sha256:   String,
+    pub body_sha256: String,
 }
 
 /// Time injection point used by tests. Production code calls
@@ -52,24 +52,24 @@ pub struct SigV4Clock {
 /// Inputs to [`sign_v4_with_clock`].
 pub struct SigV4Inputs<'a> {
     /// Access key id (e.g. `AKIA...`). Caller-owned.
-    pub access_key_id:     &'a str,
+    pub access_key_id: &'a str,
     /// Secret access key. Caller-owned. NEVER logged.
     pub secret_access_key: &'a str,
     /// AWS region (e.g. `us-east-1`). Always lowercase.
-    pub region:            &'a str,
+    pub region: &'a str,
     /// AWS service (`sts` for the V3 STS forwarder).
-    pub service:           &'a str,
+    pub service: &'a str,
     /// HTTP method (uppercase, e.g. `POST`).
-    pub method:            &'a str,
+    pub method: &'a str,
     /// Canonical URI — path part only (e.g. `/`).
-    pub canonical_uri:     &'a str,
+    pub canonical_uri: &'a str,
     /// Canonical query string. Empty when the body carries the
     /// parameters (which is the case for STS form-POSTs).
-    pub canonical_query:   &'a str,
+    pub canonical_query: &'a str,
     /// Host header value (e.g. `sts.us-east-1.amazonaws.com`).
-    pub host:              &'a str,
+    pub host: &'a str,
     /// Request body bytes (form-urlencoded for STS).
-    pub body:              &'a [u8],
+    pub body: &'a [u8],
 }
 
 /// Sign a request with `SystemTime::now()`. Returns the values
@@ -84,11 +84,8 @@ pub fn sign_v4(inputs: SigV4Inputs<'_>) -> SignedRequest {
 
 /// Sign with an injected clock. Used by tests against AWS-
 /// published vectors.
-pub fn sign_v4_with_clock(
-    inputs: SigV4Inputs<'_>,
-    clock:  SigV4Clock,
-) -> SignedRequest {
-    let amz_date  = format_amz_date(clock.now_unix_seconds);
+pub fn sign_v4_with_clock(inputs: SigV4Inputs<'_>, clock: SigV4Clock) -> SignedRequest {
+    let amz_date = format_amz_date(clock.now_unix_seconds);
     let date_only = &amz_date[..8];
 
     // 1. Canonical request.
@@ -102,27 +99,27 @@ pub fn sign_v4_with_clock(
     let signed_headers = "content-type;host;x-amz-date";
     let canonical_request = format!(
         "{method}\n{uri}\n{query}\n{headers}\n{signed}\n{hash}",
-        method  = inputs.method,
-        uri     = inputs.canonical_uri,
-        query   = inputs.canonical_query,
+        method = inputs.method,
+        uri = inputs.canonical_uri,
+        query = inputs.canonical_query,
         headers = canonical_headers,
-        signed  = signed_headers,
-        hash    = body_sha256,
+        signed = signed_headers,
+        hash = body_sha256,
     );
 
     // 2. String to sign.
     let credential_scope = format!(
         "{date}/{region}/{service}/aws4_request",
-        date    = date_only,
-        region  = inputs.region,
+        date = date_only,
+        region = inputs.region,
         service = inputs.service,
     );
     let canonical_request_hash = hex::encode(Sha256::digest(canonical_request.as_bytes()));
     let string_to_sign = format!(
         "AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{hash}",
         amz_date = amz_date,
-        scope    = credential_scope,
-        hash     = canonical_request_hash,
+        scope = credential_scope,
+        hash = canonical_request_hash,
     );
 
     // 3. Signing key.
@@ -138,33 +135,36 @@ pub fn sign_v4_with_clock(
     // 4. Authorization header.
     let authorization = format!(
         "AWS4-HMAC-SHA256 Credential={akid}/{scope}, SignedHeaders={signed}, Signature={sig}",
-        akid   = inputs.access_key_id,
-        scope  = credential_scope,
+        akid = inputs.access_key_id,
+        scope = credential_scope,
         signed = signed_headers,
-        sig    = signature,
+        sig = signature,
     );
 
-    SignedRequest { authorization, amz_date, body_sha256 }
+    SignedRequest {
+        authorization,
+        amz_date,
+        body_sha256,
+    }
 }
 
 /// Derive the SigV4 signing key:
 /// `HMAC(HMAC(HMAC(HMAC("AWS4"+secret, date), region), service), "aws4_request")`.
 fn derive_signing_key(
     secret_access_key: &str,
-    date:              &str,
-    region:            &str,
-    service:           &str,
+    date: &str,
+    region: &str,
+    service: &str,
 ) -> [u8; 32] {
-    let k_secret  = format!("AWS4{secret_access_key}");
-    let k_date    = hmac_sha256(k_secret.as_bytes(), date.as_bytes());
-    let k_region  = hmac_sha256(&k_date,             region.as_bytes());
-    let k_service = hmac_sha256(&k_region,           service.as_bytes());
-    hmac_sha256(&k_service,                          b"aws4_request")
+    let k_secret = format!("AWS4{secret_access_key}");
+    let k_date = hmac_sha256(k_secret.as_bytes(), date.as_bytes());
+    let k_region = hmac_sha256(&k_date, region.as_bytes());
+    let k_service = hmac_sha256(&k_region, service.as_bytes());
+    hmac_sha256(&k_service, b"aws4_request")
 }
 
 fn hmac_sha256(key: &[u8], msg: &[u8]) -> [u8; 32] {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key)
-        .expect("HMAC accepts any key length");
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(msg);
     let result = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -186,10 +186,14 @@ fn unix_to_civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
     let days = (secs / 86_400) as i64;
     let secs_of_day = (secs % 86_400) as u32;
     let hour = secs_of_day / 3600;
-    let min  = (secs_of_day / 60) % 60;
-    let sec  = secs_of_day % 60;
+    let min = (secs_of_day / 60) % 60;
+    let sec = secs_of_day % 60;
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = (yoe as i64) + era * 400;
@@ -237,16 +241,16 @@ mod tests {
     #[test]
     fn amz_date_format_pins() {
         // 1970-01-01T00:00:00Z
-        assert_eq!(format_amz_date(0),               "19700101T000000Z");
+        assert_eq!(format_amz_date(0), "19700101T000000Z");
         // 2015-08-30T12:36:00Z — AWS-published reference
         // request timestamp from the SigV4 test suite.
-        assert_eq!(format_amz_date(1_440_938_160),   "20150830T123600Z");
+        assert_eq!(format_amz_date(1_440_938_160), "20150830T123600Z");
         // 2026-05-12T18:00:00Z — round local vector
-        assert_eq!(format_amz_date(1_778_608_800),   "20260512T180000Z");
+        assert_eq!(format_amz_date(1_778_608_800), "20260512T180000Z");
         // 2024-02-29T23:59:59Z — leap-day boundary
-        assert_eq!(format_amz_date(1_709_251_199),   "20240229T235959Z");
+        assert_eq!(format_amz_date(1_709_251_199), "20240229T235959Z");
         // 2000-03-01T00:00:00Z — post-century leap-year
-        assert_eq!(format_amz_date(951_868_800),     "20000301T000000Z");
+        assert_eq!(format_amz_date(951_868_800), "20000301T000000Z");
     }
 
     /// End-to-end sign smoke for an STS-shaped POST. The
@@ -267,7 +271,9 @@ mod tests {
             host:              "sts.amazonaws.com",
             body:              b"Action=AssumeRole&DurationSeconds=3600&RoleArn=arn%3Aaws%3Aiam%3A%3A123456789012%3Arole%2Fdemo&RoleSessionName=raxis-pin&Version=2011-06-15",
         };
-        let clock = SigV4Clock { now_unix_seconds: 1_778_608_800 };
+        let clock = SigV4Clock {
+            now_unix_seconds: 1_778_608_800,
+        };
         let signed = sign_v4_with_clock(inputs, clock);
         assert_eq!(signed.amz_date, "20260512T180000Z");
         // Pin the signature to catch regressions in canonical
@@ -289,6 +295,8 @@ mod tests {
             .strip_prefix(prefix)
             .expect("prefix matched above");
         assert_eq!(sig.len(), 64);
-        assert!(sig.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(sig
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 }

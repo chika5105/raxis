@@ -281,10 +281,7 @@ mod tests {
             .expect_err("must time out, not succeed");
         let elapsed = started.elapsed();
         match &err {
-            BoundedWaitError::Timeout {
-                label,
-                timeout: t,
-            } => {
+            BoundedWaitError::Timeout { label, timeout: t } => {
                 assert_eq!(label, "sleep-regression");
                 assert_eq!(*t, timeout);
             }
@@ -301,12 +298,8 @@ mod tests {
     fn fast_command_returns_normally_with_captured_output() {
         let mut cmd = Command::new("printf");
         cmd.arg("hello stdout");
-        let out = run_command_output_timeout(
-            &mut cmd,
-            Duration::from_secs(5),
-            "printf-fast",
-        )
-        .expect("printf must succeed within 5s");
+        let out = run_command_output_timeout(&mut cmd, Duration::from_secs(5), "printf-fast")
+            .expect("printf must succeed within 5s");
         assert!(out.status.success(), "printf exit: {:?}", out.status);
         assert_eq!(String::from_utf8_lossy(&out.stdout), "hello stdout");
     }
@@ -314,12 +307,8 @@ mod tests {
     #[test]
     fn missing_binary_surfaces_spawn_failed() {
         let mut cmd = Command::new("/definitely/not/a/real/binary-xyz-9c1");
-        let err = run_command_output_timeout(
-            &mut cmd,
-            Duration::from_secs(2),
-            "missing-bin",
-        )
-        .expect_err("missing binary must fail to spawn");
+        let err = run_command_output_timeout(&mut cmd, Duration::from_secs(2), "missing-bin")
+            .expect_err("missing binary must fail to spawn");
         match &err {
             BoundedWaitError::SpawnFailed { label, .. } => {
                 assert_eq!(label, "missing-bin");

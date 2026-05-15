@@ -96,17 +96,15 @@ impl Arch {
     fn parse(s: &str) -> Result<Self> {
         match s {
             "aarch64" | "arm64" => Ok(Arch::Aarch64),
-            "x86_64" | "amd64"  => Ok(Arch::X86_64),
-            other => bail!(
-                "unsupported --arch {other:?}; expected: aarch64, arm64, x86_64, amd64"
-            ),
+            "x86_64" | "amd64" => Ok(Arch::X86_64),
+            other => bail!("unsupported --arch {other:?}; expected: aarch64, arm64, x86_64, amd64"),
         }
     }
 
     fn as_str(self) -> &'static str {
         match self {
             Arch::Aarch64 => "aarch64",
-            Arch::X86_64  => "x86_64",
+            Arch::X86_64 => "x86_64",
         }
     }
 
@@ -115,7 +113,7 @@ impl Arch {
     fn reference_kernel_url(self) -> &'static str {
         match self {
             Arch::Aarch64 => REF_KERNEL_AARCH64_URL,
-            Arch::X86_64  => REF_KERNEL_X86_64_URL,
+            Arch::X86_64 => REF_KERNEL_X86_64_URL,
         }
     }
 
@@ -130,7 +128,7 @@ impl Arch {
     fn reference_kernel_sha256(self) -> &'static str {
         match self {
             Arch::Aarch64 => REF_KERNEL_AARCH64_SHA256,
-            Arch::X86_64  => REF_KERNEL_X86_64_SHA256,
+            Arch::X86_64 => REF_KERNEL_X86_64_SHA256,
         }
     }
 }
@@ -148,8 +146,8 @@ enum Role {
 impl Role {
     fn cli_name(self) -> &'static str {
         match self {
-            Role::Orchestrator    => "orchestrator",
-            Role::Reviewer        => "reviewer",
+            Role::Orchestrator => "orchestrator",
+            Role::Reviewer => "reviewer",
             Role::ExecutorStarter => "executor-starter",
         }
     }
@@ -167,17 +165,12 @@ enum KernelSource {
     /// verified before installation; the all-zero placeholder
     /// constants above force this — there is no "trust the URL"
     /// path.
-    Reference {
-        sha256: Option<String>,
-    },
+    Reference { sha256: Option<String> },
     /// Operator-supplied URL + SHA-256.
-    Url {
-        url:    String,
-        sha256: String,
-    },
+    Url { url: String, sha256: String },
     /// Local file (air-gapped operators).
     File {
-        path:   PathBuf,
+        path: PathBuf,
         sha256: Option<String>,
     },
 }
@@ -185,36 +178,36 @@ enum KernelSource {
 /// Parsed `bundle` arguments.
 #[derive(Debug)]
 struct BundleArgs {
-    install_dir:    PathBuf,
-    arch:           Arch,
-    kernel_source:  KernelSource,
+    install_dir: PathBuf,
+    arch: Arch,
+    kernel_source: KernelSource,
     /// Cross-compile target for the planner agent. `None` ⇒
     /// `dev-stage`'s host-arch musl default.
-    cargo_target:   Option<String>,
+    cargo_target: Option<String>,
     /// Optional Ed25519 signing key path forwarded to `build-all`.
-    signing_key:    Option<PathBuf>,
+    signing_key: Option<PathBuf>,
     /// Subset of roles to stage. Empty ⇒ every canonical role.
-    roles:          Vec<Role>,
+    roles: Vec<Role>,
     /// Skip stage step (operator already ran `dev-stage` themselves).
-    skip_stage:     bool,
+    skip_stage: bool,
     /// Skip kernel install (operator already ran `dev-kernel`).
-    skip_kernel:    bool,
+    skip_kernel: bool,
     /// Force-overwrite an existing kernel binary at the canonical
     /// path; forwarded to `dev-kernel --force`.
-    force_kernel:   bool,
+    force_kernel: bool,
 }
 
 impl BundleArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut install_dir: Option<PathBuf>   = None;
-        let mut arch:        Option<Arch>      = None;
-        let mut from_file:   Option<PathBuf>   = None;
-        let mut url:         Option<String>    = None;
-        let mut sha256:      Option<String>    = None;
-        let mut cargo_target: Option<String>   = None;
-        let mut signing_key: Option<PathBuf>   = None;
-        let mut roles:       Vec<Role>         = Vec::new();
-        let mut skip_stage  = false;
+        let mut install_dir: Option<PathBuf> = None;
+        let mut arch: Option<Arch> = None;
+        let mut from_file: Option<PathBuf> = None;
+        let mut url: Option<String> = None;
+        let mut sha256: Option<String> = None;
+        let mut cargo_target: Option<String> = None;
+        let mut signing_key: Option<PathBuf> = None;
+        let mut roles: Vec<Role> = Vec::new();
+        let mut skip_stage = false;
         let mut skip_kernel = false;
         let mut force_kernel = false;
 
@@ -241,7 +234,11 @@ impl BundleArgs {
                 }
                 "--kernel-url" => {
                     i += 1;
-                    url = Some(argv.get(i).context("--kernel-url requires a value")?.clone());
+                    url = Some(
+                        argv.get(i)
+                            .context("--kernel-url requires a value")?
+                            .clone(),
+                    );
                 }
                 "--kernel-sha256" => {
                     i += 1;
@@ -253,9 +250,7 @@ impl BundleArgs {
                 }
                 "--target" => {
                     i += 1;
-                    cargo_target = Some(
-                        argv.get(i).context("--target requires a triple")?.clone(),
-                    );
+                    cargo_target = Some(argv.get(i).context("--target requires a triple")?.clone());
                 }
                 "--signing-key" => {
                     i += 1;
@@ -267,8 +262,8 @@ impl BundleArgs {
                     i += 1;
                     let raw = argv.get(i).context("--role requires a value")?;
                     let r = match raw.as_str() {
-                        "orchestrator"     => Role::Orchestrator,
-                        "reviewer"         => Role::Reviewer,
+                        "orchestrator" => Role::Orchestrator,
+                        "reviewer" => Role::Reviewer,
                         "executor-starter" => Role::ExecutorStarter,
                         other => bail!(
                             "unknown --role {other:?}; expected: \
@@ -277,9 +272,9 @@ impl BundleArgs {
                     };
                     roles.push(r);
                 }
-                "--skip-stage"  => skip_stage  = true,
+                "--skip-stage" => skip_stage = true,
                 "--skip-kernel" => skip_kernel = true,
-                "--force"       => force_kernel = true,
+                "--force" => force_kernel = true,
                 "-h" | "--help" => {
                     print_help();
                     std::process::exit(0);
@@ -291,24 +286,24 @@ impl BundleArgs {
 
         let install_dir = match install_dir {
             Some(p) => p,
-            None    => match std::env::var_os("RAXIS_INSTALL_DIR") {
+            None => match std::env::var_os("RAXIS_INSTALL_DIR") {
                 Some(v) => PathBuf::from(v),
-                None    => PathBuf::from(DEFAULT_DEV_INSTALL_DIR),
+                None => PathBuf::from(DEFAULT_DEV_INSTALL_DIR),
             },
         };
         let arch = arch.unwrap_or_else(Arch::from_host);
 
         let kernel_source = match (from_file, url, sha256.clone()) {
-            (Some(_), Some(_), _) => bail!(
-                "pass exactly one of --kernel-from-file or --kernel-url, not both"
-            ),
-            (Some(p), None, _)              => KernelSource::File { path: p, sha256 },
-            (None, Some(u), Some(d))        => KernelSource::Url { url: u, sha256: d },
-            (None, Some(_), None)           => bail!(
+            (Some(_), Some(_), _) => {
+                bail!("pass exactly one of --kernel-from-file or --kernel-url, not both")
+            }
+            (Some(p), None, _) => KernelSource::File { path: p, sha256 },
+            (None, Some(u), Some(d)) => KernelSource::Url { url: u, sha256: d },
+            (None, Some(_), None) => bail!(
                 "--kernel-url requires --kernel-sha256 (refusing to install \
                  unverified bytes)"
             ),
-            (None, None, _)                 => KernelSource::Reference { sha256 },
+            (None, None, _) => KernelSource::Reference { sha256 },
         };
 
         if roles.is_empty() {
@@ -369,27 +364,30 @@ pub fn run(argv: &[String]) -> Result<()> {
     // operator muscle memory.
     let (verb, tail) = argv
         .split_first()
-        .ok_or_else(|| anyhow::anyhow!(
-            "missing linux-microvm verb (available: bundle)"
-        ))?;
+        .ok_or_else(|| anyhow::anyhow!("missing linux-microvm verb (available: bundle)"))?;
     match verb.as_str() {
         "bundle" => {
             let args = BundleArgs::parse(tail)?;
             bundle(&args)
         }
-        other => bail!(
-            "unknown linux-microvm verb {other:?} (available: bundle)"
-        ),
+        other => bail!("unknown linux-microvm verb {other:?} (available: bundle)"),
     }
 }
 
 fn bundle(args: &BundleArgs) -> Result<()> {
     log_event("linux_microvm_bundle_begin", |obj| {
         obj.entry("install_dir", args.install_dir.display().to_string());
-        obj.entry("arch",        args.arch.as_str().to_owned());
-        obj.entry("roles",       args.roles.iter().map(|r| r.cli_name()).collect::<Vec<_>>().join(","));
+        obj.entry("arch", args.arch.as_str().to_owned());
+        obj.entry(
+            "roles",
+            args.roles
+                .iter()
+                .map(|r| r.cli_name())
+                .collect::<Vec<_>>()
+                .join(","),
+        );
         obj.entry("skip_kernel", args.skip_kernel.to_string());
-        obj.entry("skip_stage",  args.skip_stage.to_string());
+        obj.entry("skip_stage", args.skip_stage.to_string());
     });
 
     if !args.skip_kernel {
@@ -402,10 +400,7 @@ fn bundle(args: &BundleArgs) -> Result<()> {
 
     if !args.skip_stage {
         for role in &args.roles {
-            stage_role(args, *role).with_context(|| format!(
-                "stage_role({})",
-                role.cli_name(),
-            ))?;
+            stage_role(args, *role).with_context(|| format!("stage_role({})", role.cli_name(),))?;
         }
     } else {
         log_event("linux_microvm_skip_stage", |obj| {
@@ -417,10 +412,14 @@ fn bundle(args: &BundleArgs) -> Result<()> {
 
     log_event("linux_microvm_bundle_done", |obj| {
         obj.entry("install_dir", args.install_dir.display().to_string());
-        obj.entry("arch",        args.arch.as_str().to_owned());
+        obj.entry("arch", args.arch.as_str().to_owned());
         obj.entry(
             "kernel_path",
-            args.install_dir.join("kernel").join("vmlinux").display().to_string(),
+            args.install_dir
+                .join("kernel")
+                .join("vmlinux")
+                .display()
+                .to_string(),
         );
     });
 
@@ -445,9 +444,9 @@ fn install_kernel(args: &BundleArgs) -> Result<()> {
     }
     match &args.kernel_source {
         KernelSource::Reference { sha256 } => {
-            let sha = sha256.clone().unwrap_or_else(|| {
-                args.arch.reference_kernel_sha256().to_owned()
-            });
+            let sha = sha256
+                .clone()
+                .unwrap_or_else(|| args.arch.reference_kernel_sha256().to_owned());
             if sha == "0".repeat(64) {
                 bail!(
                     "no --kernel-sha256 supplied and the in-tree reference \
@@ -490,10 +489,7 @@ fn install_kernel(args: &BundleArgs) -> Result<()> {
 /// at `images/<role>-core/rootfs/init`. Delegates to `images
 /// dev-stage` so the Worker-B-owned recipe is single-source.
 fn stage_role(args: &BundleArgs, role: Role) -> Result<()> {
-    let mut argv: Vec<String> = vec![
-        "--role".to_owned(),
-        role.cli_name().to_owned(),
-    ];
+    let mut argv: Vec<String> = vec!["--role".to_owned(), role.cli_name().to_owned()];
     if let Some(triple) = &args.cargo_target {
         argv.push("--target".to_owned());
         argv.push(triple.clone());
@@ -568,11 +564,11 @@ fn log_event(event: &str, populate: impl FnOnce(&mut JsonObj)) {
         for ch in v.chars() {
             match ch {
                 '\\' => out.push_str("\\\\"),
-                '"'  => out.push_str("\\\""),
+                '"' => out.push_str("\\\""),
                 '\n' => out.push_str("\\n"),
                 '\r' => out.push_str("\\r"),
                 '\t' => out.push_str("\\t"),
-                _    => out.push(ch),
+                _ => out.push(ch),
             }
         }
         out.push('"');
@@ -602,9 +598,9 @@ mod tests {
     #[test]
     fn arch_parse_accepts_documented_aliases() {
         assert_eq!(Arch::parse("aarch64").unwrap(), Arch::Aarch64);
-        assert_eq!(Arch::parse("arm64").unwrap(),   Arch::Aarch64);
-        assert_eq!(Arch::parse("x86_64").unwrap(),  Arch::X86_64);
-        assert_eq!(Arch::parse("amd64").unwrap(),   Arch::X86_64);
+        assert_eq!(Arch::parse("arm64").unwrap(), Arch::Aarch64);
+        assert_eq!(Arch::parse("x86_64").unwrap(), Arch::X86_64);
+        assert_eq!(Arch::parse("amd64").unwrap(), Arch::X86_64);
         assert!(Arch::parse("riscv64").is_err());
     }
 
@@ -621,7 +617,8 @@ mod tests {
                 "ref URL for {} drifted off the firecracker-ci bucket: {url}",
                 arch.as_str(),
             );
-            assert!(url.ends_with(&format!("vmlinux-5.10.225")),
+            assert!(
+                url.ends_with(&format!("vmlinux-5.10.225")),
                 "ref URL for {} no longer pins the documented 5.10.225 floor: {url}",
                 arch.as_str(),
             );
@@ -650,29 +647,23 @@ mod tests {
         // SAFETY: single-threaded test mutating env. Restored at end.
         let prev = std::env::var_os("RAXIS_INSTALL_DIR");
         unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") };
-        let args = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(),
-            "/tmp/vmlinux".to_owned(),
-        ]).unwrap();
+        let args = BundleArgs::parse(&["--kernel-from-file".to_owned(), "/tmp/vmlinux".to_owned()])
+            .unwrap();
         assert_eq!(args.install_dir, PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
         unsafe { std::env::set_var("RAXIS_INSTALL_DIR", "/opt/raxis-dev") };
-        let args = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(),
-            "/tmp/vmlinux".to_owned(),
-        ]).unwrap();
+        let args = BundleArgs::parse(&["--kernel-from-file".to_owned(), "/tmp/vmlinux".to_owned()])
+            .unwrap();
         assert_eq!(args.install_dir, PathBuf::from("/opt/raxis-dev"));
         match prev {
             Some(v) => unsafe { std::env::set_var("RAXIS_INSTALL_DIR", v) },
-            None    => unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") },
+            None => unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") },
         }
     }
 
     #[test]
     fn parse_defaults_role_set_to_every_canonical_role() {
-        let args = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(),
-            "/tmp/vmlinux".to_owned(),
-        ]).unwrap();
+        let args = BundleArgs::parse(&["--kernel-from-file".to_owned(), "/tmp/vmlinux".to_owned()])
+            .unwrap();
         assert_eq!(args.roles.len(), 3);
     }
 
@@ -681,7 +672,9 @@ mod tests {
         let err = BundleArgs::parse(&[
             "--kernel-url".to_owned(),
             "https://example/vmlinux".to_owned(),
-        ]).unwrap_err().to_string();
+        ])
+        .unwrap_err()
+        .to_string();
         assert!(
             err.contains("--kernel-url requires --kernel-sha256"),
             "got: {err}",
@@ -691,25 +684,36 @@ mod tests {
     #[test]
     fn parse_rejects_both_from_file_and_url() {
         let err = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(), "/tmp/x".to_owned(),
-            "--kernel-url".to_owned(),       "https://example/x".to_owned(),
-            "--kernel-sha256".to_owned(),    "0".repeat(64),
-        ]).unwrap_err().to_string();
+            "--kernel-from-file".to_owned(),
+            "/tmp/x".to_owned(),
+            "--kernel-url".to_owned(),
+            "https://example/x".to_owned(),
+            "--kernel-sha256".to_owned(),
+            "0".repeat(64),
+        ])
+        .unwrap_err()
+        .to_string();
         assert!(err.contains("exactly one of"), "got: {err}");
     }
 
     #[test]
     fn parse_no_source_falls_back_to_reference_url_pin() {
         let args = BundleArgs::parse(&[]).unwrap();
-        assert!(matches!(args.kernel_source, KernelSource::Reference { sha256: None }));
+        assert!(matches!(
+            args.kernel_source,
+            KernelSource::Reference { sha256: None }
+        ));
     }
 
     #[test]
     fn parse_lowers_supplied_sha256_to_canonical_form() {
         let args = BundleArgs::parse(&[
-            "--kernel-url".to_owned(),    "https://x/y".to_owned(),
-            "--kernel-sha256".to_owned(), "ABCDEF".to_owned() + &"0".repeat(58),
-        ]).unwrap();
+            "--kernel-url".to_owned(),
+            "https://x/y".to_owned(),
+            "--kernel-sha256".to_owned(),
+            "ABCDEF".to_owned() + &"0".repeat(58),
+        ])
+        .unwrap();
         match args.kernel_source {
             KernelSource::Url { sha256, .. } => {
                 assert!(sha256.starts_with("abcdef"), "got: {sha256}");
@@ -721,15 +725,15 @@ mod tests {
     #[test]
     fn parse_skip_flags_are_independent() {
         let args = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(), "/tmp/k".to_owned(),
+            "--kernel-from-file".to_owned(),
+            "/tmp/k".to_owned(),
             "--skip-stage".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert!(args.skip_stage);
         assert!(!args.skip_kernel);
 
-        let args2 = BundleArgs::parse(&[
-            "--skip-kernel".to_owned(),
-        ]).unwrap();
+        let args2 = BundleArgs::parse(&["--skip-kernel".to_owned()]).unwrap();
         assert!(args2.skip_kernel);
         assert!(!args2.skip_stage);
     }
@@ -737,10 +741,14 @@ mod tests {
     #[test]
     fn parse_repeated_role_accumulates() {
         let args = BundleArgs::parse(&[
-            "--kernel-from-file".to_owned(), "/tmp/k".to_owned(),
-            "--role".to_owned(), "reviewer".to_owned(),
-            "--role".to_owned(), "orchestrator".to_owned(),
-        ]).unwrap();
+            "--kernel-from-file".to_owned(),
+            "/tmp/k".to_owned(),
+            "--role".to_owned(),
+            "reviewer".to_owned(),
+            "--role".to_owned(),
+            "orchestrator".to_owned(),
+        ])
+        .unwrap();
         assert_eq!(args.roles, vec![Role::Reviewer, Role::Orchestrator]);
     }
 
@@ -759,20 +767,19 @@ mod tests {
     #[test]
     fn install_kernel_refuses_reference_pin_with_placeholder_sha256() {
         let args = BundleArgs {
-            install_dir:   PathBuf::from("/tmp/raxis-bundle-test"),
-            arch:          Arch::X86_64,
+            install_dir: PathBuf::from("/tmp/raxis-bundle-test"),
+            arch: Arch::X86_64,
             kernel_source: KernelSource::Reference { sha256: None },
-            cargo_target:  None,
-            signing_key:   None,
-            roles:         Role::all().to_vec(),
-            skip_stage:    true,
-            skip_kernel:   false,
-            force_kernel:  false,
+            cargo_target: None,
+            signing_key: None,
+            roles: Role::all().to_vec(),
+            skip_stage: true,
+            skip_kernel: false,
+            force_kernel: false,
         };
         let err = install_kernel(&args).unwrap_err().to_string();
         assert!(
-            err.contains("all-zero placeholder")
-                || err.contains("--kernel-sha256"),
+            err.contains("all-zero placeholder") || err.contains("--kernel-sha256"),
             "expected operator-must-supply-sha256 error, got: {err}",
         );
     }

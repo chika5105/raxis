@@ -85,9 +85,9 @@ pub const PLANNER_API_BODY: &str = include_str!("../../../specs/v1/planner-api.m
 /// tests from having to fake a full handler context.
 #[derive(Clone, Copy)]
 pub struct PromptCtx<'a> {
-    pub store:    &'a Arc<Store>,
-    pub policy:   &'a PolicyBundle,
-    pub binding:  &'a EpochBinding,
+    pub store: &'a Arc<Store>,
+    pub policy: &'a PolicyBundle,
+    pub binding: &'a EpochBinding,
     pub now_secs: u64,
 }
 
@@ -95,13 +95,13 @@ pub struct PromptCtx<'a> {
 /// step 6 enumerates plus the embedded API body.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AssembledPrompt {
-    pub epoch_id:         u64,
-    pub session_id:       SessionId,
-    pub role_block:       String,
+    pub epoch_id: u64,
+    pub session_id: SessionId,
+    pub role_block: String,
     pub capability_block: String,
     pub initiative_block: String,
     pub constraint_block: String,
-    pub assembled_at:     u64,
+    pub assembled_at: u64,
     /// `true` iff the binding said this session's prompt was
     /// invalidated by an epoch advance since the last assembly. The
     /// kernel uses this to emit `AuditEventKind::PromptReassembled`.
@@ -180,7 +180,7 @@ pub fn assemble(
     if session.role != Role::Planner.as_sql_str() {
         return Err(PromptError::WrongRole {
             session_id: session_id.clone(),
-            role:       session.role,
+            role: session.role,
         });
     }
 
@@ -197,7 +197,7 @@ pub fn assemble(
     let initiatives = load_initiative_context(session_id, ctx.store)?;
 
     // Step 5 + 6 — render block strings.
-    let role_block       = build_role_block(session_id, &session, ctx.now_secs);
+    let role_block = build_role_block(session_id, &session, ctx.now_secs);
     let capability_block = build_capability_block(&delegations, ctx.now_secs);
     let initiative_block = build_initiative_block(&initiatives);
     let constraint_block = build_constraint_block(ctx.policy);
@@ -220,10 +220,7 @@ pub fn assemble(
 // ────────────────────────────────────────────────────────────────────
 
 fn build_role_block(session_id: &SessionId, session: &SessionRow, now_secs: u64) -> String {
-    let worktree = session
-        .worktree_root
-        .as_deref()
-        .unwrap_or("<unset>");
+    let worktree = session.worktree_root.as_deref().unwrap_or("<unset>");
     let base_sha = session.base_sha.as_deref().unwrap_or("<unset>");
     let ttl_remaining = session.expires_at.saturating_sub(now_secs as i64).max(0);
     format!(
@@ -238,14 +235,14 @@ fn build_role_block(session_id: &SessionId, session: &SessionRow, now_secs: u64)
          - base_sha:          {base}\n\
          - sequence_number:   {seq} (next intent must use {next})\n\
          - session ttl:       {ttl}s remaining (until unix={exp})",
-        sid     = session_id.as_str(),
+        sid = session_id.as_str(),
         lineage = session.lineage_id,
         worktree = worktree,
-        base    = base_sha,
-        seq     = session.sequence_number,
-        next    = session.sequence_number.saturating_add(1),
-        ttl     = ttl_remaining,
-        exp     = session.expires_at,
+        base = base_sha,
+        seq = session.sequence_number,
+        next = session.sequence_number.saturating_add(1),
+        ttl = ttl_remaining,
+        exp = session.expires_at,
     )
 }
 
@@ -253,14 +250,15 @@ fn build_capability_block(delegations: &[DelegationBrief], now_secs: u64) -> Str
     if delegations.is_empty() {
         return "## Capabilities\n\nNo delegations active for this session.".to_owned();
     }
-    let mut s = String::from("## Capabilities\n\nActive delegations (one row per capability_class):\n\n");
+    let mut s =
+        String::from("## Capabilities\n\nActive delegations (one row per capability_class):\n\n");
     for d in delegations {
         let remaining = d.expires_at.saturating_sub(now_secs as i64).max(0);
         s.push_str(&format!(
             "- {cls:<24} status={st:<14} expires_in={rem}s\n",
-            cls   = d.capability_class,
-            st    = d.status,
-            rem   = remaining,
+            cls = d.capability_class,
+            st = d.status,
+            rem = remaining,
         ));
     }
     s
@@ -276,15 +274,15 @@ fn build_initiative_block(initiatives: &[InitiativeContext]) -> String {
     for init in initiatives {
         s.push_str(&format!(
             "- initiative_id:   {id}\n  state:           {state}\n  tasks ({n}):\n",
-            id    = init.initiative_id,
+            id = init.initiative_id,
             state = init.state,
-            n     = init.tasks.len(),
+            n = init.tasks.len(),
         ));
         for t in &init.tasks {
             s.push_str(&format!(
                 "    - {tid:<40} state={st}\n",
                 tid = t.task_id,
-                st  = t.state,
+                st = t.state,
             ));
         }
     }
@@ -305,11 +303,11 @@ fn build_constraint_block(policy: &PolicyBundle) -> String {
          Refer to the API contract below for the rules that govern intent \
          submission, escalation, and budget. Do not attempt to discover \
          policy details that are not exposed here.",
-        epoch     = policy.epoch(),
-        by        = policy.signed_by(),
-        lanes     = policy.lanes().len(),
-        gates     = policy.gates().len(),
-        egress    = policy.egress_domains().len(),
+        epoch = policy.epoch(),
+        by = policy.signed_by(),
+        lanes = policy.lanes().len(),
+        gates = policy.gates().len(),
+        egress = policy.egress_domains().len(),
         providers = policy.providers().len(),
     )
 }
@@ -321,8 +319,8 @@ fn build_constraint_block(policy: &PolicyBundle) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct DelegationBrief {
     pub capability_class: String,
-    pub status:           String,
-    pub expires_at:       i64,
+    pub status: String,
+    pub expires_at: i64,
 }
 
 fn load_delegation_brief(
@@ -342,8 +340,8 @@ fn load_delegation_brief(
         .query_map([session_id.as_str()], |r| {
             Ok(DelegationBrief {
                 capability_class: r.get::<_, String>(0)?,
-                status:           r.get::<_, String>(1)?,
-                expires_at:       r.get::<_, i64>(2)?,
+                status: r.get::<_, String>(1)?,
+                expires_at: r.get::<_, i64>(2)?,
             })
         })
         .map_err(StoreError::from)?
@@ -359,14 +357,14 @@ fn load_delegation_brief(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct InitiativeContext {
     pub initiative_id: String,
-    pub state:         String,
-    pub tasks:         Vec<TaskBrief>,
+    pub state: String,
+    pub tasks: Vec<TaskBrief>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct TaskBrief {
     pub task_id: String,
-    pub state:   String,
+    pub state: String,
 }
 
 fn load_initiative_context(
@@ -375,7 +373,7 @@ fn load_initiative_context(
 ) -> Result<Vec<InitiativeContext>, PromptError> {
     // INV-STORE-03: every table identifier comes from the typed
     // `Table` enum; no hard-coded SQL names.
-    let tasks_tbl       = Table::Tasks.as_str();
+    let tasks_tbl = Table::Tasks.as_str();
     let initiatives_tbl = Table::Initiatives.as_str();
 
     let conn = store.lock_sync();
@@ -396,9 +394,7 @@ fn load_initiative_context(
     let mut out = Vec::with_capacity(init_ids.len());
     for init_id in init_ids {
         // Step 4b: initiative state.
-        let state_sql = format!(
-            "SELECT state FROM {initiatives_tbl} WHERE initiative_id = ?1"
-        );
+        let state_sql = format!("SELECT state FROM {initiatives_tbl} WHERE initiative_id = ?1");
         let state: Option<String> = conn
             .query_row(&state_sql, [init_id.as_str()], |r| r.get::<_, String>(0))
             .map(Some)
@@ -420,7 +416,7 @@ fn load_initiative_context(
             .query_map([session_id.as_str(), init_id.as_str()], |r| {
                 Ok(TaskBrief {
                     task_id: r.get::<_, String>(0)?,
-                    state:   r.get::<_, String>(1)?,
+                    state: r.get::<_, String>(1)?,
                 })
             })
             .map_err(StoreError::from)?
@@ -496,13 +492,13 @@ mod tests {
         let dels = vec![
             DelegationBrief {
                 capability_class: "WriteSecrets".to_owned(),
-                status:           "Active".to_owned(),
-                expires_at:       1_000,
+                status: "Active".to_owned(),
+                expires_at: 1_000,
             },
             DelegationBrief {
                 capability_class: "NetworkEgress".to_owned(),
-                status:           "Active".to_owned(),
-                expires_at:       2_000,
+                status: "Active".to_owned(),
+                expires_at: 2_000,
             },
         ];
         let s = build_capability_block(&dels, 100);
@@ -523,10 +519,16 @@ mod tests {
     fn build_initiative_block_lists_initiatives_and_tasks() {
         let inits = vec![InitiativeContext {
             initiative_id: "init-A".to_owned(),
-            state:         "Executing".to_owned(),
+            state: "Executing".to_owned(),
             tasks: vec![
-                TaskBrief { task_id: "task-1".to_owned(), state: "Running".to_owned() },
-                TaskBrief { task_id: "task-2".to_owned(), state: "Admitted".to_owned() },
+                TaskBrief {
+                    task_id: "task-1".to_owned(),
+                    state: "Running".to_owned(),
+                },
+                TaskBrief {
+                    task_id: "task-2".to_owned(),
+                    state: "Admitted".to_owned(),
+                },
             ],
         }];
         let s = build_initiative_block(&inits);
@@ -552,10 +554,18 @@ mod tests {
     #[test]
     fn assemble_returns_session_not_found_for_unknown_session() {
         let (store, policy, binding) = empty_ctx_test_setup();
-        let ctx = PromptCtx { store: &store, policy: &policy, binding: &binding, now_secs: 1 };
+        let ctx = PromptCtx {
+            store: &store,
+            policy: &policy,
+            binding: &binding,
+            now_secs: 1,
+        };
         let unknown = SessionId::new_v4();
         let err = assemble(&unknown, &ctx).unwrap_err();
-        assert!(matches!(err, PromptError::SessionNotFound(_)), "got: {err:?}");
+        assert!(
+            matches!(err, PromptError::SessionNotFound(_)),
+            "got: {err:?}"
+        );
     }
 
     #[test]
@@ -578,10 +588,18 @@ mod tests {
         .unwrap();
 
         binding.invalidate(&sid);
-        let ctx = PromptCtx { store: &store, policy: &policy, binding: &binding, now_secs: 1 };
+        let ctx = PromptCtx {
+            store: &store,
+            policy: &policy,
+            binding: &binding,
+            now_secs: 1,
+        };
 
         let p1 = assemble(&sid, &ctx).unwrap();
-        assert!(p1.epoch_advance_observed, "first call should report epoch advance");
+        assert!(
+            p1.epoch_advance_observed,
+            "first call should report epoch advance"
+        );
 
         let p2 = assemble(&sid, &ctx).unwrap();
         assert!(!p2.epoch_advance_observed, "second call must NOT re-report");
@@ -604,7 +622,12 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = PromptCtx { store: &store, policy: &policy, binding: &binding, now_secs: 42 };
+        let ctx = PromptCtx {
+            store: &store,
+            policy: &policy,
+            binding: &binding,
+            now_secs: 42,
+        };
         let p = assemble(&sid, &ctx).unwrap();
         assert_eq!(p.session_id, sid);
         assert_eq!(p.assembled_at, 42);
@@ -617,6 +640,9 @@ mod tests {
 
         // Rendered prompt ends with the canonical API body verbatim.
         let rendered = p.render();
-        assert!(rendered.ends_with(PLANNER_API_BODY), "API body must be the suffix");
+        assert!(
+            rendered.ends_with(PLANNER_API_BODY),
+            "API body must be the suffix"
+        );
     }
 }

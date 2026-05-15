@@ -75,21 +75,22 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             return Err(CliError::Usage(
                 "--raw is mutually exclusive with --json and --history \
                  (it dumps the on-disk policy.toml bytes verbatim, with \
-                 no parsing or re-rendering)".to_owned(),
+                 no parsing or re-rendering)"
+                    .to_owned(),
             ));
         }
         let bytes = std::fs::read(&policy_path).map_err(|e| CliError::Io {
-            path:   policy_path.display().to_string(),
+            path: policy_path.display().to_string(),
             source: e,
         })?;
         let stdout = std::io::stdout();
         let mut out = stdout.lock();
         out.write_all(&bytes).map_err(|e| CliError::Io {
-            path:   "<stdout>".to_owned(),
+            path: "<stdout>".to_owned(),
             source: e,
         })?;
         out.flush().map_err(|e| CliError::Io {
-            path:   "<stdout>".to_owned(),
+            path: "<stdout>".to_owned(),
             source: e,
         })?;
         return Ok(());
@@ -152,9 +153,9 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 #[derive(Debug, Default, Clone, Copy)]
 struct PolicyShowOpts {
-    json:         bool,
+    json: bool,
     with_history: bool,
-    raw:          bool,
+    raw: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<PolicyShowOpts, CliError> {
@@ -162,9 +163,9 @@ fn parse_args(args: &[String]) -> Result<PolicyShowOpts, CliError> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json"    => opts.json         = true,
+            "--json" => opts.json = true,
             "--history" => opts.with_history = true,
-            "--raw"     => opts.raw          = true,
+            "--raw" => opts.raw = true,
             "-h" | "--help" => {
                 print_help();
                 std::process::exit(0);
@@ -205,7 +206,7 @@ fn print_help() {
 #[derive(Debug, Clone)]
 struct HistorySummary {
     current_epoch: Option<u64>,
-    rows:          Vec<policy_history::PolicyEpochRow>,
+    rows: Vec<policy_history::PolicyEpochRow>,
 }
 
 fn read_history(flags: &GlobalFlags, with_full_list: bool) -> Result<HistorySummary, CliError> {
@@ -222,7 +223,10 @@ fn read_history(flags: &GlobalFlags, with_full_list: bool) -> Result<HistorySumm
     } else {
         Vec::new()
     };
-    Ok(HistorySummary { current_epoch, rows })
+    Ok(HistorySummary {
+        current_epoch,
+        rows,
+    })
 }
 
 // ────────────────────────────────────────────────────────────────────
@@ -230,13 +234,13 @@ fn read_history(flags: &GlobalFlags, with_full_list: bool) -> Result<HistorySumm
 // ────────────────────────────────────────────────────────────────────
 
 fn render_human<W: Write>(
-    out:          &mut W,
-    bundle:       &PolicyBundle,
-    policy_path:  &Path,
-    on_disk_sha:  &str,
-    history:      Option<&HistorySummary>,
+    out: &mut W,
+    bundle: &PolicyBundle,
+    policy_path: &Path,
+    on_disk_sha: &str,
+    history: Option<&HistorySummary>,
     with_history: bool,
-    name_lookup:  &OperatorNameLookup,
+    name_lookup: &OperatorNameLookup,
 ) {
     let _ = writeln!(out, "Active policy:");
     let _ = writeln!(out, "  source:           {}", policy_path.display());
@@ -289,10 +293,10 @@ fn render_section_lanes<W: Write>(out: &mut W, bundle: &PolicyBundle) {
         let _ = writeln!(
             out,
             "  - {id:<24} max_concurrent={mc:<3} priority={prio:<3} max_cost_per_epoch={mc2}",
-            id   = truncate(&l.lane_id, 24),
-            mc   = l.max_concurrent_tasks,
+            id = truncate(&l.lane_id, 24),
+            mc = l.max_concurrent_tasks,
             prio = l.priority,
-            mc2  = l.max_cost_per_epoch,
+            mc2 = l.max_cost_per_epoch,
         );
     }
 }
@@ -304,8 +308,8 @@ fn render_section_operators<W: Write>(out: &mut W, bundle: &PolicyBundle) {
         let _ = writeln!(
             out,
             "  - {fp}  display={name:<24}  permitted_ops={count}",
-            fp    = truncate(&o.pubkey_fingerprint, 32),
-            name  = truncate(&o.display_name, 24),
+            fp = truncate(&o.pubkey_fingerprint, 32),
+            name = truncate(&o.display_name, 24),
             count = o.permitted_ops.len(),
         );
     }
@@ -318,11 +322,11 @@ fn render_section_gates<W: Write>(out: &mut W, bundle: &PolicyBundle) {
         let _ = writeln!(
             out,
             "  - {gt:<24} cmd={cmd}  wall={wall}s  mem={mem}B  network={net}",
-            gt   = truncate(&g.gate_type, 24),
-            cmd  = truncate(&g.verifier_command, 60),
+            gt = truncate(&g.gate_type, 24),
+            cmd = truncate(&g.verifier_command, 60),
             wall = g.max_wall_seconds,
-            mem  = g.max_memory_bytes,
-            net  = g.network_allowed,
+            mem = g.max_memory_bytes,
+            net = g.network_allowed,
         );
     }
 }
@@ -339,13 +343,20 @@ fn render_section_gateway<W: Write>(out: &mut W, gw: Option<&GatewaySection>) {
     let _ = writeln!(out, "\nGateway:");
     match gw {
         None => {
-            let _ = writeln!(out, "  (not configured — kernel runs with no inference / fetch)");
+            let _ = writeln!(
+                out,
+                "  (not configured — kernel runs with no inference / fetch)"
+            );
         }
         Some(g) => {
             let _ = writeln!(out, "  binary_path:              {}", g.binary_path);
             let _ = writeln!(out, "  spawn_timeout_secs:       {}", g.spawn_timeout_secs);
             let _ = writeln!(out, "  respawn_backoff_ms:       {}", g.respawn_backoff_ms);
-            let _ = writeln!(out, "  max_consecutive_respawns: {}", g.max_consecutive_respawns);
+            let _ = writeln!(
+                out,
+                "  max_consecutive_respawns: {}",
+                g.max_consecutive_respawns
+            );
         }
     }
 }
@@ -358,12 +369,12 @@ fn render_section_providers<W: Write>(out: &mut W, bundle: &PolicyBundle) {
             out,
             "  - {id:<24} kind={kind:<10} creds={creds:<32} \
              inf_to={inf}ms data_to={data}ms max_resp={mr}B",
-            id    = truncate(&p.provider_id, 24),
-            kind  = truncate(&p.kind, 10),
+            id = truncate(&p.provider_id, 24),
+            kind = truncate(&p.kind, 10),
             creds = truncate(&p.credentials_file, 32),
-            inf   = p.inference_timeout_ms,
-            data  = p.data_fetch_timeout_ms,
-            mr    = p.max_response_bytes,
+            inf = p.inference_timeout_ms,
+            data = p.data_fetch_timeout_ms,
+            mr = p.max_response_bytes,
         );
     }
 }
@@ -375,33 +386,33 @@ fn render_section_notifications<W: Write>(out: &mut W, bundle: &PolicyBundle) {
         let _ = writeln!(
             out,
             "  - {id:<16} kind={kind:<8} target={target}",
-            id     = truncate(&c.id, 16),
-            kind   = channel_kind_label(c.kind),
+            id = truncate(&c.id, 16),
+            kind = channel_kind_label(c.kind),
             target = truncate(&c.target, 80),
         );
     }
     let defaults = bundle.default_notification_channels();
-    let _ = writeln!(
-        out,
-        "  default route channels: [{}]",
-        defaults.join(", "),
-    );
+    let _ = writeln!(out, "  default route channels: [{}]", defaults.join(", "),);
 }
 
 fn channel_kind_label(k: NotificationChannelKind) -> &'static str {
     match k {
-        NotificationChannelKind::File    => "File",
-        NotificationChannelKind::Email   => "Email",
+        NotificationChannelKind::File => "File",
+        NotificationChannelKind::Email => "Email",
         NotificationChannelKind::Sidecar => "Sidecar",
     }
 }
 
 fn render_section_history<W: Write>(
-    out:         &mut W,
-    rows:        &[policy_history::PolicyEpochRow],
+    out: &mut W,
+    rows: &[policy_history::PolicyEpochRow],
     name_lookup: &OperatorNameLookup,
 ) {
-    let _ = writeln!(out, "\nPolicy epoch history ({n} rows, newest first):", n = rows.len());
+    let _ = writeln!(
+        out,
+        "\nPolicy epoch history ({n} rows, newest first):",
+        n = rows.len()
+    );
     if rows.is_empty() {
         let _ = writeln!(out, "  (no rows)");
         return;
@@ -410,7 +421,7 @@ fn render_section_history<W: Write>(
         out,
         "  {epoch:>5}  {sha:<16}  advanced_at  triggered_by",
         epoch = "epoch",
-        sha   = "sha256_prefix",
+        sha = "sha256_prefix",
     );
     for r in rows {
         // §2.5.2 "Operator display-name fields" — the historical
@@ -423,17 +434,13 @@ fn render_section_history<W: Write>(
         // have been re-installed with a different name since),
         // or the unknown-operator annotation when the operator
         // has been removed from policy entirely.
-        let by = format_operator_with_lookup(
-            &r.triggered_by_operator,
-            None,
-            name_lookup,
-        );
+        let by = format_operator_with_lookup(&r.triggered_by_operator, None, name_lookup);
         let _ = writeln!(
             out,
             "  {epoch:>5}  {sha:<16}  {at:>11}  {by}",
             epoch = r.epoch_id,
-            sha   = truncate(&r.policy_sha256, 16),
-            at    = r.advanced_at,
+            sha = truncate(&r.policy_sha256, 16),
+            at = r.advanced_at,
         );
     }
 }
@@ -443,8 +450,8 @@ fn render_section_history<W: Write>(
 // ────────────────────────────────────────────────────────────────────
 
 fn render_json<W: Write>(
-    out:     &mut W,
-    bundle:  &PolicyBundle,
+    out: &mut W,
+    bundle: &PolicyBundle,
     on_disk: &str,
     history: Option<&HistorySummary>,
 ) {
@@ -455,34 +462,40 @@ fn render_json<W: Write>(
     let lanes_v: Vec<serde_json::Value> = bundle
         .lanes()
         .iter()
-        .map(|l| serde_json::json!({
-            "lane_id":              l.lane_id,
-            "max_concurrent_tasks": l.max_concurrent_tasks,
-            "max_cost_per_epoch":   l.max_cost_per_epoch,
-            "priority":             l.priority,
-        }))
+        .map(|l| {
+            serde_json::json!({
+                "lane_id":              l.lane_id,
+                "max_concurrent_tasks": l.max_concurrent_tasks,
+                "max_cost_per_epoch":   l.max_cost_per_epoch,
+                "priority":             l.priority,
+            })
+        })
         .collect();
 
     let ops_v: Vec<serde_json::Value> = bundle
         .operators()
         .iter()
-        .map(|o| serde_json::json!({
-            "pubkey_fingerprint": o.pubkey_fingerprint,
-            "display_name":       o.display_name,
-            "permitted_ops":      o.permitted_ops,
-        }))
+        .map(|o| {
+            serde_json::json!({
+                "pubkey_fingerprint": o.pubkey_fingerprint,
+                "display_name":       o.display_name,
+                "permitted_ops":      o.permitted_ops,
+            })
+        })
         .collect();
 
     let gates_v: Vec<serde_json::Value> = bundle
         .gates()
         .iter()
-        .map(|g| serde_json::json!({
-            "gate_type":        g.gate_type,
-            "verifier_command": g.verifier_command,
-            "max_wall_seconds": g.max_wall_seconds,
-            "max_memory_bytes": g.max_memory_bytes,
-            "network_allowed":  g.network_allowed,
-        }))
+        .map(|g| {
+            serde_json::json!({
+                "gate_type":        g.gate_type,
+                "verifier_command": g.verifier_command,
+                "max_wall_seconds": g.max_wall_seconds,
+                "max_memory_bytes": g.max_memory_bytes,
+                "network_allowed":  g.network_allowed,
+            })
+        })
         .collect();
 
     let gateway_v: serde_json::Value = match bundle.gateway() {
@@ -498,14 +511,16 @@ fn render_json<W: Write>(
     let providers_v: Vec<serde_json::Value> = bundle
         .providers()
         .iter()
-        .map(|p| serde_json::json!({
-            "provider_id":           p.provider_id,
-            "kind":                  p.kind,
-            "credentials_file":      p.credentials_file,
-            "inference_timeout_ms":  p.inference_timeout_ms,
-            "data_fetch_timeout_ms": p.data_fetch_timeout_ms,
-            "max_response_bytes":    p.max_response_bytes,
-        }))
+        .map(|p| {
+            serde_json::json!({
+                "provider_id":           p.provider_id,
+                "kind":                  p.kind,
+                "credentials_file":      p.credentials_file,
+                "inference_timeout_ms":  p.inference_timeout_ms,
+                "data_fetch_timeout_ms": p.data_fetch_timeout_ms,
+                "max_response_bytes":    p.max_response_bytes,
+            })
+        })
         .collect();
 
     let channels_v: Vec<serde_json::Value> = bundle
@@ -519,13 +534,15 @@ fn render_json<W: Write>(
         .map(|h| {
             h.rows
                 .iter()
-                .map(|r| serde_json::json!({
-                    "epoch_id":              r.epoch_id,
-                    "policy_sha256":         r.policy_sha256,
-                    "signed_by_authority":   r.signed_by_authority,
-                    "triggered_by_operator": r.triggered_by_operator,
-                    "advanced_at":           r.advanced_at,
-                }))
+                .map(|r| {
+                    serde_json::json!({
+                        "epoch_id":              r.epoch_id,
+                        "policy_sha256":         r.policy_sha256,
+                        "signed_by_authority":   r.signed_by_authority,
+                        "triggered_by_operator": r.triggered_by_operator,
+                        "advanced_at":           r.advanced_at,
+                    })
+                })
                 .collect()
         })
         .unwrap_or_default();
@@ -599,11 +616,7 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_combined_flags() {
-        let o = parse_args(&[
-            "--json".to_owned(),
-            "--history".to_owned(),
-        ])
-        .unwrap();
+        let o = parse_args(&["--json".to_owned(), "--history".to_owned()]).unwrap();
         assert!(o.json);
         assert!(o.with_history);
         assert!(!o.raw);
@@ -621,10 +634,11 @@ mod tests {
         // bytes the run() loop must echo back unchanged. We verify
         // every-byte fidelity by including a comment + a trailing
         // newline that the validating loader would normalise away.
-        let tmp        = tempfile::TempDir::new().unwrap();
+        let tmp = tempfile::TempDir::new().unwrap();
         let policy_dir = tmp.path().join("policy");
         std::fs::create_dir_all(&policy_dir).unwrap();
-        let raw_bytes  = b"# raxis policy show --raw fixture\n[meta]\nepoch = 7\n\n# trailing comment\n";
+        let raw_bytes =
+            b"# raxis policy show --raw fixture\n[meta]\nepoch = 7\n\n# trailing comment\n";
         std::fs::write(policy_dir.join("policy.toml"), raw_bytes).unwrap();
 
         // Spawn the CLI as a subprocess so we can inspect stdout
@@ -637,23 +651,34 @@ mod tests {
         // Resolve the binary cargo just built. Walk up two levels
         // from the test executable to reach `target/debug/raxis`.
         let test_exe = std::env::current_exe().expect("test exe");
-        let bin_dir  = test_exe
-            .parent().expect("deps dir")
-            .parent().expect("debug dir");
-        let raxis    = bin_dir.join("raxis");
-        assert!(raxis.exists(), "expected raxis binary at {}", raxis.display());
+        let bin_dir = test_exe
+            .parent()
+            .expect("deps dir")
+            .parent()
+            .expect("debug dir");
+        let raxis = bin_dir.join("raxis");
+        assert!(
+            raxis.exists(),
+            "expected raxis binary at {}",
+            raxis.display()
+        );
 
         let out = std::process::Command::new(&raxis)
             .args([
                 "--data-dir",
                 tmp.path().to_str().unwrap(),
-                "policy", "show", "--raw",
+                "policy",
+                "show",
+                "--raw",
             ])
             .output()
             .expect("spawn raxis policy show --raw");
-        assert!(out.status.success(),
-                "raxis policy show --raw exited non-zero: {:?}\nstderr: {}",
-                out.status, String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "raxis policy show --raw exited non-zero: {:?}\nstderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
         assert_eq!(
             out.stdout, raw_bytes,
             "stdout must be byte-for-byte identical to policy.toml"
@@ -667,8 +692,8 @@ mod tests {
         std::fs::create_dir_all(&policy_dir).unwrap();
         std::fs::write(policy_dir.join("policy.toml"), b"[meta]\nepoch = 1\n").unwrap();
         let flags = GlobalFlags {
-            data_dir:          tmp.path().to_path_buf(),
-            socket_path:       None,
+            data_dir: tmp.path().to_path_buf(),
+            socket_path: None,
             operator_key_path: None,
         };
         for combo in [
@@ -690,8 +715,8 @@ mod tests {
         // No policy.toml on disk → must surface a clean Io error
         // rather than panicking or fabricating bytes.
         let flags = GlobalFlags {
-            data_dir:          PathBuf::from("/nonexistent/raxis-policy-show-raw"),
-            socket_path:       None,
+            data_dir: PathBuf::from("/nonexistent/raxis-policy-show-raw"),
+            socket_path: None,
             operator_key_path: None,
         };
         let err = run(&flags, &["--raw".to_owned()]).unwrap_err();

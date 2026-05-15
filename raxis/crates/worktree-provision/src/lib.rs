@@ -113,7 +113,7 @@ pub enum ProvisionError {
     #[error("source repo at {path} cannot be opened: {reason}")]
     SourceRepoUnopenable {
         /// Path the kernel asked to clone from.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying gix error string.
         reason: String,
     },
@@ -123,7 +123,7 @@ pub enum ProvisionError {
     #[error("destination {path} cannot be initialised: {reason}")]
     DestUnusable {
         /// Path the destination clone was supposed to land at.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying io / gix error string.
         reason: String,
     },
@@ -157,7 +157,7 @@ pub enum ProvisionError {
     #[error("artifact pre-render failed: {what}: {reason}")]
     ArtifactRenderFailed {
         /// `"diff.patch"` or `"log.txt"`.
-        what:   &'static str,
+        what: &'static str,
         /// Underlying error.
         reason: String,
     },
@@ -207,7 +207,7 @@ pub enum ProvisionError {
         /// The pattern that failed to compile.
         pattern: String,
         /// Underlying glob error.
-        reason:  String,
+        reason: String,
     },
 }
 
@@ -305,12 +305,12 @@ pub enum ProvisionError {
 /// `configure_remote` call and the on-disk shape is retroactively
 /// thinner.
 pub fn provision_reviewer(
-    orch_repo_root:   &Path,
-    evaluation_sha:   &str,
-    main_base_sha:  &str,
-    dest_root:        &Path,
-    strategy:         CloneStrategy,
-    path_allowlist:   &[String],
+    orch_repo_root: &Path,
+    evaluation_sha: &str,
+    main_base_sha: &str,
+    dest_root: &Path,
+    strategy: CloneStrategy,
+    path_allowlist: &[String],
 ) -> Result<ReviewerProvision, ProvisionError> {
     // 0. Compile sparse-checkout patterns *before* we touch the
     //    filesystem. Plan parsing already validates these globs at
@@ -334,7 +334,7 @@ pub fn provision_reviewer(
     //    `Repository`, but only after the entire clone completes —
     //    we re-open here to be explicit about the boundary.)
     let dest_repo = gix::open(dest_root).map_err(|e| ProvisionError::DestUnusable {
-        path:   dest_root.to_path_buf(),
+        path: dest_root.to_path_buf(),
         reason: format!("post-clone open: {e}"),
     })?;
 
@@ -342,11 +342,7 @@ pub fn provision_reviewer(
     //     `.git/config`. Blobless writes the partial-clone intent;
     //     Sparse writes the cone file + `core.sparseCheckout = true`;
     //     Full writes nothing.
-    apply_strategy_config(
-        &dest_repo,
-        strategy,
-        path_allowlist,
-    )?;
+    apply_strategy_config(&dest_repo, strategy, path_allowlist)?;
 
     // 3. Verify the requested SHA actually landed.
     let eval_oid = parse_oid(evaluation_sha)?;
@@ -376,12 +372,12 @@ pub fn provision_reviewer(
         .map_err(|e| ProvisionError::Io(format!("mkdir {}: {e}", raxis_dir.display())))?;
 
     let diff_path = raxis_dir.join("diff.patch");
-    let log_path  = raxis_dir.join("log.txt");
+    let log_path = raxis_dir.join("log.txt");
     render_diff(&dest_repo, main_base_sha, evaluation_sha, &diff_path)?;
     render_log(&dest_repo, main_base_sha, evaluation_sha, &log_path)?;
 
     Ok(ReviewerProvision {
-        worktree_root:  dest_root.to_path_buf(),
+        worktree_root: dest_root.to_path_buf(),
         raxis_dir,
         diff_path,
         log_path,
@@ -420,9 +416,9 @@ pub fn provision_reviewer(
 /// corrupt git's 3-way merge traversal at `IntegrationMerge` time.
 pub fn provision_orchestrator(
     main_repo_root: &Path,
-    base_sha:         &str,
-    dest_root:        &Path,
-    strategy:         CloneStrategy,
+    base_sha: &str,
+    dest_root: &Path,
+    strategy: CloneStrategy,
 ) -> Result<OrchestratorProvision, ProvisionError> {
     // V2 §Step 27 — backstop. The structural validator at
     // `approve_plan` is the primary gate; we refuse here as
@@ -434,7 +430,7 @@ pub fn provision_orchestrator(
     let _ = clone_local(main_repo_root, dest_root)?;
 
     let dest_repo = gix::open(dest_root).map_err(|e| ProvisionError::DestUnusable {
-        path:   dest_root.to_path_buf(),
+        path: dest_root.to_path_buf(),
         reason: format!("post-clone open: {e}"),
     })?;
 
@@ -461,14 +457,13 @@ pub fn provision_orchestrator(
     // `session.env`, and the `bundles/` drop dir into a directory
     // that already exists.
     let raxis_dir = dest_root.join(".raxis");
-    std::fs::create_dir_all(raxis_dir.join("bundles")).map_err(|e| {
-        ProvisionError::Io(format!("mkdir {}: {e}", raxis_dir.display()))
-    })?;
+    std::fs::create_dir_all(raxis_dir.join("bundles"))
+        .map_err(|e| ProvisionError::Io(format!("mkdir {}: {e}", raxis_dir.display())))?;
 
     Ok(OrchestratorProvision {
         worktree_root: dest_root.to_path_buf(),
         raxis_dir,
-        base_sha:      base_sha.to_owned(),
+        base_sha: base_sha.to_owned(),
     })
 }
 
@@ -479,22 +474,20 @@ pub fn provision_orchestrator(
 /// Clone the repo at `src` into `dest` via `file://` URL. The clone
 /// uses the pack-decode pipeline so destination objects are
 /// independent of the source's on-disk packs.
-fn clone_local(src: &Path, dest: &Path)
-    -> Result<gix::Repository, ProvisionError>
-{
+fn clone_local(src: &Path, dest: &Path) -> Result<gix::Repository, ProvisionError> {
     if !src.exists() {
         return Err(ProvisionError::SourceRepoUnopenable {
-            path:   src.to_path_buf(),
+            path: src.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
 
     let parent = dest.parent().ok_or_else(|| ProvisionError::DestUnusable {
-        path:   dest.to_path_buf(),
+        path: dest.to_path_buf(),
         reason: "destination has no parent".to_owned(),
     })?;
     std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
-        path:   parent.to_path_buf(),
+        path: parent.to_path_buf(),
         reason: e.to_string(),
     })?;
 
@@ -527,9 +520,8 @@ fn clone_local(src: &Path, dest: &Path)
 
 /// Parse a hex SHA into a `gix::ObjectId`.
 fn parse_oid(sha: &str) -> Result<gix::ObjectId, ProvisionError> {
-    gix::ObjectId::from_hex(sha.as_bytes()).map_err(|e| {
-        ProvisionError::CloneFailed(format!("invalid SHA {sha:?}: {e}"))
-    })
+    gix::ObjectId::from_hex(sha.as_bytes())
+        .map_err(|e| ProvisionError::CloneFailed(format!("invalid SHA {sha:?}: {e}")))
 }
 
 /// Compile each entry in `path_allowlist` to a [`glob::Pattern`].
@@ -541,11 +533,9 @@ fn parse_oid(sha: &str) -> Result<gix::ObjectId, ProvisionError> {
 fn compile_globs(path_allowlist: &[String]) -> Result<Vec<glob::Pattern>, ProvisionError> {
     let mut out = Vec::with_capacity(path_allowlist.len());
     for raw in path_allowlist {
-        let pat = glob::Pattern::new(raw).map_err(|e| {
-            ProvisionError::InvalidAllowlistGlob {
-                pattern: raw.clone(),
-                reason:  e.to_string(),
-            }
+        let pat = glob::Pattern::new(raw).map_err(|e| ProvisionError::InvalidAllowlistGlob {
+            pattern: raw.clone(),
+            reason: e.to_string(),
         })?;
         out.push(pat);
     }
@@ -562,8 +552,8 @@ fn compile_globs(path_allowlist: &[String]) -> Result<Vec<glob::Pattern>, Provis
 /// — the same shape `git sparse-checkout set` honours.
 fn path_matches_any(rel_path: &Path, patterns: &[glob::Pattern]) -> bool {
     let opts = glob::MatchOptions {
-        case_sensitive:              true,
-        require_literal_separator:   true,
+        case_sensitive: true,
+        require_literal_separator: true,
         require_literal_leading_dot: false,
     };
     patterns.iter().any(|p| p.matches_path_with(rel_path, opts))
@@ -607,16 +597,14 @@ fn apply_strategy_config(
             // append rather than rewrite so we don't accidentally
             // truncate any sections gix wrote during clone.
             let cfg_path = git_dir.join("config");
-            let existing = std::fs::read_to_string(&cfg_path).map_err(|e| {
-                ProvisionError::Io(format!("read {}: {e}", cfg_path.display()))
-            })?;
+            let existing = std::fs::read_to_string(&cfg_path)
+                .map_err(|e| ProvisionError::Io(format!("read {}: {e}", cfg_path.display())))?;
             // Rewrite-in-place: locate or insert `[remote "origin"]`
             // section and add the two keys. We only touch the keys
             // we own so an operator-tweaked config keeps its edits.
             let updated = upsert_remote_origin_partial_clone_markers(&existing);
-            std::fs::write(&cfg_path, updated.as_bytes()).map_err(|e| {
-                ProvisionError::Io(format!("write {}: {e}", cfg_path.display()))
-            })?;
+            std::fs::write(&cfg_path, updated.as_bytes())
+                .map_err(|e| ProvisionError::Io(format!("write {}: {e}", cfg_path.display())))?;
             Ok(())
         }
         CloneStrategy::Sparse => {
@@ -626,22 +614,19 @@ fn apply_strategy_config(
             //    [core] header. (This mirrors what `git config
             //    core.sparseCheckout true` writes.)
             let cfg_path = git_dir.join("config");
-            let existing = std::fs::read_to_string(&cfg_path).map_err(|e| {
-                ProvisionError::Io(format!("read {}: {e}", cfg_path.display()))
-            })?;
+            let existing = std::fs::read_to_string(&cfg_path)
+                .map_err(|e| ProvisionError::Io(format!("read {}: {e}", cfg_path.display())))?;
             let updated = upsert_core_sparse_checkout_true(&existing);
-            std::fs::write(&cfg_path, updated.as_bytes()).map_err(|e| {
-                ProvisionError::Io(format!("write {}: {e}", cfg_path.display()))
-            })?;
+            std::fs::write(&cfg_path, updated.as_bytes())
+                .map_err(|e| ProvisionError::Io(format!("write {}: {e}", cfg_path.display())))?;
 
             // 2. .git/info/sparse-checkout — one pattern per line, no
             //    leading `/`, exact bytes from `path_allowlist`. We
             //    skip empty entries defensively though the parser
             //    rejects them at admission.
             let info_dir = git_dir.join("info");
-            std::fs::create_dir_all(&info_dir).map_err(|e| {
-                ProvisionError::Io(format!("mkdir {}: {e}", info_dir.display()))
-            })?;
+            std::fs::create_dir_all(&info_dir)
+                .map_err(|e| ProvisionError::Io(format!("mkdir {}: {e}", info_dir.display())))?;
             let sparse_path = info_dir.join("sparse-checkout");
             let mut body = String::with_capacity(64 * path_allowlist.len());
             for pat in path_allowlist {
@@ -651,9 +636,8 @@ fn apply_strategy_config(
                 body.push_str(pat);
                 body.push('\n');
             }
-            std::fs::write(&sparse_path, body.as_bytes()).map_err(|e| {
-                ProvisionError::Io(format!("write {}: {e}", sparse_path.display()))
-            })?;
+            std::fs::write(&sparse_path, body.as_bytes())
+                .map_err(|e| ProvisionError::Io(format!("write {}: {e}", sparse_path.display())))?;
             Ok(())
         }
     }
@@ -673,13 +657,11 @@ fn apply_strategy_config(
 ///    immediately under the section header.
 /// 3. If it has either key, leave the existing line alone (idempotent).
 fn upsert_remote_origin_partial_clone_markers(existing: &str) -> String {
-    const SECTION:   &str = "[remote \"origin\"]";
-    const PROMISOR:  &str = "promisor";
-    const FILTER:    &str = "partialclonefilter";
+    const SECTION: &str = "[remote \"origin\"]";
+    const PROMISOR: &str = "promisor";
+    const FILTER: &str = "partialclonefilter";
 
-    let has_section = existing
-        .lines()
-        .any(|l| l.trim() == SECTION);
+    let has_section = existing.lines().any(|l| l.trim() == SECTION);
 
     if !has_section {
         let mut out = existing.to_owned();
@@ -756,11 +738,9 @@ fn upsert_remote_origin_partial_clone_markers(existing: &str) -> String {
 /// `[core]` / `sparseCheckout`.
 fn upsert_core_sparse_checkout_true(existing: &str) -> String {
     const SECTION: &str = "[core]";
-    const KEY:     &str = "sparsecheckout";
+    const KEY: &str = "sparsecheckout";
 
-    let has_section = existing
-        .lines()
-        .any(|l| l.trim() == SECTION);
+    let has_section = existing.lines().any(|l| l.trim() == SECTION);
 
     if !has_section {
         let mut out = existing.to_owned();
@@ -817,14 +797,12 @@ fn write_ref(
     let git_dir = repo.git_dir();
     let ref_path = git_dir.join(full_name);
     if let Some(parent) = ref_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            ProvisionError::Io(format!("mkdir {}: {e}", parent.display()))
-        })?;
+        std::fs::create_dir_all(parent)
+            .map_err(|e| ProvisionError::Io(format!("mkdir {}: {e}", parent.display())))?;
     }
     let body = format!("{oid}\n");
-    std::fs::write(&ref_path, body).map_err(|e| {
-        ProvisionError::Io(format!("write {}: {e}", ref_path.display()))
-    })?;
+    std::fs::write(&ref_path, body)
+        .map_err(|e| ProvisionError::Io(format!("write {}: {e}", ref_path.display())))?;
     Ok(())
 }
 
@@ -852,19 +830,18 @@ fn write_ref(
 /// worktree against it.
 fn checkout_worktree_at(
     repo: &gix::Repository,
-    oid:  &gix::ObjectId,
+    oid: &gix::ObjectId,
     sparse_globs: Option<&[glob::Pattern]>,
-) -> Result<(), ProvisionError>
-{
-    let commit = repo.find_object(*oid).map_err(|e| {
-        ProvisionError::CheckoutFailed(format!("find_object({oid}): {e}"))
-    })?;
-    let commit = commit.try_into_commit().map_err(|e| {
-        ProvisionError::CheckoutFailed(format!("not a commit: {e}"))
-    })?;
-    let tree_id = commit.tree_id().map_err(|e| {
-        ProvisionError::CheckoutFailed(format!("tree_id: {e}"))
-    })?;
+) -> Result<(), ProvisionError> {
+    let commit = repo
+        .find_object(*oid)
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("find_object({oid}): {e}")))?;
+    let commit = commit
+        .try_into_commit()
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("not a commit: {e}")))?;
+    let tree_id = commit
+        .tree_id()
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("tree_id: {e}")))?;
 
     let workdir = repo.workdir().ok_or_else(|| {
         ProvisionError::CheckoutFailed(
@@ -874,11 +851,16 @@ fn checkout_worktree_at(
 
     // 1. Walk the target tree and collect (relative-path → blob-oid, mode)
     //    pairs for every file/symlink reachable from the tree.
-    let target_tree = repo.find_tree(tree_id).map_err(|e| {
-        ProvisionError::CheckoutFailed(format!("find_tree({tree_id}): {e}"))
-    })?;
+    let target_tree = repo
+        .find_tree(tree_id)
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("find_tree({tree_id}): {e}")))?;
     let mut target_files: Vec<TreeFile> = Vec::new();
-    collect_tree_files(repo, &target_tree, std::path::PathBuf::new(), &mut target_files)?;
+    collect_tree_files(
+        repo,
+        &target_tree,
+        std::path::PathBuf::new(),
+        &mut target_files,
+    )?;
 
     // 2. Materialise each target file. Re-create directory chains as
     //    we go. In sparse mode (`sparse_globs.is_some()`), skip any
@@ -894,9 +876,8 @@ fn checkout_worktree_at(
         }
         let dest_path = workdir.join(&f.rel_path);
         if let Some(parent) = dest_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                ProvisionError::Io(format!("mkdir {}: {e}", parent.display()))
-            })?;
+            std::fs::create_dir_all(parent)
+                .map_err(|e| ProvisionError::Io(format!("mkdir {}: {e}", parent.display())))?;
         }
         match f.kind {
             TreeEntryKind::Blob { executable } => {
@@ -955,9 +936,7 @@ fn checkout_worktree_at(
     //    `git update-ref --no-deref HEAD <oid>`.
     let head_path = repo.git_dir().join("HEAD");
     let body = format!("{oid}\n");
-    std::fs::write(&head_path, body).map_err(|e| {
-        ProvisionError::Io(format!("write HEAD: {e}"))
-    })?;
+    std::fs::write(&head_path, body).map_err(|e| ProvisionError::Io(format!("write HEAD: {e}")))?;
 
     Ok(())
 }
@@ -971,26 +950,25 @@ enum TreeEntryKind {
 #[derive(Debug)]
 struct TreeFile {
     rel_path: PathBuf,
-    oid:      gix::ObjectId,
-    kind:     TreeEntryKind,
+    oid: gix::ObjectId,
+    kind: TreeEntryKind,
 }
 
 /// Walk a tree recursively, collecting every blob/symlink leaf
 /// with its repository-relative path.
 fn collect_tree_files(
-    repo:     &gix::Repository,
-    tree:     &gix::Tree<'_>,
-    prefix:   PathBuf,
-    out:      &mut Vec<TreeFile>,
+    repo: &gix::Repository,
+    tree: &gix::Tree<'_>,
+    prefix: PathBuf,
+    out: &mut Vec<TreeFile>,
 ) -> Result<(), ProvisionError> {
     use gix::objs::tree::EntryKind;
-    let decoded = tree.decode().map_err(|e| {
-        ProvisionError::CheckoutFailed(format!("decode tree: {e}"))
-    })?;
+    let decoded = tree
+        .decode()
+        .map_err(|e| ProvisionError::CheckoutFailed(format!("decode tree: {e}")))?;
     for entry in decoded.entries.iter() {
-        let name = std::str::from_utf8(entry.filename).map_err(|e| {
-            ProvisionError::CheckoutFailed(format!("non-utf8 entry name: {e}"))
-        })?;
+        let name = std::str::from_utf8(entry.filename)
+            .map_err(|e| ProvisionError::CheckoutFailed(format!("non-utf8 entry name: {e}")))?;
         let mut child = prefix.clone();
         child.push(name);
         match entry.mode.kind() {
@@ -1002,18 +980,18 @@ fn collect_tree_files(
             }
             EntryKind::Blob => out.push(TreeFile {
                 rel_path: child,
-                oid:      entry.oid.into(),
-                kind:     TreeEntryKind::Blob { executable: false },
+                oid: entry.oid.into(),
+                kind: TreeEntryKind::Blob { executable: false },
             }),
             EntryKind::BlobExecutable => out.push(TreeFile {
                 rel_path: child,
-                oid:      entry.oid.into(),
-                kind:     TreeEntryKind::Blob { executable: true },
+                oid: entry.oid.into(),
+                kind: TreeEntryKind::Blob { executable: true },
             }),
             EntryKind::Link => out.push(TreeFile {
                 rel_path: child,
-                oid:      entry.oid.into(),
-                kind:     TreeEntryKind::Symlink,
+                oid: entry.oid.into(),
+                kind: TreeEntryKind::Symlink,
             }),
             // Submodules are commits; we don't materialise them.
             EntryKind::Commit => continue,
@@ -1027,17 +1005,16 @@ fn collect_tree_files(
 /// (RAXIS staging skeleton).
 fn sweep_worktree_against(
     workdir: &Path,
-    wanted:  &std::collections::BTreeSet<PathBuf>,
+    wanted: &std::collections::BTreeSet<PathBuf>,
 ) -> Result<(), ProvisionError> {
     fn walk(
         base: &Path,
-        rel:  &Path,
+        rel: &Path,
         wanted: &std::collections::BTreeSet<PathBuf>,
     ) -> Result<(), ProvisionError> {
         let abs = base.join(rel);
-        let read = std::fs::read_dir(&abs).map_err(|e| {
-            ProvisionError::Io(format!("read_dir {}: {e}", abs.display()))
-        })?;
+        let read = std::fs::read_dir(&abs)
+            .map_err(|e| ProvisionError::Io(format!("read_dir {}: {e}", abs.display())))?;
         for entry in read {
             let entry = entry.map_err(|e| ProvisionError::Io(e.to_string()))?;
             let name = entry.file_name();
@@ -1047,7 +1024,9 @@ fn sweep_worktree_against(
             if rel.as_os_str().is_empty() && (name == ".git" || name == ".raxis") {
                 continue;
             }
-            let ft = entry.file_type().map_err(|e| ProvisionError::Io(e.to_string()))?;
+            let ft = entry
+                .file_type()
+                .map_err(|e| ProvisionError::Io(e.to_string()))?;
             if ft.is_dir() {
                 walk(base, &child_rel, wanted)?;
                 // Remove the directory if it is empty after sweeping.
@@ -1060,9 +1039,8 @@ fn sweep_worktree_against(
                 }
             } else if !wanted.contains(&child_rel) {
                 let abs_child = base.join(&child_rel);
-                std::fs::remove_file(&abs_child).map_err(|e| {
-                    ProvisionError::Io(format!("rm {}: {e}", abs_child.display()))
-                })?;
+                std::fs::remove_file(&abs_child)
+                    .map_err(|e| ProvisionError::Io(format!("rm {}: {e}", abs_child.display())))?;
             }
         }
         Ok(())
@@ -1078,37 +1056,49 @@ fn sweep_worktree_against(
 /// a per-path summary plus blob-byte diffs). Tests pin that the
 /// output is non-empty and references both SHAs.
 fn render_diff(
-    repo:           &gix::Repository,
-    base_sha:       &str,
+    repo: &gix::Repository,
+    base_sha: &str,
     evaluation_sha: &str,
-    dest:           &Path,
+    dest: &Path,
 ) -> Result<(), ProvisionError> {
     let base_oid = parse_oid(base_sha)?;
     let eval_oid = parse_oid(evaluation_sha)?;
 
-    let base_commit = repo.find_object(base_oid)
+    let base_commit = repo
+        .find_object(base_oid)
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("find_object({base_oid}): {e}"),
+            what: "diff.patch",
+            reason: format!("find_object({base_oid}): {e}"),
         })?
         .try_into_commit()
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("base not a commit: {e}"),
+            what: "diff.patch",
+            reason: format!("base not a commit: {e}"),
         })?;
-    let eval_commit = repo.find_object(eval_oid)
+    let eval_commit = repo
+        .find_object(eval_oid)
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("find_object({eval_oid}): {e}"),
+            what: "diff.patch",
+            reason: format!("find_object({eval_oid}): {e}"),
         })?
         .try_into_commit()
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("eval not a commit: {e}"),
+            what: "diff.patch",
+            reason: format!("eval not a commit: {e}"),
         })?;
 
-    let base_tree = base_commit.tree().map_err(|e| ProvisionError::ArtifactRenderFailed {
-        what: "diff.patch", reason: format!("base tree: {e}"),
-    })?;
-    let eval_tree = eval_commit.tree().map_err(|e| ProvisionError::ArtifactRenderFailed {
-        what: "diff.patch", reason: format!("eval tree: {e}"),
-    })?;
+    let base_tree = base_commit
+        .tree()
+        .map_err(|e| ProvisionError::ArtifactRenderFailed {
+            what: "diff.patch",
+            reason: format!("base tree: {e}"),
+        })?;
+    let eval_tree = eval_commit
+        .tree()
+        .map_err(|e| ProvisionError::ArtifactRenderFailed {
+            what: "diff.patch",
+            reason: format!("eval tree: {e}"),
+        })?;
 
     let mut out = format!(
         "# RAXIS — pre-rendered diff\n\
@@ -1119,26 +1109,27 @@ fn render_diff(
          # per kernel-mechanics-prompt.md §3.3.\n\n",
     );
 
-    base_tree.changes()
+    base_tree
+        .changes()
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("changes(): {e}"),
+            what: "diff.patch",
+            reason: format!("changes(): {e}"),
         })?
-        .for_each_to_obtain_tree(&eval_tree, |change| -> Result<_, std::convert::Infallible> {
-            use std::fmt::Write as _;
-            let _ = writeln!(
-                &mut out,
-                "{}",
-                summarise_change(&change),
-            );
-            Ok(std::ops::ControlFlow::Continue(()))
-        })
+        .for_each_to_obtain_tree(
+            &eval_tree,
+            |change| -> Result<_, std::convert::Infallible> {
+                use std::fmt::Write as _;
+                let _ = writeln!(&mut out, "{}", summarise_change(&change),);
+                Ok(std::ops::ControlFlow::Continue(()))
+            },
+        )
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "diff.patch", reason: format!("for_each_to_obtain_tree: {e}"),
+            what: "diff.patch",
+            reason: format!("for_each_to_obtain_tree: {e}"),
         })?;
 
-    std::fs::write(dest, out.as_bytes()).map_err(|e| {
-        ProvisionError::Io(format!("write {}: {e}", dest.display()))
-    })?;
+    std::fs::write(dest, out.as_bytes())
+        .map_err(|e| ProvisionError::Io(format!("write {}: {e}", dest.display())))?;
     Ok(())
 }
 
@@ -1151,11 +1142,25 @@ fn summarise_change(change: &gix::object::tree::diff::Change<'_, '_, '_>) -> Str
         Change::Deletion { location, id, .. } => {
             format!("- {} ({})", location, id)
         }
-        Change::Modification { location, previous_id, id, .. } => {
+        Change::Modification {
+            location,
+            previous_id,
+            id,
+            ..
+        } => {
             format!("~ {} ({} → {})", location, previous_id, id)
         }
-        Change::Rewrite { source_location, location, source_id, id, .. } => {
-            format!("R {} → {} ({} → {})", source_location, location, source_id, id)
+        Change::Rewrite {
+            source_location,
+            location,
+            source_id,
+            id,
+            ..
+        } => {
+            format!(
+                "R {} → {} ({} → {})",
+                source_location, location, source_id, id
+            )
         }
     }
 }
@@ -1165,10 +1170,10 @@ fn summarise_change(change: &gix::object::tree::diff::Change<'_, '_, '_>) -> Str
 /// One commit per line, format pinned per `v2-deep-spec.md §Step 24`:
 /// `<short-sha> <author-name> <unix-secs> <subject>`.
 fn render_log(
-    repo:           &gix::Repository,
-    base_sha:       &str,
+    repo: &gix::Repository,
+    base_sha: &str,
     evaluation_sha: &str,
-    dest:           &Path,
+    dest: &Path,
 ) -> Result<(), ProvisionError> {
     let base_oid = parse_oid(base_sha)?;
     let eval_oid = parse_oid(evaluation_sha)?;
@@ -1179,7 +1184,8 @@ fn render_log(
         .with_hidden([base_oid])
         .all()
         .map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "log.txt", reason: format!("rev_walk: {e}"),
+            what: "log.txt",
+            reason: format!("rev_walk: {e}"),
         })?;
 
     let mut out = format!(
@@ -1189,41 +1195,47 @@ fn render_log(
     );
     for info in walk {
         let info = info.map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "log.txt", reason: format!("rev_walk item: {e}"),
+            what: "log.txt",
+            reason: format!("rev_walk item: {e}"),
         })?;
         let id = info.id;
-        let commit = repo.find_object(id)
+        let commit = repo
+            .find_object(id)
             .map_err(|e| ProvisionError::ArtifactRenderFailed {
-                what: "log.txt", reason: format!("find_object({id}): {e}"),
+                what: "log.txt",
+                reason: format!("find_object({id}): {e}"),
             })?
             .try_into_commit()
             .map_err(|e| ProvisionError::ArtifactRenderFailed {
-                what: "log.txt", reason: format!("not a commit: {e}"),
+                what: "log.txt",
+                reason: format!("not a commit: {e}"),
             })?;
-        let raw = commit.decode().map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "log.txt", reason: format!("decode: {e}"),
-        })?;
+        let raw = commit
+            .decode()
+            .map_err(|e| ProvisionError::ArtifactRenderFailed {
+                what: "log.txt",
+                reason: format!("decode: {e}"),
+            })?;
         let subject = raw.message().title.to_string();
-        let author_sig = raw.author().map_err(|e| ProvisionError::ArtifactRenderFailed {
-            what: "log.txt", reason: format!("parse author: {e}"),
-        })?;
+        let author_sig = raw
+            .author()
+            .map_err(|e| ProvisionError::ArtifactRenderFailed {
+                what: "log.txt",
+                reason: format!("parse author: {e}"),
+            })?;
         let author = author_sig.name.to_string();
-        let when_secs = author_sig
-            .time()
-            .ok()
-            .map(|t| t.seconds)
-            .unwrap_or(0);
+        let when_secs = author_sig.time().ok().map(|t| t.seconds).unwrap_or(0);
         let id_str = id.to_string();
-        let short = if id_str.len() >= 7 { &id_str[..7] } else { id_str.as_str() };
-        let line = format!(
-            "{} {} {} {}\n",
-            short, author, when_secs, subject,
-        );
+        let short = if id_str.len() >= 7 {
+            &id_str[..7]
+        } else {
+            id_str.as_str()
+        };
+        let line = format!("{} {} {} {}\n", short, author, when_secs, subject,);
         out.push_str(&line);
     }
-    std::fs::write(dest, out.as_bytes()).map_err(|e| {
-        ProvisionError::Io(format!("write {}: {e}", dest.display()))
-    })?;
+    std::fs::write(dest, out.as_bytes())
+        .map_err(|e| ProvisionError::Io(format!("write {}: {e}", dest.display())))?;
     Ok(())
 }
 
@@ -1260,7 +1272,8 @@ mod tests {
                 .env("GIT_COMMITTER_DATE", "1700000000 +0000")
                 .output()
                 .expect("git invocation");
-            assert!(status.status.success(),
+            assert!(
+                status.status.success(),
                 "git {args:?} failed in {}: stdout={} stderr={}",
                 cwd.display(),
                 String::from_utf8_lossy(&status.stdout),
@@ -1276,69 +1289,72 @@ mod tests {
         std::fs::write(repo.join("README.md"), "v1\n").ok()?;
         run(&["add", "README.md"], &repo);
         run(&["commit", "-q", "-m", "initial"], &repo);
-        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout).ok()?
-            .trim().to_owned();
+        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
         std::fs::write(repo.join("README.md"), "v1\nv2\n").ok()?;
         std::fs::write(repo.join("foo.txt"), "hello\n").ok()?;
         run(&["add", "."], &repo);
         run(&["commit", "-q", "-m", "v2"], &repo);
-        let eval = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout).ok()?
-            .trim().to_owned();
+        let eval = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
         Some((repo, base, eval))
     }
 
     #[test]
     fn provision_reviewer_creates_independent_worktree_at_evaluation_sha() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((src, base, eval)) =
-            fixture_repo_with_two_commits(tmp.path())
-        else {
+        let Some((src, base, eval)) = fixture_repo_with_two_commits(tmp.path()) else {
             eprintln!("skipping: git CLI not available on PATH");
             return;
         };
 
         let dest = tmp.path().join("reviewer-uuid-1");
-        let prov = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Full, &[],
-        )
+        let prov = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Full, &[])
             .expect("provision_reviewer must succeed against a real source repo");
 
         // Worktree-level pin: README.md and foo.txt must exist with
         // the v2 contents (proves the checkout landed at eval, not
         // base).
         let readme = std::fs::read_to_string(prov.worktree_root.join("README.md")).unwrap();
-        assert_eq!(readme, "v1\nv2\n",
-            "Reviewer worktree must materialise files at evaluation_sha");
+        assert_eq!(
+            readme, "v1\nv2\n",
+            "Reviewer worktree must materialise files at evaluation_sha"
+        );
         let foo = std::fs::read_to_string(prov.worktree_root.join("foo.txt")).unwrap();
         assert_eq!(foo, "hello\n");
 
         // Diff and log artifacts must exist + reference both SHAs.
         let diff_body = std::fs::read_to_string(&prov.diff_path).unwrap();
-        let log_body  = std::fs::read_to_string(&prov.log_path).unwrap();
+        let log_body = std::fs::read_to_string(&prov.log_path).unwrap();
         assert!(diff_body.contains(&base), "diff must mention base SHA");
-        assert!(diff_body.contains(&eval), "diff must mention evaluation SHA");
-        assert!(log_body.contains(&base[..7]) || log_body.contains(&base),
-            "log must reference the base anchor");
-        assert!(log_body.contains(&eval[..7]) || log_body.contains(&eval),
-            "log must reference the evaluation SHA");
+        assert!(
+            diff_body.contains(&eval),
+            "diff must mention evaluation SHA"
+        );
+        assert!(
+            log_body.contains(&base[..7]) || log_body.contains(&base),
+            "log must reference the base anchor"
+        );
+        assert!(
+            log_body.contains(&eval[..7]) || log_body.contains(&eval),
+            "log must reference the evaluation SHA"
+        );
     }
 
     #[test]
     fn provision_reviewer_object_database_is_independent_of_source() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((src, base, eval)) =
-            fixture_repo_with_two_commits(tmp.path())
-        else {
+        let Some((src, base, eval)) = fixture_repo_with_two_commits(tmp.path()) else {
             eprintln!("skipping: git CLI not available on PATH");
             return;
         };
 
         let dest = tmp.path().join("reviewer-uuid-2");
-        provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Full, &[],
-        ).unwrap();
+        provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Full, &[]).unwrap();
 
         // Touch a fresh blob in the source ODB *after* provisioning.
         // A correct (independent) destination ODB MUST NOT see this
@@ -1370,56 +1386,64 @@ mod tests {
         let dest_repo = gix::open(&dest).unwrap();
         let leak = dest_repo.head_commit().unwrap();
         let leak_msg = leak.decode().unwrap().message().title.to_string();
-        assert_ne!(leak_msg, "post-prov",
+        assert_ne!(
+            leak_msg, "post-prov",
             "destination ODB must be independent — post-clone source mutations \
-             must not appear in the Reviewer worktree (INV-03 / Step 24 isolation)");
+             must not appear in the Reviewer worktree (INV-03 / Step 24 isolation)"
+        );
 
         // Worktree files must not contain the leaked blob either.
-        assert!(!dest.join("post-prov.txt").exists(),
-            "leaked source-only file must not appear in the Reviewer worktree");
+        assert!(
+            !dest.join("post-prov.txt").exists(),
+            "leaked source-only file must not appear in the Reviewer worktree"
+        );
     }
 
     #[test]
     fn provision_orchestrator_lands_head_at_base_sha_and_creates_raxis_skeleton() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((src, base, _eval)) =
-            fixture_repo_with_two_commits(tmp.path())
-        else {
+        let Some((src, base, _eval)) = fixture_repo_with_two_commits(tmp.path()) else {
             eprintln!("skipping: git CLI not available on PATH");
             return;
         };
 
         // Provision off `base` (initiative anchor), not eval.
         let dest = tmp.path().join("orch-uuid-1");
-        let prov = provision_orchestrator(
-            &src, &base, &dest, CloneStrategy::Full,
-        )
+        let prov = provision_orchestrator(&src, &base, &dest, CloneStrategy::Full)
             .expect("provision_orchestrator must succeed");
 
         let raxis = prov.raxis_dir.clone();
-        assert!(raxis.is_dir(),  ".raxis must exist for the staging crate");
-        assert!(raxis.join("bundles").is_dir(),
-            ".raxis/bundles must exist so the kernel can drop Executor bundles");
+        assert!(raxis.is_dir(), ".raxis must exist for the staging crate");
+        assert!(
+            raxis.join("bundles").is_dir(),
+            ".raxis/bundles must exist so the kernel can drop Executor bundles"
+        );
         assert_eq!(prov.base_sha, base);
 
         // HEAD on the destination must match the base SHA, and the
         // worktree must contain v1's files only (no foo.txt yet).
         let dest_repo = gix::open(&dest).unwrap();
         let head = dest_repo.head_commit().unwrap();
-        assert_eq!(head.id.to_string(), base,
-            "Orchestrator HEAD must land at base_sha (Step 24b)");
+        assert_eq!(
+            head.id.to_string(),
+            base,
+            "Orchestrator HEAD must land at base_sha (Step 24b)"
+        );
         let readme = std::fs::read_to_string(dest.join("README.md")).unwrap();
-        assert_eq!(readme, "v1\n", "Orchestrator worktree must reflect base_sha");
-        assert!(!dest.join("foo.txt").exists(),
-            "files added after base_sha must not appear in the Orchestrator worktree");
+        assert_eq!(
+            readme, "v1\n",
+            "Orchestrator worktree must reflect base_sha"
+        );
+        assert!(
+            !dest.join("foo.txt").exists(),
+            "files added after base_sha must not appear in the Orchestrator worktree"
+        );
     }
 
     #[test]
     fn provision_reviewer_rejects_missing_evaluation_sha() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((src, base, _eval)) =
-            fixture_repo_with_two_commits(tmp.path())
-        else {
+        let Some((src, base, _eval)) = fixture_repo_with_two_commits(tmp.path()) else {
             eprintln!("skipping: git CLI not available on PATH");
             return;
         };
@@ -1516,7 +1540,8 @@ mod tests {
                 .env("GIT_COMMITTER_DATE", "1700000000 +0000")
                 .output()
                 .expect("git invocation");
-            assert!(status.status.success(),
+            assert!(
+                status.status.success(),
                 "git {args:?} failed in {}: stdout={} stderr={}",
                 cwd.display(),
                 String::from_utf8_lossy(&status.stdout),
@@ -1538,21 +1563,24 @@ mod tests {
         std::fs::write(repo.join("top-level.txt"), "tl\n").ok()?;
         run(&["add", "."], &repo);
         run(&["commit", "-q", "-m", "initial"], &repo);
-        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout).ok()?
-            .trim().to_owned();
+        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
 
         std::fs::write(repo.join("src/ml/model.py"), "ml model\n").ok()?;
         run(&["add", "."], &repo);
         run(&["commit", "-q", "-m", "add ml"], &repo);
-        let eval = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout).ok()?
-            .trim().to_owned();
+        let eval = String::from_utf8(run(&["rev-parse", "HEAD"], &repo).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
         Some((repo, base, eval))
     }
 
     /// Read a `.git/config` and return its full text.
     fn read_git_config(repo_root: &Path) -> String {
-        std::fs::read_to_string(repo_root.join(".git").join("config"))
-            .expect("read .git/config")
+        std::fs::read_to_string(repo_root.join(".git").join("config")).expect("read .git/config")
     }
 
     // ─── Strategy: Full ──────────────────────────────────────────────
@@ -1565,24 +1593,35 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("rev-full");
-        let _ = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Full, &[],
-        ).expect("Full provision must succeed");
+        let _ = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Full, &[])
+            .expect("Full provision must succeed");
 
         // No partial-clone markers, no sparse cone file.
         let cfg = read_git_config(&dest);
-        assert!(!cfg.to_lowercase().contains("promisor"),
-            "Full strategy must not write promisor=true to .git/config");
-        assert!(!cfg.to_lowercase().contains("partialclonefilter"),
-            "Full strategy must not write partialclonefilter to .git/config");
-        assert!(!cfg.to_lowercase().contains("sparsecheckout"),
-            "Full strategy must not enable core.sparseCheckout");
-        assert!(!dest.join(".git/info/sparse-checkout").exists(),
-            "Full strategy must not produce a sparse-checkout cone file");
+        assert!(
+            !cfg.to_lowercase().contains("promisor"),
+            "Full strategy must not write promisor=true to .git/config"
+        );
+        assert!(
+            !cfg.to_lowercase().contains("partialclonefilter"),
+            "Full strategy must not write partialclonefilter to .git/config"
+        );
+        assert!(
+            !cfg.to_lowercase().contains("sparsecheckout"),
+            "Full strategy must not enable core.sparseCheckout"
+        );
+        assert!(
+            !dest.join(".git/info/sparse-checkout").exists(),
+            "Full strategy must not produce a sparse-checkout cone file"
+        );
 
         // Worktree must contain every file from the eval tree.
-        for rel in &["src/api/server.rs", "src/ml/model.py", "docs/README.md", "top-level.txt"] {
+        for rel in &[
+            "src/api/server.rs",
+            "src/ml/model.py",
+            "docs/README.md",
+            "top-level.txt",
+        ] {
             assert!(dest.join(rel).exists(), "Full worktree must contain {rel}");
         }
     }
@@ -1597,25 +1636,37 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("rev-blobless");
-        let _ = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Blobless, &[],
-        ).expect("Blobless provision must succeed");
+        let _ = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Blobless, &[])
+            .expect("Blobless provision must succeed");
 
         // Partial-clone markers present.
         let cfg = read_git_config(&dest);
-        assert!(cfg.contains("[remote \"origin\"]"),
-            "Blobless config must reference remote.origin: {cfg}");
-        assert!(cfg.to_lowercase().contains("promisor = true"),
-            "Blobless must record remote.origin.promisor=true: {cfg}");
-        assert!(cfg.to_lowercase().contains("partialclonefilter = blob:none"),
-            "Blobless must record remote.origin.partialclonefilter=blob:none: {cfg}");
+        assert!(
+            cfg.contains("[remote \"origin\"]"),
+            "Blobless config must reference remote.origin: {cfg}"
+        );
+        assert!(
+            cfg.to_lowercase().contains("promisor = true"),
+            "Blobless must record remote.origin.promisor=true: {cfg}"
+        );
+        assert!(
+            cfg.to_lowercase()
+                .contains("partialclonefilter = blob:none"),
+            "Blobless must record remote.origin.partialclonefilter=blob:none: {cfg}"
+        );
 
         // Worktree shape is identical to Full (per V2 best-judgment):
         // file:// transport, no real wire savings.
-        for rel in &["src/api/server.rs", "src/ml/model.py", "docs/README.md", "top-level.txt"] {
-            assert!(dest.join(rel).exists(),
-                "Blobless under file:// transport materialises every file: missing {rel}");
+        for rel in &[
+            "src/api/server.rs",
+            "src/ml/model.py",
+            "docs/README.md",
+            "top-level.txt",
+        ] {
+            assert!(
+                dest.join(rel).exists(),
+                "Blobless under file:// transport materialises every file: missing {rel}"
+            );
         }
     }
 
@@ -1633,21 +1684,23 @@ mod tests {
         let mut bodies = Vec::new();
         for i in 0..2 {
             let dest = tmp.path().join(format!("rev-bl-{i}"));
-            let _ = provision_reviewer(
-                &src, &eval, &base, &dest,
-                CloneStrategy::Blobless, &[],
-            ).unwrap();
+            let _ = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Blobless, &[])
+                .unwrap();
             bodies.push(read_git_config(&dest));
         }
         // Each config must contain exactly one promisor line and one
         // partialclonefilter line.
         for (i, body) in bodies.iter().enumerate() {
             let promisor_count = body.matches("promisor = true").count();
-            let filter_count   = body.matches("partialclonefilter = blob:none").count();
-            assert_eq!(promisor_count, 1,
-                "iteration {i}: promisor must appear exactly once: {body}");
-            assert_eq!(filter_count, 1,
-                "iteration {i}: partialclonefilter must appear exactly once: {body}");
+            let filter_count = body.matches("partialclonefilter = blob:none").count();
+            assert_eq!(
+                promisor_count, 1,
+                "iteration {i}: promisor must appear exactly once: {body}"
+            );
+            assert_eq!(
+                filter_count, 1,
+                "iteration {i}: partialclonefilter must appear exactly once: {body}"
+            );
         }
     }
 
@@ -1665,40 +1718,54 @@ mod tests {
         // should contain `src/api/server.rs` but NOT `src/ml/model.py`,
         // `docs/README.md`, or `top-level.txt`.
         let allowlist: Vec<String> = vec!["src/api/**".to_owned()];
-        let prov = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Sparse, &allowlist,
-        ).expect("Sparse provision must succeed");
+        let prov = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Sparse, &allowlist)
+            .expect("Sparse provision must succeed");
 
         // Must materialise the matching file.
-        assert!(dest.join("src/api/server.rs").exists(),
-            "sparse: src/api/server.rs must be materialised");
+        assert!(
+            dest.join("src/api/server.rs").exists(),
+            "sparse: src/api/server.rs must be materialised"
+        );
 
         // Must NOT materialise non-matching files.
-        assert!(!dest.join("src/ml/model.py").exists(),
-            "sparse: src/ml/model.py must NOT be materialised (outside allowlist)");
-        assert!(!dest.join("docs/README.md").exists(),
-            "sparse: docs/README.md must NOT be materialised (outside allowlist)");
-        assert!(!dest.join("top-level.txt").exists(),
-            "sparse: top-level.txt must NOT be materialised (outside allowlist)");
+        assert!(
+            !dest.join("src/ml/model.py").exists(),
+            "sparse: src/ml/model.py must NOT be materialised (outside allowlist)"
+        );
+        assert!(
+            !dest.join("docs/README.md").exists(),
+            "sparse: docs/README.md must NOT be materialised (outside allowlist)"
+        );
+        assert!(
+            !dest.join("top-level.txt").exists(),
+            "sparse: top-level.txt must NOT be materialised (outside allowlist)"
+        );
 
         // Empty parent directories must be cleaned up by the sweep.
         // (`docs/` should be gone since its only entry was filtered.)
-        assert!(!dest.join("docs").exists(),
-            "sparse: empty docs/ must be swept");
+        assert!(
+            !dest.join("docs").exists(),
+            "sparse: empty docs/ must be swept"
+        );
 
         // .git/info/sparse-checkout must contain the allowlist.
         let cone_path = dest.join(".git/info/sparse-checkout");
-        assert!(cone_path.exists(),
-            "sparse: .git/info/sparse-checkout must exist");
+        assert!(
+            cone_path.exists(),
+            "sparse: .git/info/sparse-checkout must exist"
+        );
         let cone_body = std::fs::read_to_string(&cone_path).unwrap();
-        assert!(cone_body.contains("src/api/**"),
-            "sparse: cone file must contain the allowlist pattern: {cone_body}");
+        assert!(
+            cone_body.contains("src/api/**"),
+            "sparse: cone file must contain the allowlist pattern: {cone_body}"
+        );
 
         // .git/config must enable core.sparseCheckout.
         let cfg = read_git_config(&dest);
-        assert!(cfg.to_lowercase().contains("sparsecheckout = true"),
-            "sparse: core.sparseCheckout must be true: {cfg}");
+        assert!(
+            cfg.to_lowercase().contains("sparsecheckout = true"),
+            "sparse: core.sparseCheckout must be true: {cfg}"
+        );
 
         // ODB must still contain every reachable object: a `gix::open`
         // + `find_object(eval_oid)` for ml/model.py blob must succeed
@@ -1723,8 +1790,10 @@ mod tests {
         // The above loop is structural; the *real* assertion is that
         // `gix::open` succeeded against a non-bare repo, which means
         // every reachable object is present. We pin this explicitly:
-        assert!(prov.evaluation_sha == eval,
-            "sparse: provision must still pin evaluation_sha");
+        assert!(
+            prov.evaluation_sha == eval,
+            "sparse: provision must still pin evaluation_sha"
+        );
         // Suppress unused warning.
         let _ = found_ml_blob;
         let _ = base;
@@ -1738,22 +1807,23 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("rev-sparse-multi");
-        let allowlist: Vec<String> = vec![
-            "src/api/**".to_owned(),
-            "docs/**".to_owned(),
-        ];
-        let _ = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Sparse, &allowlist,
-        ).expect("Sparse provision must succeed");
+        let allowlist: Vec<String> = vec!["src/api/**".to_owned(), "docs/**".to_owned()];
+        let _ = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Sparse, &allowlist)
+            .expect("Sparse provision must succeed");
 
         assert!(dest.join("src/api/server.rs").exists());
-        assert!(dest.join("docs/README.md").exists(),
-            "sparse: docs/** must be materialised when allowlist includes it");
-        assert!(!dest.join("src/ml/model.py").exists(),
-            "sparse: src/ml/** must remain filtered out");
-        assert!(!dest.join("top-level.txt").exists(),
-            "sparse: top-level.txt is outside both globs");
+        assert!(
+            dest.join("docs/README.md").exists(),
+            "sparse: docs/** must be materialised when allowlist includes it"
+        );
+        assert!(
+            !dest.join("src/ml/model.py").exists(),
+            "sparse: src/ml/** must remain filtered out"
+        );
+        assert!(
+            !dest.join("top-level.txt").exists(),
+            "sparse: top-level.txt is outside both globs"
+        );
     }
 
     #[test]
@@ -1764,10 +1834,7 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("rev-sparse-empty");
-        let result = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Sparse, &[],
-        );
+        let result = provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Sparse, &[]);
         match result {
             Err(ProvisionError::SparseEmptyAllowlist) => {}
             other => panic!("expected SparseEmptyAllowlist, got {other:?}"),
@@ -1775,8 +1842,10 @@ mod tests {
         // Critical: the destination must NOT have been clone-touched.
         // (We compile the globs *before* clone_local for exactly this
         // reason — fail fast, don't litter the filesystem.)
-        assert!(!dest.exists(),
-            "rejected sparse must not leave a partial clone on disk");
+        assert!(
+            !dest.exists(),
+            "rejected sparse must not leave a partial clone on disk"
+        );
     }
 
     #[test]
@@ -1789,18 +1858,18 @@ mod tests {
         let dest = tmp.path().join("rev-sparse-invalid");
         // `]` without a matching `[` is a malformed glob.
         let allowlist = vec!["src/api/[bad".to_owned()];
-        let result = provision_reviewer(
-            &src, &eval, &base, &dest,
-            CloneStrategy::Sparse, &allowlist,
-        );
+        let result =
+            provision_reviewer(&src, &eval, &base, &dest, CloneStrategy::Sparse, &allowlist);
         match result {
             Err(ProvisionError::InvalidAllowlistGlob { pattern, .. }) => {
                 assert_eq!(pattern, "src/api/[bad");
             }
             other => panic!("expected InvalidAllowlistGlob, got {other:?}"),
         }
-        assert!(!dest.exists(),
-            "rejected sparse glob compile must not leave a partial clone");
+        assert!(
+            !dest.exists(),
+            "rejected sparse glob compile must not leave a partial clone"
+        );
     }
 
     // ─── Sparse-Orchestrator exclusion (defense-in-depth) ────────────
@@ -1813,16 +1882,16 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("orch-sparse-refused");
-        let result = provision_orchestrator(
-            &src, &base, &dest, CloneStrategy::Sparse,
-        );
+        let result = provision_orchestrator(&src, &base, &dest, CloneStrategy::Sparse);
         match result {
             Err(ProvisionError::SparseOrchestratorRefused) => {}
             other => panic!("expected SparseOrchestratorRefused, got {other:?}"),
         }
         // The provisioner must reject *before* clone — so dest must not exist.
-        assert!(!dest.exists(),
-            "Sparse-Orchestrator refusal must short-circuit before clone");
+        assert!(
+            !dest.exists(),
+            "Sparse-Orchestrator refusal must short-circuit before clone"
+        );
     }
 
     #[test]
@@ -1833,15 +1902,18 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("orch-blobless");
-        let prov = provision_orchestrator(
-            &src, &base, &dest, CloneStrategy::Blobless,
-        ).expect("Orchestrator Blobless must succeed");
+        let prov = provision_orchestrator(&src, &base, &dest, CloneStrategy::Blobless)
+            .expect("Orchestrator Blobless must succeed");
 
         let cfg = read_git_config(&dest);
         assert!(cfg.to_lowercase().contains("promisor = true"));
-        assert!(cfg.to_lowercase().contains("partialclonefilter = blob:none"));
-        assert!(!cfg.to_lowercase().contains("sparsecheckout"),
-            "Orchestrator Blobless must NOT enable sparse-checkout");
+        assert!(cfg
+            .to_lowercase()
+            .contains("partialclonefilter = blob:none"));
+        assert!(
+            !cfg.to_lowercase().contains("sparsecheckout"),
+            "Orchestrator Blobless must NOT enable sparse-checkout"
+        );
         assert_eq!(prov.base_sha, base);
     }
 
@@ -1853,9 +1925,8 @@ mod tests {
             return;
         };
         let dest = tmp.path().join("orch-full");
-        let _ = provision_orchestrator(
-            &src, &base, &dest, CloneStrategy::Full,
-        ).expect("Orchestrator Full must succeed");
+        let _ = provision_orchestrator(&src, &base, &dest, CloneStrategy::Full)
+            .expect("Orchestrator Full must succeed");
 
         let cfg = read_git_config(&dest);
         assert!(!cfg.to_lowercase().contains("promisor"));
@@ -1886,10 +1957,7 @@ mod tests {
 
     #[test]
     fn path_matches_any_unions_multiple_globs() {
-        let pats = compile_globs(&[
-            "src/api/**".to_owned(),
-            "docs/**".to_owned(),
-        ]).unwrap();
+        let pats = compile_globs(&["src/api/**".to_owned(), "docs/**".to_owned()]).unwrap();
         assert!(path_matches_any(Path::new("src/api/x.rs"), &pats));
         assert!(path_matches_any(Path::new("docs/r.md"), &pats));
         assert!(!path_matches_any(Path::new("src/ml/m.py"), &pats));
@@ -1902,10 +1970,14 @@ mod tests {
     fn upsert_remote_origin_appends_section_when_missing() {
         let before = "[core]\n\trepositoryformatversion = 0\n";
         let after = upsert_remote_origin_partial_clone_markers(before);
-        assert!(after.contains("[core]"),
-            "must preserve pre-existing sections: {after}");
-        assert!(after.contains("[remote \"origin\"]"),
-            "must append the remote.origin section: {after}");
+        assert!(
+            after.contains("[core]"),
+            "must preserve pre-existing sections: {after}"
+        );
+        assert!(
+            after.contains("[remote \"origin\"]"),
+            "must append the remote.origin section: {after}"
+        );
         assert!(after.contains("promisor = true"));
         assert!(after.contains("partialclonefilter = blob:none"));
     }
@@ -1917,31 +1989,43 @@ mod tests {
 \turl = file:///tmp/src\n\
 [core]\n\trepositoryformatversion = 0\n";
         let after = upsert_remote_origin_partial_clone_markers(before);
-        assert!(after.contains("url = file:///tmp/src"),
-            "must preserve existing url line: {after}");
-        assert!(after.contains("promisor = true"),
-            "must add promisor in remote.origin: {after}");
-        assert!(after.contains("partialclonefilter = blob:none"),
-            "must add partialclonefilter in remote.origin: {after}");
+        assert!(
+            after.contains("url = file:///tmp/src"),
+            "must preserve existing url line: {after}"
+        );
+        assert!(
+            after.contains("promisor = true"),
+            "must add promisor in remote.origin: {after}"
+        );
+        assert!(
+            after.contains("partialclonefilter = blob:none"),
+            "must add partialclonefilter in remote.origin: {after}"
+        );
         // Promisor and filter must come *before* [core], i.e. inside
         // the remote.origin section.
         let remote_idx = after.find("[remote \"origin\"]").unwrap();
-        let core_idx   = after.find("[core]").unwrap();
+        let core_idx = after.find("[core]").unwrap();
         let promisor_idx = after.find("promisor = true").unwrap();
-        let filter_idx   = after.find("partialclonefilter = blob:none").unwrap();
-        assert!(remote_idx < promisor_idx && promisor_idx < core_idx,
-            "promisor must land inside remote.origin section");
-        assert!(remote_idx < filter_idx && filter_idx < core_idx,
-            "partialclonefilter must land inside remote.origin section");
+        let filter_idx = after.find("partialclonefilter = blob:none").unwrap();
+        assert!(
+            remote_idx < promisor_idx && promisor_idx < core_idx,
+            "promisor must land inside remote.origin section"
+        );
+        assert!(
+            remote_idx < filter_idx && filter_idx < core_idx,
+            "partialclonefilter must land inside remote.origin section"
+        );
     }
 
     #[test]
     fn upsert_remote_origin_is_idempotent() {
         let before = "[remote \"origin\"]\n\turl = file:///tmp/src\n";
-        let once   = upsert_remote_origin_partial_clone_markers(before);
-        let twice  = upsert_remote_origin_partial_clone_markers(&once);
-        assert_eq!(once, twice,
-            "applying the upsert twice must produce the same body");
+        let once = upsert_remote_origin_partial_clone_markers(before);
+        let twice = upsert_remote_origin_partial_clone_markers(&once);
+        assert_eq!(
+            once, twice,
+            "applying the upsert twice must produce the same body"
+        );
         assert_eq!(once.matches("promisor = true").count(), 1);
         assert_eq!(once.matches("partialclonefilter = blob:none").count(), 1);
     }

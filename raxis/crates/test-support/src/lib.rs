@@ -113,8 +113,8 @@ mod workspace_guard;
 pub use audit_dir::{AuditDir, GenesisInfo};
 pub use audit_sink::{CapturedEvent, FakeAuditSink};
 pub use cert::{
-    ephemeral_cert, ephemeral_cert_with_key, ephemeral_cert_with_opts,
-    ephemeral_signing_key, pubkey_hex, stub_cert_for_pubkey, CertOpts,
+    ephemeral_cert, ephemeral_cert_with_key, ephemeral_cert_with_opts, ephemeral_signing_key,
+    pubkey_hex, stub_cert_for_pubkey, CertOpts,
 };
 pub use clock::FakeClock;
 pub use disk_store::DiskStore;
@@ -154,8 +154,10 @@ mod smoke {
         // Two independent in-memory stores must not share state.
         let s1 = mem_store();
         let s2 = mem_store();
-        assert!(!std::ptr::eq(&s1, &s2),
-            "mem_store handed out the same allocation twice");
+        assert!(
+            !std::ptr::eq(&s1, &s2),
+            "mem_store handed out the same allocation twice"
+        );
     }
 
     #[test]

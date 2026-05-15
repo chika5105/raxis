@@ -21,15 +21,15 @@ use crate::Table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NotificationRow {
     pub notification_id: String,
-    pub event_kind:      String,
-    pub initiative_id:   Option<String>,
-    pub task_id:         Option<String>,
-    pub session_id:      Option<String>,
-    pub summary:         String,
-    pub payload_json:    String,
-    pub read:            bool,
+    pub event_kind: String,
+    pub initiative_id: Option<String>,
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
+    pub summary: String,
+    pub payload_json: String,
+    pub read: bool,
     pub source_event_id: String,
-    pub created_at:      u64,
+    pub created_at: u64,
 }
 
 #[derive(Debug, Error)]
@@ -53,7 +53,7 @@ pub fn unread_count(conn: &RoConn) -> Result<u64, NotificationViewError> {
 
 /// List unread notifications, newest first, capped at `limit`.
 pub fn list_unread(
-    conn:  &RoConn,
+    conn: &RoConn,
     limit: usize,
 ) -> Result<Vec<NotificationRow>, NotificationViewError> {
     let sql = format!(
@@ -76,8 +76,8 @@ pub fn list_unread(
 /// List all notifications, newest first, capped at `limit`.
 /// Optionally filter by `initiative_id`.
 pub fn list_all(
-    conn:          &RoConn,
-    limit:         usize,
+    conn: &RoConn,
+    limit: usize,
     initiative_id: Option<&str>,
 ) -> Result<Vec<NotificationRow>, NotificationViewError> {
     let (sql, has_filter) = if initiative_id.is_some() {
@@ -131,7 +131,7 @@ pub fn list_all(
 /// operation. Callers MUST wrap this in a `BEGIN IMMEDIATE`
 /// transaction if they need atomicity with other writes.
 pub fn mark_read(
-    conn:            &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     notification_id: &str,
 ) -> Result<bool, NotificationViewError> {
     let n = conn.execute(
@@ -146,9 +146,7 @@ pub fn mark_read(
 
 /// Mark ALL unread notifications as read. Returns the number of
 /// rows updated.
-pub fn mark_all_read(
-    conn: &rusqlite::Connection,
-) -> Result<u64, NotificationViewError> {
+pub fn mark_all_read(conn: &rusqlite::Connection) -> Result<u64, NotificationViewError> {
     let n = conn.execute(
         &format!(
             "UPDATE {} SET read = 1 WHERE read = 0",
@@ -162,15 +160,15 @@ pub fn mark_all_read(
 fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<NotificationRow> {
     Ok(NotificationRow {
         notification_id: r.get(0)?,
-        event_kind:      r.get(1)?,
-        initiative_id:   r.get(2)?,
-        task_id:         r.get(3)?,
-        session_id:      r.get(4)?,
-        summary:         r.get(5)?,
-        payload_json:    r.get(6)?,
-        read:            r.get::<_, i64>(7)? != 0,
+        event_kind: r.get(1)?,
+        initiative_id: r.get(2)?,
+        task_id: r.get(3)?,
+        session_id: r.get(4)?,
+        summary: r.get(5)?,
+        payload_json: r.get(6)?,
+        read: r.get::<_, i64>(7)? != 0,
         source_event_id: r.get(8)?,
-        created_at:      r.get::<_, i64>(9)?.max(0) as u64,
+        created_at: r.get::<_, i64>(9)?.max(0) as u64,
     })
 }
 
@@ -193,34 +191,37 @@ mod tests {
         // below trips `SQLITE_CONSTRAINT_FOREIGNKEY`. The schema
         // pins `state ∈ InitiativeState::ALL` (`Draft` is the
         // canonical seed value used elsewhere in the test suite).
-        guard.execute(
-            &format!(
-                "INSERT INTO {} \
+        guard
+            .execute(
+                &format!(
+                    "INSERT INTO {} \
                  (initiative_id, state, terminal_criteria_json, \
                   plan_artifact_sha256, created_at) \
                  VALUES ('init-1', 'Draft', '{{}}', 'sha-fixture', 0)",
-                Table::Initiatives.as_str(),
-            ),
-            [],
-        )
-        .unwrap();
+                    Table::Initiatives.as_str(),
+                ),
+                [],
+            )
+            .unwrap();
 
         // Seed three notifications — two unread, one read.
         for (id, kind, init, read, ts) in [
-            ("n-1", "EscalationPending",   Some("init-1"), 0, 300_i64),
-            ("n-2", "PolicyEpochAdvanced", None,           0, 200),
-            ("n-3", "EscalationApproved",  Some("init-1"), 1, 100),
+            ("n-1", "EscalationPending", Some("init-1"), 0, 300_i64),
+            ("n-2", "PolicyEpochAdvanced", None, 0, 200),
+            ("n-3", "EscalationApproved", Some("init-1"), 1, 100),
         ] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {} \
                      (notification_id, event_kind, initiative_id, task_id, \
                       session_id, summary, payload_json, read, source_event_id, created_at) \
                      VALUES (?1, ?2, ?3, NULL, NULL, ?2, '{{}}', ?4, 'evt-1', ?5)",
-                    Table::Notifications.as_str(),
-                ),
-                rusqlite::params![id, kind, init, read, ts],
-            ).unwrap();
+                        Table::Notifications.as_str(),
+                    ),
+                    rusqlite::params![id, kind, init, read, ts],
+                )
+                .unwrap();
         }
         tmp
     }
@@ -257,7 +258,9 @@ mod tests {
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_all(&conn, 10, Some("init-1")).unwrap();
         assert_eq!(rows.len(), 2);
-        assert!(rows.iter().all(|r| r.initiative_id.as_deref() == Some("init-1")));
+        assert!(rows
+            .iter()
+            .all(|r| r.initiative_id.as_deref() == Some("init-1")));
     }
 
     #[test]

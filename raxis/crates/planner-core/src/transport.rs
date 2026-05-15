@@ -161,10 +161,7 @@ pub trait KernelTransport: Send + Sync {
     /// to drop the transport and rebuild it from the boot
     /// environment (preserving the kernel's per-connection
     /// session-token authentication invariant).
-    async fn request(
-        &self,
-        outbound: &IpcMessage,
-    ) -> Result<IpcMessage, TransportError>;
+    async fn request(&self, outbound: &IpcMessage) -> Result<IpcMessage, TransportError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -199,7 +196,7 @@ pub enum KernelTransportConfig {
         /// Context ID of the host (`2` for AF_VSOCK on the standard
         /// Apple-VZ / Firecracker host). Pinned by the kernel's
         /// session-spawn path.
-        cid:  u32,
+        cid: u32,
         /// Port the kernel's host-side proxy is listening on.
         port: u32,
     },
@@ -248,7 +245,9 @@ impl KernelTransportConfig {
     {
         if let Some(path) = f("RAXIS_KERNEL_PLANNER_SOCKET") {
             if !path.is_empty() {
-                return Ok(Self::Uds { socket_path: PathBuf::from(path) });
+                return Ok(Self::Uds {
+                    socket_path: PathBuf::from(path),
+                });
             }
         }
         if let Some(port) = f("RAXIS_KERNEL_VSOCK_LISTEN_PORT") {
@@ -257,19 +256,16 @@ impl KernelTransportConfig {
             // 0 is reserved by AF_VSOCK semantics and would shadow
             // a real misconfiguration.
             if !port.is_empty() {
-                let port: u32 = port
-                    .parse()
-                    .map_err(|_| TransportError::NotConfigured)?;
+                let port: u32 = port.parse().map_err(|_| TransportError::NotConfigured)?;
                 return Ok(Self::VsockListen { port });
             }
         }
-        if let (Some(cid), Some(port)) =
-            (f("RAXIS_KERNEL_VSOCK_CID"), f("RAXIS_KERNEL_VSOCK_PORT"))
+        if let (Some(cid), Some(port)) = (f("RAXIS_KERNEL_VSOCK_CID"), f("RAXIS_KERNEL_VSOCK_PORT"))
         {
             // Parse loosely: a malformed numeric value is a kernel
             // bug we want to surface as NotConfigured rather than
             // pretending we have a transport.
-            let cid:  u32 = cid.parse().map_err(|_| TransportError::NotConfigured)?;
+            let cid: u32 = cid.parse().map_err(|_| TransportError::NotConfigured)?;
             let port: u32 = port.parse().map_err(|_| TransportError::NotConfigured)?;
             return Ok(Self::Vsock { cid, port });
         }
@@ -310,7 +306,8 @@ pub async fn connect(
 ) -> Result<Arc<dyn KernelTransport>, TransportError> {
     match cfg {
         KernelTransportConfig::Uds { socket_path } => {
-            let stream = UnixStream::connect(socket_path).await
+            let stream = UnixStream::connect(socket_path)
+                .await
                 .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
             Ok(Arc::new(StreamTransport::new(stream)))
         }
@@ -323,11 +320,10 @@ pub async fn connect(
             // `accept_planner_loop`, the wire framing on top of vsock
             // is identical to the UDS path, so we wrap the stream in
             // the same `StreamTransport` as the UDS branch.
-            let stream = tokio_vsock::VsockStream::connect(
-                tokio_vsock::VsockAddr::new(*cid, *port),
-            )
-            .await
-            .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
+            let stream =
+                tokio_vsock::VsockStream::connect(tokio_vsock::VsockAddr::new(*cid, *port))
+                    .await
+                    .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
             Ok(Arc::new(StreamTransport::new(stream)))
         }
         #[cfg(not(all(feature = "vsock-transport", target_os = "linux")))]
@@ -340,9 +336,10 @@ pub async fn connect(
             // own CID at boot and AVF assigns it implicitly. backlog
             // is exactly one because the kernel dials exactly once
             // per session.
-            let listener = tokio_vsock::VsockListener::bind(
-                tokio_vsock::VsockAddr::new(tokio_vsock::VMADDR_CID_ANY, *port),
-            )
+            let listener = tokio_vsock::VsockListener::bind(tokio_vsock::VsockAddr::new(
+                tokio_vsock::VMADDR_CID_ANY,
+                *port,
+            ))
             .map_err(|e| TransportError::Frame(FrameError::Io(e)))?;
             let (stream, _peer) = listener
                 .accept()
@@ -416,29 +413,24 @@ impl<S> KernelTransport for StreamTransport<S>
 where
     S: AsyncRead + AsyncWrite + Send + Unpin + 'static,
 {
-    async fn request(
-        &self,
-        outbound: &IpcMessage,
-    ) -> Result<IpcMessage, TransportError> {
+    async fn request(&self, outbound: &IpcMessage) -> Result<IpcMessage, TransportError> {
         let mut halves = self.halves.lock().await;
         // Outbound write — one frame.
         write_frame(&mut halves.writer, outbound).await?;
         // Inbound read — one frame, optionally bounded by deadline.
         let read_fut = read_frame::<_, IpcMessage>(&mut halves.reader);
         let resp = match self.request_deadline {
-            None    => read_fut.await,
+            None => read_fut.await,
             Some(d) => match tokio::time::timeout(d, read_fut).await {
-                Ok(r)  => r,
+                Ok(r) => r,
                 Err(_) => {
-                    return Err(TransportError::Frame(FrameError::Io(
-                        std::io::Error::new(
-                            std::io::ErrorKind::TimedOut,
-                            format!(
-                                "kernel response timeout after {d:?} \
+                    return Err(TransportError::Frame(FrameError::Io(std::io::Error::new(
+                        std::io::ErrorKind::TimedOut,
+                        format!(
+                            "kernel response timeout after {d:?} \
                                  (planner→kernel transport)"
-                            ),
                         ),
-                    )));
+                    ))));
                 }
             },
         }?;
@@ -460,28 +452,27 @@ mod tests {
     use super::*;
     use raxis_ipc::frame::write_frame;
     use raxis_types::{
-        IntentKind, IntentOutcome, IntentRequest, IntentResponse, PlannerErrorCode,
-        TaskState,
+        IntentKind, IntentOutcome, IntentRequest, IntentResponse, PlannerErrorCode, TaskState,
     };
     use tokio::io::{duplex, DuplexStream};
 
     fn fixture_intent_request() -> IntentRequest {
         IntentRequest {
-            session_token:           "session-token-fixture".to_owned(),
-            sequence_number:         1,
-            envelope_nonce:          format!("{:032x}", 0x1234567890abcdefu128),
-            intent_kind:             IntentKind::ReportFailure,
-            task_id:                 raxis_types::TaskId::parse("task-fixture").unwrap(),
-            base_sha:                None,
-            head_sha:                None,
-            submitted_claims:        vec![],
-            justification:           Some("transport unit test".to_owned()),
-            idempotency_key:         None,
-            approval_token:          None,
-            approved:                None,
-            critique:                None,
+            session_token: "session-token-fixture".to_owned(),
+            sequence_number: 1,
+            envelope_nonce: format!("{:032x}", 0x1234567890abcdefu128),
+            intent_kind: IntentKind::ReportFailure,
+            task_id: raxis_types::TaskId::parse("task-fixture").unwrap(),
+            base_sha: None,
+            head_sha: None,
+            submitted_claims: vec![],
+            justification: Some("transport unit test".to_owned()),
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         }
     }
@@ -489,9 +480,9 @@ mod tests {
     fn fixture_intent_response_rejected(seq: u64) -> IntentResponse {
         IntentResponse {
             sequence_number: seq,
-            task_state:      TaskState::Failed,
+            task_state: TaskState::Failed,
             outcome: IntentOutcome::Rejected {
-                error_code:   PlannerErrorCode::InvalidRequest,
+                error_code: PlannerErrorCode::InvalidRequest,
                 error_detail: None,
             },
         }
@@ -504,12 +495,13 @@ mod tests {
     #[test]
     fn config_prefers_uds_path_over_vsock_vars() {
         let cfg = KernelTransportConfig::from_env_fn(|k| match k {
-            "RAXIS_KERNEL_PLANNER_SOCKET"     => Some("/tmp/planner.sock".to_owned()),
-            "RAXIS_KERNEL_VSOCK_CID"          => Some("2".to_owned()),
-            "RAXIS_KERNEL_VSOCK_PORT"         => Some("1024".to_owned()),
-            "RAXIS_KERNEL_VSOCK_LISTEN_PORT"  => Some("1024".to_owned()),
-            _                                 => None,
-        }).unwrap();
+            "RAXIS_KERNEL_PLANNER_SOCKET" => Some("/tmp/planner.sock".to_owned()),
+            "RAXIS_KERNEL_VSOCK_CID" => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_PORT" => Some("1024".to_owned()),
+            "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("1024".to_owned()),
+            _ => None,
+        })
+        .unwrap();
         match cfg {
             KernelTransportConfig::Uds { socket_path } => {
                 assert_eq!(socket_path.to_str(), Some("/tmp/planner.sock"));
@@ -521,10 +513,11 @@ mod tests {
     #[test]
     fn config_uses_vsock_when_only_vsock_vars_present() {
         let cfg = KernelTransportConfig::from_env_fn(|k| match k {
-            "RAXIS_KERNEL_VSOCK_CID"  => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_CID" => Some("2".to_owned()),
             "RAXIS_KERNEL_VSOCK_PORT" => Some("1024".to_owned()),
-            _                         => None,
-        }).unwrap();
+            _ => None,
+        })
+        .unwrap();
         match cfg {
             KernelTransportConfig::Vsock { cid, port } => {
                 assert_eq!(cid, 2);
@@ -543,10 +536,11 @@ mod tests {
     fn config_prefers_vsock_listen_over_vsock_dial() {
         let cfg = KernelTransportConfig::from_env_fn(|k| match k {
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("1024".to_owned()),
-            "RAXIS_KERNEL_VSOCK_CID"         => Some("2".to_owned()),
-            "RAXIS_KERNEL_VSOCK_PORT"        => Some("1024".to_owned()),
-            _                                => None,
-        }).unwrap();
+            "RAXIS_KERNEL_VSOCK_CID" => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_PORT" => Some("1024".to_owned()),
+            _ => None,
+        })
+        .unwrap();
         match cfg {
             KernelTransportConfig::VsockListen { port } => assert_eq!(port, 1024),
             other => panic!("expected VsockListen; got {other:?}"),
@@ -557,8 +551,9 @@ mod tests {
     fn config_picks_vsock_listen_when_only_listen_var_set() {
         let cfg = KernelTransportConfig::from_env_fn(|k| match k {
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("1024".to_owned()),
-            _                                => None,
-        }).unwrap();
+            _ => None,
+        })
+        .unwrap();
         assert!(matches!(
             cfg,
             KernelTransportConfig::VsockListen { port: 1024 },
@@ -569,8 +564,9 @@ mod tests {
     fn config_rejects_malformed_listen_port_as_not_configured() {
         let err = KernelTransportConfig::from_env_fn(|k| match k {
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT" => Some("not-a-port".to_owned()),
-            _                                => None,
-        }).unwrap_err();
+            _ => None,
+        })
+        .unwrap_err();
         assert!(matches!(err, TransportError::NotConfigured));
     }
 
@@ -583,10 +579,11 @@ mod tests {
     #[test]
     fn config_rejects_malformed_vsock_port_as_not_configured() {
         let err = KernelTransportConfig::from_env_fn(|k| match k {
-            "RAXIS_KERNEL_VSOCK_CID"  => Some("2".to_owned()),
+            "RAXIS_KERNEL_VSOCK_CID" => Some("2".to_owned()),
             "RAXIS_KERNEL_VSOCK_PORT" => Some("not-a-port".to_owned()),
-            _                         => None,
-        }).unwrap_err();
+            _ => None,
+        })
+        .unwrap_err();
         assert!(matches!(err, TransportError::NotConfigured));
     }
 
@@ -596,8 +593,9 @@ mod tests {
         // bug; we MUST NOT silently coerce it to "current directory".
         let err = KernelTransportConfig::from_env_fn(|k| match k {
             "RAXIS_KERNEL_PLANNER_SOCKET" => Some(String::new()),
-            _                             => None,
-        }).unwrap_err();
+            _ => None,
+        })
+        .unwrap_err();
         assert!(matches!(err, TransportError::NotConfigured));
     }
 
@@ -634,8 +632,7 @@ mod tests {
     /// `IpcMessage` codec.
     #[tokio::test]
     async fn stream_transport_round_trips_intent_request_and_response() {
-        let (planner_side, mut kernel_side): (DuplexStream, DuplexStream) =
-            duplex(64 * 1024);
+        let (planner_side, mut kernel_side): (DuplexStream, DuplexStream) = duplex(64 * 1024);
 
         let transport = StreamTransport::new(planner_side);
 
@@ -643,8 +640,7 @@ mod tests {
         // response.
         let kernel_task = tokio::spawn(async move {
             // Read inbound IpcMessage::IntentRequest.
-            let inbound: IpcMessage =
-                read_frame(&mut kernel_side).await.unwrap();
+            let inbound: IpcMessage = read_frame(&mut kernel_side).await.unwrap();
             match inbound {
                 IpcMessage::IntentRequest(req) => {
                     assert_eq!(req.session_token, "session-token-fixture");
@@ -653,9 +649,7 @@ mod tests {
                 other => panic!("expected IntentRequest, got {other:?}"),
             }
             // Respond with KernelIntentResponse.
-            let resp = IpcMessage::KernelIntentResponse(
-                fixture_intent_response_rejected(1),
-            );
+            let resp = IpcMessage::KernelIntentResponse(fixture_intent_response_rejected(1));
             write_frame(&mut kernel_side, &resp).await.unwrap();
         });
 
@@ -686,8 +680,7 @@ mod tests {
     /// deadlock under load.
     #[tokio::test]
     async fn stream_transport_serialises_back_to_back_requests() {
-        let (planner_side, mut kernel_side): (DuplexStream, DuplexStream) =
-            duplex(64 * 1024);
+        let (planner_side, mut kernel_side): (DuplexStream, DuplexStream) = duplex(64 * 1024);
         let transport = StreamTransport::new(planner_side);
 
         // Mock kernel: respond to two consecutive requests with
@@ -696,9 +689,8 @@ mod tests {
         let kernel_task = tokio::spawn(async move {
             for n in 0u64..2 {
                 let _: IpcMessage = read_frame(&mut kernel_side).await.unwrap();
-                let resp = IpcMessage::KernelIntentResponse(
-                    fixture_intent_response_rejected(n + 100),
-                );
+                let resp =
+                    IpcMessage::KernelIntentResponse(fixture_intent_response_rejected(n + 100));
                 write_frame(&mut kernel_side, &resp).await.unwrap();
             }
         });
@@ -723,8 +715,7 @@ mod tests {
     /// stall-recovery audit log + exit code.
     #[tokio::test]
     async fn stream_transport_request_deadline_fires_on_silent_kernel() {
-        let (planner_side, _kernel_side): (DuplexStream, DuplexStream) =
-            duplex(64 * 1024);
+        let (planner_side, _kernel_side): (DuplexStream, DuplexStream) = duplex(64 * 1024);
         // Hold _kernel_side without responding — the read on the
         // planner side will block until the deadline.
         let transport = StreamTransport::new(planner_side)

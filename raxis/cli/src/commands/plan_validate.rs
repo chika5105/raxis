@@ -70,13 +70,12 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         .map(PathBuf::from)?;
 
     let bytes = std::fs::read(&plan_path).map_err(|e| CliError::Io {
-        path:   plan_path.display().to_string(),
+        path: plan_path.display().to_string(),
         source: e,
     })?;
 
-    let text = std::str::from_utf8(&bytes).map_err(|e| {
-        CliError::Usage(format!("plan.toml is not valid UTF-8: {e}"))
-    })?;
+    let text = std::str::from_utf8(&bytes)
+        .map_err(|e| CliError::Usage(format!("plan.toml is not valid UTF-8: {e}")))?;
 
     println!("Plan validation: {}", plan_path.display());
     let report = validate_plan_text(text);
@@ -96,7 +95,7 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 #[derive(Debug, Default)]
 pub struct ValidationReport {
-    pub lines:       Vec<String>,
+    pub lines: Vec<String>,
     pub first_error: Option<String>,
 }
 
@@ -117,8 +116,14 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
 
     // ── Step 1: TOML parse ────────────────────────────────────────────────
     let doc: toml::Value = match toml::from_str(text) {
-        Ok(v)  => { r.ok("TOML parses"); v }
-        Err(e) => { r.fail("TOML parse", e.to_string()); return r; }
+        Ok(v) => {
+            r.ok("TOML parses");
+            v
+        }
+        Err(e) => {
+            r.fail("TOML parse", e.to_string());
+            return r;
+        }
     };
 
     // ── Step 2: required sections ─────────────────────────────────────────
@@ -225,10 +230,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
         let task_id = match entry.get("task_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s.to_owned(),
             _ => {
-                r.fail(
-                    "[[tasks]] task_id",
-                    format!("tasks[{i}] missing task_id"),
-                );
+                r.fail("[[tasks]] task_id", format!("tasks[{i}] missing task_id"));
                 return r;
             }
         };
@@ -267,9 +269,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
             Some(_) => {
                 r.fail(
                     "[[tasks]] description",
-                    format!(
-                        "task `{task_id}` `description` must be a TOML string"
-                    ),
+                    format!("task `{task_id}` `description` must be a TOML string"),
                 );
                 return r;
             }
@@ -342,10 +342,17 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
         let predecessors: Vec<String> = entry
             .get("predecessors")
             .and_then(|v| v.as_array())
-            .map(|a| a.iter().filter_map(|v| v.as_str().map(str::to_owned)).collect())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_owned))
+                    .collect()
+            })
             .unwrap_or_default();
 
-        tasks.push(ParsedTask { task_id, predecessors });
+        tasks.push(ParsedTask {
+            task_id,
+            predecessors,
+        });
     }
     r.ok(&format!("{} task(s) declared", tasks.len()));
 
@@ -358,18 +365,21 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
 
     // ── Step 6: cross-cutting artifacts ──────────────────────────────────
     if let Some(orch) = doc.get("orchestrator").and_then(|v| v.as_table()) {
-        if let Some(arr) = orch.get("cross_cutting_artifacts").and_then(|v| v.as_array()) {
+        if let Some(arr) = orch
+            .get("cross_cutting_artifacts")
+            .and_then(|v| v.as_array())
+        {
             for v in arr {
                 let s = v.as_str().unwrap_or("");
                 if let Err(reason) = check_cross_cutting_entry(s) {
-                    r.fail(
-                        "cross_cutting_artifacts",
-                        format!("entry `{s}`: {reason}"),
-                    );
+                    r.fail("cross_cutting_artifacts", format!("entry `{s}`: {reason}"));
                     return r;
                 }
             }
-            r.ok(&format!("cross_cutting_artifacts: {} entry/entries OK", arr.len()));
+            r.ok(&format!(
+                "cross_cutting_artifacts: {} entry/entries OK",
+                arr.len()
+            ));
         }
     }
 
@@ -389,7 +399,7 @@ pub fn validate_plan_text(text: &str) -> ValidationReport {
 
 #[derive(Debug)]
 struct ParsedTask {
-    task_id:      String,
+    task_id: String,
     predecessors: Vec<String>,
 }
 
@@ -426,7 +436,11 @@ fn validate_dag(tasks: &[ParsedTask]) -> Result<(), String> {
     }
 
     // Cycle detection — iterative DFS, three-color marking.
-    enum Color { White, Gray, Black }
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
     let mut color: HashMap<&str, Color> = tasks
         .iter()
         .map(|t| (t.task_id.as_str(), Color::White))
@@ -443,9 +457,14 @@ fn validate_dag(tasks: &[ParsedTask]) -> Result<(), String> {
         let mut stack: Vec<(&str, usize)> = vec![(t.task_id.as_str(), 0)];
         while let Some(&(node, idx)) = stack.last() {
             match color.get(node).unwrap() {
-                Color::Black => { stack.pop(); continue; }
-                Color::White => { color.insert(node, Color::Gray); }
-                Color::Gray  => { /* fall through to child walk */ }
+                Color::Black => {
+                    stack.pop();
+                    continue;
+                }
+                Color::White => {
+                    color.insert(node, Color::Gray);
+                }
+                Color::Gray => { /* fall through to child walk */ }
             }
             let preds = pred_map.get(node).copied().unwrap_or(&[]);
             if idx < preds.len() {
@@ -472,13 +491,28 @@ fn validate_dag(tasks: &[ParsedTask]) -> Result<(), String> {
 }
 
 fn check_cross_cutting_entry(entry: &str) -> Result<(), &'static str> {
-    if entry.is_empty() { return Err("empty entry"); }
-    if entry.starts_with('!') { return Err("leading `!` (negation marker not permitted)"); }
-    if entry.starts_with('/') { return Err("absolute path not permitted"); }
-    if entry.ends_with('/') { return Err("trailing `/` not permitted (must be exact filename)"); }
-    if entry.split('/').any(|seg| seg == "..") { return Err("`..` path-escape segment"); }
-    if entry.contains('/') { return Err("must be an exact filename (no `/`)"); }
-    if entry.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}')) {
+    if entry.is_empty() {
+        return Err("empty entry");
+    }
+    if entry.starts_with('!') {
+        return Err("leading `!` (negation marker not permitted)");
+    }
+    if entry.starts_with('/') {
+        return Err("absolute path not permitted");
+    }
+    if entry.ends_with('/') {
+        return Err("trailing `/` not permitted (must be exact filename)");
+    }
+    if entry.split('/').any(|seg| seg == "..") {
+        return Err("`..` path-escape segment");
+    }
+    if entry.contains('/') {
+        return Err("must be an exact filename (no `/`)");
+    }
+    if entry
+        .chars()
+        .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+    {
         return Err("glob character not permitted");
     }
     Ok(())
@@ -496,7 +530,9 @@ fn validate_path_allowlists_in_doc(doc: &toml::Value) -> Result<(), String> {
         for v in arr {
             let s = v.as_str().unwrap_or("");
             if let Err(reason) = check_path_allowlist_entry(s) {
-                return Err(format!("task `{task_id}` path_allowlist entry `{s}`: {reason}"));
+                return Err(format!(
+                    "task `{task_id}` path_allowlist entry `{s}`: {reason}"
+                ));
             }
         }
     }
@@ -504,12 +540,21 @@ fn validate_path_allowlists_in_doc(doc: &toml::Value) -> Result<(), String> {
 }
 
 fn check_path_allowlist_entry(entry: &str) -> Result<(), &'static str> {
-    if entry.is_empty() { return Err("empty entry"); }
-    if entry.starts_with('!') { return Err("leading `!` (negation marker not permitted)"); }
-    if entry.starts_with('/') { return Err("absolute path not permitted"); }
+    if entry.is_empty() {
+        return Err("empty entry");
+    }
+    if entry.starts_with('!') {
+        return Err("leading `!` (negation marker not permitted)");
+    }
+    if entry.starts_with('/') {
+        return Err("absolute path not permitted");
+    }
     // Glob characters are rejected — V2 path_allowlist uses exact
     // filenames or directory prefixes only.
-    if entry.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}')) {
+    if entry
+        .chars()
+        .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+    {
         return Err("glob character not permitted (use exact filenames or directory prefixes)");
     }
     // `..` segments at any position. Note: `..` as part of a filename
@@ -557,25 +602,31 @@ predecessors       = ["build"]
         let r = validate_plan_text(passing_plan());
         assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
         assert!(r.lines.iter().any(|l| l.contains("[OK] TOML parses")));
-        assert!(r.lines.iter().any(|l| l.contains("[OK] 2 task(s) declared")));
+        assert!(r
+            .lines
+            .iter()
+            .any(|l| l.contains("[OK] 2 task(s) declared")));
     }
 
     #[test]
     fn missing_workspace_section_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         assert!(r.first_error.as_ref().unwrap().contains("[workspace]"));
     }
 
     #[test]
     fn missing_workspace_lane_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -584,14 +635,16 @@ description = "fixture"
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[workspace] lane_id"), "err = {err}");
     }
 
     #[test]
     fn orchestrator_task_declaration_is_rejected_with_v2_hint() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -602,7 +655,8 @@ lane_id = "default"
 task_id            = "orch"
 description        = "do thing"
 session_agent_type = "Orchestrator"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("Orchestrator"), "err = {err}");
         assert!(err.contains("auto-create"), "err = {err}");
@@ -610,7 +664,8 @@ session_agent_type = "Orchestrator"
 
     #[test]
     fn invalid_clone_strategy_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -621,7 +676,8 @@ lane_id = "default"
 task_id        = "a"
 description    = "do thing"
 clone_strategy = "shallow"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("clone_strategy"), "err = {err}");
         assert!(err.contains("full, blobless, sparse"), "err = {err}");
@@ -629,7 +685,8 @@ clone_strategy = "shallow"
 
     #[test]
     fn per_task_lane_id_override_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -640,14 +697,16 @@ lane_id = "default"
 task_id     = "a"
 description = "do thing"
 lane_id     = "other"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("single-lane propagation"), "err = {err}");
     }
 
     #[test]
     fn duplicate_task_ids_are_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -660,14 +719,16 @@ description = "do thing"
 [[tasks]]
 task_id     = "a"
 description = "do thing again"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("duplicate"), "err = {err}");
     }
 
     #[test]
     fn self_loop_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -678,14 +739,16 @@ lane_id = "default"
 task_id      = "a"
 description  = "do thing"
 predecessors = ["a"]
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("itself"), "err = {err}");
     }
 
     #[test]
     fn dangling_predecessor_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -696,14 +759,16 @@ lane_id = "default"
 task_id      = "a"
 description  = "do thing"
 predecessors = ["ghost"]
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("ghost"), "err = {err}");
     }
 
     #[test]
     fn cycle_is_detected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -719,14 +784,16 @@ predecessors = ["b"]
 task_id      = "b"
 description  = "do other thing"
 predecessors = ["a"]
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("cycle"), "err = {err}");
     }
 
     #[test]
     fn cross_cutting_artifact_globs_are_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -739,14 +806,16 @@ cross_cutting_artifacts = ["Cargo.lock", "*.toml"]
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("glob"), "err = {err}");
     }
 
     #[test]
     fn path_allowlist_glob_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -757,14 +826,16 @@ lane_id = "default"
 task_id        = "a"
 description    = "do thing"
 path_allowlist = ["src/*.rs"]
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("glob"), "err = {err}");
     }
 
     #[test]
     fn single_task_plan_passes() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -774,7 +845,8 @@ lane_id = "default"
 [[tasks]]
 task_id     = "noop"
 description = "do thing"
-"#);
+"#,
+        );
         assert!(r.first_error.is_none(), "report: {:#?}", r.lines);
     }
 
@@ -782,14 +854,16 @@ description = "do thing"
 
     #[test]
     fn missing_plan_initiative_section_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [workspace]
 lane_id = "default"
 
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[plan.initiative]"), "err = {err}");
         assert!(err.contains("§1.1"), "err = {err}");
@@ -797,7 +871,8 @@ description = "do thing"
 
     #[test]
     fn missing_plan_initiative_description_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 
 [workspace]
@@ -806,7 +881,8 @@ lane_id = "default"
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[plan.initiative] description"), "err = {err}");
         assert!(err.contains("missing"), "err = {err}");
@@ -814,7 +890,8 @@ description = "do thing"
 
     #[test]
     fn empty_plan_initiative_description_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "   "
 
@@ -824,7 +901,8 @@ lane_id = "default"
 [[tasks]]
 task_id     = "a"
 description = "do thing"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[plan.initiative] description"), "err = {err}");
         assert!(err.contains("empty"), "err = {err}");
@@ -832,7 +910,8 @@ description = "do thing"
 
     #[test]
     fn missing_task_description_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -841,7 +920,8 @@ lane_id = "default"
 
 [[tasks]]
 task_id = "a"
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[[tasks]] description"), "err = {err}");
         assert!(err.contains("missing"), "err = {err}");
@@ -850,7 +930,8 @@ task_id = "a"
 
     #[test]
     fn empty_task_description_is_rejected() {
-        let r = validate_plan_text(r#"
+        let r = validate_plan_text(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -860,7 +941,8 @@ lane_id = "default"
 [[tasks]]
 task_id     = "a"
 description = "   "
-"#);
+"#,
+        );
         let err = r.first_error.unwrap();
         assert!(err.contains("[[tasks]] description"), "err = {err}");
         assert!(err.contains("empty"), "err = {err}");
@@ -869,7 +951,8 @@ description = "   "
     #[test]
     fn oversized_task_description_is_rejected() {
         let huge = "x".repeat(65 * 1024);
-        let plan = format!(r#"
+        let plan = format!(
+            r#"
 [plan.initiative]
 description = "fixture"
 
@@ -879,7 +962,8 @@ lane_id = "default"
 [[tasks]]
 task_id     = "a"
 description = "{huge}"
-"#);
+"#
+        );
         let r = validate_plan_text(&plan);
         let err = r.first_error.unwrap();
         assert!(err.contains("64 KiB"), "err = {err}");

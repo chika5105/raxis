@@ -27,19 +27,20 @@ use anyhow::{anyhow, Context, Result};
 pub type EnvMap = BTreeMap<String, String>;
 
 pub fn load(path: &Path) -> Result<EnvMap> {
-    let body = std::fs::read_to_string(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let body = std::fs::read_to_string(path).with_context(|| format!("read {}", path.display()))?;
     let mut out = EnvMap::new();
     for (lineno, line) in body.lines().enumerate() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        let (k, v) = line.split_once('=')
-            .ok_or_else(|| anyhow!(
+        let (k, v) = line.split_once('=').ok_or_else(|| {
+            anyhow!(
                 "{}:{}: expected KEY=VALUE, got {line:?}",
-                path.display(), lineno + 1,
-            ))?;
+                path.display(),
+                lineno + 1,
+            )
+        })?;
         let k = k.trim().to_owned();
         let mut v = v.trim().to_owned();
         if (v.starts_with('"') && v.ends_with('"') && v.len() >= 2)

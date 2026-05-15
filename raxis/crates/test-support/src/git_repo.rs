@@ -84,10 +84,26 @@ impl GitRepo {
 
         // Everything below is local config (no global writes). `--local`
         // requires the repo to already exist, hence the order.
-        run_git_or_panic(&root, &["config", "user.email", "raxis-test@example.com"], "config user.email");
-        run_git_or_panic(&root, &["config", "user.name",  "raxis-test"],             "config user.name");
-        run_git_or_panic(&root, &["config", "commit.gpgsign", "false"],              "config commit.gpgsign");
-        run_git_or_panic(&root, &["config", "core.autocrlf",  "false"],              "config core.autocrlf");
+        run_git_or_panic(
+            &root,
+            &["config", "user.email", "raxis-test@example.com"],
+            "config user.email",
+        );
+        run_git_or_panic(
+            &root,
+            &["config", "user.name", "raxis-test"],
+            "config user.name",
+        );
+        run_git_or_panic(
+            &root,
+            &["config", "commit.gpgsign", "false"],
+            "config commit.gpgsign",
+        );
+        run_git_or_panic(
+            &root,
+            &["config", "core.autocrlf", "false"],
+            "config core.autocrlf",
+        );
 
         Self { _tmp: tmp, root }
     }
@@ -154,7 +170,11 @@ impl GitRepo {
 
     /// Create a new branch from current HEAD and switch to it.
     pub fn create_branch(&self, name: &str) {
-        run_git_or_panic(&self.root, &["checkout", "-q", "-b", name], "git checkout -b");
+        run_git_or_panic(
+            &self.root,
+            &["checkout", "-q", "-b", name],
+            "git checkout -b",
+        );
     }
 
     /// Switch to an existing branch.
@@ -237,27 +257,39 @@ mod tests {
 
     #[test]
     fn init_creates_a_valid_repo_with_dot_git() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
-        assert!(repo.path().join(".git").is_dir(),
-            "init must create a .git directory");
+        assert!(
+            repo.path().join(".git").is_dir(),
+            "init must create a .git directory"
+        );
     }
 
     #[test]
     fn commit_file_returns_a_40_hex_sha() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let sha = repo.commit_file("hello.txt", "hi", "init");
         assert_eq!(sha.len(), 40, "SHA must be 40 hex chars, got {sha:?}");
-        assert!(sha.chars().all(|c| c.is_ascii_hexdigit()),
-            "SHA must be all hex, got {sha:?}");
-        assert!(sha.chars().all(|c| !c.is_ascii_uppercase()),
-            "SHA must be lowercase, got {sha:?}");
+        assert!(
+            sha.chars().all(|c| c.is_ascii_hexdigit()),
+            "SHA must be all hex, got {sha:?}"
+        );
+        assert!(
+            sha.chars().all(|c| !c.is_ascii_uppercase()),
+            "SHA must be lowercase, got {sha:?}"
+        );
     }
 
     #[test]
     fn two_commits_produce_distinct_shas() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let s1 = repo.commit_file("a.txt", "1", "first");
         let s2 = repo.commit_file("b.txt", "2", "second");
@@ -266,31 +298,41 @@ mod tests {
 
     #[test]
     fn commit_files_writes_every_path() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         repo.commit_files(
             &[("a.txt", "A"), ("dir/b.txt", "B"), ("dir/sub/c.txt", "C")],
             "bulk",
         );
         for p in ["a.txt", "dir/b.txt", "dir/sub/c.txt"] {
-            assert!(repo.path().join(p).is_file(),
-                "expected {p} to exist after commit_files");
+            assert!(
+                repo.path().join(p).is_file(),
+                "expected {p} to exist after commit_files"
+            );
         }
     }
 
     #[test]
     fn delete_file_commit_removes_path_from_worktree() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         repo.commit_file("doomed.txt", "x", "add");
         repo.delete_file_commit("doomed.txt", "delete");
-        assert!(!repo.path().join("doomed.txt").exists(),
-            "delete_file_commit must remove the path from the worktree");
+        assert!(
+            !repo.path().join("doomed.txt").exists(),
+            "delete_file_commit must remove the path from the worktree"
+        );
     }
 
     #[test]
     fn branch_and_merge_produces_a_merge_commit() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         repo.commit_file("base.txt", "0", "base");
         repo.create_branch("feature");
@@ -301,50 +343,68 @@ mod tests {
         assert_eq!(merge_sha.len(), 40);
 
         let out = Command::new("git")
-            .arg("-C").arg(repo.path())
+            .arg("-C")
+            .arg(repo.path())
             .args(["rev-list", "--min-parents=2", "--count", "HEAD"])
             .output()
             .unwrap();
         let count: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().unwrap();
-        assert_eq!(count, 1, "merge_no_ff must produce exactly one merge commit reachable from HEAD");
+        assert_eq!(
+            count, 1,
+            "merge_no_ff must produce exactly one merge commit reachable from HEAD"
+        );
     }
 
     #[test]
     fn relative_path_assertion_fires_on_absolute_input() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             repo.commit_file("/etc/passwd", "x", "x");
         }));
-        assert!(r.is_err(), "absolute path MUST panic — would otherwise escape TempDir");
+        assert!(
+            r.is_err(),
+            "absolute path MUST panic — would otherwise escape TempDir"
+        );
     }
 
     #[test]
     fn drop_cleans_up_temp_dir() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let path = {
             let repo = GitRepo::init();
             repo.commit_file("a.txt", "x", "init");
             repo.path().to_path_buf()
         };
         // After drop, the temp dir must be gone.
-        assert!(!path.exists(),
-            "TempDir-backed GitRepo failed to clean up on drop: {path:?}");
+        assert!(
+            !path.exists(),
+            "TempDir-backed GitRepo failed to clean up on drop: {path:?}"
+        );
     }
 
     #[test]
     fn two_independent_repos_are_isolated() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let r1 = GitRepo::init();
         let r2 = GitRepo::init();
-        assert_ne!(r1.path(), r2.path(),
-            "each GitRepo must own its own TempDir");
+        assert_ne!(
+            r1.path(),
+            r2.path(),
+            "each GitRepo must own its own TempDir"
+        );
         let s1 = r1.commit_file("only-in-r1.txt", "1", "x");
         let s2 = r2.commit_file("only-in-r2.txt", "2", "x");
         assert_ne!(s1, s2);
-        assert!( r1.path().join("only-in-r1.txt").exists());
+        assert!(r1.path().join("only-in-r1.txt").exists());
         assert!(!r2.path().join("only-in-r1.txt").exists());
-        assert!( r2.path().join("only-in-r2.txt").exists());
+        assert!(r2.path().join("only-in-r2.txt").exists());
         assert!(!r1.path().join("only-in-r2.txt").exists());
     }
 }

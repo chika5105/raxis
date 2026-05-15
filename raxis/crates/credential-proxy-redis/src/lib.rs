@@ -116,11 +116,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::{Arc, OnceLock};
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 use rustls::ClientConfig;
 use rustls_pki_types::ServerName;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, BufReader};
@@ -142,13 +142,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -166,18 +169,18 @@ pub struct ProxyConfig {
     /// Address the inbound listener binds to. Production wires
     /// `127.0.0.1:0` so the kernel can pass the chosen port to
     /// the VM via env-var injection.
-    pub listen_addr:        String,
+    pub listen_addr: String,
     /// `host:port` of the upstream Redis. The proxy refuses to
     /// dial any other address per the threat-model section.
     pub upstream_host_port: String,
     /// Credential to inject. Resolved via `CredentialBackend` per
     /// **connection** so rotations land mid-session.
-    pub credential_name:    CredentialName,
+    pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:           OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:       Restrictions,
+    pub restrictions: Restrictions,
     /// Wrap the upstream TCP stream in TLS before the AUTH
     /// handshake. Required by managed Redis offerings (AWS
     /// Elasticache, GCP Memorystore, Azure Cache for Redis).
@@ -185,7 +188,7 @@ pub struct ProxyConfig {
     /// The kernel-side `CredentialProxyManager` populates this
     /// from `[[credentials]].upstream_tls = true|false` in the
     /// operator's policy.
-    pub upstream_tls:       bool,
+    pub upstream_tls: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -196,12 +199,12 @@ pub struct ProxyConfig {
 #[derive(Debug, Default)]
 pub struct ProxyStats {
     /// Number of accepted connections served.
-    pub connections_served:  AtomicU32,
+    pub connections_served: AtomicU32,
     /// Number of commands forwarded to upstream after restriction
     /// check.
-    pub commands_forwarded:  AtomicU32,
+    pub commands_forwarded: AtomicU32,
     /// Number of commands rejected by `Restrictions`.
-    pub commands_blocked:    AtomicU32,
+    pub commands_blocked: AtomicU32,
     /// Total bytes forwarded to upstream (request side only).
     pub bytes_out_to_upstream: AtomicU64,
 }
@@ -210,9 +213,9 @@ impl ProxyStats {
     /// Snapshot the counters.
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
-            connections_served:    self.connections_served   .load(Ordering::Relaxed),
-            commands_forwarded:    self.commands_forwarded   .load(Ordering::Relaxed),
-            commands_blocked:      self.commands_blocked     .load(Ordering::Relaxed),
+            connections_served: self.connections_served.load(Ordering::Relaxed),
+            commands_forwarded: self.commands_forwarded.load(Ordering::Relaxed),
+            commands_blocked: self.commands_blocked.load(Ordering::Relaxed),
             bytes_out_to_upstream: self.bytes_out_to_upstream.load(Ordering::Relaxed),
         }
     }
@@ -222,11 +225,11 @@ impl ProxyStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProxyStatsSnapshot {
     /// Number of accepted connections served.
-    pub connections_served:    u32,
+    pub connections_served: u32,
     /// Number of commands forwarded to upstream.
-    pub commands_forwarded:    u32,
+    pub commands_forwarded: u32,
     /// Number of commands rejected by `Restrictions`.
-    pub commands_blocked:      u32,
+    pub commands_blocked: u32,
     /// Total bytes forwarded to upstream.
     pub bytes_out_to_upstream: u64,
 }
@@ -260,19 +263,19 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Uppercased command verb (e.g. `"GET"`, `"AUTH"`,
         /// `"FLUSHDB"`). For pipelined frames this is the verb of
         /// the leading frame.
-        command:     String,
+        command: String,
         /// SHA-256 of the rendered RESP request frame the
         /// upstream would have seen. For blocked commands this
         /// is computed from the inbound bytes.
         frame_sha256: String,
         /// True if a restriction blocked this command.
-        blocked:     bool,
+        blocked: bool,
     },
 
     /// Emitted once per agent connection on the first successful
@@ -281,9 +284,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session that triggered upstream contact.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream **hostname from the credential URL** so
         /// dashboards can group events without leaking DNS noise.
         upstream_host: String,
@@ -303,9 +306,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session that triggered upstream contact.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream hostname from the credential URL.
         upstream_host: String,
         /// Upstream port from the credential URL.
@@ -330,7 +333,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error from `tokio::net::TcpListener::bind`.
         source: std::io::Error,
     },
@@ -346,25 +349,26 @@ pub enum ProxyError {
 /// Redis credential proxy.
 pub struct RedisProxy {
     listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 }
 
 impl RedisProxy {
     /// Bind a listener and return an owned proxy.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
         if !config.upstream_host_port.contains(':') {
             return Err(ProxyError::BadUpstream(config.upstream_host_port.clone()));
         }
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -397,11 +401,13 @@ impl RedisProxy {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
                     let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
                             tracing::warn!(error = %e, "redis proxy connection ended with error");
@@ -423,18 +429,19 @@ impl RedisProxy {
 
 async fn serve_one(
     client_stream: TcpStream,
-    backend:       Arc<dyn CredentialBackend>,
-    config:        ProxyConfig,
-    stats:         Arc<ProxyStats>,
-    audit:         Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
     // Resolve the upstream credential ONCE per connection so a
     // rotation lands mid-session.
-    let cred = backend.resolve(&config.credential_name, config.consumer.as_ref())
+    let cred = backend
+        .resolve(&config.credential_name, config.consumer.as_ref())
         .map_err(|e| std::io::Error::other(format!("credential resolve: {e}")))?;
     let cred_str = match cred.as_utf8() {
         Some(s) => s,
-        None    => {
+        None => {
             // Treat non-UTF-8 credentials as a hard error — Redis
             // AUTH wire takes a UTF-8 string. We surface as IO.
             return Err(std::io::Error::other("credential is not valid UTF-8"));
@@ -455,18 +462,20 @@ async fn serve_one(
         Ok(s) => s,
         Err(e) => {
             audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
-                timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
-                    .map(|d| d.as_secs()).unwrap_or(0),
-                consumer:      config.consumer.clone(),
-                credential:    config.credential_name.clone(),
+                timestamp_unix_seconds: SystemTime::now()
+                    .duration_since(UNIX_EPOCH)
+                    .map(|d| d.as_secs())
+                    .unwrap_or(0),
+                consumer: config.consumer.clone(),
+                credential: config.credential_name.clone(),
                 upstream_host: upstream_host.clone(),
                 upstream_port,
-                reason:        if e.kind() == std::io::ErrorKind::TimedOut {
+                reason: if e.kind() == std::io::ErrorKind::TimedOut {
                     "Timeout".into()
                 } else {
                     "TcpConnectFailed".into()
                 },
-                detail:        e.to_string(),
+                detail: e.to_string(),
             });
             return Err(std::io::Error::other(format!("upstream dial: {e}")));
         }
@@ -482,16 +491,20 @@ async fn serve_one(
             Err(e) => {
                 audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
                     timestamp_unix_seconds: SystemTime::now()
-                        .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-                    consumer:      config.consumer.clone(),
-                    credential:    config.credential_name.clone(),
+                        .duration_since(UNIX_EPOCH)
+                        .map(|d| d.as_secs())
+                        .unwrap_or(0),
+                    consumer: config.consumer.clone(),
+                    credential: config.credential_name.clone(),
                     upstream_host: upstream_host.clone(),
                     upstream_port,
-                    reason:        "TlsHandshakeFailed".into(),
-                    detail:        e.to_string(),
+                    reason: "TlsHandshakeFailed".into(),
+                    detail: e.to_string(),
                 });
                 let mut client = client_stream;
-                client.write_all(b"-ERR upstream TLS handshake failed\r\n").await?;
+                client
+                    .write_all(b"-ERR upstream TLS handshake failed\r\n")
+                    .await?;
                 return Err(std::io::Error::other(format!("upstream tls: {e}")));
             }
         }
@@ -507,31 +520,37 @@ async fn serve_one(
         // Upstream rejected our credential. Surface a generic
         // upstream auth error to the agent and close.
         audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
-            timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
-                .map(|d| d.as_secs()).unwrap_or(0),
-            consumer:      config.consumer.clone(),
-            credential:    config.credential_name.clone(),
+            timestamp_unix_seconds: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+            consumer: config.consumer.clone(),
+            credential: config.credential_name.clone(),
             upstream_host: upstream_host.clone(),
             upstream_port,
-            reason:        "AuthRejected".into(),
-            detail:        format!(
+            reason: "AuthRejected".into(),
+            detail: format!(
                 "upstream rejected AUTH (response prefix: {:.32?})",
                 String::from_utf8_lossy(&auth_resp[..auth_resp.len().min(64)]),
             ),
         });
         let mut client = client_stream;
-        client.write_all(b"-ERR upstream auth rejected by RAXIS proxy\r\n").await?;
+        client
+            .write_all(b"-ERR upstream auth rejected by RAXIS proxy\r\n")
+            .await?;
         return Ok(());
     }
     let handshake_ms = connect_started.elapsed().as_millis().min(u32::MAX as u128) as u32;
     audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
-        timestamp_unix_seconds: SystemTime::now().duration_since(UNIX_EPOCH)
-            .map(|d| d.as_secs()).unwrap_or(0),
-        consumer:      config.consumer.clone(),
-        credential:    config.credential_name.clone(),
+        timestamp_unix_seconds: SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
         upstream_host,
         upstream_port,
-        tls:           config.upstream_tls,
+        tls: config.upstream_tls,
         handshake_ms,
     });
 
@@ -556,7 +575,9 @@ async fn serve_one(
                 Ok(0) => return,
                 Ok(n) => {
                     let mut w = client_write_for_forwarder.lock().await;
-                    if w.write_all(&buf[..n]).await.is_err() { return; }
+                    if w.write_all(&buf[..n]).await.is_err() {
+                        return;
+                    }
                 }
                 Err(_) => return,
             }
@@ -568,8 +589,8 @@ async fn serve_one(
     loop {
         let frame_bytes = match read_one_request_frame(&mut client_reader).await {
             Ok(Some(b)) => b,
-            Ok(None)    => break,
-            Err(e)      => {
+            Ok(None) => break,
+            Err(e) => {
                 tracing::warn!(error = %e, "redis proxy: malformed inbound frame");
                 break;
             }
@@ -588,7 +609,9 @@ async fn serve_one(
         if verb == "HELLO" {
             audit.emit(audit_event(&config, &verb, &frame_bytes, false));
             let mut w = client_write.lock().await;
-            let _ = w.write_all(b"-NOPROTO sorry, this proxy speaks RESP2\r\n").await;
+            let _ = w
+                .write_all(b"-NOPROTO sorry, this proxy speaks RESP2\r\n")
+                .await;
             continue;
         }
 
@@ -596,18 +619,20 @@ async fn serve_one(
             stats.commands_blocked.fetch_add(1, Ordering::Relaxed);
             audit.emit(audit_event(&config, &verb, &frame_bytes, true));
             let mut w = client_write.lock().await;
-            let _ = w.write_all(
-                format!("-ERR command {verb} not allowed by RAXIS policy\r\n").as_bytes(),
-            ).await;
+            let _ = w
+                .write_all(
+                    format!("-ERR command {verb} not allowed by RAXIS policy\r\n").as_bytes(),
+                )
+                .await;
             continue;
         }
 
         // Forward.
         upstream_write.write_all(&frame_bytes).await?;
         stats.commands_forwarded.fetch_add(1, Ordering::Relaxed);
-        stats.bytes_out_to_upstream.fetch_add(
-            frame_bytes.len() as u64, Ordering::Relaxed,
-        );
+        stats
+            .bytes_out_to_upstream
+            .fetch_add(frame_bytes.len() as u64, Ordering::Relaxed);
         audit.emit(audit_event(&config, &verb, &frame_bytes, false));
     }
 
@@ -631,7 +656,7 @@ trait UpstreamIo: AsyncRead + AsyncWrite + Send + Unpin {}
 impl<T: AsyncRead + AsyncWrite + Send + Unpin> UpstreamIo for T {}
 
 async fn tls_handshake(
-    tcp:  TcpStream,
+    tcp: TcpStream,
     host: &str,
 ) -> std::io::Result<tokio_rustls::client::TlsStream<TcpStream>> {
     // The hostname goes into the SNI/cert-name check; we strip
@@ -675,10 +700,7 @@ enum AuthCredentials {
     /// is `AUTH <password>`.
     Password(String),
     /// Redis 6+ ACL form. Wire form is `AUTH <user> <password>`.
-    UserPassword {
-        user:     String,
-        password: String,
-    },
+    UserPassword { user: String, password: String },
 }
 
 /// Parse the bytes returned by `CredentialBackend::resolve` into
@@ -716,25 +738,30 @@ fn parse_redis_credential(raw: &str) -> AuthCredentials {
         return AuthCredentials::Password(trimmed.to_owned());
     }
 
-    let mut user:     Option<String> = None;
+    let mut user: Option<String> = None;
     let mut password: Option<String> = None;
     for line in trimmed.lines() {
         let stripped = strip_comment(line.trim());
-        if stripped.is_empty() { continue; }
+        if stripped.is_empty() {
+            continue;
+        }
         if let Some((k, v)) = stripped.split_once('=') {
             let key = k.trim();
             let val = unquote_value(v.trim());
             match key {
-                "RAXIS_REDIS_USER"     => user     = Some(val),
+                "RAXIS_REDIS_USER" => user = Some(val),
                 "RAXIS_REDIS_PASSWORD" => password = Some(val),
                 _ => {} // Other keys ignored — credentials are scoped per-proxy.
             }
         }
     }
     match (user, password) {
-        (Some(u), Some(p)) => AuthCredentials::UserPassword { user: u, password: p },
+        (Some(u), Some(p)) => AuthCredentials::UserPassword {
+            user: u,
+            password: p,
+        },
         // Password-only env file: still emit the canonical `AUTH password` form.
-        (None,    Some(p)) => AuthCredentials::Password(p),
+        (None, Some(p)) => AuthCredentials::Password(p),
         // No structured `RAXIS_REDIS_*` keys present despite the
         // file looking env-shaped — fall back to literal-bytes
         // password to avoid silently dropping the operator's
@@ -748,13 +775,15 @@ fn is_env_key_char(c: char) -> bool {
 }
 
 fn strip_comment(line: &str) -> &str {
-    line.find('#').map(|i| &line[..i]).unwrap_or(line).trim_end()
+    line.find('#')
+        .map(|i| &line[..i])
+        .unwrap_or(line)
+        .trim_end()
 }
 
 fn unquote_value(v: &str) -> String {
     if v.len() >= 2
-        && ((v.starts_with('"') && v.ends_with('"'))
-            || (v.starts_with('\'') && v.ends_with('\'')))
+        && ((v.starts_with('"') && v.ends_with('"')) || (v.starts_with('\'') && v.ends_with('\'')))
     {
         v[1..v.len() - 1].to_owned()
     } else {
@@ -762,10 +791,7 @@ fn unquote_value(v: &str) -> String {
     }
 }
 
-async fn write_auth<S>(
-    upstream: &mut BufReader<S>,
-    creds:    &AuthCredentials,
-) -> std::io::Result<()>
+async fn write_auth<S>(upstream: &mut BufReader<S>, creds: &AuthCredentials) -> std::io::Result<()>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -791,7 +817,7 @@ fn build_auth_frame(creds: &AuthCredentials) -> Vec<u8> {
         }
         AuthCredentials::UserPassword { user, password } => {
             let user = user.as_bytes();
-            let pw   = password.as_bytes();
+            let pw = password.as_bytes();
             let mut out = Vec::with_capacity(28 + user.len() + pw.len());
             out.extend_from_slice(b"*3\r\n$4\r\nAUTH\r\n$");
             out.extend_from_slice(user.len().to_string().as_bytes());
@@ -809,9 +835,7 @@ fn build_auth_frame(creds: &AuthCredentials) -> Vec<u8> {
 
 /// Read one simple response frame from upstream (`+OK\r\n` or
 /// `-ERR ...\r\n` or `:NUMBER\r\n`).
-async fn read_simple_response<S>(
-    upstream: &mut BufReader<S>,
-) -> std::io::Result<Vec<u8>>
+async fn read_simple_response<S>(upstream: &mut BufReader<S>) -> std::io::Result<Vec<u8>>
 where
     S: AsyncRead + AsyncWrite + Unpin,
 {
@@ -819,9 +843,13 @@ where
     let mut byte = [0u8; 1];
     loop {
         let n = upstream.read(&mut byte).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         acc.push(byte[0]);
-        if acc.ends_with(b"\r\n") { break; }
+        if acc.ends_with(b"\r\n") {
+            break;
+        }
     }
     Ok(acc)
 }
@@ -847,21 +875,25 @@ async fn read_one_request_frame(
 ) -> std::io::Result<Option<Vec<u8>>> {
     let first = match peek_byte(reader).await? {
         Some(b) => b,
-        None    => return Ok(None),
+        None => return Ok(None),
     };
     if first == b'*' {
         // Array form. Read count, then N bulk strings.
         let header = read_until_crlf(reader).await?;
-        let n: i64 = std::str::from_utf8(&header[1..header.len()-2])
-            .ok().and_then(|s| s.parse().ok())
+        let n: i64 = std::str::from_utf8(&header[1..header.len() - 2])
+            .ok()
+            .and_then(|s| s.parse().ok())
             .ok_or_else(|| std::io::Error::other("malformed array header"))?;
         let mut frame = header.clone();
-        if n <= 0 { return Ok(Some(frame)); }
+        if n <= 0 {
+            return Ok(Some(frame));
+        }
         for _ in 0..n {
             let bulk_header = read_until_crlf(reader).await?;
             frame.extend_from_slice(&bulk_header);
-            let len: i64 = std::str::from_utf8(&bulk_header[1..bulk_header.len()-2])
-                .ok().and_then(|s| s.parse().ok())
+            let len: i64 = std::str::from_utf8(&bulk_header[1..bulk_header.len() - 2])
+                .ok()
+                .and_then(|s| s.parse().ok())
                 .ok_or_else(|| std::io::Error::other("malformed bulk header"))?;
             if len < 0 {
                 // null bulk
@@ -884,7 +916,11 @@ async fn peek_byte(
 ) -> std::io::Result<Option<u8>> {
     use tokio::io::AsyncBufReadExt;
     let buf = reader.fill_buf().await?;
-    if buf.is_empty() { Ok(None) } else { Ok(Some(buf[0])) }
+    if buf.is_empty() {
+        Ok(None)
+    } else {
+        Ok(Some(buf[0]))
+    }
 }
 
 async fn read_until_crlf(
@@ -894,9 +930,13 @@ async fn read_until_crlf(
     let mut byte = [0u8; 1];
     loop {
         let n = reader.read(&mut byte).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         acc.push(byte[0]);
-        if acc.ends_with(b"\r\n") { break; }
+        if acc.ends_with(b"\r\n") {
+            break;
+        }
     }
     if !acc.ends_with(b"\r\n") {
         return Err(std::io::Error::other("short read mid-frame"));
@@ -913,28 +953,30 @@ fn parse_host_port(host_port: &str) -> (String, u16) {
     match host_port.rsplit_once(':') {
         Some((host, port_str)) => {
             let port = port_str.parse::<u16>().unwrap_or(0);
-            (host.trim_start_matches('[').trim_end_matches(']').to_owned(), port)
+            (
+                host.trim_start_matches('[')
+                    .trim_end_matches(']')
+                    .to_owned(),
+                port,
+            )
         }
         None => (host_port.to_owned(), 0),
     }
 }
 
-fn audit_event(
-    config:    &ProxyConfig,
-    verb:      &str,
-    frame_bytes: &[u8],
-    blocked:   bool,
-) -> AuditEvent {
+fn audit_event(config: &ProxyConfig, verb: &str, frame_bytes: &[u8], blocked: bool) -> AuditEvent {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(frame_bytes);
     let sha = hex::encode(h.finalize());
     AuditEvent::RedisCommandExecuted {
         timestamp_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        command:     verb.to_owned(),
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        command: verb.to_owned(),
         frame_sha256: sha,
         blocked,
     }
@@ -968,7 +1010,7 @@ mod tests {
     #[test]
     fn auth_frame_emits_acl_form_for_user_password() {
         let f = build_auth_frame(&AuthCredentials::UserPassword {
-            user:     "alice".into(),
+            user: "alice".into(),
             password: "p4ssw0rd".into(),
         });
         // *3\r\n$4\r\nAUTH\r\n$5\r\nalice\r\n$8\r\np4ssw0rd\r\n
@@ -997,7 +1039,7 @@ mod tests {
         assert_eq!(
             parsed,
             AuthCredentials::UserPassword {
-                user:     "alice".into(),
+                user: "alice".into(),
                 password: "p4ssw0rd".into(),
             },
         );
@@ -1017,7 +1059,7 @@ mod tests {
         assert_eq!(
             parsed,
             AuthCredentials::UserPassword {
-                user:     "alice".into(),
+                user: "alice".into(),
                 password: "p4ssw0rd".into(),
             },
         );
@@ -1053,6 +1095,8 @@ mod tests {
 
     #[test]
     fn is_ok_or_unauth_already_rejects_bad_password() {
-        assert!(!is_ok_or_unauth_already(b"-WRONGPASS invalid username-password pair\r\n"));
+        assert!(!is_ok_or_unauth_already(
+            b"-WRONGPASS invalid username-password pair\r\n"
+        ));
     }
 }

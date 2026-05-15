@@ -32,22 +32,22 @@ use serde::{Deserialize, Serialize};
 /// Hard cap for `DiagnosticFlag.message`. The §3.2 spec quotes
 /// 1024 chars; we use bytes here because that's what `String::len`
 /// returns and gives the kernel a true wire-shape ceiling.
-pub const STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES:  usize = 1_024;
+pub const STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES: usize = 1_024;
 
 /// Hard cap for `TaskSummary.approach`. Spec: ≤ 2048 chars.
-pub const STRUCTURED_OUTPUT_MAX_APPROACH_BYTES:      usize = 2_048;
+pub const STRUCTURED_OUTPUT_MAX_APPROACH_BYTES: usize = 2_048;
 
 /// Hard cap on a single `Vec<String>` payload (changed_paths /
 /// files_modified). Per-element string is also capped at 4 KiB to
 /// keep the audit chain payload bounded. Both are kernel-side
 /// validation; the planner-side tool surface accepts any input
 /// shape and lets the kernel's structural validator reject.
-pub const STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN:       usize = 256;
-pub const STRUCTURED_OUTPUT_MAX_PATH_BYTES:          usize = 4_096;
+pub const STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN: usize = 256;
+pub const STRUCTURED_OUTPUT_MAX_PATH_BYTES: usize = 4_096;
 
 /// Per-session rate limit. The spec uses 10 as the example; we
 /// pin it here so the kernel and CLI agree on the number.
-pub const STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT:  u32   = 10;
+pub const STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT: u32 = 10;
 
 /// **`v2_extended_gaps.md §3.2` — typed mid-session output kinds.**
 ///
@@ -77,14 +77,14 @@ pub enum StructuredOutputKind {
         /// entries and each entry at `STRUCTURED_OUTPUT_MAX_PATH_BYTES`.
         files_modified: Vec<String>,
         /// Number of tests that passed in the most-recent run.
-        tests_passing:  u32,
+        tests_passing: u32,
         /// Number of tests that failed in the most-recent run.
-        tests_failing:  u32,
+        tests_failing: u32,
         /// Self-reported confidence in `[0.0, 1.0]`. Kernel CLAMPS
         /// to the closed range — values outside are NOT rejected
         /// (a confidence of `1.5` would block a perfectly-good
         /// progress report on a typo); they are coerced.
-        confidence:     f32,
+        confidence: f32,
     },
 
     /// "I found something the operator should see." Stored on the
@@ -99,7 +99,7 @@ pub enum StructuredOutputKind {
         /// payloads are TRUNCATED with a "<truncated>" marker
         /// rather than rejected so a verbose model output still
         /// surfaces something operator-actionable.
-        message:  String,
+        message: String,
         /// Optional file path or `path:line` reference pointing to
         /// the relevant source location. Workspace-relative;
         /// kernel applies the same path-list cap.
@@ -112,14 +112,14 @@ pub enum StructuredOutputKind {
     TaskSummary {
         /// Final commit SHA for the executor's work. Validated as a
         /// 40-char hex `CommitSha` at admission time.
-        commit_sha:    String,
+        commit_sha: String,
         /// Workspace-relative paths the executor authored. Same
         /// caps as `ProgressReport.files_modified`.
         changed_paths: Vec<String>,
         /// One-paragraph rationale (≤
         /// `STRUCTURED_OUTPUT_MAX_APPROACH_BYTES`). Larger ⇒
         /// truncated with marker.
-        approach:      String,
+        approach: String,
     },
 }
 
@@ -138,8 +138,8 @@ impl DiagnosticSeverity {
     /// JSON `serde(rename_all = "snake_case")` projection.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Info     => "info",
-            Self::Warning  => "warning",
+            Self::Info => "info",
+            Self::Warning => "warning",
             Self::Critical => "critical",
         }
     }
@@ -153,7 +153,7 @@ impl StructuredOutputKind {
         match self {
             Self::ProgressReport { .. } => "progress_report",
             Self::DiagnosticFlag { .. } => "diagnostic_flag",
-            Self::TaskSummary    { .. } => "task_summary",
+            Self::TaskSummary { .. } => "task_summary",
         }
     }
 
@@ -167,7 +167,9 @@ impl StructuredOutputKind {
     pub fn validate_and_normalise(&mut self) -> Result<(), &'static str> {
         match self {
             Self::ProgressReport {
-                files_modified, confidence, ..
+                files_modified,
+                confidence,
+                ..
             } => {
                 Self::truncate_path_list(files_modified);
                 if !confidence.is_finite() {
@@ -184,14 +186,12 @@ impl StructuredOutputKind {
                 }
             }
             Self::TaskSummary {
-                commit_sha, changed_paths, approach,
+                commit_sha,
+                changed_paths,
+                approach,
             } => {
-                if commit_sha.len() != 40
-                    || !commit_sha.chars().all(|c| c.is_ascii_hexdigit())
-                {
-                    return Err(
-                        "task_summary.commit_sha must be 40 hex chars",
-                    );
+                if commit_sha.len() != 40 || !commit_sha.chars().all(|c| c.is_ascii_hexdigit()) {
+                    return Err("task_summary.commit_sha must be 40 hex chars");
                 }
                 // Normalise to lowercase for the audit chain.
                 commit_sha.make_ascii_lowercase();
@@ -212,10 +212,14 @@ impl StructuredOutputKind {
     }
 
     fn truncate_string(s: &mut String, max_bytes: usize) {
-        if s.len() <= max_bytes { return; }
+        if s.len() <= max_bytes {
+            return;
+        }
         // Walk back to a UTF-8 boundary that fits.
         let mut idx = max_bytes;
-        while idx > 0 && !s.is_char_boundary(idx) { idx -= 1; }
+        while idx > 0 && !s.is_char_boundary(idx) {
+            idx -= 1;
+        }
         s.truncate(idx);
         s.push_str("…<truncated>");
     }
@@ -227,8 +231,8 @@ mod tests {
 
     #[test]
     fn diagnostic_severity_wire_strings_pinned() {
-        assert_eq!(DiagnosticSeverity::Info.as_str(),     "info");
-        assert_eq!(DiagnosticSeverity::Warning.as_str(),  "warning");
+        assert_eq!(DiagnosticSeverity::Info.as_str(), "info");
+        assert_eq!(DiagnosticSeverity::Warning.as_str(), "warning");
         assert_eq!(DiagnosticSeverity::Critical.as_str(), "critical");
     }
 
@@ -236,20 +240,21 @@ mod tests {
     fn variant_tag_matches_serde_rename() {
         let p = StructuredOutputKind::ProgressReport {
             files_modified: vec![],
-            tests_passing: 0, tests_failing: 0,
+            tests_passing: 0,
+            tests_failing: 0,
             confidence: 0.0,
         };
         assert_eq!(p.variant_tag(), "progress_report");
         let d = StructuredOutputKind::DiagnosticFlag {
             severity: DiagnosticSeverity::Info,
-            message:  "x".to_owned(),
+            message: "x".to_owned(),
             evidence: None,
         };
         assert_eq!(d.variant_tag(), "diagnostic_flag");
         let t = StructuredOutputKind::TaskSummary {
-            commit_sha:    "0".repeat(40),
+            commit_sha: "0".repeat(40),
             changed_paths: vec![],
-            approach:      "fix".to_owned(),
+            approach: "fix".to_owned(),
         };
         assert_eq!(t.variant_tag(), "task_summary");
     }
@@ -258,12 +263,17 @@ mod tests {
     fn validate_clamps_confidence_and_truncates_lists() {
         let mut k = StructuredOutputKind::ProgressReport {
             files_modified: (0..1024).map(|i| format!("p/{i}")).collect(),
-            tests_passing:  100, tests_failing: 0,
-            confidence:     1.5,
+            tests_passing: 100,
+            tests_failing: 0,
+            confidence: 1.5,
         };
         k.validate_and_normalise().unwrap();
         match k {
-            StructuredOutputKind::ProgressReport { files_modified, confidence, .. } => {
+            StructuredOutputKind::ProgressReport {
+                files_modified,
+                confidence,
+                ..
+            } => {
                 assert_eq!(files_modified.len(), STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN);
                 assert_eq!(confidence, 1.0);
             }
@@ -276,7 +286,7 @@ mod tests {
         let huge = "x".repeat(STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES * 4);
         let mut k = StructuredOutputKind::DiagnosticFlag {
             severity: DiagnosticSeverity::Critical,
-            message:  huge,
+            message: huge,
             evidence: None,
         };
         k.validate_and_normalise().unwrap();
@@ -292,9 +302,9 @@ mod tests {
     #[test]
     fn validate_rejects_non_hex_commit_sha() {
         let mut k = StructuredOutputKind::TaskSummary {
-            commit_sha:    "not-a-real-sha".to_owned(),
+            commit_sha: "not-a-real-sha".to_owned(),
             changed_paths: vec![],
-            approach:      "fix".to_owned(),
+            approach: "fix".to_owned(),
         };
         let err = k.validate_and_normalise().unwrap_err();
         assert!(err.contains("commit_sha"));
@@ -303,9 +313,9 @@ mod tests {
     #[test]
     fn validate_normalises_uppercase_commit_sha() {
         let mut k = StructuredOutputKind::TaskSummary {
-            commit_sha:    "A".repeat(40),
+            commit_sha: "A".repeat(40),
             changed_paths: vec![],
-            approach:      "fix".to_owned(),
+            approach: "fix".to_owned(),
         };
         k.validate_and_normalise().unwrap();
         match k {
@@ -329,30 +339,28 @@ mod tests {
         let kinds: Vec<StructuredOutputKind> = vec![
             StructuredOutputKind::ProgressReport {
                 files_modified: vec!["a.rs".into(), "b.rs".into()],
-                tests_passing: 10, tests_failing: 1,
+                tests_passing: 10,
+                tests_failing: 1,
                 confidence: 0.75,
             },
             StructuredOutputKind::DiagnosticFlag {
                 severity: DiagnosticSeverity::Warning,
-                message:  "be careful here".into(),
+                message: "be careful here".into(),
                 evidence: Some("src/lib.rs:42".into()),
             },
             StructuredOutputKind::TaskSummary {
-                commit_sha:    "0".repeat(40),
+                commit_sha: "0".repeat(40),
                 changed_paths: vec!["x.rs".into()],
-                approach:      "split into helper".into(),
+                approach: "split into helper".into(),
             },
         ];
         for k in kinds {
-            let bytes = bincode::serde::encode_to_vec(
-                &k, bincode::config::standard(),
-            ).unwrap();
-            let (back, _): (StructuredOutputKind, _) = bincode::serde::decode_from_slice(
-                &bytes, bincode::config::standard(),
-            ).unwrap();
+            let bytes = bincode::serde::encode_to_vec(&k, bincode::config::standard()).unwrap();
+            let (back, _): (StructuredOutputKind, _) =
+                bincode::serde::decode_from_slice(&bytes, bincode::config::standard()).unwrap();
             assert_eq!(back, k, "bincode round-trip");
 
-            let s    = serde_json::to_string(&k).unwrap();
+            let s = serde_json::to_string(&k).unwrap();
             let back: StructuredOutputKind = serde_json::from_str(&s).unwrap();
             assert_eq!(back, k, "json round-trip");
         }
@@ -371,8 +379,11 @@ mod tests {
             DiagnosticSeverity::Critical,
         ] {
             let json: String = serde_json::to_string(&s).unwrap();
-            assert_eq!(json, format!("\"{}\"", s.as_str()),
-                "DiagnosticSeverity JSON must match its as_str() projection");
+            assert_eq!(
+                json,
+                format!("\"{}\"", s.as_str()),
+                "DiagnosticSeverity JSON must match its as_str() projection"
+            );
             let back: DiagnosticSeverity = serde_json::from_str(&json).unwrap();
             assert_eq!(back, s);
         }

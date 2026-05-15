@@ -95,8 +95,8 @@ impl TproxyProtocol {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Tcp  => "tcp",
-            Self::Tls  => "https",
+            Self::Tcp => "tcp",
+            Self::Tls => "https",
             Self::Http => "http",
         }
     }
@@ -110,7 +110,7 @@ impl TproxyProtocol {
 pub struct TproxyAdmissionRequest {
     /// Per-request UUIDv4 the guest mints. The kernel echoes it on
     /// the response so concurrent admissions can be correlated.
-    pub request_id:    Uuid,
+    pub request_id: Uuid,
 
     /// The session token the kernel stamped at spawn time. The
     /// admission handler validates against `sessions.session_token`
@@ -121,21 +121,21 @@ pub struct TproxyAdmissionRequest {
     /// present. The kernel matches this first against the active
     /// `policy.tproxy_allowlist`; raw TCP / non-TLS / no-SNI
     /// flows leave this `None`.
-    pub sni:           Option<String>,
+    pub sni: Option<String>,
 
     /// Lowercased, port-stripped HTTP/1.x `Host:` header value
     /// extracted from the agent's plaintext request preamble.
     /// Populated only for `protocol == Http`.
-    pub host_header:   Option<String>,
+    pub host_header: Option<String>,
 
     /// Post-DNS-resolution destination `(ip, port)` from
     /// `SO_ORIGINAL_DST` on the iptables-redirected agent socket.
     /// Always populated; falls through to allowlist matching when
     /// `sni` and `host_header` are both `None`.
-    pub destination:   SocketAddr,
+    pub destination: SocketAddr,
 
     /// Layer-7 protocol guess (see [`TproxyProtocol`]).
-    pub protocol:      TproxyProtocol,
+    pub protocol: TproxyProtocol,
 }
 
 /// **Kernel → guest.** The kernel's verdict for one
@@ -155,11 +155,11 @@ pub enum TproxyAdmissionResponse {
     /// via a second vsock connection on the kernel's tunnel port.
     Admit {
         /// Echoes the request's `request_id`.
-        request_id:   Uuid,
+        request_id: Uuid,
         /// Opaque handle the guest sends in the tunnel-handshake
         /// frame. Single-use: the kernel removes the tunnel
         /// registration on the first successful handshake.
-        tunnel_id:    Uuid,
+        tunnel_id: Uuid,
         /// 32-byte random authenticator the guest sends alongside
         /// `tunnel_id` to prove it received the Admit response.
         /// Single-use; not stored anywhere outside the kernel's
@@ -177,11 +177,11 @@ pub enum TproxyAdmissionResponse {
         /// Vocabulary mirrors
         /// `raxis_tproxy_protocol::DenyReason::as_str` plus
         /// `"FAIL_SESSION_TOKEN_MISMATCH"` and `"FAIL_AUDIT_EMIT"`.
-        reason:     String,
+        reason: String,
         /// Optional operator-facing hint (e.g. "add `*.example.com`
         /// to `policy.tproxy_allowlist`"). Surfaced in the audit
         /// payload's `hint` field unchanged.
-        hint:       Option<String>,
+        hint: Option<String>,
     },
 }
 
@@ -232,16 +232,16 @@ pub enum DnsQueryType {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DnsResolveRequest {
     /// Per-query UUIDv4 the guest mints. Echoed on the response.
-    pub request_id:    Uuid,
+    pub request_id: Uuid,
     /// Session-token authenticator; same shape as
     /// [`TproxyAdmissionRequest::session_token`].
     pub session_token: String,
     /// Hostname to resolve. Lowercased by the in-guest stub
     /// before sending so the kernel's allowlist matching is
     /// case-insensitive without per-handler normalisation.
-    pub hostname:      String,
+    pub hostname: String,
     /// A vs AAAA.
-    pub query_type:    DnsQueryType,
+    pub query_type: DnsQueryType,
 }
 
 /// **Kernel → guest.** Resolved address list (empty = NXDOMAIN)
@@ -254,11 +254,11 @@ pub struct DnsResolveResponse {
     /// returned NXDOMAIN or any other failure (the
     /// `AuditEventKind::DnsResolveRequested` event records the
     /// `resolved_count` regardless).
-    pub addresses:  Vec<IpAddr>,
+    pub addresses: Vec<IpAddr>,
     /// Upper-bound TTL the in-guest stub MAY cache the answer
     /// for. `0` means "do not cache" (kernel resolver failure /
     /// transient negative response).
-    pub ttl_secs:   u32,
+    pub ttl_secs: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -278,12 +278,12 @@ mod tests {
     #[test]
     fn tproxy_admission_request_round_trips_through_serde_json() {
         let req = TproxyAdmissionRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "session-token-fixture".to_owned(),
-            sni:           Some("api.anthropic.com".to_owned()),
-            host_header:   None,
-            destination:   SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 443)),
-            protocol:      TproxyProtocol::Tls,
+            sni: Some("api.anthropic.com".to_owned()),
+            host_header: None,
+            destination: SocketAddr::V4(SocketAddrV4::new(Ipv4Addr::new(10, 0, 0, 7), 443)),
+            protocol: TproxyProtocol::Tls,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: TproxyAdmissionRequest = serde_json::from_str(&s).unwrap();
@@ -297,8 +297,8 @@ mod tests {
     #[test]
     fn tproxy_admission_response_admit_round_trips() {
         let resp = TproxyAdmissionResponse::Admit {
-            request_id:   Uuid::nil(),
-            tunnel_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
+            tunnel_id: Uuid::nil(),
             tunnel_token: [0x7Au8; 32],
         };
         let s = serde_json::to_string(&resp).unwrap();
@@ -315,8 +315,8 @@ mod tests {
     fn tproxy_admission_response_deny_carries_reason_and_hint() {
         let resp = TproxyAdmissionResponse::Deny {
             request_id: Uuid::nil(),
-            reason:     "host_not_in_allowlist".to_owned(),
-            hint:       Some("add `*.example.com` to policy.tproxy_allowlist".to_owned()),
+            reason: "host_not_in_allowlist".to_owned(),
+            hint: Some("add `*.example.com` to policy.tproxy_allowlist".to_owned()),
         };
         let s = serde_json::to_string(&resp).unwrap();
         let back: TproxyAdmissionResponse = serde_json::from_str(&s).unwrap();
@@ -334,18 +334,18 @@ mod tests {
         // The legacy AdmissionProtocol::as_str values are wire-stable
         // for forensic dashboards. A3 events project onto the same
         // strings so the dashboard does not need to fork its query.
-        assert_eq!(TproxyProtocol::Tls.as_str(),  "https");
+        assert_eq!(TproxyProtocol::Tls.as_str(), "https");
         assert_eq!(TproxyProtocol::Http.as_str(), "http");
-        assert_eq!(TproxyProtocol::Tcp.as_str(),  "tcp");
+        assert_eq!(TproxyProtocol::Tcp.as_str(), "tcp");
     }
 
     #[test]
     fn dns_resolve_request_round_trips_through_serde_json() {
         let req = DnsResolveRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "session-token-fixture".to_owned(),
-            hostname:      "api.anthropic.com".to_owned(),
-            query_type:    DnsQueryType::A,
+            hostname: "api.anthropic.com".to_owned(),
+            query_type: DnsQueryType::A,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: DnsResolveRequest = serde_json::from_str(&s).unwrap();
@@ -359,8 +359,8 @@ mod tests {
         // / resolver failure; pin the contract.
         let resp = DnsResolveResponse {
             request_id: Uuid::nil(),
-            addresses:  vec![],
-            ttl_secs:   0,
+            addresses: vec![],
+            ttl_secs: 0,
         };
         let s = serde_json::to_string(&resp).unwrap();
         let back: DnsResolveResponse = serde_json::from_str(&s).unwrap();

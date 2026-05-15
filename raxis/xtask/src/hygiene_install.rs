@@ -129,9 +129,9 @@ impl HostEnv {
         let cargo_bin = std::env::var_os("CARGO")
             .map(PathBuf::from)
             .or_else(|| which("cargo"))
-            .ok_or_else(|| anyhow!(
-                "could not locate the `cargo` binary; set $CARGO or add it to PATH"
-            ))?;
+            .ok_or_else(|| {
+                anyhow!("could not locate the `cargo` binary; set $CARGO or add it to PATH")
+            })?;
         let user = std::env::var("USER").unwrap_or_else(|_| "operator".into());
         Ok(Self {
             home,
@@ -190,10 +190,15 @@ fn install_macos(env: &HostEnv, dry_run: bool) -> anyhow::Result<()> {
     eprintln!("[hygiene-install] logs dir:     {}", logs_dir.display());
 
     if dry_run {
-        eprintln!("[hygiene-install] dry-run: would write {} bytes to {}",
-            body.len(), target.display());
-        eprintln!("[hygiene-install] dry-run: would `launchctl bootstrap gui/$UID {}`",
-            target.display());
+        eprintln!(
+            "[hygiene-install] dry-run: would write {} bytes to {}",
+            body.len(),
+            target.display()
+        );
+        eprintln!(
+            "[hygiene-install] dry-run: would `launchctl bootstrap gui/$UID {}`",
+            target.display()
+        );
         return Ok(());
     }
 
@@ -220,9 +225,7 @@ fn install_macos(env: &HostEnv, dry_run: bool) -> anyhow::Result<()> {
     if !status.success() {
         bail!("launchctl bootstrap exited {status}; check Console.app for details");
     }
-    eprintln!(
-        "[hygiene-install] installed; verify with: launchctl list | grep {PLIST_LABEL}"
-    );
+    eprintln!("[hygiene-install] installed; verify with: launchctl list | grep {PLIST_LABEL}");
     Ok(())
 }
 
@@ -231,17 +234,21 @@ fn uninstall_macos(env: &HostEnv, dry_run: bool) -> anyhow::Result<()> {
     let uid = unsafe { libc::getuid() };
     let domain = format!("gui/{uid}");
     if dry_run {
-        eprintln!("[hygiene-install] dry-run: would `launchctl bootout {domain} {}`",
-            target.display());
-        eprintln!("[hygiene-install] dry-run: would remove {}", target.display());
+        eprintln!(
+            "[hygiene-install] dry-run: would `launchctl bootout {domain} {}`",
+            target.display()
+        );
+        eprintln!(
+            "[hygiene-install] dry-run: would remove {}",
+            target.display()
+        );
         return Ok(());
     }
     let _ = Command::new("launchctl")
         .args(["bootout", &domain, &target.to_string_lossy()])
         .status();
     if target.exists() {
-        std::fs::remove_file(&target)
-            .with_context(|| format!("removing {}", target.display()))?;
+        std::fs::remove_file(&target).with_context(|| format!("removing {}", target.display()))?;
     }
     eprintln!("[hygiene-install] uninstalled {PLIST_LABEL}");
     Ok(())
@@ -282,7 +289,8 @@ fn install_linux(env: &HostEnv, system: bool, dry_run: bool) -> anyhow::Result<(
     if dry_run {
         eprintln!(
             "[hygiene-install] dry-run: would write {} + {} bytes",
-            service_body.len(), timer_body.len(),
+            service_body.len(),
+            timer_body.len(),
         );
         let scope_flag = if system { "" } else { "--user " };
         eprintln!("[hygiene-install] dry-run: would `systemctl {scope_flag}daemon-reload`");
@@ -334,9 +342,17 @@ fn uninstall_linux(env: &HostEnv, system: bool, dry_run: bool) -> anyhow::Result
 
     if dry_run {
         let scope_flag = if system { "" } else { "--user " };
-        eprintln!("[hygiene-install] dry-run: would `systemctl {scope_flag}disable --now {TIMER_NAME}`");
-        eprintln!("[hygiene-install] dry-run: would remove {}", service_path.display());
-        eprintln!("[hygiene-install] dry-run: would remove {}", timer_path.display());
+        eprintln!(
+            "[hygiene-install] dry-run: would `systemctl {scope_flag}disable --now {TIMER_NAME}`"
+        );
+        eprintln!(
+            "[hygiene-install] dry-run: would remove {}",
+            service_path.display()
+        );
+        eprintln!(
+            "[hygiene-install] dry-run: would remove {}",
+            timer_path.display()
+        );
         return Ok(());
     }
     let mut disable = Command::new("systemctl");
@@ -398,8 +414,14 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let env = fixture_env(tmp.path());
         let body = render_plist(&env);
-        assert!(!body.contains("__CARGO_BIN__"), "plist still has __CARGO_BIN__");
-        assert!(!body.contains("__REPO_ROOT__"), "plist still has __REPO_ROOT__");
+        assert!(
+            !body.contains("__CARGO_BIN__"),
+            "plist still has __CARGO_BIN__"
+        );
+        assert!(
+            !body.contains("__REPO_ROOT__"),
+            "plist still has __REPO_ROOT__"
+        );
         assert!(!body.contains("__HOME__"), "plist still has __HOME__");
         assert!(body.contains("/usr/local/bin/cargo"));
         assert!(body.contains("repo/raxis"));
@@ -468,21 +490,10 @@ mod tests {
         let env = fixture_env(tmp.path());
         let unit_dir = tmp.path().join("units");
         std::fs::create_dir_all(&unit_dir).unwrap();
-        std::fs::write(
-            unit_dir.join(SERVICE_NAME),
-            render_service(&env).as_bytes(),
-        )
-        .unwrap();
-        std::fs::write(
-            unit_dir.join(TIMER_NAME),
-            render_timer(&env).as_bytes(),
-        )
-        .unwrap();
+        std::fs::write(unit_dir.join(SERVICE_NAME), render_service(&env).as_bytes()).unwrap();
+        std::fs::write(unit_dir.join(TIMER_NAME), render_timer(&env).as_bytes()).unwrap();
         let out = Command::new("systemd-analyze")
-            .args([
-                "verify",
-                &unit_dir.join(TIMER_NAME).to_string_lossy(),
-            ])
+            .args(["verify", &unit_dir.join(TIMER_NAME).to_string_lossy()])
             .output()
             .unwrap();
         // `systemd-analyze verify` may complain about non-resolvable

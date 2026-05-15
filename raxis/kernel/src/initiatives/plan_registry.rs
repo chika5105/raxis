@@ -46,14 +46,14 @@ use raxis_types::{CloneStrategy, SessionAgentType};
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TaskKey {
     pub initiative_id: String,
-    pub task_id:       String,
+    pub task_id: String,
 }
 
 impl TaskKey {
     pub fn new(initiative_id: impl Into<String>, task_id: impl Into<String>) -> Self {
         Self {
             initiative_id: initiative_id.into(),
-            task_id:       task_id.into(),
+            task_id: task_id.into(),
         }
     }
 }
@@ -88,15 +88,15 @@ impl TaskKey {
 /// dropped immediately after lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskPlanFields {
-    pub path_allowlist:            Vec<String>,
+    pub path_allowlist: Vec<String>,
     pub path_export_to_successors: bool,
-    pub path_export_globs:         Vec<String>,
-    pub path_scope_override:       bool,
+    pub path_export_globs: Vec<String>,
+    pub path_scope_override: bool,
 
     // V2 §Step 27 — typed clone strategy.
-    pub clone_strategy:            CloneStrategy,
+    pub clone_strategy: CloneStrategy,
     // V2 §Step 6 / §Step 27 check #6 — agent type for this task.
-    pub session_agent_type:        SessionAgentType,
+    pub session_agent_type: SessionAgentType,
 
     /// V2.5 §13 — `[[plan.tasks.X]] vm_image` resolved at admission
     /// against the operator-published `[[vm_images]]` registry.
@@ -115,7 +115,7 @@ pub struct TaskPlanFields {
     /// (re-checking `oci_digest` and `linux_kernel_version_min`)
     /// so a credential rotation between admission and activation
     /// does not silently drift the image bytes.
-    pub vm_image:                  String,
+    pub vm_image: String,
 
     /// V2 `v2_extended_gaps.md §1.1` — operator-authored seed prompt
     /// for the executor / reviewer agent. Lives inside the signed
@@ -139,7 +139,7 @@ pub struct TaskPlanFields {
     /// driver. The kernel does not interpret the prompt text in
     /// any way (no template substitution, no command parsing) — it
     /// is opaque bytes the model receives.
-    pub description:               String,
+    pub description: String,
 
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
     /// **VM-crash retries** for this sub-task. Read by
@@ -168,7 +168,7 @@ pub struct TaskPlanFields {
     ///     unsuccessful attempt against an Executor under the same
     ///     per-task ceiling).
     /// The retry handler reads it at counter-check time only.
-    pub max_crash_retries:         Option<u32>,
+    pub max_crash_retries: Option<u32>,
 
     /// V2 `v2-deep-spec.md §Step 12` — operator-declared ceiling on
     /// **review-rejection retries** for this sub-task. Read by
@@ -194,7 +194,7 @@ pub struct TaskPlanFields {
     /// (`handle_submit_review` → `compute_aggregate_review_outcome`
     /// transitions to `AtLeastOneRejected`). The retry handler
     /// reads the latest active activation row's value.
-    pub max_review_rejections:     Option<u32>,
+    pub max_review_rejections: Option<u32>,
 
     /// V2.7 — operator-declared per-task hard turn ceiling for the
     /// planner dispatch loop running inside the spawned VM. The
@@ -230,7 +230,7 @@ pub struct TaskPlanFields {
     /// useful and almost always indicates a typo (the agent would
     /// terminate before issuing its first model call). `Some(n)` for
     /// any `n >= 1` is admitted verbatim.
-    pub max_turns:                 Option<u32>,
+    pub max_turns: Option<u32>,
 
     /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
     /// operator-declared per-task scaling step applied to each
@@ -256,7 +256,7 @@ pub struct TaskPlanFields {
     /// operator actually wants the constant-budget behaviour they
     /// should pin `max_turns` to a higher value rather than zeroing
     /// the step.
-    pub max_turns_step:            Option<u32>,
+    pub max_turns_step: Option<u32>,
 
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// Operator-declared toggle for upward VM-resource scaling on
@@ -273,30 +273,30 @@ pub struct TaskPlanFields {
     /// when policy `enabled = false`; `Some(false)` is always
     /// admissible (a plan can always be MORE restrictive than
     /// policy).
-    pub elastic:                   Option<bool>,
+    pub elastic: Option<bool>,
 
     /// Operator-declared floor on vCPU count for any spawn /
     /// scale-down event for this task. `None` ⇒ kernel uses the
     /// role baseline from `policy.[isolation]`. Validated against
     /// the policy ceiling `policy.[elastic].max_vcpus_per_session`
     /// at admission time.
-    pub min_vcpus:                 Option<u32>,
+    pub min_vcpus: Option<u32>,
 
     /// Operator-declared ceiling on vCPU count for any scale-up
     /// event for this task. `None` ⇒ kernel uses the policy
     /// ceiling. Plans MAY narrow below the policy ceiling but
     /// MAY NOT exceed it (INV-ELASTIC-01).
-    pub max_vcpus:                 Option<u32>,
+    pub max_vcpus: Option<u32>,
 
     /// Operator-declared floor on memory MiB for any spawn /
     /// scale-down event. Same resolution + INV-ELASTIC-01 rule
     /// as `min_vcpus`.
-    pub min_memory_mb:             Option<u32>,
+    pub min_memory_mb: Option<u32>,
 
     /// Operator-declared ceiling on memory MiB for any scale-up
     /// event. Same resolution + INV-ELASTIC-01 rule as
     /// `max_vcpus`.
-    pub max_memory_mb:             Option<u32>,
+    pub max_memory_mb: Option<u32>,
 }
 
 /// V2 `v2-deep-spec.md §Step 12` — kernel default `max_crash_retries`
@@ -341,23 +341,23 @@ pub const DEFAULT_PLANNER_MAX_TURNS: u32 = 100;
 impl Default for TaskPlanFields {
     fn default() -> Self {
         Self {
-            path_allowlist:            Vec::new(),
+            path_allowlist: Vec::new(),
             path_export_to_successors: false,
-            path_export_globs:         Vec::new(),
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Blobless,
-            session_agent_type:        SessionAgentType::Executor,
-            vm_image:                  String::new(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            max_turns_step:            None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: Vec::new(),
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Blobless,
+            session_agent_type: SessionAgentType::Executor,
+            vm_image: String::new(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            max_turns_step: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 }
@@ -396,10 +396,7 @@ impl TaskPlanFields {
     /// `session_spawn_orchestrator` callsite can emit a structured
     /// `PlannerMaxTurnsResolved` log line whose `source` field names
     /// the resolution arm verbatim.
-    pub fn effective_max_turns(
-        &self,
-        policy_default: Option<u32>,
-    ) -> (u32, &'static str) {
+    pub fn effective_max_turns(&self, policy_default: Option<u32>) -> (u32, &'static str) {
         if let Some(c) = self.max_turns {
             (c, "task")
         } else if let Some(d) = policy_default {
@@ -506,9 +503,9 @@ impl Default for OrchestratorPlanFields {
     fn default() -> Self {
         Self {
             cross_cutting_artifacts: Vec::new(),
-            description:             String::new(),
-            target_ref:              Self::DEFAULT_TARGET_REF.to_owned(),
-            elastic:                 None,
+            description: String::new(),
+            target_ref: Self::DEFAULT_TARGET_REF.to_owned(),
+            elastic: None,
         }
     }
 }
@@ -529,7 +526,7 @@ impl Default for OrchestratorPlanFields {
 ///   `cross_cutting_artifacts` so V1 plans need no schema bump.
 #[derive(Debug, Default)]
 pub struct PlanRegistry {
-    inner:         RwLock<FxHashMap<TaskKey, TaskPlanFields>>,
+    inner: RwLock<FxHashMap<TaskKey, TaskPlanFields>>,
     orchestrators: RwLock<FxHashMap<String, OrchestratorPlanFields>>,
 }
 
@@ -598,8 +595,14 @@ impl PlanRegistry {
     /// per initiative; a re-insert (e.g. from `repopulate_from_store`)
     /// overwrites with identical bytes since the signed plan artifact
     /// is immutable.
-    pub fn insert_orchestrator(&self, initiative_id: impl Into<String>, fields: OrchestratorPlanFields) {
-        let mut guard = self.orchestrators.write()
+    pub fn insert_orchestrator(
+        &self,
+        initiative_id: impl Into<String>,
+        fields: OrchestratorPlanFields,
+    ) {
+        let mut guard = self
+            .orchestrators
+            .write()
             .expect("PlanRegistry orchestrators RwLock poisoned — kernel must abort");
         guard.insert(initiative_id.into(), fields);
     }
@@ -610,7 +613,9 @@ impl PlanRegistry {
     /// artifacts" (the empty-list default), never as "match
     /// everything".
     pub fn orchestrator(&self, initiative_id: &str) -> Option<OrchestratorPlanFields> {
-        let guard = self.orchestrators.read()
+        let guard = self
+            .orchestrators
+            .read()
             .expect("PlanRegistry orchestrators RwLock poisoned — kernel must abort");
         guard.get(initiative_id).cloned()
     }
@@ -622,7 +627,9 @@ impl PlanRegistry {
     /// `cross_cutting_artifacts`. Returns an owned Vec so the caller
     /// can release the lock immediately.
     pub fn tasks_in_initiative(&self, initiative_id: &str) -> Vec<(String, TaskPlanFields)> {
-        let guard = self.inner.read()
+        let guard = self
+            .inner
+            .read()
             .expect("PlanRegistry RwLock poisoned — kernel must abort");
         guard
             .iter()
@@ -703,19 +710,31 @@ mod tests {
         // the contract because a regression here would silently widen
         // the path scope of any task that omits these fields in TOML.
         let f = TaskPlanFields::default();
-        assert!(f.path_allowlist.is_empty(), "default path_allowlist must deny");
+        assert!(
+            f.path_allowlist.is_empty(),
+            "default path_allowlist must deny"
+        );
         assert!(!f.path_export_to_successors, "default export must be off");
-        assert!(f.path_export_globs.is_empty(), "default export globs must be empty");
+        assert!(
+            f.path_export_globs.is_empty(),
+            "default export globs must be empty"
+        );
         assert!(!f.path_scope_override, "default override must be false");
         // V2 §Step 27 defaults — `Blobless` is uniformly safe for every
         // agent type and uniformly cheaper than `Full` for repos with
         // binary blobs.
-        assert_eq!(f.clone_strategy, CloneStrategy::Blobless,
-            "default clone_strategy must be Blobless (V2 §Step 27)");
+        assert_eq!(
+            f.clone_strategy,
+            CloneStrategy::Blobless,
+            "default clone_strategy must be Blobless (V2 §Step 27)"
+        );
         // Plan-declared tasks default to Executor; the Orchestrator
         // is auto-created at admission per `planner-harness.md §4.8`.
-        assert_eq!(f.session_agent_type, SessionAgentType::Executor,
-            "default session_agent_type must be Executor (V2 §Step 6)");
+        assert_eq!(
+            f.session_agent_type,
+            SessionAgentType::Executor,
+            "default session_agent_type must be Executor (V2 §Step 6)"
+        );
         // V2 `v2_extended_gaps.md §1.1` — `Default` MUST yield an
         // empty `description`. Production NEVER reaches the spawn
         // path with a default-constructed `TaskPlanFields`: every
@@ -736,14 +755,24 @@ mod tests {
         // the `Option` shape (so a 0-value test fixture is
         // distinguishable from omission) and the resolved kernel
         // defaults.
-        assert_eq!(f.max_crash_retries, None,
-            "default max_crash_retries must be None so the kernel default applies");
-        assert_eq!(f.max_review_rejections, None,
-            "default max_review_rejections must be None so the kernel default applies");
-        assert_eq!(f.effective_max_crash_retries(), DEFAULT_MAX_CRASH_RETRIES,
-            "kernel default max_crash_retries pin (V2 §Step 12)");
-        assert_eq!(f.effective_max_review_rejections(), DEFAULT_MAX_REVIEW_REJECTIONS,
-            "kernel default max_review_rejections pin (V2 §Step 12)");
+        assert_eq!(
+            f.max_crash_retries, None,
+            "default max_crash_retries must be None so the kernel default applies"
+        );
+        assert_eq!(
+            f.max_review_rejections, None,
+            "default max_review_rejections must be None so the kernel default applies"
+        );
+        assert_eq!(
+            f.effective_max_crash_retries(),
+            DEFAULT_MAX_CRASH_RETRIES,
+            "kernel default max_crash_retries pin (V2 §Step 12)"
+        );
+        assert_eq!(
+            f.effective_max_review_rejections(),
+            DEFAULT_MAX_REVIEW_REJECTIONS,
+            "kernel default max_review_rejections pin (V2 §Step 12)"
+        );
     }
 
     #[test]
@@ -753,7 +782,7 @@ mod tests {
         // retry handler must observe the explicit zero rather than
         // the conservative default.
         let f = TaskPlanFields {
-            max_crash_retries:     Some(0),
+            max_crash_retries: Some(0),
             max_review_rejections: Some(0),
             ..Default::default()
         };
@@ -766,7 +795,7 @@ mod tests {
         let r = PlanRegistry::new();
         let key = TaskKey::new("init-1", "task-A");
         let f = TaskPlanFields {
-            max_crash_retries:     Some(7),
+            max_crash_retries: Some(7),
             max_review_rejections: Some(11),
             ..Default::default()
         };
@@ -785,10 +814,7 @@ mod tests {
         // (TaskPlanFields::default with explicit insert) from "task has
         // no plan entry at all" (corrupted state, should fail closed).
         let r = PlanRegistry::new();
-        r.insert(
-            TaskKey::new("init", "present"),
-            TaskPlanFields::default(),
-        );
+        r.insert(TaskKey::new("init", "present"), TaskPlanFields::default());
         assert!(r.get(&TaskKey::new("init", "present")).is_some());
         assert!(r.get(&TaskKey::new("init", "absent")).is_none());
     }
@@ -809,10 +835,7 @@ mod tests {
     fn orchestrator_insert_then_lookup_round_trips() {
         let r = PlanRegistry::new();
         let f = OrchestratorPlanFields {
-            cross_cutting_artifacts: vec![
-                "Cargo.lock".to_owned(),
-                "package-lock.json".to_owned(),
-            ],
+            cross_cutting_artifacts: vec!["Cargo.lock".to_owned(), "package-lock.json".to_owned()],
             ..Default::default()
         };
         r.insert_orchestrator("init-1", f.clone());
@@ -823,14 +846,20 @@ mod tests {
     #[test]
     fn orchestrator_re_insert_overwrites_in_place() {
         let r = PlanRegistry::new();
-        r.insert_orchestrator("init-1", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["old.lock".to_owned()],
-            ..Default::default()
-        });
-        r.insert_orchestrator("init-1", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["new.lock".to_owned()],
-            ..Default::default()
-        });
+        r.insert_orchestrator(
+            "init-1",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["old.lock".to_owned()],
+                ..Default::default()
+            },
+        );
+        r.insert_orchestrator(
+            "init-1",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["new.lock".to_owned()],
+                ..Default::default()
+            },
+        );
         let got = r.orchestrator("init-1").unwrap();
         assert_eq!(got.cross_cutting_artifacts, vec!["new.lock"]);
     }
@@ -838,18 +867,28 @@ mod tests {
     #[test]
     fn orchestrators_are_scoped_per_initiative() {
         let r = PlanRegistry::new();
-        r.insert_orchestrator("init-A", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["a.lock".to_owned()],
-            ..Default::default()
-        });
-        r.insert_orchestrator("init-B", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["b.lock".to_owned()],
-            ..Default::default()
-        });
-        assert_eq!(r.orchestrator("init-A").unwrap().cross_cutting_artifacts,
-                   vec!["a.lock"]);
-        assert_eq!(r.orchestrator("init-B").unwrap().cross_cutting_artifacts,
-                   vec!["b.lock"]);
+        r.insert_orchestrator(
+            "init-A",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["a.lock".to_owned()],
+                ..Default::default()
+            },
+        );
+        r.insert_orchestrator(
+            "init-B",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["b.lock".to_owned()],
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            r.orchestrator("init-A").unwrap().cross_cutting_artifacts,
+            vec!["a.lock"]
+        );
+        assert_eq!(
+            r.orchestrator("init-B").unwrap().cross_cutting_artifacts,
+            vec!["b.lock"]
+        );
     }
 
     #[test]
@@ -871,13 +910,19 @@ mod tests {
         r.insert(TaskKey::new("init-A", "t2"), fields_with_allowlist(&["b/"]));
         r.insert(TaskKey::new("init-B", "t1"), fields_with_allowlist(&["c/"]));
 
-        let mut a_tasks: Vec<String> = r.tasks_in_initiative("init-A")
-            .into_iter().map(|(id, _)| id).collect();
+        let mut a_tasks: Vec<String> = r
+            .tasks_in_initiative("init-A")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         a_tasks.sort();
         assert_eq!(a_tasks, vec!["t1".to_owned(), "t2".to_owned()]);
 
-        let b_tasks: Vec<String> = r.tasks_in_initiative("init-B")
-            .into_iter().map(|(id, _)| id).collect();
+        let b_tasks: Vec<String> = r
+            .tasks_in_initiative("init-B")
+            .into_iter()
+            .map(|(id, _)| id)
+            .collect();
         assert_eq!(b_tasks, vec!["t1".to_owned()]);
     }
 
@@ -892,23 +937,23 @@ mod tests {
     fn tasks_in_initiative_carries_full_fields() {
         let r = PlanRegistry::new();
         let f = TaskPlanFields {
-            path_allowlist:            vec!["src/a.rs".to_owned()],
+            path_allowlist: vec!["src/a.rs".to_owned()],
             path_export_to_successors: true,
-            path_export_globs:         vec!["src/**".to_owned()],
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Sparse,
-            session_agent_type:        SessionAgentType::Executor,
-            vm_image:                  String::new(),
-            description:               "Refactor parser to handle UTF-16".to_owned(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            max_turns_step:            None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: vec!["src/**".to_owned()],
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Sparse,
+            session_agent_type: SessionAgentType::Executor,
+            vm_image: String::new(),
+            description: "Refactor parser to handle UTF-16".to_owned(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            max_turns_step: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         };
         r.insert(TaskKey::new("init-A", "t1"), f.clone());
         let snapshot = r.tasks_in_initiative("init-A");

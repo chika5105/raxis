@@ -52,8 +52,7 @@ use std::time::{Duration, Instant};
 
 use raxis_isolation::{
     Backend, CapabilityKind, CapabilityValue, ExitStatus, IntentFrame, IsolationError,
-    IsolationLevel, PushFrame, Session, SessionTransportId, VerifiedImage, VmSpec,
-    WorkspaceMount,
+    IsolationLevel, PushFrame, Session, SessionTransportId, VerifiedImage, VmSpec, WorkspaceMount,
 };
 
 use crate::api::{
@@ -178,9 +177,9 @@ impl HostSupport {
     /// Translate to the substrate trait's tier.
     pub const fn isolation_level(&self) -> IsolationLevel {
         match self {
-            Self::Supported          => IsolationLevel::R1Conformant,
-            Self::KvmUnavailable {..} => IsolationLevel::FallbackOnly,
-            Self::Unsupported {..}   => IsolationLevel::FallbackOnly,
+            Self::Supported => IsolationLevel::R1Conformant,
+            Self::KvmUnavailable { .. } => IsolationLevel::FallbackOnly,
+            Self::Unsupported { .. } => IsolationLevel::FallbackOnly,
         }
     }
 }
@@ -209,7 +208,9 @@ pub fn probe_host() -> HostSupport {
             .open(dev_kvm)
         {
             return HostSupport::KvmUnavailable {
-                reason: format!("/dev/kvm open: {e} (check group membership: `usermod -aG kvm $USER`)"),
+                reason: format!(
+                    "/dev/kvm open: {e} (check group membership: `usermod -aG kvm $USER`)"
+                ),
             };
         }
         HostSupport::Supported
@@ -238,16 +239,16 @@ pub fn probe_host() -> HostSupport {
 pub struct FirecrackerBackend {
     /// Optional override of the `firecracker` binary path. `None` ⇒
     /// PATH lookup.
-    binary:        Option<PathBuf>,
+    binary: Option<PathBuf>,
     /// Directory under which we mint per-session UDS paths
     /// (`<runtime_dir>/<uuid>.api.sock`, `<runtime_dir>/<uuid>.vsock`).
-    runtime_dir:   PathBuf,
+    runtime_dir: PathBuf,
     /// Default planner port (overridable per-session via spec).
-    planner_port:  u32,
+    planner_port: u32,
     /// API call deadline.
-    api_timeout:   Duration,
+    api_timeout: Duration,
     /// Boot grace period (API-sock-appearance deadline).
-    boot_grace:    Duration,
+    boot_grace: Duration,
 }
 
 impl FirecrackerBackend {
@@ -258,11 +259,11 @@ impl FirecrackerBackend {
     /// teardown.
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
         Self {
-            binary:        None,
-            runtime_dir:   runtime_dir.into(),
-            planner_port:  DEFAULT_PLANNER_PORT,
-            api_timeout:   DEFAULT_API_TIMEOUT,
-            boot_grace:    DEFAULT_BOOT_GRACE,
+            binary: None,
+            runtime_dir: runtime_dir.into(),
+            planner_port: DEFAULT_PLANNER_PORT,
+            api_timeout: DEFAULT_API_TIMEOUT,
+            boot_grace: DEFAULT_BOOT_GRACE,
         }
     }
 
@@ -294,7 +295,7 @@ impl FirecrackerBackend {
     /// Construct per-session UDS paths.
     fn session_paths(&self, session_uuid: &str) -> (PathBuf, PathBuf) {
         let api_sock = self.runtime_dir.join(format!("{session_uuid}.api.sock"));
-        let vsock    = self.runtime_dir.join(format!("{session_uuid}.vsock"));
+        let vsock = self.runtime_dir.join(format!("{session_uuid}.vsock"));
         (api_sock, vsock)
     }
 
@@ -304,20 +305,20 @@ impl FirecrackerBackend {
     /// so test fixtures can call it against a fake VMM as a unit.
     fn boot_and_open_session(
         &self,
-        image:     &VerifiedImage,
-        mounts:    &[WorkspaceMount],
-        spec:      &VmSpec,
-        api_sock:  PathBuf,
+        image: &VerifiedImage,
+        mounts: &[WorkspaceMount],
+        spec: &VmSpec,
+        api_sock: PathBuf,
         vsock_uds: PathBuf,
     ) -> Result<FirecrackerSession, IsolationError> {
         // ---- 1. Spawn VMM child ------------------------------------------
         let vmm = FirecrackerVmm::spawn(&SpawnArgs {
-            api_sock:       api_sock.clone(),
-            binary:         self.binary.clone(),
-            pre_args:       None,
-            log_level:      None,
-            extra_args:     None,
-            boot_grace:     self.boot_grace,
+            api_sock: api_sock.clone(),
+            binary: self.binary.clone(),
+            pre_args: None,
+            log_level: None,
+            extra_args: None,
+            boot_grace: self.boot_grace,
             capture_stderr: false,
         })
         .map_err(|e| IsolationError::SpawnFailed(format!("{BACKEND_ID}: {e}")))?;
@@ -338,20 +339,18 @@ impl FirecrackerBackend {
         // ---- 3. Open the planner-port channel ----------------------------
         let port = spec.vsock_cid.unwrap_or(self.planner_port);
         let channel = HostVsockChannel::connect(&vsock_uds, port).map_err(|e| {
-            IsolationError::TransportFault(format!(
-                "{BACKEND_ID}: vsock CONNECT {port}: {e}"
-            ))
+            IsolationError::TransportFault(format!("{BACKEND_ID}: vsock CONNECT {port}: {e}"))
         })?;
 
         // ---- 4. Build live Session handle --------------------------------
         Ok(FirecrackerSession {
-            backend_id:    BACKEND_ID,
-            vmm:           Some(vmm),
-            channel:       Some(channel),
-            terminated:    false,
-            vsock_cid:     spec.vsock_cid.unwrap_or(0),
+            backend_id: BACKEND_ID,
+            vmm: Some(vmm),
+            channel: Some(channel),
+            terminated: false,
+            vsock_cid: spec.vsock_cid.unwrap_or(0),
             api_sock_path: api_sock,
-            vsock_uds:     vsock_uds,
+            vsock_uds: vsock_uds,
             #[cfg(unix)]
             loopback_bridges: Vec::new(),
         })
@@ -361,16 +360,16 @@ impl FirecrackerBackend {
 /// Drive the typed boot REST sequence. Pulled out so tests can run it
 /// against a fake VMM endpoint.
 fn drive_boot(
-    api:       &FirecrackerApi,
-    image:     &VerifiedImage,
-    _mounts:   &[WorkspaceMount],
-    spec:      &VmSpec,
+    api: &FirecrackerApi,
+    image: &VerifiedImage,
+    _mounts: &[WorkspaceMount],
+    spec: &VmSpec,
     vsock_uds: &std::path::Path,
 ) -> Result<(), api::ApiError> {
     api.put_machine_config(&MachineConfig {
-        vcpu_count:   spec.vcpu_count,
+        vcpu_count: spec.vcpu_count,
         mem_size_mib: spec.mem_mib,
-        smt:          false,
+        smt: false,
     })?;
 
     // The Linux kernel binary is a host-canonical artefact lived
@@ -426,7 +425,11 @@ fn drive_boot(
         // For initramfs boots the rootfs is loaded by the kernel as
         // initrd; for EROFS boots we attach it as a virtio-blk drive
         // (`PUT /drives/rootfs`) and leave initrd empty.
-        initrd_path:       if is_initramfs { Some(rootfs_path.clone()) } else { None },
+        initrd_path: if is_initramfs {
+            Some(rootfs_path.clone())
+        } else {
+            None
+        },
     })?;
 
     // Drive registration is conditional on rootfs shape. EROFS uses
@@ -434,10 +437,10 @@ fn drive_boot(
     // kernel's initrd channel is the rootfs).
     if !is_initramfs {
         api.put_drive(&Drive {
-            drive_id:       "rootfs".to_owned(),
-            path_on_host:   rootfs_path,
+            drive_id: "rootfs".to_owned(),
+            path_on_host: rootfs_path,
             is_root_device: true,
-            is_read_only:   true,
+            is_read_only: true,
         })?;
     }
 
@@ -460,9 +463,9 @@ fn drive_boot(
     // been removed entirely — no `attach_nic` branch survives.
 
     api.put_vsock(&VsockConfig {
-        vsock_id:  "raxis".to_owned(),
+        vsock_id: "raxis".to_owned(),
         guest_cid: spec.vsock_cid.unwrap_or(3),
-        uds_path:  vsock_uds.to_path_buf(),
+        uds_path: vsock_uds.to_path_buf(),
     })?;
 
     api.request_action(ActionType::InstanceStart)
@@ -483,7 +486,7 @@ impl FirecrackerApi {
     /// `pub` so tests can drive it directly.
     pub fn put_action(&self, body: &Action) -> Result<(), api::ApiError> {
         match body.action_type {
-            ActionType::InstanceStart  => self.instance_start(),
+            ActionType::InstanceStart => self.instance_start(),
             ActionType::SendCtrlAltDel => self.send_ctrl_alt_del(),
         }
     }
@@ -496,9 +499,9 @@ impl FirecrackerApi {
 impl Backend for FirecrackerBackend {
     fn spawn(
         &self,
-        image:    &VerifiedImage,
-        mounts:   &[WorkspaceMount],
-        spec:     &VmSpec,
+        image: &VerifiedImage,
+        mounts: &[WorkspaceMount],
+        spec: &VmSpec,
     ) -> Result<Box<dyn Session>, IsolationError> {
         // Refuse fast on unsupported hosts — Drop of the VMM child
         // would otherwise mask a clear "wrong host" diagnostic.
@@ -540,9 +543,9 @@ impl Backend for FirecrackerBackend {
                 CapabilityValue::Bool(matches!(probe_host(), HostSupport::Supported))
             }
             CapabilityKind::AttestationSupported => CapabilityValue::Bool(false),
-            CapabilityKind::BootLatencyMs        => CapabilityValue::Int(BOOT_LATENCY_MS_MEDIAN),
-            CapabilityKind::MaxConcurrentVms     => CapabilityValue::Int(256),
-            CapabilityKind::MemoryEncryption     => CapabilityValue::Bool(false),
+            CapabilityKind::BootLatencyMs => CapabilityValue::Int(BOOT_LATENCY_MS_MEDIAN),
+            CapabilityKind::MaxConcurrentVms => CapabilityValue::Int(256),
+            CapabilityKind::MemoryEncryption => CapabilityValue::Bool(false),
         }
     }
 
@@ -563,22 +566,22 @@ impl Backend for FirecrackerBackend {
 #[derive(Debug)]
 pub struct FirecrackerSession {
     /// Stable identifier reported to audit logs.
-    backend_id:    &'static str,
+    backend_id: &'static str,
     /// VMM supervisor; `None` after `terminate` / `shutdown` reaps.
-    vmm:           Option<FirecrackerVmm>,
+    vmm: Option<FirecrackerVmm>,
     /// Channel to the planner inside the guest; `None` after
     /// `terminate` / `shutdown`.
-    channel:       Option<HostVsockChannel>,
+    channel: Option<HostVsockChannel>,
     /// Whether the session has been torn down. Idempotent terminate
     /// path — second call short-circuits.
-    terminated:    bool,
+    terminated: bool,
     /// Guest CID we used at boot. Recorded so `session_identity`
     /// remains stable across the session lifetime.
-    vsock_cid:     u32,
+    vsock_cid: u32,
     /// API socket path; for diagnostic reporting.
     api_sock_path: PathBuf,
     /// VSock UDS path; cleaned up on Drop.
-    vsock_uds:     PathBuf,
+    vsock_uds: PathBuf,
     /// Per-`(vsock_port)` reverse-direction loopback bridges. One
     /// entry per `register_loopback_listener` call. Drained on
     /// `terminate` / `shutdown` BEFORE the VMM child is reaped so
@@ -613,10 +616,7 @@ impl FirecrackerSession {
 
 impl Session for FirecrackerSession {
     fn push(&mut self, frame: &PushFrame) -> Result<(), IsolationError> {
-        let ch = self
-            .channel
-            .as_mut()
-            .ok_or(IsolationError::PeerClosed)?;
+        let ch = self.channel.as_mut().ok_or(IsolationError::PeerClosed)?;
         ch.send_frame(&frame.bytes).map_err(|e| match e {
             crate::vsock::VsockError::PeerClosed => IsolationError::PeerClosed,
             other => IsolationError::TransportFault(format!("{BACKEND_ID}: push: {other}")),
@@ -624,10 +624,7 @@ impl Session for FirecrackerSession {
     }
 
     fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError> {
-        let ch = self
-            .channel
-            .as_mut()
-            .ok_or(IsolationError::PeerClosed)?;
+        let ch = self.channel.as_mut().ok_or(IsolationError::PeerClosed)?;
         let bytes = ch.recv_frame().map_err(|e| match e {
             crate::vsock::VsockError::PeerClosed => IsolationError::PeerClosed,
             other => IsolationError::TransportFault(format!("{BACKEND_ID}: recv: {other}")),
@@ -687,7 +684,7 @@ impl Session for FirecrackerSession {
     #[cfg(unix)]
     fn register_loopback_listener(
         &mut self,
-        vsock_port:         u32,
+        vsock_port: u32,
         host_loopback_port: u16,
     ) -> Result<(), IsolationError> {
         if self.terminated {
@@ -739,9 +736,10 @@ impl Session for FirecrackerSession {
 
         // Try graceful shutdown via VMM's `SendCtrlAltDel` action,
         // then poll for child exit.
-        let api = self.vmm.as_ref().map(|v| {
-            FirecrackerApi::new(v.api_sock()).with_timeout(Duration::from_millis(500))
-        });
+        let api = self
+            .vmm
+            .as_ref()
+            .map(|v| FirecrackerApi::new(v.api_sock()).with_timeout(Duration::from_millis(500)));
         if let Some(api) = api {
             // Best effort — if the child already exited, this fails;
             // the wait loop below will pick up the exit status.
@@ -769,7 +767,9 @@ impl Session for FirecrackerSession {
     }
 
     fn session_identity(&self) -> SessionTransportId {
-        SessionTransportId::Vsock { cid: self.vsock_cid }
+        SessionTransportId::Vsock {
+            cid: self.vsock_cid,
+        }
     }
 }
 
@@ -803,38 +803,38 @@ mod tests {
         // (per-role, .img/EROFS or initramfs cpio.gz). The kernel
         // binary path lives on `VmSpec.linux_kernel_path` instead.
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(p),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path(p),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "raxis-test-fc-1".to_owned(),
+            image_id: "raxis-test-fc-1".to_owned(),
         }
     }
 
     fn fixture_spec(token: &str) -> VmSpec {
         VmSpec {
-            vcpu_count:        1,
-            mem_mib:           128,
-            egress_tier:       EgressTier::None,
-            cgroup_quota:      None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken(token.to_owned()),
-            vsock_cid:         Some(3),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 128,
+            egress_tier: EgressTier::None,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken(token.to_owned()),
+            vsock_cid: Some(3),
+            virtio_fs_mounts: Vec::new(),
             // Substrate tests run with a real (placeholder-on-disk)
             // kernel path so the empty-path guard does not short-
             // circuit the test before exercising the boot-source PUT.
             linux_kernel_path: PathBuf::from("/tmp/raxis-fixture-vmlinux"),
-            env:               Default::default(),
+            env: Default::default(),
             guest_console_log: None,
         }
     }
 
     fn fixture_mount() -> WorkspaceMount {
         WorkspaceMount {
-            host_path:    PathBuf::from("/tmp/raxis-fixture-workspace"),
-            guest_path:   "/workspace".to_owned(),
-            mode:         MountMode::ReadOnly,
+            host_path: PathBuf::from("/tmp/raxis-fixture-workspace"),
+            guest_path: "/workspace".to_owned(),
+            mode: MountMode::ReadOnly,
             content_hash: Some(ContentHash([0u8; 32])),
         }
     }
@@ -848,11 +848,17 @@ mod tests {
             IsolationLevel::R1Conformant,
         );
         assert_eq!(
-            HostSupport::KvmUnavailable { reason: "no /dev/kvm".into() }.isolation_level(),
+            HostSupport::KvmUnavailable {
+                reason: "no /dev/kvm".into()
+            }
+            .isolation_level(),
             IsolationLevel::FallbackOnly,
         );
         assert_eq!(
-            HostSupport::Unsupported { reason: "macos".into() }.isolation_level(),
+            HostSupport::Unsupported {
+                reason: "macos".into()
+            }
+            .isolation_level(),
             IsolationLevel::FallbackOnly,
         );
     }
@@ -874,9 +880,9 @@ mod tests {
         match probe_host() {
             HostSupport::Supported => {}
             HostSupport::KvmUnavailable { reason } => assert!(!reason.is_empty()),
-            HostSupport::Unsupported { reason } => panic!(
-                "Linux host should not report Unsupported, got: {reason}"
-            ),
+            HostSupport::Unsupported { reason } => {
+                panic!("Linux host should not report Unsupported, got: {reason}")
+            }
         }
     }
 
@@ -1060,11 +1066,7 @@ mod tests {
                     }
                 }
                 let text = String::from_utf8_lossy(&buf).into_owned();
-                let request_line = text
-                    .lines()
-                    .next()
-                    .unwrap_or("")
-                    .to_owned();
+                let request_line = text.lines().next().unwrap_or("").to_owned();
                 captured_thread.lock().unwrap().push(request_line);
                 stream
                     .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\n\r\n")
@@ -1119,7 +1121,9 @@ mod tests {
                 let mut tmp = [0u8; 1024];
                 loop {
                     let n = stream.read(&mut tmp).unwrap();
-                    if n == 0 { break; }
+                    if n == 0 {
+                        break;
+                    }
                     buf.extend_from_slice(&tmp[..n]);
                     if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
                         let headers = std::str::from_utf8(&buf[..end]).unwrap();
@@ -1131,7 +1135,9 @@ mod tests {
                                     .map(|s| s.trim().parse::<usize>().unwrap_or(0))
                             })
                             .unwrap_or(0);
-                        if buf.len() >= end + 4 + cl { break; }
+                        if buf.len() >= end + 4 + cl {
+                            break;
+                        }
                     }
                 }
                 let text = String::from_utf8_lossy(&buf).into_owned();
@@ -1163,7 +1169,8 @@ mod tests {
             *cap,
         );
         assert!(
-            cap.iter().all(|line| !line.starts_with("PUT /network-interfaces")),
+            cap.iter()
+                .all(|line| !line.starts_with("PUT /network-interfaces")),
             "INV-NETISO-A3-UNIVERSAL-NO-NIC-01: Mediated emitted a \
              network-interfaces PUT — captured: {:?}",
             *cap,
@@ -1184,10 +1191,10 @@ mod tests {
         // inline-bytes is reserved for Wasm/SGX and should not flow
         // here. The boot driver fails fast without spawning anything.
         let img = VerifiedImage {
-            kind:      ImageKind::WasmModule,
-            body:      ImageBody::Bytes(vec![0u8; 16]),
+            kind: ImageKind::WasmModule,
+            body: ImageBody::Bytes(vec![0u8; 16]),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "wasm-not-allowed".to_owned(),
+            image_id: "wasm-not-allowed".to_owned(),
         };
         let dir = tempfile::tempdir().unwrap();
         let api_sock = dir.path().join("api.sock");

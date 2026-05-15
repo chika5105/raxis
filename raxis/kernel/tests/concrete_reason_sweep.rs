@@ -63,7 +63,7 @@ const FORBIDDEN_PHRASES: &[&str] = &[
 /// prose doesn't accidentally trigger.
 fn strip_sweep_ignore_blocks(input: &str) -> String {
     const BEGIN: &str = "SWEEP-IGNORE-BEGIN";
-    const END:   &str = "SWEEP-IGNORE-END";
+    const END: &str = "SWEEP-IGNORE-END";
     let mut out = String::with_capacity(input.len());
     let mut skipping = false;
     for line in input.lines() {
@@ -84,7 +84,9 @@ fn strip_sweep_ignore_blocks(input: &str) -> String {
 }
 
 fn collect_files(dir: &Path, ext_filter: &[&str], out: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(dir) else { return };
+    let Ok(entries) = fs::read_dir(dir) else {
+        return;
+    };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.is_dir() {
@@ -105,10 +107,16 @@ fn is_allowed(p: &Path) -> bool {
     let s = p.to_string_lossy();
     // This file names the forbidden phrases as the counter-
     // examples being asserted against.
-    if s.ends_with("concrete_reason_sweep.rs") { return true; }
+    if s.ends_with("concrete_reason_sweep.rs") {
+        return true;
+    }
     // Pre-existing kernel-bug-detection regex anchors.
-    if s.ends_with("failure_reason_invariant_witness.rs") { return true; }
-    if s.ends_with("notification_filter.rs") { return true; }
+    if s.ends_with("failure_reason_invariant_witness.rs") {
+        return true;
+    }
+    if s.ends_with("notification_filter.rs") {
+        return true;
+    }
     // The activity-tracker module is the iter56 P2 patch documentation
     // home: its module-level doc-comment quotes the umbrella verbatim
     // as the regression baseline, and its rendering helpers contain
@@ -117,20 +125,28 @@ fn is_allowed(p: &Path) -> bool {
     // `INV-FAILURE-REASON-CONCRETE-01`-clean (no umbrella tail); we
     // whitelist the file rather than wrap every doc-comment in
     // SWEEP-IGNORE markers.
-    if s.ends_with("session_activity.rs") { return true; }
+    if s.ends_with("session_activity.rs") {
+        return true;
+    }
     // FE empty-state component: pins the kernel-bug badge's
     // empty-state strings (which include phrases like "No reason
     // supplied — kernel bug" intentionally — those are the
     // operator-visible affordances for the kernel-bug path, not
     // emit-site reasons).
-    if s.ends_with("FailureReasonPanel.tsx") { return true; }
+    if s.ends_with("FailureReasonPanel.tsx") {
+        return true;
+    }
     // FE Health page renders the same kernel-bug badge text on
     // `failing` / `degraded` subsystems when `last_error` is
     // empty (pinned by INV-DASHBOARD-FAILURE-VISIBILITY-01).
-    if s.ends_with("Health.tsx") { return true; }
+    if s.ends_with("Health.tsx") {
+        return true;
+    }
     // FE wire-shape types file — references the kernel-bug
     // empty-state strings inside doc-comments.
-    if s.ends_with("dashboard-fe/src/types/api.ts") { return true; }
+    if s.ends_with("dashboard-fe/src/types/api.ts") {
+        return true;
+    }
     // FE test fixtures for the kernel-bug badge — the test text
     // intentionally contains the strings the badge displays.
     if s.contains("/test/") || s.ends_with(".test.ts") || s.ends_with(".test.tsx") {
@@ -155,7 +171,7 @@ fn no_umbrella_reason_in_kernel_or_dashboard_emit_sites() {
         .parent()
         .expect("kernel manifest has a parent (raxis/)");
     let kernel_src = manifest.join("src");
-    let fe_src     = raxis_root.join("dashboard-fe").join("src");
+    let fe_src = raxis_root.join("dashboard-fe").join("src");
 
     let mut files: Vec<PathBuf> = Vec::new();
     collect_files(&kernel_src, &["rs"], &mut files);
@@ -172,8 +188,12 @@ fn no_umbrella_reason_in_kernel_or_dashboard_emit_sites() {
 
     let mut violations: Vec<(PathBuf, String, &'static str)> = Vec::new();
     for f in &files {
-        if is_allowed(f) { continue; }
-        let Ok(text) = fs::read_to_string(f) else { continue };
+        if is_allowed(f) {
+            continue;
+        }
+        let Ok(text) = fs::read_to_string(f) else {
+            continue;
+        };
         // Strip regions wrapped in `// SWEEP-IGNORE-BEGIN`/`// SWEEP-IGNORE-END`
         // (or `/* SWEEP-IGNORE-BEGIN */` for block-comment form) so per-file
         // unit-test counter-example lists can co-exist with the actual emit

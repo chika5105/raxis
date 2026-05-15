@@ -64,13 +64,15 @@ pub struct RevocationStore {
 /// a bad revocation file the operator must investigate.
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct LoadStats {
-    pub loaded:   usize,
+    pub loaded: usize,
     pub rejected: usize,
 }
 
 impl RevocationStore {
     /// Construct an empty store.
-    pub fn empty() -> Self { Self::default() }
+    pub fn empty() -> Self {
+        Self::default()
+    }
 
     /// Load `<data_dir>/revocations/*.toml`. Tolerates a missing
     /// directory (returns an empty store with `LoadStats::default()`
@@ -105,9 +107,7 @@ impl RevocationStore {
             match Self::load_record_from(&path) {
                 Ok(rec) => {
                     let key = rec.subject_pubkey_hex.clone();
-                    store
-                        .by_pubkey
-                        .insert(key, (rec.reason, rec.revoked_at));
+                    store.by_pubkey.insert(key, (rec.reason, rec.revoked_at));
                     stats.loaded += 1;
                 }
                 Err(e) => {
@@ -131,10 +131,14 @@ impl RevocationStore {
 
     /// Number of revocation records loaded. Kernel boot logs this
     /// alongside the rejected count for forensic visibility.
-    pub fn len(&self) -> usize { self.by_pubkey.len() }
+    pub fn len(&self) -> usize {
+        self.by_pubkey.len()
+    }
 
     /// Whether the store has zero loaded records. Used by tests.
-    pub fn is_empty(&self) -> bool { self.by_pubkey.is_empty() }
+    pub fn is_empty(&self) -> bool {
+        self.by_pubkey.is_empty()
+    }
 
     /// Test helper: insert an in-memory record without going
     /// through disk. Behind `#[cfg(test)]` so production code
@@ -143,8 +147,8 @@ impl RevocationStore {
     pub(crate) fn insert_for_tests(
         &mut self,
         subject_pubkey_hex: impl Into<String>,
-        reason:             RevocationReason,
-        revoked_at:         i64,
+        reason: RevocationReason,
+        revoked_at: i64,
     ) {
         self.by_pubkey
             .insert(subject_pubkey_hex.into(), (reason, revoked_at));
@@ -152,11 +156,9 @@ impl RevocationStore {
 
     fn load_record_from(path: &PathBuf) -> Result<RevocationRecord, String> {
         let bytes = std::fs::read(path).map_err(|e| format!("read: {e}"))?;
-        let text  = std::str::from_utf8(&bytes).map_err(|e| format!("utf8: {e}"))?;
-        let rec: RevocationRecord = toml::from_str(text)
-            .map_err(|e| format!("toml-parse: {e}"))?;
-        verify_revocation_signature(&rec)
-            .map_err(|e| format!("signature-verify: {e}"))?;
+        let text = std::str::from_utf8(&bytes).map_err(|e| format!("utf8: {e}"))?;
+        let rec: RevocationRecord = toml::from_str(text).map_err(|e| format!("toml-parse: {e}"))?;
+        verify_revocation_signature(&rec).map_err(|e| format!("signature-verify: {e}"))?;
         Ok(rec)
     }
 }
@@ -176,17 +178,17 @@ mod tests {
     }
 
     fn build_record(reason: RevocationReason, when: i64, reference: &str) -> RevocationRecord {
-        let pk  = fixture_pubkey();
+        let pk = fixture_pubkey();
         let sig = sign_revocation(&pk, reason, when, reference, &fixture_signing());
         RevocationRecord {
-            subject_pubkey_hex:        pk.clone(),
-            subject_fingerprint:       "00".repeat(16),
+            subject_pubkey_hex: pk.clone(),
+            subject_fingerprint: "00".repeat(16),
             reason,
-            revoked_at:                when,
-            reference:                 reference.into(),
-            revoked_by_pubkey_hex:     pk,
-            revoked_by_signature_hex:  sig,
-            signing_input_version:     "raxis-cert-revocation/v1".into(),
+            revoked_at: when,
+            reference: reference.into(),
+            revoked_by_pubkey_hex: pk,
+            revoked_by_signature_hex: sig,
+            signing_input_version: "raxis-cert-revocation/v1".into(),
         }
     }
 
@@ -195,7 +197,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (store, stats) = RevocationStore::open(tmp.path());
         assert!(store.is_empty());
-        assert_eq!(stats, LoadStats { loaded: 0, rejected: 0 });
+        assert_eq!(
+            stats,
+            LoadStats {
+                loaded: 0,
+                rejected: 0
+            }
+        );
     }
 
     #[test]
@@ -209,22 +217,22 @@ mod tests {
         std::fs::write(
             revs.join(format!("{}.toml", good.subject_pubkey_hex)),
             toml::to_string(&good).unwrap(),
-        ).unwrap();
+        )
+        .unwrap();
 
         // Tampered record: change `reason` after signing so the
         // canonical bytes no longer match the embedded signature.
         let mut bad = build_record(RevocationReason::Rotation, 1_700_000_001, "INC-2");
         bad.reason = RevocationReason::Compromise;
         // Different filename so it doesn't collide with `good`.
-        std::fs::write(
-            revs.join("bad.toml"),
-            toml::to_string(&bad).unwrap(),
-        ).unwrap();
+        std::fs::write(revs.join("bad.toml"), toml::to_string(&bad).unwrap()).unwrap();
 
         let (store, stats) = RevocationStore::open(tmp.path());
-        assert_eq!(stats.loaded,   1, "exactly one well-formed record");
+        assert_eq!(stats.loaded, 1, "exactly one well-formed record");
         assert_eq!(stats.rejected, 1, "tampered record must be rejected");
-        let hit = store.lookup(&good.subject_pubkey_hex).expect("good record loaded");
+        let hit = store
+            .lookup(&good.subject_pubkey_hex)
+            .expect("good record loaded");
         assert_eq!(hit.0, RevocationReason::Compromise);
         assert_eq!(hit.1, 1_700_000_000);
     }

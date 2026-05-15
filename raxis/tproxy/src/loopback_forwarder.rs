@@ -95,8 +95,8 @@ pub enum LoopbackForwarderError {
 /// `Ok(None)` when the env var is absent (i.e. the kernel
 /// substrate did not request any forwarding for this VM — for
 /// example, a session that needs no credential proxies).
-pub fn loopback_plan_from_env(
-) -> Result<Option<LoopbackPlan>, raxis_vsock_loopback::PlanParseError> {
+pub fn loopback_plan_from_env() -> Result<Option<LoopbackPlan>, raxis_vsock_loopback::PlanParseError>
+{
     match std::env::var(ENV_VAR_LOOPBACK_PLAN) {
         Ok(s) => {
             let plan = LoopbackPlan::from_env_string(&s)?;
@@ -145,12 +145,13 @@ pub async fn spawn_forwarder(plan: &LoopbackPlan) -> Result<(), LoopbackForwarde
     let mut bindings: Vec<(LoopbackEntry, TcpListener)> = Vec::with_capacity(plan.len());
     for entry in plan.iter() {
         let bind_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, entry.guest_loopback_port);
-        let listener = TcpListener::bind(bind_addr).await.map_err(|e| {
-            LoopbackForwarderError::Bind {
-                guest_loopback_port: entry.guest_loopback_port,
-                source: e,
-            }
-        })?;
+        let listener =
+            TcpListener::bind(bind_addr)
+                .await
+                .map_err(|e| LoopbackForwarderError::Bind {
+                    guest_loopback_port: entry.guest_loopback_port,
+                    source: e,
+                })?;
         eprintln!(
             "raxis-tproxy: bound 127.0.0.1:{} -> vsock(host_cid, {})",
             entry.guest_loopback_port, entry.vsock_port

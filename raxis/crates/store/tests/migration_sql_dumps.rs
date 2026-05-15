@@ -42,15 +42,15 @@ use std::path::PathBuf;
 /// safe so long as the `.sql` filename + this slice stay in sync.
 fn slug(version: u32) -> &'static str {
     match version {
-        1  => "v1_baseline_kernel_db",
-        2  => "v1x_operator_certificates",
-        3  => "v1x_initiative_quarantines_and_signer",
-        4  => "v1x_quarantined_at_index",
-        5  => "v2_session_schema",
-        6  => "v2_tasks_last_critique",
-        7  => "v2_tasks_review_verdict",
-        8  => "v2_plan_bundle_sealing",
-        9  => "v2_clone_strategy_columns",
+        1 => "v1_baseline_kernel_db",
+        2 => "v1x_operator_certificates",
+        3 => "v1x_initiative_quarantines_and_signer",
+        4 => "v1x_quarantined_at_index",
+        5 => "v2_session_schema",
+        6 => "v2_tasks_last_critique",
+        7 => "v2_tasks_review_verdict",
+        8 => "v2_plan_bundle_sealing",
+        9 => "v2_clone_strategy_columns",
         10 => "v2_task_credential_proxies",
         11 => "v2_integration_merge_attempts",
         12 => "v25_tasks_token_usage",
@@ -62,22 +62,22 @@ fn slug(version: u32) -> &'static str {
         18 => "v2_session_initiative_link_and_nullable_structured_output_task",
         19 => "v2_initiatives_orchestrator_no_progress_respawn_count",
         20 => "v2_escalations_initiator",
-        _  => panic!("no slug registered for migration version {version}"),
+        _ => panic!("no slug registered for migration version {version}"),
     }
 }
 
 fn render(version: u32) -> String {
     use raxis_store::migration::*;
     match version {
-        1  => render_migration_1_ddl(),
-        2  => render_migration_2_ddl(),
-        3  => render_migration_3_ddl(),
-        4  => render_migration_4_ddl(),
-        5  => render_migration_5_ddl(),
-        6  => render_migration_6_ddl(),
-        7  => render_migration_7_ddl(),
-        8  => render_migration_8_ddl(),
-        9  => render_migration_9_ddl(),
+        1 => render_migration_1_ddl(),
+        2 => render_migration_2_ddl(),
+        3 => render_migration_3_ddl(),
+        4 => render_migration_4_ddl(),
+        5 => render_migration_5_ddl(),
+        6 => render_migration_6_ddl(),
+        7 => render_migration_7_ddl(),
+        8 => render_migration_8_ddl(),
+        9 => render_migration_9_ddl(),
         10 => render_migration_10_ddl(),
         11 => render_migration_11_ddl(),
         12 => render_migration_12_ddl(),
@@ -89,7 +89,7 @@ fn render(version: u32) -> String {
         18 => render_migration_18_ddl(),
         19 => render_migration_19_ddl(),
         20 => render_migration_20_ddl(),
-        _  => panic!("no renderer registered for migration version {version}"),
+        _ => panic!("no renderer registered for migration version {version}"),
     }
 }
 
@@ -124,7 +124,9 @@ fn wrap_with_header(rendered: &str) -> String {
     out
 }
 
-const VERSIONS: &[u32] = &[1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20];
+const VERSIONS: &[u32] = &[
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+];
 
 /// Drift-detection: every committed `.sql` matches its
 /// `render_migration_N_ddl()` output byte-for-byte. Set
@@ -147,7 +149,7 @@ fn migration_sql_files_match_rendered_ddl() {
         }
 
         let observed = match std::fs::read_to_string(&path) {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(_) => {
                 drifted.push(format!(
                     "  - missing file: {} (run with RAXIS_DUMP_MIGRATION_SQL=1)",
@@ -168,8 +170,11 @@ fn migration_sql_files_match_rendered_ddl() {
     if dumping {
         // Summary so the maintainer sees the dump count in the test
         // log.
-        eprintln!("RAXIS_DUMP_MIGRATION_SQL: refreshed {} files in {}",
-            VERSIONS.len(), dir.display());
+        eprintln!(
+            "RAXIS_DUMP_MIGRATION_SQL: refreshed {} files in {}",
+            VERSIONS.len(),
+            dir.display()
+        );
         return;
     }
 

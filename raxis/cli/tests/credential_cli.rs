@@ -91,7 +91,11 @@ fn run_raxis_with_stdin(args: &[&str], data_dir: &Path, stdin: &[u8]) -> std::pr
 fn list_on_empty_data_dir_prints_no_credentials_message() {
     let tmp = make_data_dir();
     let out = run_raxis(&["credential", "list"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
         stdout.contains("(no credentials registered)"),
@@ -102,18 +106,31 @@ fn list_on_empty_data_dir_prints_no_credentials_message() {
 #[test]
 fn list_renders_credentials_and_providers_alphabetically() {
     let tmp = make_data_dir();
-    write_cred_file(tmp.path(), "credentials", "zeta-staging.env", b"stage-secret");
-    write_cred_file(tmp.path(), "credentials", "alpha-prod.env",   b"prod-secret");
-    write_cred_file(tmp.path(), "providers",   "anthropic.toml",   b"api_key=...\n");
+    write_cred_file(
+        tmp.path(),
+        "credentials",
+        "zeta-staging.env",
+        b"stage-secret",
+    );
+    write_cred_file(tmp.path(), "credentials", "alpha-prod.env", b"prod-secret");
+    write_cred_file(tmp.path(), "providers", "anthropic.toml", b"api_key=...\n");
 
     let out = run_raxis(&["credential", "list"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     let alpha_pos = stdout.find("alpha-prod").expect("alpha-prod in output");
-    let providers_pos = stdout.find("providers.anthropic").expect("providers.anthropic in output");
+    let providers_pos = stdout
+        .find("providers.anthropic")
+        .expect("providers.anthropic in output");
     let zeta_pos = stdout.find("zeta-staging").expect("zeta-staging in output");
-    assert!(alpha_pos < providers_pos && providers_pos < zeta_pos,
-        "expected alphabetical ordering. stdout: {stdout}");
+    assert!(
+        alpha_pos < providers_pos && providers_pos < zeta_pos,
+        "expected alphabetical ordering. stdout: {stdout}"
+    );
     assert!(stdout.contains("NAME"), "stdout has header: {stdout}");
     assert!(stdout.contains("KIND"), "stdout has header: {stdout}");
 }
@@ -139,11 +156,19 @@ fn list_skips_rotation_temp_files() {
     // Simulate a stranded rotation tempfile (the file backend names
     // these `<stem>.<ext>.tmp.<pid>.<nanos>`). The lister must not
     // surface these as credentials.
-    write_cred_file(tmp.path(), "credentials", "real.env.tmp.12345.6789", b"orphaned");
+    write_cred_file(
+        tmp.path(),
+        "credentials",
+        "real.env.tmp.12345.6789",
+        b"orphaned",
+    );
     let out = run_raxis(&["credential", "list"], tmp.path());
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("real"), "stdout: {stdout}");
-    assert!(!stdout.contains(".tmp."), "tmp files must not appear: {stdout}");
+    assert!(
+        !stdout.contains(".tmp."),
+        "tmp files must not appear: {stdout}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -160,7 +185,11 @@ fn rotate_replaces_an_existing_credential_atomically() {
         tmp.path(),
         b"new-password",
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let on_disk = std::fs::read(tmp.path().join("credentials/pg-staging.env")).unwrap();
     assert_eq!(on_disk, b"new-password");
 }
@@ -179,7 +208,11 @@ fn rotate_strips_one_trailing_newline_from_stdin() {
         tmp.path(),
         b"new\n",
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let on_disk = std::fs::read(tmp.path().join("credentials/x.env")).unwrap();
     assert_eq!(on_disk, b"new");
 }
@@ -192,7 +225,10 @@ fn rotate_fails_when_credential_does_not_exist() {
         tmp.path(),
         b"new",
     );
-    assert!(!out.status.success(), "rotate must fail when credential is missing");
+    assert!(
+        !out.status.success(),
+        "rotate must fail when credential is missing"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("does not exist") || stderr.contains("nonexistent"),
@@ -208,7 +244,10 @@ fn rotate_rejects_value_argv_flag_to_protect_secret_from_ps_aux() {
         &["credential", "rotate", "x", "--value", "the-actual-secret"],
         tmp.path(),
     );
-    assert!(!out.status.success(), "INV-CRED-CLI-01: --value must be rejected");
+    assert!(
+        !out.status.success(),
+        "INV-CRED-CLI-01: --value must be rejected"
+    );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
         stderr.contains("--value") && (stderr.contains("rejected") || stderr.contains("ps aux")),
@@ -220,11 +259,7 @@ fn rotate_rejects_value_argv_flag_to_protect_secret_from_ps_aux() {
 fn rotate_refuses_empty_input() {
     let tmp = make_data_dir();
     write_cred_file(tmp.path(), "credentials", "x.env", b"old");
-    let out = run_raxis_with_stdin(
-        &["credential", "rotate", "x", "--stdin"],
-        tmp.path(),
-        b"",
-    );
+    let out = run_raxis_with_stdin(&["credential", "rotate", "x", "--stdin"], tmp.path(), b"");
     assert!(!out.status.success(), "empty input must be refused");
     let on_disk = std::fs::read(tmp.path().join("credentials/x.env")).unwrap();
     assert_eq!(on_disk, b"old", "credential must not have been touched");
@@ -251,12 +286,19 @@ fn rotate_via_file_input_writes_exact_bytes() {
     std::fs::write(&value_path, b"binary\x00bytes\xff").unwrap();
     let out = run_raxis(
         &[
-            "credential", "rotate", "x",
-            "--file", value_path.to_str().unwrap(),
+            "credential",
+            "rotate",
+            "x",
+            "--file",
+            value_path.to_str().unwrap(),
         ],
         tmp.path(),
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let on_disk = std::fs::read(tmp.path().join("credentials/x.env")).unwrap();
     assert_eq!(on_disk, b"binary\x00bytes\xff");
 }
@@ -286,11 +328,24 @@ fn unknown_credential_subcommand_suggests_list_or_rotate() {
 fn add_writes_a_new_credential_with_mode_0600() {
     let tmp = make_data_dir();
     let out = run_raxis_with_stdin(
-        &["credential", "add", "newpg", "--type", "postgres", "--env", "staging", "--stdin"],
+        &[
+            "credential",
+            "add",
+            "newpg",
+            "--type",
+            "postgres",
+            "--env",
+            "staging",
+            "--stdin",
+        ],
         tmp.path(),
         b"PGHOST=db\nPGPASSWORD=hunter2\n",
     );
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let on_disk = std::fs::read(tmp.path().join("credentials/newpg.env")).unwrap();
     assert_eq!(on_disk, b"PGHOST=db\nPGPASSWORD=hunter2");
     #[cfg(unix)]
@@ -305,14 +360,23 @@ fn add_writes_a_new_credential_with_mode_0600() {
 fn add_emits_a_credential_registered_record_in_the_local_trail() {
     let tmp = make_data_dir();
     let out = run_raxis_with_stdin(
-        &["credential", "add", "trailpg", "--type", "postgres", "--env", "staging", "--stdin"],
+        &[
+            "credential",
+            "add",
+            "trailpg",
+            "--type",
+            "postgres",
+            "--env",
+            "staging",
+            "--stdin",
+        ],
         tmp.path(),
         b"hello",
     );
     assert!(out.status.success());
 
-    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
-        .expect("trail file");
+    let trail =
+        std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl")).expect("trail file");
     let line = trail.lines().last().expect("at least one line");
     let v: serde_json::Value = serde_json::from_str(line).expect("valid json");
     assert_eq!(v["kind"], "CredentialRegistered");
@@ -351,7 +415,10 @@ fn add_rejects_value_argv_flag() {
     );
     assert!(!out.status.success());
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--value") && stderr.contains("rejected"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("--value") && stderr.contains("rejected"),
+        "stderr: {stderr}"
+    );
 }
 
 #[test]
@@ -364,7 +431,10 @@ fn add_refuses_path_traversal_in_name() {
     );
     assert!(!out.status.success(), "must refuse traversal segments");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("traversal") || stderr.contains("path separator"), "stderr: {stderr}");
+    assert!(
+        stderr.contains("traversal") || stderr.contains("path separator"),
+        "stderr: {stderr}"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,14 +444,26 @@ fn add_refuses_path_traversal_in_name() {
 #[test]
 fn show_prints_metadata_without_revealing_value() {
     let tmp = make_data_dir();
-    write_cred_file(tmp.path(), "credentials", "shown.env", b"super-secret-value");
+    write_cred_file(
+        tmp.path(),
+        "credentials",
+        "shown.env",
+        b"super-secret-value",
+    );
     let out = run_raxis(&["credential", "show", "shown"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("Name:"), "stdout: {stdout}");
     assert!(stdout.contains("File path:"), "stdout: {stdout}");
     assert!(stdout.contains("Permissions:"), "stdout: {stdout}");
-    assert!(!stdout.contains("super-secret-value"), "show MUST NOT reveal the value");
+    assert!(
+        !stdout.contains("super-secret-value"),
+        "show MUST NOT reveal the value"
+    );
 }
 
 #[test]
@@ -415,8 +497,14 @@ fn remove_without_force_refuses_and_keeps_file() {
     let out = run_raxis(&["credential", "remove", "keep"], tmp.path());
     assert!(!out.status.success(), "remove without --force must fail");
     let stderr = String::from_utf8_lossy(&out.stderr);
-    assert!(stderr.contains("--force"), "stderr should explain --force: {stderr}");
-    assert!(tmp.path().join("credentials/keep.env").exists(), "file must still exist");
+    assert!(
+        stderr.contains("--force"),
+        "stderr should explain --force: {stderr}"
+    );
+    assert!(
+        tmp.path().join("credentials/keep.env").exists(),
+        "file must still exist"
+    );
 }
 
 #[test]
@@ -424,11 +512,18 @@ fn remove_with_force_deletes_file_and_emits_audit_record() {
     let tmp = make_data_dir();
     write_cred_file(tmp.path(), "credentials", "gone.env", b"goodbye");
     let out = run_raxis(&["credential", "remove", "gone", "--force"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
-    assert!(!tmp.path().join("credentials/gone.env").exists(), "file must be unlinked");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !tmp.path().join("credentials/gone.env").exists(),
+        "file must be unlinked"
+    );
 
-    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
-        .expect("trail file");
+    let trail =
+        std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl")).expect("trail file");
     let line = trail.lines().last().expect("at least one line");
     let v: serde_json::Value = serde_json::from_str(line).unwrap();
     assert_eq!(v["kind"], "CredentialRemoved");
@@ -450,11 +545,23 @@ fn remove_unknown_credential_fails() {
 #[test]
 fn verify_passes_for_well_formed_env_credential() {
     let tmp = make_data_dir();
-    write_cred_file(tmp.path(), "credentials", "vpg.env", b"PGHOST=x\nPGPASSWORD=y\n");
+    write_cred_file(
+        tmp.path(),
+        "credentials",
+        "vpg.env",
+        b"PGHOST=x\nPGPASSWORD=y\n",
+    );
     let out = run_raxis(&["credential", "verify", "vpg"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("Status:") && stdout.contains("OK"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("Status:") && stdout.contains("OK"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]
@@ -471,8 +578,8 @@ fn verify_emits_audit_record_with_success_field() {
     write_cred_file(tmp.path(), "credentials", "v.env", b"hello");
     let out = run_raxis(&["credential", "verify", "v"], tmp.path());
     assert!(out.status.success());
-    let trail = std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl"))
-        .expect("trail file");
+    let trail =
+        std::fs::read_to_string(tmp.path().join("audit/credential-cli.jsonl")).expect("trail file");
     let line = trail.lines().last().expect("at least one line");
     let v: serde_json::Value = serde_json::from_str(line).unwrap();
     assert_eq!(v["kind"], "CredentialVerified");
@@ -490,17 +597,30 @@ fn audit_shows_records_for_a_credential() {
     let tmp = make_data_dir();
     // Seed by adding + verifying.
     let _ = run_raxis_with_stdin(
-        &["credential", "add", "trail", "--type", "postgres", "--env", "staging", "--stdin"],
+        &[
+            "credential",
+            "add",
+            "trail",
+            "--type",
+            "postgres",
+            "--env",
+            "staging",
+            "--stdin",
+        ],
         tmp.path(),
         b"PGHOST=h\n",
     );
     let _ = run_raxis(&["credential", "verify", "trail"], tmp.path());
 
     let out = run_raxis(&["credential", "audit", "trail"], tmp.path());
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(stdout.contains("CredentialRegistered"), "stdout: {stdout}");
-    assert!(stdout.contains("CredentialVerified"),   "stdout: {stdout}");
+    assert!(stdout.contains("CredentialVerified"), "stdout: {stdout}");
 }
 
 #[test]
@@ -509,7 +629,10 @@ fn audit_for_unknown_credential_returns_zero_lines() {
     let out = run_raxis(&["credential", "audit", "ghost"], tmp.path());
     assert!(out.status.success(), "no-events case must exit zero");
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(stdout.contains("(no audit events found"), "stdout: {stdout}");
+    assert!(
+        stdout.contains("(no audit events found"),
+        "stdout: {stdout}"
+    );
 }
 
 #[test]

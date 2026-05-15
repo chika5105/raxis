@@ -105,7 +105,11 @@ async fn serve_one(
     if kind != PRELOGIN {
         return Ok(());
     }
-    s.write_all(&frame_packet(TABULAR_RESULT, &build_prelogin_response_body())).await?;
+    s.write_all(&frame_packet(
+        TABULAR_RESULT,
+        &build_prelogin_response_body(),
+    ))
+    .await?;
     s.flush().await?;
     // LOGIN7.
     let (kind, body) = read_packet(&mut s).await?;
@@ -121,11 +125,16 @@ async fn serve_one(
         }
     };
     if !auth_ok {
-        s.write_all(&frame_packet(TABULAR_RESULT, &build_error_done_body(18456, "Login failed for user"))).await?;
+        s.write_all(&frame_packet(
+            TABULAR_RESULT,
+            &build_error_done_body(18456, "Login failed for user"),
+        ))
+        .await?;
         s.flush().await?;
         return Ok(());
     }
-    s.write_all(&frame_packet(TABULAR_RESULT, &build_loginack_done_body())).await?;
+    s.write_all(&frame_packet(TABULAR_RESULT, &build_loginack_done_body()))
+        .await?;
     s.flush().await?;
     // Command loop.
     loop {
@@ -153,7 +162,10 @@ async fn read_packet(s: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     let kind = hdr[0];
     let len = u16::from_be_bytes([hdr[2], hdr[3]]) as usize;
     if len < 8 {
-        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, "short TDS header"));
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "short TDS header",
+        ));
     }
     let body_len = len - 8;
     let mut body = vec![0u8; body_len];
@@ -192,7 +204,10 @@ fn build_prelogin_response_body() -> Vec<u8> {
 
 fn build_loginack_done_body() -> Vec<u8> {
     let mut body = Vec::new();
-    let progname: Vec<u8> = "fake-mssql".encode_utf16().flat_map(|c| c.to_le_bytes()).collect();
+    let progname: Vec<u8> = "fake-mssql"
+        .encode_utf16()
+        .flat_map(|c| c.to_le_bytes())
+        .collect();
     let inner_len = 1 + 4 + 1 + progname.len() + 4;
     body.push(TOKEN_LOGINACK);
     body.extend_from_slice(&(inner_len as u16).to_le_bytes());
@@ -237,7 +252,9 @@ fn build_error_done_body(number: i32, message: &str) -> Vec<u8> {
 }
 
 fn decode_sql_batch_body(body: &[u8]) -> Option<String> {
-    if body.len() < 4 { return None; }
+    if body.len() < 4 {
+        return None;
+    }
     let total_headers = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
     if total_headers > body.len() {
         return decode_utf16_le(body);
@@ -246,8 +263,11 @@ fn decode_sql_batch_body(body: &[u8]) -> Option<String> {
 }
 
 fn decode_utf16_le(bytes: &[u8]) -> Option<String> {
-    if bytes.len() % 2 != 0 { return None; }
-    let units: Vec<u16> = bytes.chunks_exact(2)
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
+    let units: Vec<u16> = bytes
+        .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16(&units).ok()
@@ -268,7 +288,9 @@ fn parse_login7(body: &[u8]) -> ParsedLogin7 {
     // 9 OffsetLength tuples.
     let read_off = |idx: usize| -> Option<(usize, usize)> {
         let base = i + idx * 4;
-        if base + 4 > body.len() { return None; }
+        if base + 4 > body.len() {
+            return None;
+        }
         let off = u16::from_le_bytes([body[base], body[base + 1]]) as usize;
         let chars = u16::from_le_bytes([body[base + 2], body[base + 3]]) as usize;
         Some((off, chars))
@@ -278,7 +300,9 @@ fn parse_login7(body: &[u8]) -> ParsedLogin7 {
     let user_bytes = if user_tuple.1 > 0 {
         let start = user_tuple.0;
         let end = start + user_tuple.1 * 2;
-        if end > body.len() { return ParsedLogin7::default(); }
+        if end > body.len() {
+            return ParsedLogin7::default();
+        }
         body[start..end].to_vec()
     } else {
         Vec::new()
@@ -287,7 +311,9 @@ fn parse_login7(body: &[u8]) -> ParsedLogin7 {
     let password = if pwd_tuple.1 > 0 {
         let start = pwd_tuple.0;
         let end = start + pwd_tuple.1 * 2;
-        if end > body.len() { return ParsedLogin7::default(); }
+        if end > body.len() {
+            return ParsedLogin7::default();
+        }
         body[start..end].to_vec()
     } else {
         Vec::new()
@@ -306,7 +332,8 @@ fn deobfuscate_password(obf: &[u8]) -> Vec<u8> {
         out.push(unswap);
     }
     // Convert UTF-16 LE → UTF-8 → bytes.
-    let units: Vec<u16> = out.chunks_exact(2)
+    let units: Vec<u16> = out
+        .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
         .collect();
     String::from_utf16(&units).unwrap_or_default().into_bytes()

@@ -69,11 +69,11 @@ use tokio_rustls::TlsConnector;
 
 use raxis_credentials::CredentialBackend;
 
-use crate::{
-    compute_envelope_sha256, AuthMode, EnvelopeAudit, EnvelopeAuditSink,
-    EnvelopeOutcome, ProxyConfig, ProxyStats,
-};
 use crate::restriction::{EnvelopeRejection, RecipientCheck};
+use crate::{
+    compute_envelope_sha256, AuthMode, EnvelopeAudit, EnvelopeAuditSink, EnvelopeOutcome,
+    ProxyConfig, ProxyStats,
+};
 
 /// Errors the proxy lifecycle can surface.
 #[derive(Debug, thiserror::Error)]
@@ -82,7 +82,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error from `tokio::net::TcpListener::bind`.
         source: std::io::Error,
     },
@@ -94,19 +94,19 @@ pub enum ProxyError {
 /// SMTP credential proxy.
 pub struct SmtpProxy {
     listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    audit:    Arc<dyn EnvelopeAuditSink>,
-    stats:    Arc<ProxyStats>,
-    rate:     Arc<Mutex<RateBucket>>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    audit: Arc<dyn EnvelopeAuditSink>,
+    stats: Arc<ProxyStats>,
+    rate: Arc<Mutex<RateBucket>>,
 }
 
 impl SmtpProxy {
     /// Bind a listener and return an owned proxy.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn EnvelopeAuditSink>,
+        config: ProxyConfig,
+        audit: Arc<dyn EnvelopeAuditSink>,
     ) -> Result<Self, ProxyError> {
         validate_upstream(&config.upstream_host_port)
             .ok_or_else(|| ProxyError::BadUpstream(config.upstream_host_port.clone()))?;
@@ -114,7 +114,7 @@ impl SmtpProxy {
         let listener = TcpListener::bind(&config.listen_addr)
             .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
 
@@ -124,7 +124,7 @@ impl SmtpProxy {
             config,
             audit,
             stats: Arc::new(ProxyStats::default()),
-            rate:  Arc::new(Mutex::new(RateBucket::new())),
+            rate: Arc::new(Mutex::new(RateBucket::new())),
         })
     }
 
@@ -151,14 +151,17 @@ impl SmtpProxy {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let audit   = Arc::clone(&self.audit);
-                    let stats   = Arc::clone(&self.stats);
-                    let rate    = Arc::clone(&self.rate);
+                    let config = self.config.clone();
+                    let audit = Arc::clone(&self.audit);
+                    let stats = Arc::clone(&self.stats);
+                    let rate = Arc::clone(&self.rate);
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, audit, stats, rate).await {
+                        if let Err(e) = serve_one(stream, backend, config, audit, stats, rate).await
+                        {
                             tracing::warn!(error = ?e, "smtp proxy connection ended with error");
                         }
                     });
@@ -173,10 +176,7 @@ impl SmtpProxy {
 
     /// Process one inbound connection synchronously (used by the
     /// integration tests; production calls `serve`).
-    pub async fn serve_one_for_tests(
-        &self,
-        stream: TcpStream,
-    ) -> std::io::Result<()> {
+    pub async fn serve_one_for_tests(&self, stream: TcpStream) -> std::io::Result<()> {
         serve_one(
             stream,
             Arc::clone(&self.backend),
@@ -184,7 +184,8 @@ impl SmtpProxy {
             Arc::clone(&self.audit),
             Arc::clone(&self.stats),
             Arc::clone(&self.rate),
-        ).await
+        )
+        .await
     }
 }
 
@@ -214,20 +215,22 @@ enum SessionState {
 }
 
 async fn serve_one(
-    stream:  TcpStream,
+    stream: TcpStream,
     backend: Arc<dyn CredentialBackend>,
-    config:  ProxyConfig,
-    audit:   Arc<dyn EnvelopeAuditSink>,
-    stats:   Arc<ProxyStats>,
-    rate:    Arc<Mutex<RateBucket>>,
+    config: ProxyConfig,
+    audit: Arc<dyn EnvelopeAuditSink>,
+    stats: Arc<ProxyStats>,
+    rate: Arc<Mutex<RateBucket>>,
 ) -> std::io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read);
 
-    write.write_all(b"220 raxis-credential-proxy ready\r\n").await?;
+    write
+        .write_all(b"220 raxis-credential-proxy ready\r\n")
+        .await?;
 
     let mut state = SessionState::Greeted;
-    let mut line  = String::new();
+    let mut line = String::new();
 
     loop {
         line.clear();
@@ -270,14 +273,20 @@ async fn serve_one(
                         // Consume username line.
                         line.clear();
                         let n = reader.read_line(&mut line).await?;
-                        if n == 0 { return Ok(()); }
+                        if n == 0 {
+                            return Ok(());
+                        }
                         write.write_all(b"334 UGFzc3dvcmQ6\r\n").await?;
                         // Consume password line.
                         line.clear();
                         let n = reader.read_line(&mut line).await?;
-                        if n == 0 { return Ok(()); }
+                        if n == 0 {
+                            return Ok(());
+                        }
                     }
-                    write.write_all(b"235 2.7.0 authentication successful\r\n").await?;
+                    write
+                        .write_all(b"235 2.7.0 authentication successful\r\n")
+                        .await?;
                 } else if let Some(addr) = strip_prefix_ci(cmd, "MAIL FROM:") {
                     let from = addr.trim().to_owned();
 
@@ -294,23 +303,34 @@ async fn serve_one(
                                 0,
                                 EnvelopeRejection::RateLimitExceeded { limit },
                             ));
-                            stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            write.write_all(b"421 4.7.0 rate limit exceeded\r\n").await?;
+                            stats
+                                .messages_rejected
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            write
+                                .write_all(b"421 4.7.0 rate limit exceeded\r\n")
+                                .await?;
                             continue;
                         }
                     }
 
                     if let Err(rej) = config.restrictions.check_sender(&from) {
                         audit.emit(rejection_audit(&config, &from, &[], 0, rej));
-                        stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        stats
+                            .messages_rejected
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         write.write_all(b"550 5.7.1 sender not allowed\r\n").await?;
                         continue;
                     }
 
-                    state = SessionState::Mail { from, rcpts: Vec::new() };
+                    state = SessionState::Mail {
+                        from,
+                        rcpts: Vec::new(),
+                    };
                     write.write_all(b"250 2.1.0 OK\r\n").await?;
                 } else {
-                    write.write_all(b"503 5.5.1 bad sequence of commands\r\n").await?;
+                    write
+                        .write_all(b"503 5.5.1 bad sequence of commands\r\n")
+                        .await?;
                 }
             }
             SessionState::Mail { from, rcpts } => {
@@ -329,8 +349,12 @@ async fn serve_one(
                                 0,
                                 EnvelopeRejection::RecipientNotAllowed { reason },
                             ));
-                            stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            write.write_all(b"550 5.7.1 recipient not allowed\r\n").await?;
+                            stats
+                                .messages_rejected
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            write
+                                .write_all(b"550 5.7.1 recipient not allowed\r\n")
+                                .await?;
                         }
                     }
                 } else if cmd.eq_ignore_ascii_case("DATA") {
@@ -338,30 +362,49 @@ async fn serve_one(
                         write.write_all(b"503 5.5.1 RCPT TO required\r\n").await?;
                         continue;
                     }
-                    if let Err(rej) = config.restrictions.check_recipient_count(rcpts.len() as u32) {
+                    if let Err(rej) = config
+                        .restrictions
+                        .check_recipient_count(rcpts.len() as u32)
+                    {
                         audit.emit(rejection_audit(&config, from, rcpts, 0, rej));
-                        stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        write.write_all(b"452 4.5.3 too many recipients\r\n").await?;
+                        stats
+                            .messages_rejected
+                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        write
+                            .write_all(b"452 4.5.3 too many recipients\r\n")
+                            .await?;
                         // Reset to Ready so the agent can MAIL FROM again.
                         state = SessionState::Ready;
                         continue;
                     }
-                    write.write_all(b"354 end data with <CRLF>.<CRLF>\r\n").await?;
+                    write
+                        .write_all(b"354 end data with <CRLF>.<CRLF>\r\n")
+                        .await?;
 
                     // Read the message body.
-                    let body = match read_dot_terminated_body(&mut reader, &mut write,
-                        config.restrictions.max_message_bytes).await? {
+                    let body = match read_dot_terminated_body(
+                        &mut reader,
+                        &mut write,
+                        config.restrictions.max_message_bytes,
+                    )
+                    .await?
+                    {
                         Some(b) => b,
-                        None    => {
+                        None => {
                             // Oversize-rejected; client got 552.
                             audit.emit(rejection_audit(
-                                &config, from, rcpts, 0,
+                                &config,
+                                from,
+                                rcpts,
+                                0,
                                 EnvelopeRejection::MessageTooLarge {
                                     limit: config.restrictions.max_message_bytes.unwrap_or(0),
-                                    got:   config.restrictions.max_message_bytes.unwrap_or(0) + 1,
+                                    got: config.restrictions.max_message_bytes.unwrap_or(0) + 1,
                                 },
                             ));
-                            stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            stats
+                                .messages_rejected
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             state = SessionState::Ready;
                             continue;
                         }
@@ -369,48 +412,63 @@ async fn serve_one(
 
                     let bytes = body.len() as u64;
 
-                    let from_owned  = from.clone();
+                    let from_owned = from.clone();
                     let rcpts_owned = std::mem::take(rcpts);
 
-                    state = SessionState::Body { from: from_owned.clone(), rcpts: rcpts_owned.clone() };
+                    state = SessionState::Body {
+                        from: from_owned.clone(),
+                        rcpts: rcpts_owned.clone(),
+                    };
                     let _ = state;
 
                     // Forward to upstream.
                     let envelope_sha = compute_envelope_sha256(&from_owned, &rcpts_owned);
-                    match Outbound::submit(&backend, &config, &from_owned, &rcpts_owned, &body).await {
+                    match Outbound::submit(&backend, &config, &from_owned, &rcpts_owned, &body)
+                        .await
+                    {
                         Ok(()) => {
                             audit.emit(EnvelopeAudit {
-                                outcome:           EnvelopeOutcome::Relayed,
-                                consumer:          config.consumer.clone(),
-                                envelope_sha256:   envelope_sha,
-                                recipient_count:   rcpts_owned.len() as u32,
-                                bytes_submitted:   bytes,
-                                rejection_reason:  None,
+                                outcome: EnvelopeOutcome::Relayed,
+                                consumer: config.consumer.clone(),
+                                envelope_sha256: envelope_sha,
+                                recipient_count: rcpts_owned.len() as u32,
+                                bytes_submitted: bytes,
+                                rejection_reason: None,
                             });
-                            stats.messages_relayed.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            stats
+                                .messages_relayed
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             stats.recipients_accepted.fetch_add(
                                 rcpts_owned.len() as u32,
                                 std::sync::atomic::Ordering::Relaxed,
                             );
-                            stats.bytes_relayed.fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
+                            stats
+                                .bytes_relayed
+                                .fetch_add(bytes, std::sync::atomic::Ordering::Relaxed);
                             write.write_all(b"250 2.0.0 OK\r\n").await?;
                         }
                         Err(reason) => {
                             audit.emit(EnvelopeAudit {
-                                outcome:           EnvelopeOutcome::Rejected,
-                                consumer:          config.consumer.clone(),
-                                envelope_sha256:   envelope_sha,
-                                recipient_count:   rcpts_owned.len() as u32,
-                                bytes_submitted:   bytes,
-                                rejection_reason:  Some(format!("upstream_failed reason={reason}")),
+                                outcome: EnvelopeOutcome::Rejected,
+                                consumer: config.consumer.clone(),
+                                envelope_sha256: envelope_sha,
+                                recipient_count: rcpts_owned.len() as u32,
+                                bytes_submitted: bytes,
+                                rejection_reason: Some(format!("upstream_failed reason={reason}")),
                             });
-                            stats.messages_rejected.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                            write.write_all(b"451 4.4.0 upstream relay failed\r\n").await?;
+                            stats
+                                .messages_rejected
+                                .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            write
+                                .write_all(b"451 4.4.0 upstream relay failed\r\n")
+                                .await?;
                         }
                     }
                     state = SessionState::Ready;
                 } else {
-                    write.write_all(b"503 5.5.1 bad sequence of commands\r\n").await?;
+                    write
+                        .write_all(b"503 5.5.1 bad sequence of commands\r\n")
+                        .await?;
                 }
             }
             SessionState::Body { .. } => {
@@ -434,7 +492,7 @@ async fn serve_one(
 /// and is NOT a body terminator.
 async fn read_dot_terminated_body<R, W>(
     reader: &mut BufReader<R>,
-    write:  &mut W,
+    write: &mut W,
     soft_cap: Option<u64>,
 ) -> std::io::Result<Option<Vec<u8>>>
 where
@@ -482,7 +540,9 @@ where
                 }
                 drained += m as u64;
             }
-            write.write_all(b"552 5.3.4 message size exceeds fixed limit\r\n").await?;
+            write
+                .write_all(b"552 5.3.4 message size exceeds fixed limit\r\n")
+                .await?;
             return Ok(None);
         }
         body.extend_from_slice(stripped.as_bytes());
@@ -491,17 +551,17 @@ where
 
 fn rejection_audit(
     config: &ProxyConfig,
-    from:   &str,
-    rcpts:  &[String],
-    bytes:  u64,
-    rej:    EnvelopeRejection,
+    from: &str,
+    rcpts: &[String],
+    bytes: u64,
+    rej: EnvelopeRejection,
 ) -> EnvelopeAudit {
     EnvelopeAudit {
-        outcome:          EnvelopeOutcome::Rejected,
-        consumer:         config.consumer.clone(),
-        envelope_sha256:  compute_envelope_sha256(from, rcpts),
-        recipient_count:  rcpts.len() as u32,
-        bytes_submitted:  bytes,
+        outcome: EnvelopeOutcome::Rejected,
+        consumer: config.consumer.clone(),
+        envelope_sha256: compute_envelope_sha256(from, rcpts),
+        recipient_count: rcpts.len() as u32,
+        bytes_submitted: bytes,
         rejection_reason: Some(rej.audit_summary()),
     }
 }
@@ -565,10 +625,10 @@ impl Outbound {
     ///   6. `QUIT` (best-effort).
     pub async fn submit(
         backend: &Arc<dyn CredentialBackend>,
-        config:  &ProxyConfig,
-        from:    &str,
-        rcpts:   &[String],
-        body:    &[u8],
+        config: &ProxyConfig,
+        from: &str,
+        rcpts: &[String],
+        body: &[u8],
     ) -> Result<(), String> {
         // Resolve the credential bytes per submission. The backend's
         // resolve API is synchronous and takes `ConsumerIdentity` by
@@ -597,22 +657,24 @@ impl Outbound {
 /// Cleartext flow: greet → EHLO → AUTH → MAIL FROM → RCPT TO → DATA
 /// → QUIT, all on plain TCP.
 async fn drive_cleartext(
-    stream:  TcpStream,
-    config:  &ProxyConfig,
-    cred:    &raxis_credentials::CredentialValue,
-    from:    &str,
-    rcpts:   &[String],
-    body:    &[u8],
+    stream: TcpStream,
+    config: &ProxyConfig,
+    cred: &raxis_credentials::CredentialValue,
+    from: &str,
+    rcpts: &[String],
+    body: &[u8],
 ) -> Result<(), String> {
     let (read, write) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
-    let mut write  = write;
+    let mut write = write;
 
     // 220 greeting.
     let _greeting = read_smtp_status(&mut reader, "greeting").await?;
 
     // EHLO.
-    write.write_all(b"EHLO raxis-credential-proxy\r\n").await
+    write
+        .write_all(b"EHLO raxis-credential-proxy\r\n")
+        .await
         .map_err(|e| format!("ehlo_write_failed: {e}"))?;
     let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo").await?;
 
@@ -643,15 +705,19 @@ async fn starttls_upgrade(
     {
         let (read, write) = tokio::io::split(&mut stream);
         let mut reader = BufReader::new(read);
-        let mut write  = write;
+        let mut write = write;
 
         let _greeting = read_smtp_status(&mut reader, "greeting").await?;
 
-        write.write_all(b"EHLO raxis-credential-proxy\r\n").await
+        write
+            .write_all(b"EHLO raxis-credential-proxy\r\n")
+            .await
             .map_err(|e| format!("ehlo_write_failed: {e}"))?;
         let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo").await?;
 
-        write.write_all(b"STARTTLS\r\n").await
+        write
+            .write_all(b"STARTTLS\r\n")
+            .await
             .map_err(|e| format!("starttls_write_failed: {e}"))?;
         let s = read_smtp_status(&mut reader, "starttls").await?;
         if s != 220 {
@@ -660,7 +726,9 @@ async fn starttls_upgrade(
     }
 
     // Step 2: TLS handshake.
-    let mut tls_stream = connector.connect(server_name, stream).await
+    let mut tls_stream = connector
+        .connect(server_name, stream)
+        .await
         .map_err(|e| format!("tls_handshake_failed: {e}"))?;
 
     // Step 3: re-issue EHLO over TLS so the upstream advertises its
@@ -669,8 +737,10 @@ async fn starttls_upgrade(
     {
         let (read, write) = tokio::io::split(&mut tls_stream);
         let mut reader = BufReader::new(read);
-        let mut write  = write;
-        write.write_all(b"EHLO raxis-credential-proxy\r\n").await
+        let mut write = write;
+        write
+            .write_all(b"EHLO raxis-credential-proxy\r\n")
+            .await
             .map_err(|e| format!("ehlo_tls_write_failed: {e}"))?;
         let _ehlo_resp = read_smtp_multi_status(&mut reader, "ehlo_tls").await?;
         // Drop the split halves; ownership returns to the outer
@@ -682,16 +752,16 @@ async fn starttls_upgrade(
 
 /// Continue the SMTP submission on a (post-handshake) TLS stream.
 async fn drive_post_handshake<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
-    stream:  S,
-    config:  &ProxyConfig,
-    cred:    &raxis_credentials::CredentialValue,
-    from:    &str,
-    rcpts:   &[String],
-    body:    &[u8],
+    stream: S,
+    config: &ProxyConfig,
+    cred: &raxis_credentials::CredentialValue,
+    from: &str,
+    rcpts: &[String],
+    body: &[u8],
 ) -> Result<(), String> {
     let (read, write) = tokio::io::split(stream);
     let mut reader = BufReader::new(read);
-    let mut write  = write;
+    let mut write = write;
 
     drive_auth_through_quit(&mut reader, &mut write, config, cred, from, rcpts, body).await
 }
@@ -701,12 +771,12 @@ async fn drive_post_handshake<S: tokio::io::AsyncRead + tokio::io::AsyncWrite + 
 /// same code.
 async fn drive_auth_through_quit<R, W>(
     reader: &mut BufReader<R>,
-    write:  &mut W,
+    write: &mut W,
     config: &ProxyConfig,
-    cred:   &raxis_credentials::CredentialValue,
-    from:   &str,
-    rcpts:  &[String],
-    body:   &[u8],
+    cred: &raxis_credentials::CredentialValue,
+    from: &str,
+    rcpts: &[String],
+    body: &[u8],
 ) -> Result<(), String>
 where
     R: tokio::io::AsyncRead + Unpin,
@@ -716,17 +786,15 @@ where
     // we render the wire-format payload inside `with_bytes` so the
     // borrow scope ends before the stream write returns).
     let auth_line = match &config.auth_mode {
-        AuthMode::Plain { user } => {
-            cred.with_bytes(|cred_bytes| {
-                let mut payload = Vec::with_capacity(2 + user.len() + cred_bytes.len());
-                payload.push(0u8);
-                payload.extend_from_slice(user.as_bytes());
-                payload.push(0u8);
-                payload.extend_from_slice(cred_bytes);
-                let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
-                format!("AUTH PLAIN {b64}\r\n")
-            })
-        }
+        AuthMode::Plain { user } => cred.with_bytes(|cred_bytes| {
+            let mut payload = Vec::with_capacity(2 + user.len() + cred_bytes.len());
+            payload.push(0u8);
+            payload.extend_from_slice(user.as_bytes());
+            payload.push(0u8);
+            payload.extend_from_slice(cred_bytes);
+            let b64 = base64::engine::general_purpose::STANDARD.encode(&payload);
+            format!("AUTH PLAIN {b64}\r\n")
+        }),
         AuthMode::Login { user } => {
             // RFC 4954 §4 allows the user-line to be supplied in the
             // same command for IMF clients that prefer it; many
@@ -735,7 +803,9 @@ where
             format!("AUTH LOGIN {user_b64}\r\n")
         }
     };
-    write.write_all(auth_line.as_bytes()).await
+    write
+        .write_all(auth_line.as_bytes())
+        .await
         .map_err(|e| format!("auth_write_failed: {e}"))?;
     let auth_status = read_smtp_status(reader, "auth").await?;
     if auth_status >= 400 {
@@ -743,10 +813,11 @@ where
     }
     // Login may need a second password line if status was 334.
     if matches!(&config.auth_mode, AuthMode::Login { .. }) && auth_status == 334 {
-        let pw_b64 = cred.with_bytes(|cred_bytes| {
-            base64::engine::general_purpose::STANDARD.encode(cred_bytes)
-        });
-        write.write_all(pw_b64.as_bytes()).await
+        let pw_b64 = cred
+            .with_bytes(|cred_bytes| base64::engine::general_purpose::STANDARD.encode(cred_bytes));
+        write
+            .write_all(pw_b64.as_bytes())
+            .await
             .map_err(|e| format!("auth_login_pw_write_failed: {e}"))?;
         write.write_all(b"\r\n").await.ok();
         let s = read_smtp_status(reader, "auth-login-pw").await?;
@@ -756,21 +827,31 @@ where
     }
 
     // MAIL FROM.
-    write.write_all(format!("MAIL FROM:{from}\r\n").as_bytes()).await
+    write
+        .write_all(format!("MAIL FROM:{from}\r\n").as_bytes())
+        .await
         .map_err(|e| format!("mail_from_write_failed: {e}"))?;
     let s = read_smtp_status(reader, "mail_from").await?;
-    if s >= 400 { return Err(format!("mail_from_rejected status={s}")); }
+    if s >= 400 {
+        return Err(format!("mail_from_rejected status={s}"));
+    }
 
     // RCPT TO (one at a time).
     for r in rcpts {
-        write.write_all(format!("RCPT TO:{r}\r\n").as_bytes()).await
+        write
+            .write_all(format!("RCPT TO:{r}\r\n").as_bytes())
+            .await
             .map_err(|e| format!("rcpt_to_write_failed: {e}"))?;
         let s = read_smtp_status(reader, "rcpt_to").await?;
-        if s >= 400 { return Err(format!("rcpt_to_rejected status={s}")); }
+        if s >= 400 {
+            return Err(format!("rcpt_to_rejected status={s}"));
+        }
     }
 
     // DATA.
-    write.write_all(b"DATA\r\n").await
+    write
+        .write_all(b"DATA\r\n")
+        .await
         .map_err(|e| format!("data_write_failed: {e}"))?;
     let s = read_smtp_status(reader, "data").await?;
     if s != 354 {
@@ -779,10 +860,14 @@ where
     // Apply RFC 5321 §4.5.2 dot-stuffing on the way out.
     for line in body.split_inclusive(|&b| b == b'\n') {
         if line.starts_with(b".") {
-            write.write_all(b".").await
+            write
+                .write_all(b".")
+                .await
                 .map_err(|e| format!("data_body_dot_stuff_write_failed: {e}"))?;
         }
-        write.write_all(line).await
+        write
+            .write_all(line)
+            .await
             .map_err(|e| format!("data_body_write_failed: {e}"))?;
     }
     // Ensure the body ends with CRLF before the terminator, then
@@ -790,18 +875,19 @@ where
     if !body.ends_with(b"\r\n") {
         write.write_all(b"\r\n").await.ok();
     }
-    write.write_all(b".\r\n").await
+    write
+        .write_all(b".\r\n")
+        .await
         .map_err(|e| format!("data_terminator_write_failed: {e}"))?;
     let s = read_smtp_status(reader, "data_done").await?;
-    if s >= 400 { return Err(format!("data_done_rejected status={s}")); }
+    if s >= 400 {
+        return Err(format!("data_done_rejected status={s}"));
+    }
 
     // QUIT (best-effort; we don't fail the relay if the upstream
     // hangs up before responding).
     write.write_all(b"QUIT\r\n").await.ok();
-    let _ = tokio::time::timeout(
-        Duration::from_secs(2),
-        read_smtp_status(reader, "quit"),
-    ).await;
+    let _ = tokio::time::timeout(Duration::from_secs(2), read_smtp_status(reader, "quit")).await;
 
     Ok(())
 }
@@ -830,10 +916,12 @@ fn default_client_config() -> Arc<ClientConfig> {
 /// they expect one.
 async fn read_smtp_status<R: AsyncReadExt + Unpin>(
     reader: &mut BufReader<R>,
-    where_:  &str,
+    where_: &str,
 ) -> Result<u16, String> {
     let mut line = String::new();
-    let n = reader.read_line(&mut line).await
+    let n = reader
+        .read_line(&mut line)
+        .await
         .map_err(|e| format!("{where_}_read_failed: {e}"))?;
     if n == 0 {
         return Err(format!("{where_}_eof_before_status"));
@@ -843,12 +931,14 @@ async fn read_smtp_status<R: AsyncReadExt + Unpin>(
 
 async fn read_smtp_multi_status<R: AsyncReadExt + Unpin>(
     reader: &mut BufReader<R>,
-    where_:  &str,
+    where_: &str,
 ) -> Result<u16, String> {
     let mut line = String::new();
     loop {
         line.clear();
-        let n = reader.read_line(&mut line).await
+        let n = reader
+            .read_line(&mut line)
+            .await
             .map_err(|e| format!("{where_}_read_failed: {e}"))?;
         if n == 0 {
             return Err(format!("{where_}_eof_before_status"));
@@ -866,7 +956,8 @@ fn parse_smtp_status_line(line: &str, where_: &str) -> Result<u16, String> {
     if line.len() < 3 {
         return Err(format!("{where_}_short_status: {line:?}"));
     }
-    line[..3].parse::<u16>()
+    line[..3]
+        .parse::<u16>()
         .map_err(|e| format!("{where_}_bad_status: {e} (line={line:?})"))
 }
 
@@ -884,7 +975,9 @@ struct RateBucket {
 
 impl RateBucket {
     fn new() -> Self {
-        Self { timestamps: Vec::new() }
+        Self {
+            timestamps: Vec::new(),
+        }
     }
 
     fn try_consume_now(&mut self, limit_per_minute: u32) -> bool {
@@ -924,8 +1017,10 @@ mod tests {
         assert!(validate_upstream("smtp.example.com").is_none());
         assert!(validate_upstream(":25").is_none());
         assert!(validate_upstream("smtp.example.com:not-a-port").is_none());
-        assert!(validate_upstream("smtp.example.com:99999").is_none(),
-            "port out of u16 range");
+        assert!(
+            validate_upstream("smtp.example.com:99999").is_none(),
+            "port out of u16 range"
+        );
     }
 
     #[test]
@@ -935,8 +1030,10 @@ mod tests {
         for _ in 0..5 {
             assert!(b.try_consume_at(now, 5));
         }
-        assert!(!b.try_consume_at(now, 5),
-            "6th attempt within 60s must be rejected");
+        assert!(
+            !b.try_consume_at(now, 5),
+            "6th attempt within 60s must be rejected"
+        );
     }
 
     #[test]
@@ -957,7 +1054,10 @@ mod tests {
     fn parse_smtp_status_line_extracts_code() {
         assert_eq!(parse_smtp_status_line("220 hello\r\n", "x").unwrap(), 220);
         assert_eq!(parse_smtp_status_line("250-multi\r\n", "x").unwrap(), 250);
-        assert_eq!(parse_smtp_status_line("550 5.7.1 nope\r\n", "x").unwrap(), 550);
+        assert_eq!(
+            parse_smtp_status_line("550 5.7.1 nope\r\n", "x").unwrap(),
+            550
+        );
     }
 
     #[test]
@@ -972,7 +1072,7 @@ mod tests {
         assert_eq!(strip_prefix_ci("ehlo foo", "EHLO "), Some("foo"));
         assert_eq!(strip_prefix_ci("EhLo foo", "EHLO "), Some("foo"));
         assert_eq!(strip_prefix_ci("HELO bar", "EHLO "), None);
-        assert_eq!(strip_prefix_ci("EH",       "EHLO "), None);
+        assert_eq!(strip_prefix_ci("EH", "EHLO "), None);
     }
 
     /// Bind a proxy on `127.0.0.1:0`, exchange a minimal
@@ -990,15 +1090,15 @@ mod tests {
     /// EHLO continuation line with an independent `write_all`). The
     /// helper mirrors what a real SMTP client does and what
     /// `read_smtp_multi_status` does in this same file.
-    async fn drain_reply<'a>(
-        reader: &mut tokio::io::BufReader<&'a mut TcpStream>,
-    ) -> String {
+    async fn drain_reply<'a>(reader: &mut tokio::io::BufReader<&'a mut TcpStream>) -> String {
         use tokio::io::AsyncBufReadExt;
         let mut out = String::new();
         loop {
             let mut line = String::new();
             let n = reader.read_line(&mut line).await.expect("read_line");
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             out.push_str(&line);
             // Continuation marker is `<code>-` (4th byte). Any other
             // 4th byte (typically a space, RFC 5321 §4.2.1) marks
@@ -1013,45 +1113,55 @@ mod tests {
     #[tokio::test]
     async fn ehlo_quit_round_trip_reads_220_and_221() {
         use raxis_credentials::{
-            CredentialBackend, CredentialError, CredentialName, CredentialValue,
-            ConsumerIdentity, Lease, OperatorId,
+            ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
+            Lease, OperatorId,
         };
         struct NoopBackend;
         impl CredentialBackend for NoopBackend {
             fn resolve(
                 &self,
-                _name:    &CredentialName,
-                _by:      ConsumerIdentity<'_>,
+                _name: &CredentialName,
+                _by: ConsumerIdentity<'_>,
             ) -> Result<CredentialValue, CredentialError> {
                 Ok(CredentialValue::from_bytes(b"".to_vec()))
             }
             fn rotate(
                 &self,
                 _name: &CredentialName,
-                _new:  CredentialValue,
+                _new: CredentialValue,
                 _actor: OperatorId,
             ) -> Result<(), CredentialError> {
                 unreachable!("rotate not exercised in this test")
             }
-            fn exists(&self, _name: &CredentialName) -> bool { true }
-            fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-            fn backend_kind(&self) -> &'static str { "test_noop" }
+            fn exists(&self, _name: &CredentialName) -> bool {
+                true
+            }
+            fn lease(&self, _name: &CredentialName) -> Lease {
+                Lease::Forever
+            }
+            fn backend_kind(&self) -> &'static str {
+                "test_noop"
+            }
         }
 
         let cfg = ProxyConfig {
-            listen_addr:           "127.0.0.1:0".to_owned(),
-            upstream_host_port:    "127.0.0.1:1".to_owned(),
-            require_upstream_tls:  false,
-            credential_name:       CredentialName::new("smtp-test"),
-            auth_mode:             AuthMode::Plain { user: "u".to_owned() },
-            consumer:              crate::OwnedConsumer::new("test", "smtp"),
-            restrictions:          crate::Restrictions::default(),
+            listen_addr: "127.0.0.1:0".to_owned(),
+            upstream_host_port: "127.0.0.1:1".to_owned(),
+            require_upstream_tls: false,
+            credential_name: CredentialName::new("smtp-test"),
+            auth_mode: AuthMode::Plain {
+                user: "u".to_owned(),
+            },
+            consumer: crate::OwnedConsumer::new("test", "smtp"),
+            restrictions: crate::Restrictions::default(),
         };
         let proxy = SmtpProxy::bind(
             Arc::new(NoopBackend),
             cfg,
             Arc::new(crate::NoopEnvelopeAuditSink),
-        ).await.expect("bind smtp proxy");
+        )
+        .await
+        .expect("bind smtp proxy");
 
         let addr = proxy.local_addr().expect("local_addr");
         let _stats = proxy.stats_handle();
@@ -1061,7 +1171,10 @@ mod tests {
         let mut reader = tokio::io::BufReader::new(&mut client);
 
         let banner = drain_reply(&mut reader).await;
-        assert!(banner.starts_with("220 "), "expected 220 banner, got {banner:?}");
+        assert!(
+            banner.starts_with("220 "),
+            "expected 220 banner, got {banner:?}"
+        );
 
         // Drop the borrow so we can write back through the same
         // socket without splitting it.
@@ -1070,17 +1183,17 @@ mod tests {
         client.write_all(b"EHLO smoke\r\n").await.unwrap();
         let mut reader = tokio::io::BufReader::new(&mut client);
         let ehlo = drain_reply(&mut reader).await;
-        assert!(ehlo.contains("250"),
-            "expected 250 EHLO line, got {ehlo:?}");
-        assert!(ehlo.contains("AUTH"),
-            "EHLO must advertise AUTH, got {ehlo:?}");
+        assert!(ehlo.contains("250"), "expected 250 EHLO line, got {ehlo:?}");
+        assert!(
+            ehlo.contains("AUTH"),
+            "EHLO must advertise AUTH, got {ehlo:?}"
+        );
         drop(reader);
 
         client.write_all(b"QUIT\r\n").await.unwrap();
         let mut reader = tokio::io::BufReader::new(&mut client);
         let quit = drain_reply(&mut reader).await;
-        assert!(quit.starts_with("221 "),
-            "expected 221 Bye, got {quit:?}");
+        assert!(quit.starts_with("221 "), "expected 221 Bye, got {quit:?}");
 
         server.abort();
     }
@@ -1092,8 +1205,8 @@ mod tests {
     #[tokio::test]
     async fn sender_not_allowed_rejects_with_550_and_audits_envelope() {
         use raxis_credentials::{
-            CredentialBackend, CredentialError, CredentialName, CredentialValue,
-            ConsumerIdentity, Lease, OperatorId,
+            ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
+            Lease, OperatorId,
         };
         use std::sync::Mutex as StdMutex;
 
@@ -1101,22 +1214,28 @@ mod tests {
         impl CredentialBackend for NoopBackend {
             fn resolve(
                 &self,
-                _name:    &CredentialName,
-                _by:      ConsumerIdentity<'_>,
+                _name: &CredentialName,
+                _by: ConsumerIdentity<'_>,
             ) -> Result<CredentialValue, CredentialError> {
                 Ok(CredentialValue::from_bytes(b"".to_vec()))
             }
             fn rotate(
                 &self,
                 _name: &CredentialName,
-                _new:  CredentialValue,
+                _new: CredentialValue,
                 _actor: OperatorId,
             ) -> Result<(), CredentialError> {
                 unreachable!("rotate not exercised in this test")
             }
-            fn exists(&self, _name: &CredentialName) -> bool { true }
-            fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-            fn backend_kind(&self) -> &'static str { "test_noop" }
+            fn exists(&self, _name: &CredentialName) -> bool {
+                true
+            }
+            fn lease(&self, _name: &CredentialName) -> Lease {
+                Lease::Forever
+            }
+            fn backend_kind(&self) -> &'static str {
+                "test_noop"
+            }
         }
         struct CapturingSink(StdMutex<Vec<EnvelopeAudit>>);
         impl EnvelopeAuditSink for CapturingSink {
@@ -1127,18 +1246,22 @@ mod tests {
 
         let sink = Arc::new(CapturingSink(StdMutex::new(Vec::new())));
         let cfg = ProxyConfig {
-            listen_addr:           "127.0.0.1:0".to_owned(),
-            upstream_host_port:    "127.0.0.1:1".to_owned(),
-            require_upstream_tls:  false,
-            credential_name:       CredentialName::new("smtp-test"),
-            auth_mode:             AuthMode::Plain { user: "u".to_owned() },
-            consumer:              crate::OwnedConsumer::new("test", "smtp"),
-            restrictions:          crate::Restrictions {
+            listen_addr: "127.0.0.1:0".to_owned(),
+            upstream_host_port: "127.0.0.1:1".to_owned(),
+            require_upstream_tls: false,
+            credential_name: CredentialName::new("smtp-test"),
+            auth_mode: AuthMode::Plain {
+                user: "u".to_owned(),
+            },
+            consumer: crate::OwnedConsumer::new("test", "smtp"),
+            restrictions: crate::Restrictions {
                 allowed_sender_address: Some("noreply@example.com".to_owned()),
                 ..crate::Restrictions::default()
             },
         };
-        let proxy = SmtpProxy::bind(Arc::new(NoopBackend), cfg, sink.clone()).await.unwrap();
+        let proxy = SmtpProxy::bind(Arc::new(NoopBackend), cfg, sink.clone())
+            .await
+            .unwrap();
         let addr = proxy.local_addr().unwrap();
         let server = tokio::spawn(async move { proxy.serve().await });
 
@@ -1154,11 +1277,16 @@ mod tests {
         let _ehlo = drain_reply(&mut reader).await;
         drop(reader);
 
-        client.write_all(b"MAIL FROM:<attacker@elsewhere.example>\r\n").await.unwrap();
+        client
+            .write_all(b"MAIL FROM:<attacker@elsewhere.example>\r\n")
+            .await
+            .unwrap();
         let mut reader = tokio::io::BufReader::new(&mut client);
         let resp = drain_reply(&mut reader).await;
-        assert!(resp.starts_with("550 "),
-            "expected 550 sender_not_allowed, got {resp:?}");
+        assert!(
+            resp.starts_with("550 "),
+            "expected 550 sender_not_allowed, got {resp:?}"
+        );
         drop(reader);
 
         client.write_all(b"QUIT\r\n").await.unwrap();
@@ -1169,12 +1297,22 @@ mod tests {
         server.abort();
 
         let events = sink.0.lock().unwrap();
-        assert_eq!(events.len(), 1, "expected 1 audit event, got {:?}", events.len());
+        assert_eq!(
+            events.len(),
+            1,
+            "expected 1 audit event, got {:?}",
+            events.len()
+        );
         let ev = &events[0];
         assert_eq!(ev.outcome, EnvelopeOutcome::Rejected);
-        assert!(ev.rejection_reason.as_deref().unwrap()
-                  .starts_with("sender_not_allowed"),
-            "rejection_reason was {:?}", ev.rejection_reason);
+        assert!(
+            ev.rejection_reason
+                .as_deref()
+                .unwrap()
+                .starts_with("sender_not_allowed"),
+            "rejection_reason was {:?}",
+            ev.rejection_reason
+        );
         assert_eq!(ev.recipient_count, 0);
     }
 }

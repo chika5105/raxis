@@ -524,7 +524,9 @@ impl FailureReason {
     }
 
     /// Borrow the inner string (the verbatim reason text).
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 
     /// Consume the newtype and return the inner `String`. For
     /// callers that need to write the value into SQLite via
@@ -532,7 +534,9 @@ impl FailureReason {
     /// shaped legacy API — at the call site they convert through
     /// `into_string()` so the type-system entry-point stays
     /// `FailureReason::new()`.
-    pub fn into_string(self) -> String { self.0 }
+    pub fn into_string(self) -> String {
+        self.0
+    }
 
     /// Adapt an `Option<&str>` legacy API: `Some(non-empty)` →
     /// `Some(FailureReason)`, `Some("") | Some("   ") | None` →
@@ -553,7 +557,9 @@ impl fmt::Display for FailureReason {
 }
 
 impl AsRef<str> for FailureReason {
-    fn as_ref(&self) -> &str { &self.0 }
+    fn as_ref(&self) -> &str {
+        &self.0
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -590,10 +596,12 @@ mod tests {
     /// classifying it as terminal would defeat that retry path.
     #[test]
     fn dependency_not_met_is_not_terminal() {
-        assert!(!PlannerErrorCode::DependencyNotMet.is_terminal(),
+        assert!(
+            !PlannerErrorCode::DependencyNotMet.is_terminal(),
             "DEPENDENCY_NOT_MET must be retryable per §Step 21 — \
              treating it as terminal would cause the Orchestrator to \
-             abandon valid sub-tasks while waiting on dependencies.");
+             abandon valid sub-tasks while waiting on dependencies."
+        );
     }
 
     /// Pin the existing terminal set so a future re-classification
@@ -609,9 +617,11 @@ mod tests {
             PlannerErrorCode::FailInitiativeQuarantined,
         ];
         for &code in &terminal {
-            assert!(code.is_terminal(),
+            assert!(
+                code.is_terminal(),
                 "{code:?} dropped out of the terminal set — \
-                 spec change requires explicit acknowledgement");
+                 spec change requires explicit acknowledgement"
+            );
         }
 
         // Retryable: every other variant. We use a structural
@@ -636,9 +646,11 @@ mod tests {
             PlannerErrorCode::FailStructuredOutputInvalid,
             PlannerErrorCode::FailStructuredOutputRateLimited,
         ] {
-            assert!(!code.is_terminal(),
+            assert!(
+                !code.is_terminal(),
                 "{code:?} is in the retryable set but \
-                 `is_terminal()` returned true");
+                 `is_terminal()` returned true"
+            );
         }
     }
 }

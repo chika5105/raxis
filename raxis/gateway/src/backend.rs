@@ -23,6 +23,4 @@
 // (`raxis_gateway::backend::Backend`,
 // `raxis_gateway::backend::BackendError`, etc.) continue to work
 // after the trait moved out into `raxis-gateway-substrate`.
-pub use raxis_gateway_substrate::{
-    Backend, BackendError, BackendRequest, BackendResponse,
-};
+pub use raxis_gateway_substrate::{Backend, BackendError, BackendRequest, BackendResponse};

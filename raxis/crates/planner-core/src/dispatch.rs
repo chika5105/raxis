@@ -53,7 +53,9 @@ use std::time::Duration;
 
 use thiserror::Error;
 
-use crate::model::{ContentBlock, Message, MessageRequest, MessageResponse, ModelClient, ModelError, Usage};
+use crate::model::{
+    ContentBlock, Message, MessageRequest, MessageResponse, ModelClient, ModelError, Usage,
+};
 use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 
 // ---------------------------------------------------------------------------
@@ -67,18 +69,18 @@ use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 #[derive(Debug, Clone)]
 pub struct DispatchConfig {
     /// Anthropic model id (e.g. `"claude-sonnet-4-5-20250929"`).
-    pub model:         String,
+    pub model: String,
     /// Hard cap on assistant turns. Per
     /// `planner-harness.md §INV-PLANNER-HARNESS-04`, every dispatch
     /// loop MUST surface a structured terminal outcome before this
     /// ceiling so an infinite-loop model cannot consume the operator's
     /// token budget unbounded.
-    pub max_turns:     u32,
+    pub max_turns: u32,
     /// Per-turn LLM `max_tokens` budget. Bounded by the policy-side
     /// `[providers.X] max_tokens_per_request` ceiling.
-    pub max_tokens:    u32,
+    pub max_tokens: u32,
     /// Sampling temperature. None ⇒ Anthropic default (1.0).
-    pub temperature:   Option<f32>,
+    pub temperature: Option<f32>,
     /// Per-tool deadline. Planner-side bound; the kernel-side budget
     /// is enforced separately.
     pub tool_deadline: Option<Duration>,
@@ -96,7 +98,7 @@ pub struct DispatchConfig {
     /// model call. The role binary surfaces this as a structured
     /// failure (`ReportFailure` on the executor; review-aborted on
     /// the reviewer).
-    pub max_tokens_input_total:  Option<u64>,
+    pub max_tokens_input_total: Option<u64>,
     /// V2_GAPS §C1 — coarse per-session cumulative *output* token
     /// ceiling (counts every Anthropic `usage.output_tokens`).
     /// `None` ⇒ uncapped.
@@ -105,7 +107,7 @@ pub struct DispatchConfig {
     /// ceiling (input + output). `None` ⇒ uncapped. Cheaper to set
     /// when an operator only cares about total spend rather than
     /// the input/output split.
-    pub max_tokens_total:        Option<u64>,
+    pub max_tokens_total: Option<u64>,
 }
 
 impl DispatchConfig {
@@ -121,14 +123,14 @@ impl DispatchConfig {
     /// postgres-plus-mongo path in iter31).
     pub fn new(model: impl Into<String>) -> Self {
         Self {
-            model:         model.into(),
-            max_turns:     100,
-            max_tokens:    4096,
-            temperature:   Some(0.7),
+            model: model.into(),
+            max_turns: 100,
+            max_tokens: 4096,
+            temperature: Some(0.7),
             tool_deadline: Some(Duration::from_secs(120)),
-            max_tokens_input_total:  None,
+            max_tokens_input_total: None,
             max_tokens_output_total: None,
-            max_tokens_total:        None,
+            max_tokens_total: None,
         }
     }
 }
@@ -153,14 +155,14 @@ pub enum DispatchOutcome {
         /// The tool's input as the model emitted it. Round-tripped
         /// to the dispatch caller so the caller can convert it into
         /// the matching IPC intent (see [`crate::intent`]).
-        input:     serde_json::Value,
+        input: serde_json::Value,
         /// Tool's output.
-        output:    ToolOutput,
+        output: ToolOutput,
         /// V2 §2.5 — cumulative input tokens at the moment the
         /// terminal tool fired (across every model turn the loop
         /// drove). May be 0 when the terminal tool fired on the
         /// very first model turn before any input was charged.
-        cum_input_tokens:  u64,
+        cum_input_tokens: u64,
         /// V2 §2.5 — cumulative output tokens at the moment the
         /// terminal tool fired.
         cum_output_tokens: u64,
@@ -171,9 +173,9 @@ pub enum DispatchOutcome {
     Idle {
         /// Final assistant text content (joined across all `Text`
         /// blocks in the last turn).
-        final_text:        String,
+        final_text: String,
         /// V2 §2.5 — cumulative input tokens at idle.
-        cum_input_tokens:  u64,
+        cum_input_tokens: u64,
         /// V2 §2.5 — cumulative output tokens at idle.
         cum_output_tokens: u64,
     },
@@ -184,7 +186,7 @@ pub enum DispatchOutcome {
         turns: u32,
         /// V2 §2.5 — cumulative input tokens at the moment the
         /// turn ceiling fired.
-        cum_input_tokens:  u64,
+        cum_input_tokens: u64,
         /// V2 §2.5 — cumulative output tokens at the moment the
         /// turn ceiling fired.
         cum_output_tokens: u64,
@@ -202,14 +204,14 @@ pub enum DispatchOutcome {
         /// to the policy/plan keys from `token-limit-enforcement.md
         /// §2 Coarse table` (`max_tokens_input_total`,
         /// `max_tokens_output_total`, `max_tokens_total`).
-        which:        &'static str,
+        which: &'static str,
         /// Cumulative input tokens consumed across all turns so far.
-        input_tokens:  u64,
+        input_tokens: u64,
         /// Cumulative output tokens consumed across all turns.
         output_tokens: u64,
         /// Configured ceiling that was hit (so the role binary can
         /// surface a clean operator-facing message).
-        ceiling:       u64,
+        ceiling: u64,
     },
 }
 
@@ -220,12 +222,26 @@ impl DispatchOutcome {
     /// which terminal arm fired.
     pub fn cumulative_tokens(&self) -> (u64, u64) {
         match self {
-            DispatchOutcome::TerminalTool { cum_input_tokens, cum_output_tokens, .. }
-            | DispatchOutcome::Idle { cum_input_tokens, cum_output_tokens, .. }
-            | DispatchOutcome::MaxTurnsExceeded { cum_input_tokens, cum_output_tokens, .. }
-                => (*cum_input_tokens, *cum_output_tokens),
-            DispatchOutcome::TokensExceeded { input_tokens, output_tokens, .. }
-                => (*input_tokens, *output_tokens),
+            DispatchOutcome::TerminalTool {
+                cum_input_tokens,
+                cum_output_tokens,
+                ..
+            }
+            | DispatchOutcome::Idle {
+                cum_input_tokens,
+                cum_output_tokens,
+                ..
+            }
+            | DispatchOutcome::MaxTurnsExceeded {
+                cum_input_tokens,
+                cum_output_tokens,
+                ..
+            } => (*cum_input_tokens, *cum_output_tokens),
+            DispatchOutcome::TokensExceeded {
+                input_tokens,
+                output_tokens,
+                ..
+            } => (*input_tokens, *output_tokens),
         }
     }
 }
@@ -261,10 +277,10 @@ pub enum DispatchError {
 /// initial system prompt + initial user message and runs to a
 /// terminal outcome.
 pub struct DispatchLoop {
-    model:    Arc<dyn ModelClient>,
+    model: Arc<dyn ModelClient>,
     registry: Arc<ToolRegistry>,
-    config:   DispatchConfig,
-    ctx:      ToolContext,
+    config: DispatchConfig,
+    ctx: ToolContext,
     /// Names of tools that, when invoked, terminate the loop with
     /// [`DispatchOutcome::TerminalTool`]. Populated by the role
     /// binary via [`DispatchLoop::with_terminal_tools`]; default is
@@ -277,10 +293,10 @@ impl DispatchLoop {
     /// four slots up front; the loop is `&mut self` so two
     /// concurrent calls on one instance is a build-time error.
     pub fn new(
-        model:    Arc<dyn ModelClient>,
+        model: Arc<dyn ModelClient>,
         registry: Arc<ToolRegistry>,
-        config:   DispatchConfig,
-        ctx:      ToolContext,
+        config: DispatchConfig,
+        ctx: ToolContext,
     ) -> Self {
         Self {
             model,
@@ -311,7 +327,7 @@ impl DispatchLoop {
     /// "You are working on task task-42; the goal is …").
     pub async fn run(
         &mut self,
-        system_prompt:  String,
+        system_prompt: String,
         seed_user_text: String,
     ) -> Result<DispatchOutcome, DispatchError> {
         // Build the request once and mutate `req.messages` in place
@@ -327,16 +343,18 @@ impl DispatchLoop {
         // pushed onto `req.messages` between calls, matching the
         // pre-refactor `messages` Vec mutations.
         let mut req = MessageRequest {
-            model:       self.config.model.clone(),
-            max_tokens:  self.config.max_tokens,
-            system:      Some(system_prompt),
-            messages:    vec![Message {
-                role:    "user".to_owned(),
-                content: vec![ContentBlock::Text { text: seed_user_text }],
+            model: self.config.model.clone(),
+            max_tokens: self.config.max_tokens,
+            system: Some(system_prompt),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: vec![ContentBlock::Text {
+                    text: seed_user_text,
+                }],
             }],
-            tools:       self.registry.to_specs(),
+            tools: self.registry.to_specs(),
             temperature: self.config.temperature,
-            stream:      false,
+            stream: false,
             // `prompt-caching.md §"Per-role defaults"` — every
             // dispatch session's tools + system + growing message
             // history are the canonical cache-write targets.
@@ -345,16 +363,16 @@ impl DispatchLoop {
             // OpenAI / Gemini ignore them and rely on upstream
             // automatic / implicit caching, surfacing the cache
             // hit count through `Usage::cache_read_input_tokens`.
-            cache_system:   true,
-            cache_tools:    true,
+            cache_system: true,
+            cache_tools: true,
             cache_messages: true,
-            cache_ttl:      None, // 5-minute ephemeral, refreshed for free
+            cache_ttl: None, // 5-minute ephemeral, refreshed for free
         };
 
         // V2_GAPS §C1 — cumulative session token totals. Updated
         // post-turn from `MessageResponse::usage` and checked against
         // the per-session ceilings before issuing the next request.
-        let mut cum_in:  u64 = 0;
+        let mut cum_in: u64 = 0;
         let mut cum_out: u64 = 0;
 
         for turn in 0..self.config.max_turns {
@@ -363,13 +381,15 @@ impl DispatchLoop {
             // running totals before any other side effect, so a
             // ceiling that fires post-turn still records the call.
             let Usage {
-                input_tokens, output_tokens,
-                cache_creation_input_tokens, cache_read_input_tokens,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             } = resp.usage;
-            cum_in  = cum_in.saturating_add(
+            cum_in = cum_in.saturating_add(
                 u64::from(input_tokens)
                     .saturating_add(u64::from(cache_creation_input_tokens))
-                    .saturating_add(u64::from(cache_read_input_tokens))
+                    .saturating_add(u64::from(cache_read_input_tokens)),
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
 
@@ -392,7 +412,7 @@ impl DispatchLoop {
             // Append the assistant turn to the history (verbatim so
             // tool_use blocks correlate with our tool_result reply).
             req.messages.push(Message {
-                role:    "assistant".to_owned(),
+                role: "assistant".to_owned(),
                 content: resp.content.clone(),
             });
 
@@ -403,7 +423,9 @@ impl DispatchLoop {
             for block in &resp.content {
                 match block {
                     ContentBlock::Text { text } => {
-                        if !text_acc.is_empty() { text_acc.push('\n'); }
+                        if !text_acc.is_empty() {
+                            text_acc.push('\n');
+                        }
                         text_acc.push_str(text);
                     }
                     ContentBlock::ToolUse { id, name, input } => {
@@ -416,8 +438,8 @@ impl DispatchLoop {
             if tool_uses.is_empty() {
                 // No tools called — either Idle or MaxTurns will fire.
                 return Ok(DispatchOutcome::Idle {
-                    final_text:        text_acc,
-                    cum_input_tokens:  cum_in,
+                    final_text: text_acc,
+                    cum_input_tokens: cum_in,
                     cum_output_tokens: cum_out,
                 });
             }
@@ -436,7 +458,9 @@ impl DispatchLoop {
                     // the last text, NOT a hard error — the caller
                     // can synthesize the IPC intent from `input`.
                     let output = match self.registry.get(tool_name) {
-                        Some(tool) => tool.execute(input, &self.ctx).await
+                        Some(tool) => tool
+                            .execute(input, &self.ctx)
+                            .await
                             .unwrap_or_else(|e| ToolOutput::err(e.to_string())),
                         None => ToolOutput::ok(format!(
                             "<terminal tool {tool_name:?} not in registry; \
@@ -444,30 +468,28 @@ impl DispatchLoop {
                         )),
                     };
                     return Ok(DispatchOutcome::TerminalTool {
-                        tool_name:         tool_name.clone(),
-                        input:             input.clone(),
+                        tool_name: tool_name.clone(),
+                        input: input.clone(),
                         output,
-                        cum_input_tokens:  cum_in,
+                        cum_input_tokens: cum_in,
                         cum_output_tokens: cum_out,
                     });
                 }
                 let output = match self.registry.get(tool_name) {
                     Some(tool) => match tool.execute(input, &self.ctx).await {
-                        Ok(o)  => o,
+                        Ok(o) => o,
                         Err(e) => ToolOutput::err(e.to_string()),
                     },
-                    None => ToolOutput::err(format!(
-                        "unknown tool: {tool_name:?}"
-                    )),
+                    None => ToolOutput::err(format!("unknown tool: {tool_name:?}")),
                 };
                 next_user_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: tu_id.clone(),
-                    content:     output.content,
-                    is_error:    output.is_error,
+                    content: output.content,
+                    is_error: output.is_error,
                 });
             }
             req.messages.push(Message {
-                role:    "user".to_owned(),
+                role: "user".to_owned(),
                 content: next_user_blocks,
             });
             let _ = turn; // turn is implicit in the for-loop counter.
@@ -483,8 +505,8 @@ impl DispatchLoop {
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
-            turns:             self.config.max_turns,
-            cum_input_tokens:  cum_in,
+            turns: self.config.max_turns,
+            cum_input_tokens: cum_in,
             cum_output_tokens: cum_out,
         })
     }
@@ -521,7 +543,7 @@ impl DispatchLoop {
     /// ceiling" (mid-stream check).
     pub async fn run_streaming(
         &mut self,
-        system_prompt:  String,
+        system_prompt: String,
         seed_user_text: String,
     ) -> Result<DispatchOutcome, DispatchError> {
         use crate::streaming::StreamEvent;
@@ -537,25 +559,27 @@ impl DispatchLoop {
         // construction so the AnthropicClient SSE path receives the
         // flag without per-turn re-derivation.
         let mut req = MessageRequest {
-            model:       self.config.model.clone(),
-            max_tokens:  self.config.max_tokens,
-            system:      Some(system_prompt),
-            messages:    vec![Message {
-                role:    "user".to_owned(),
-                content: vec![ContentBlock::Text { text: seed_user_text }],
+            model: self.config.model.clone(),
+            max_tokens: self.config.max_tokens,
+            system: Some(system_prompt),
+            messages: vec![Message {
+                role: "user".to_owned(),
+                content: vec![ContentBlock::Text {
+                    text: seed_user_text,
+                }],
             }],
-            tools:       self.registry.to_specs(),
+            tools: self.registry.to_specs(),
             temperature: self.config.temperature,
-            stream:      true,
+            stream: true,
             // Same cache opt-in as the buffered path above. See
             // `prompt-caching.md §"Per-role defaults"`.
-            cache_system:   true,
-            cache_tools:    true,
+            cache_system: true,
+            cache_tools: true,
             cache_messages: true,
-            cache_ttl:      None,
+            cache_ttl: None,
         };
 
-        let mut cum_in:  u64 = 0;
+        let mut cum_in: u64 = 0;
         let mut cum_out: u64 = 0;
 
         for turn in 0..self.config.max_turns {
@@ -574,16 +598,14 @@ impl DispatchLoop {
                         let speculative_in = cum_in.saturating_add(
                             u64::from(usage.input_tokens)
                                 .saturating_add(u64::from(usage.cache_creation_input_tokens))
-                                .saturating_add(u64::from(usage.cache_read_input_tokens))
+                                .saturating_add(u64::from(usage.cache_read_input_tokens)),
                         );
-                        let speculative_out = cum_out.saturating_add(
-                            u64::from(usage.output_tokens)
-                        );
+                        let speculative_out =
+                            cum_out.saturating_add(u64::from(usage.output_tokens));
 
-                        if let Some(budget_exceeded) = self.check_ceilings(
-                            speculative_in,
-                            speculative_out,
-                        ) {
+                        if let Some(budget_exceeded) =
+                            self.check_ceilings(speculative_in, speculative_out)
+                        {
                             // Drop rx: closes the channel, upstream
                             // reader task will observe a closed
                             // `Sender` and drop the HTTP body,
@@ -614,23 +636,23 @@ impl DispatchLoop {
                 None => {
                     // Stream ended without a Complete event — treat
                     // as a transport error (upstream disconnected).
-                    return Err(DispatchError::Model(
-                        ModelError::Transport(
-                            "stream ended without Complete event".to_owned(),
-                        ),
-                    ));
+                    return Err(DispatchError::Model(ModelError::Transport(
+                        "stream ended without Complete event".to_owned(),
+                    )));
                 }
             };
 
             // ── Canonical post-turn usage fold (same as `run()`) ──
             let Usage {
-                input_tokens, output_tokens,
-                cache_creation_input_tokens, cache_read_input_tokens,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
             } = resp.usage;
-            cum_in  = cum_in.saturating_add(
+            cum_in = cum_in.saturating_add(
                 u64::from(input_tokens)
                     .saturating_add(u64::from(cache_creation_input_tokens))
-                    .saturating_add(u64::from(cache_read_input_tokens))
+                    .saturating_add(u64::from(cache_read_input_tokens)),
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
 
@@ -658,7 +680,7 @@ impl DispatchLoop {
 
             // ── From here, identical to `run()` ───────────────────
             req.messages.push(Message {
-                role:    "assistant".to_owned(),
+                role: "assistant".to_owned(),
                 content: resp.content.clone(),
             });
 
@@ -667,7 +689,9 @@ impl DispatchLoop {
             for block in &resp.content {
                 match block {
                     ContentBlock::Text { text } => {
-                        if !text_acc.is_empty() { text_acc.push('\n'); }
+                        if !text_acc.is_empty() {
+                            text_acc.push('\n');
+                        }
                         text_acc.push_str(text);
                     }
                     ContentBlock::ToolUse { id, name, input } => {
@@ -679,8 +703,8 @@ impl DispatchLoop {
 
             if tool_uses.is_empty() {
                 return Ok(DispatchOutcome::Idle {
-                    final_text:        text_acc,
-                    cum_input_tokens:  cum_in,
+                    final_text: text_acc,
+                    cum_input_tokens: cum_in,
                     cum_output_tokens: cum_out,
                 });
             }
@@ -689,7 +713,9 @@ impl DispatchLoop {
             for (tu_id, tool_name, input) in &tool_uses {
                 if self.terminal_tools.iter().any(|n| *n == tool_name.as_str()) {
                     let output = match self.registry.get(tool_name) {
-                        Some(tool) => tool.execute(input, &self.ctx).await
+                        Some(tool) => tool
+                            .execute(input, &self.ctx)
+                            .await
                             .unwrap_or_else(|e| ToolOutput::err(e.to_string())),
                         None => ToolOutput::ok(format!(
                             "<terminal tool {tool_name:?} not in registry; \
@@ -697,30 +723,28 @@ impl DispatchLoop {
                         )),
                     };
                     return Ok(DispatchOutcome::TerminalTool {
-                        tool_name:         tool_name.clone(),
-                        input:             input.clone(),
+                        tool_name: tool_name.clone(),
+                        input: input.clone(),
                         output,
-                        cum_input_tokens:  cum_in,
+                        cum_input_tokens: cum_in,
                         cum_output_tokens: cum_out,
                     });
                 }
                 let output = match self.registry.get(tool_name) {
                     Some(tool) => match tool.execute(input, &self.ctx).await {
-                        Ok(o)  => o,
+                        Ok(o) => o,
                         Err(e) => ToolOutput::err(e.to_string()),
                     },
-                    None => ToolOutput::err(format!(
-                        "unknown tool: {tool_name:?}"
-                    )),
+                    None => ToolOutput::err(format!("unknown tool: {tool_name:?}")),
                 };
                 next_user_blocks.push(ContentBlock::ToolResult {
                     tool_use_id: tu_id.clone(),
-                    content:     output.content,
-                    is_error:    output.is_error,
+                    content: output.content,
+                    is_error: output.is_error,
                 });
             }
             req.messages.push(Message {
-                role:    "user".to_owned(),
+                role: "user".to_owned(),
                 content: next_user_blocks,
             });
             let _ = turn;
@@ -737,8 +761,8 @@ impl DispatchLoop {
         }
 
         Ok(DispatchOutcome::MaxTurnsExceeded {
-            turns:             self.config.max_turns,
-            cum_input_tokens:  cum_in,
+            turns: self.config.max_turns,
+            cum_input_tokens: cum_in,
             cum_output_tokens: cum_out,
         })
     }
@@ -746,16 +770,12 @@ impl DispatchLoop {
     /// Shared ceiling check used by both `run()` and
     /// `run_streaming()`. Returns `Some(TokensExceeded)` if any
     /// configured ceiling is exceeded, `None` otherwise.
-    fn check_ceilings(
-        &self,
-        cum_in:  u64,
-        cum_out: u64,
-    ) -> Option<DispatchOutcome> {
+    fn check_ceilings(&self, cum_in: u64, cum_out: u64) -> Option<DispatchOutcome> {
         if let Some(ceiling) = self.config.max_tokens_total {
             if cum_in.saturating_add(cum_out) > ceiling {
                 return Some(DispatchOutcome::TokensExceeded {
-                    which:         "total",
-                    input_tokens:  cum_in,
+                    which: "total",
+                    input_tokens: cum_in,
                     output_tokens: cum_out,
                     ceiling,
                 });
@@ -764,8 +784,8 @@ impl DispatchLoop {
         if let Some(ceiling) = self.config.max_tokens_input_total {
             if cum_in > ceiling {
                 return Some(DispatchOutcome::TokensExceeded {
-                    which:         "input",
-                    input_tokens:  cum_in,
+                    which: "input",
+                    input_tokens: cum_in,
                     output_tokens: cum_out,
                     ceiling,
                 });
@@ -774,8 +794,8 @@ impl DispatchLoop {
         if let Some(ceiling) = self.config.max_tokens_output_total {
             if cum_out > ceiling {
                 return Some(DispatchOutcome::TokensExceeded {
-                    which:         "output",
-                    input_tokens:  cum_in,
+                    which: "output",
+                    input_tokens: cum_in,
                     output_tokens: cum_out,
                     ceiling,
                 });
@@ -796,9 +816,9 @@ mod tests {
 
     fn empty_response_end_turn(text: &str) -> MessageResponse {
         MessageResponse {
-            id:    "msg-end".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-end".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: text.to_owned(),
             }],
@@ -812,14 +832,14 @@ mod tests {
     /// regression tests can pin the post-turn ceiling-check
     /// behaviour (`v2_extended_gaps.md §2.5`).
     fn empty_response_end_turn_with_usage(
-        text:          &str,
-        input_tokens:  u32,
+        text: &str,
+        input_tokens: u32,
         output_tokens: u32,
     ) -> MessageResponse {
         MessageResponse {
-            id:    "msg-end".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-end".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: text.to_owned(),
             }],
@@ -828,20 +848,24 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens:    0,
+                cache_read_input_tokens: 0,
             },
             model: "claude-sonnet-4-5-20250929".to_owned(),
         }
     }
 
-    fn tool_use_response(tool_use_id: &str, name: &str, input: serde_json::Value) -> MessageResponse {
+    fn tool_use_response(
+        tool_use_id: &str,
+        name: &str,
+        input: serde_json::Value,
+    ) -> MessageResponse {
         MessageResponse {
-            id:    format!("msg-call-{tool_use_id}"),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: format!("msg-call-{tool_use_id}"),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::ToolUse {
-                id:    tool_use_id.to_owned(),
-                name:  name.to_owned(),
+                id: tool_use_id.to_owned(),
+                name: name.to_owned(),
                 input,
             }],
             stop_reason: Some("tool_use".to_owned()),
@@ -858,9 +882,7 @@ mod tests {
 
     #[tokio::test]
     async fn idle_outcome_when_model_emits_text_only() {
-        let model = Arc::new(MockModelClient::new(vec![
-            empty_response_end_turn("done!"),
-        ]));
+        let model = Arc::new(MockModelClient::new(vec![empty_response_end_turn("done!")]));
         let registry = Arc::new(crate::tools::build_executor_registry());
         let ws = fixture_workspace();
         let mut d = DispatchLoop::new(
@@ -869,10 +891,10 @@ mod tests {
             DispatchConfig::new("test-model"),
             ToolContext::for_workspace(ws.path()),
         );
-        let out = d.run(
-            "system prompt".to_owned(),
-            "seed user message".to_owned(),
-        ).await.unwrap();
+        let out = d
+            .run("system prompt".to_owned(), "seed user message".to_owned())
+            .await
+            .unwrap();
         match out {
             DispatchOutcome::Idle { final_text, .. } => {
                 assert_eq!(final_text, "done!");
@@ -886,13 +908,14 @@ mod tests {
         // Turn 1: model calls read_file
         // Turn 2: model emits text-only end_turn
         let r1 = tool_use_response(
-            "tu1", "read_file",
+            "tu1",
+            "read_file",
             serde_json::json!({ "path": "hello.txt" }),
         );
         let r2 = empty_response_end_turn("read it");
-        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
+        let ws = fixture_workspace();
         let captured = model.seen.clone();
 
         let mut d = DispatchLoop::new(
@@ -911,16 +934,25 @@ mod tests {
         assert_eq!(seen.len(), 2);
         let t2 = &seen[1];
         // Turn 2 must include 3 messages: user(seed), assistant(tool_use), user(tool_result).
-        assert_eq!(t2.messages.len(), 3,
+        assert_eq!(
+            t2.messages.len(),
+            3,
             "turn 2 must include the tool_result reply, got {} messages",
-            t2.messages.len());
+            t2.messages.len()
+        );
         let last = &t2.messages[2];
         assert_eq!(last.role, "user");
         match &last.content[0] {
-            ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+            ContentBlock::ToolResult {
+                tool_use_id,
+                content,
+                is_error,
+            } => {
                 assert_eq!(tool_use_id, "tu1");
-                assert_eq!(content, "hi from raxis",
-                    "tool_result content must echo read_file output");
+                assert_eq!(
+                    content, "hi from raxis",
+                    "tool_result content must echo read_file output"
+                );
                 assert_eq!(*is_error, None);
             }
             other => panic!("expected ToolResult, got {other:?}"),
@@ -929,15 +961,12 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_tool_surfaces_as_structured_error_to_model() {
-        let r1 = tool_use_response(
-            "tu1", "no_such_tool",
-            serde_json::json!({}),
-        );
+        let r1 = tool_use_response("tu1", "no_such_tool", serde_json::json!({}));
         let r2 = empty_response_end_turn("recovered");
-        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
         let captured = model.seen.clone();
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
+        let ws = fixture_workspace();
 
         let mut d = DispatchLoop::new(
             model.clone(),
@@ -953,7 +982,9 @@ mod tests {
         let seen = captured.lock().await;
         let last_user = seen[1].messages.last().unwrap();
         match &last_user.content[0] {
-            ContentBlock::ToolResult { is_error, content, .. } => {
+            ContentBlock::ToolResult {
+                is_error, content, ..
+            } => {
                 assert_eq!(*is_error, Some(true));
                 assert!(content.contains("unknown tool"));
             }
@@ -964,24 +995,28 @@ mod tests {
     #[tokio::test]
     async fn terminal_tool_short_circuits_loop() {
         let r1 = tool_use_response(
-            "tu1", "task_complete",
+            "tu1",
+            "task_complete",
             serde_json::json!({ "head_sha": "abc123def456" }),
         );
         // No second response queued: the dispatch loop must
         // short-circuit on the terminal tool BEFORE asking the
         // model again.
-        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let model = Arc::new(MockModelClient::new(vec![r1]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
+        let ws = fixture_workspace();
         let mut d = DispatchLoop::new(
             model,
             registry,
             DispatchConfig::new("test-model"),
             ToolContext::for_workspace(ws.path()),
-        ).with_terminal_tools(vec!["task_complete"]);
+        )
+        .with_terminal_tools(vec!["task_complete"]);
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
-            DispatchOutcome::TerminalTool { tool_name, input, .. } => {
+            DispatchOutcome::TerminalTool {
+                tool_name, input, ..
+            } => {
                 assert_eq!(tool_name, "task_complete");
                 assert_eq!(input["head_sha"], "abc123def456");
             }
@@ -996,19 +1031,17 @@ mod tests {
         let mut queue = Vec::new();
         for i in 0..5 {
             queue.push(tool_use_response(
-                &format!("tu{i}"), "read_file",
+                &format!("tu{i}"),
+                "read_file",
                 serde_json::json!({ "path": "hello.txt" }),
             ));
         }
-        let model    = Arc::new(MockModelClient::new(queue));
+        let model = Arc::new(MockModelClient::new(queue));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         cfg.max_turns = 3;
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
@@ -1022,19 +1055,19 @@ mod tests {
     /// so the §C1 cumulative-tracking tests can drive ceiling crossings
     /// deterministically.
     fn tool_use_response_with_usage(
-        tool_use_id:   &str,
-        name:          &str,
-        input:         serde_json::Value,
-        input_tokens:  u32,
+        tool_use_id: &str,
+        name: &str,
+        input: serde_json::Value,
+        input_tokens: u32,
         output_tokens: u32,
     ) -> MessageResponse {
         MessageResponse {
-            id:    format!("msg-call-{tool_use_id}"),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: format!("msg-call-{tool_use_id}"),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::ToolUse {
-                id:    tool_use_id.to_owned(),
-                name:  name.to_owned(),
+                id: tool_use_id.to_owned(),
+                name: name.to_owned(),
                 input,
             }],
             stop_reason: Some("tool_use".to_owned()),
@@ -1042,7 +1075,7 @@ mod tests {
                 input_tokens,
                 output_tokens,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens:    0,
+                cache_read_input_tokens: 0,
             },
             model: "claude-sonnet-4-5-20250929".to_owned(),
         }
@@ -1054,28 +1087,29 @@ mod tests {
     #[tokio::test]
     async fn input_total_ceiling_surfaces_tokens_exceeded() {
         let r1 = tool_use_response_with_usage(
-            "tu1", "read_file",
+            "tu1",
+            "read_file",
             serde_json::json!({ "path": "hello.txt" }),
             150, // input
             10,  // output
         );
         let r2 = empty_response_end_turn("done");
-        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_input_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TokensExceeded {
-                which, input_tokens, output_tokens, ceiling,
+                which,
+                input_tokens,
+                output_tokens,
+                ceiling,
             } => {
                 assert_eq!(which, "input");
-                assert_eq!(input_tokens,  150);
+                assert_eq!(input_tokens, 150);
                 assert_eq!(output_tokens, 10);
                 assert_eq!(ceiling, 100);
             }
@@ -1089,28 +1123,29 @@ mod tests {
     #[tokio::test]
     async fn total_ceiling_takes_precedence_over_input_only_ceiling() {
         let r1 = tool_use_response_with_usage(
-            "tu1", "read_file",
+            "tu1",
+            "read_file",
             serde_json::json!({ "path": "hello.txt" }),
-            60, 60,
+            60,
+            60,
         );
         let r2 = empty_response_end_turn("done");
-        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         // Both ceilings would fire, but `total` is the first
         // post-turn check.
-        cfg.max_tokens_total       = Some(100);
+        cfg.max_tokens_total = Some(100);
         cfg.max_tokens_input_total = Some(50);
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TokensExceeded { which, .. } => {
-                assert_eq!(which, "total",
-                    "total ceiling fires before input ceiling per V2_GAPS §C1");
+                assert_eq!(
+                    which, "total",
+                    "total ceiling fires before input ceiling per V2_GAPS §C1"
+                );
             }
             other => panic!("expected TokensExceeded(total), got {other:?}"),
         }
@@ -1127,22 +1162,24 @@ mod tests {
     #[tokio::test]
     async fn input_ceiling_fires_even_on_idle_terminal_path() {
         let r1 = empty_response_end_turn_with_usage("done", 200, 5);
-        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let model = Arc::new(MockModelClient::new(vec![r1]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_input_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TokensExceeded {
-                which, input_tokens, ceiling, ..
+                which,
+                input_tokens,
+                ceiling,
+                ..
             } => {
-                assert_eq!(which, "input",
-                    "Idle exit MUST NOT bypass the input cap (§2.5 regression guard)");
+                assert_eq!(
+                    which, "input",
+                    "Idle exit MUST NOT bypass the input cap (§2.5 regression guard)"
+                );
                 assert_eq!(input_tokens, 200);
                 assert_eq!(ceiling, 100);
             }
@@ -1159,26 +1196,26 @@ mod tests {
         // Use `task_complete` — registered as a terminal tool by
         // `build_executor_registry`. Usage explicitly busts the cap.
         let r1 = tool_use_response_with_usage(
-            "tu1", "task_complete",
+            "tu1",
+            "task_complete",
             serde_json::json!({ "summary": "done" }),
             300, // input
             5,   // output
         );
-        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let model = Arc::new(MockModelClient::new(vec![r1]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_input_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        )
-        .with_terminal_tools(vec!["task_complete"]);
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()))
+            .with_terminal_tools(vec!["task_complete"]);
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
             DispatchOutcome::TokensExceeded { which, ceiling, .. } => {
-                assert_eq!(which, "input",
-                    "terminal-tool short-circuit MUST NOT bypass the input cap");
+                assert_eq!(
+                    which, "input",
+                    "terminal-tool short-circuit MUST NOT bypass the input cap"
+                );
                 assert_eq!(ceiling, 100);
             }
             other => panic!("expected TokensExceeded(input), got {other:?}"),
@@ -1190,20 +1227,19 @@ mod tests {
     #[tokio::test]
     async fn no_ceiling_means_uncapped_dispatch_runs_to_natural_terminal() {
         let r1 = empty_response_end_turn("done");
-        let model    = Arc::new(MockModelClient::new(vec![r1]));
+        let model = Arc::new(MockModelClient::new(vec![r1]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let cfg      = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let cfg = DispatchConfig::new("test-model");
         assert!(cfg.max_tokens_input_total.is_none());
         assert!(cfg.max_tokens_output_total.is_none());
         assert!(cfg.max_tokens_total.is_none());
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
-        assert!(matches!(out, DispatchOutcome::Idle { .. }),
-            "uncapped dispatch must surface Idle, got {out:?}");
+        assert!(
+            matches!(out, DispatchOutcome::Idle { .. }),
+            "uncapped dispatch must surface Idle, got {out:?}"
+        );
     }
 
     /// V2_GAPS §C1 — cumulative tracking must include cache-read +
@@ -1211,12 +1247,12 @@ mod tests {
     #[tokio::test]
     async fn cumulative_input_includes_cache_tokens() {
         let r1 = MessageResponse {
-            id:    "msg-1".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-1".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::ToolUse {
-                id:    "tu1".to_owned(),
-                name:  "read_file".to_owned(),
+                id: "tu1".to_owned(),
+                name: "read_file".to_owned(),
                 input: serde_json::json!({ "path": "hello.txt" }),
             }],
             stop_reason: Some("tool_use".to_owned()),
@@ -1224,27 +1260,30 @@ mod tests {
                 input_tokens: 30,
                 output_tokens: 5,
                 cache_creation_input_tokens: 40,
-                cache_read_input_tokens:     35,
+                cache_read_input_tokens: 35,
             },
             model: "claude-sonnet-4-5-20250929".to_owned(),
         };
         let r2 = empty_response_end_turn("done");
-        let model    = Arc::new(MockModelClient::new(vec![r1, r2]));
+        let model = Arc::new(MockModelClient::new(vec![r1, r2]));
         let registry = Arc::new(crate::tools::build_executor_registry());
-        let ws       = fixture_workspace();
-        let mut cfg  = DispatchConfig::new("test-model");
+        let ws = fixture_workspace();
+        let mut cfg = DispatchConfig::new("test-model");
         // 30 + 40 + 35 = 105; threshold 100 must fire.
         cfg.max_tokens_input_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model, registry, cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d.run("sys".to_owned(), "seed".to_owned()).await.unwrap();
         match out {
-            DispatchOutcome::TokensExceeded { which, input_tokens, .. } => {
+            DispatchOutcome::TokensExceeded {
+                which,
+                input_tokens,
+                ..
+            } => {
                 assert_eq!(which, "input");
-                assert_eq!(input_tokens, 105,
-                    "cumulative input must fold input + cache-creation + cache-read");
+                assert_eq!(
+                    input_tokens, 105,
+                    "cumulative input must fold input + cache-creation + cache-read"
+                );
             }
             other => panic!("expected TokensExceeded, got {other:?}"),
         }
@@ -1287,10 +1326,8 @@ mod tests {
         async fn create_message_stream(
             &self,
             _req: &MessageRequest,
-        ) -> Result<
-            tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
-            ModelError,
-        > {
+        ) -> Result<tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>, ModelError>
+        {
             use crate::streaming::StreamEvent;
 
             let mut q = self.pending.lock().await;
@@ -1301,16 +1338,14 @@ mod tests {
             }
             let (mid_usage, resp) = q.remove(0);
 
-            let (tx, rx) = tokio::sync::mpsc::channel(
-                crate::streaming::DEFAULT_STREAM_CHANNEL_CAP,
-            );
+            let (tx, rx) = tokio::sync::mpsc::channel(crate::streaming::DEFAULT_STREAM_CHANNEL_CAP);
 
             // Emit events in the same order a real provider would:
             // MessageStart → Usage → Complete.
             tokio::spawn(async move {
                 let _ = tx
                     .send(StreamEvent::MessageStart {
-                        id:    resp.id.clone(),
+                        id: resp.id.clone(),
                         model: resp.model.clone(),
                     })
                     .await;
@@ -1356,17 +1391,17 @@ mod tests {
     #[tokio::test]
     async fn streaming_mid_stream_output_ceiling_aborts() {
         let mid_usage = Usage {
-            input_tokens:  50,
-            output_tokens: 200,  // exceeds ceiling of 100
+            input_tokens: 50,
+            output_tokens: 200, // exceeds ceiling of 100
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     0,
+            cache_read_input_tokens: 0,
         };
         // The Complete would carry these same counts, but the loop
         // should never reach it — it aborts on the Usage event.
         let resp = MessageResponse {
-            id:    "msg-abort".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-abort".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: "should not reach this".to_owned(),
             }],
@@ -1374,19 +1409,12 @@ mod tests {
             usage: mid_usage.clone(),
             model: "claude-sonnet-4-5-20250929".to_owned(),
         };
-        let model = Arc::new(MockStreamingModelClient::new(vec![
-            (mid_usage, resp),
-        ]));
+        let model = Arc::new(MockStreamingModelClient::new(vec![(mid_usage, resp)]));
         let registry = Arc::new(crate::tools::build_executor_registry());
         let ws = fixture_workspace();
         let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_output_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model,
-            registry,
-            cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d
             .run_streaming("sys".to_owned(), "seed".to_owned())
             .await
@@ -1410,15 +1438,15 @@ mod tests {
     #[tokio::test]
     async fn streaming_mid_stream_total_ceiling_aborts() {
         let mid_usage = Usage {
-            input_tokens:  80,
-            output_tokens: 80,  // total 160 > ceiling 100
+            input_tokens: 80,
+            output_tokens: 80, // total 160 > ceiling 100
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     0,
+            cache_read_input_tokens: 0,
         };
         let resp = MessageResponse {
-            id:    "msg-total".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-total".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: "over budget".to_owned(),
             }],
@@ -1426,27 +1454,22 @@ mod tests {
             usage: mid_usage.clone(),
             model: "claude-sonnet-4-5-20250929".to_owned(),
         };
-        let model = Arc::new(MockStreamingModelClient::new(vec![
-            (mid_usage, resp),
-        ]));
+        let model = Arc::new(MockStreamingModelClient::new(vec![(mid_usage, resp)]));
         let registry = Arc::new(crate::tools::build_executor_registry());
         let ws = fixture_workspace();
         let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_total = Some(100);
-        let mut d = DispatchLoop::new(
-            model,
-            registry,
-            cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d
             .run_streaming("sys".to_owned(), "seed".to_owned())
             .await
             .unwrap();
         match out {
             DispatchOutcome::TokensExceeded { which, .. } => {
-                assert_eq!(which, "total",
-                    "total ceiling must fire before input/output per check_ceilings order");
+                assert_eq!(
+                    which, "total",
+                    "total ceiling must fire before input/output per check_ceilings order"
+                );
             }
             other => panic!("expected TokensExceeded(total), got {other:?}"),
         }
@@ -1456,40 +1479,38 @@ mod tests {
     #[tokio::test]
     async fn streaming_under_budget_completes_tool_dispatch() {
         let mid1 = Usage {
-            input_tokens:  20,
+            input_tokens: 20,
             output_tokens: 10,
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     0,
+            cache_read_input_tokens: 0,
         };
         let r1 = tool_use_response(
-            "tu1", "read_file",
+            "tu1",
+            "read_file",
             serde_json::json!({ "path": "hello.txt" }),
         );
         // Override usage on r1 to match mid-stream
-        let r1 = MessageResponse { usage: mid1.clone(), ..r1 };
+        let r1 = MessageResponse {
+            usage: mid1.clone(),
+            ..r1
+        };
 
         let mid2 = Usage::default();
         let r2 = empty_response_end_turn("file read");
 
-        let model = Arc::new(MockStreamingModelClient::new(vec![
-            (mid1, r1),
-            (mid2, r2),
-        ]));
+        let model = Arc::new(MockStreamingModelClient::new(vec![(mid1, r1), (mid2, r2)]));
         let registry = Arc::new(crate::tools::build_executor_registry());
         let ws = fixture_workspace();
         let mut cfg = DispatchConfig::new("test-model");
         cfg.max_tokens_output_total = Some(1000); // plenty of headroom
-        let mut d = DispatchLoop::new(
-            model,
-            registry,
-            cfg,
-            ToolContext::for_workspace(ws.path()),
-        );
+        let mut d = DispatchLoop::new(model, registry, cfg, ToolContext::for_workspace(ws.path()));
         let out = d
             .run_streaming("sys".to_owned(), "seed".to_owned())
             .await
             .unwrap();
-        assert!(matches!(out, DispatchOutcome::Idle { .. }),
-            "under-budget streaming must complete normally, got {out:?}");
+        assert!(
+            matches!(out, DispatchOutcome::Idle { .. }),
+            "under-budget streaming must complete normally, got {out:?}"
+        );
     }
 }

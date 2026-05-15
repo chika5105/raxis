@@ -60,10 +60,10 @@ fn make_kernel_placeholder(path: &Path) {
 /// `VmSpec.linux_kernel_path`.
 fn fixture_image_at(rootfs_path: PathBuf) -> VerifiedImage {
     VerifiedImage {
-        kind:      ImageKind::RootfsErofs,
-        body:      ImageBody::Path(rootfs_path),
+        kind: ImageKind::RootfsErofs,
+        body: ImageBody::Path(rootfs_path),
         signature: ImageSignature(vec![0u8; 64]),
-        image_id:  "avf-integ-1".to_owned(),
+        image_id: "avf-integ-1".to_owned(),
     }
 }
 
@@ -79,31 +79,27 @@ fn fixture_image_at(rootfs_path: PathBuf) -> VerifiedImage {
 /// substrate validates the path is non-empty BEFORE handing the
 /// config to AVF — passing `PathBuf::new()` here would short-
 /// circuit the test before any AVF API gets called.
-fn fixture_spec(
-    token:             &str,
-    egress:            EgressTier,
-    linux_kernel_path: PathBuf,
-) -> VmSpec {
+fn fixture_spec(token: &str, egress: EgressTier, linux_kernel_path: PathBuf) -> VmSpec {
     VmSpec {
-        vcpu_count:        1,
-        mem_mib:           128,
-        egress_tier:       egress,
-        cgroup_quota:     None,
-        boot_args:         Vec::new(),
-        entrypoint_argv:   Vec::new(),
-        session_token:     SessionToken(token.to_owned()),
-        vsock_cid:         Some(11),
-        virtio_fs_mounts:  Vec::new(),
+        vcpu_count: 1,
+        mem_mib: 128,
+        egress_tier: egress,
+        cgroup_quota: None,
+        boot_args: Vec::new(),
+        entrypoint_argv: Vec::new(),
+        session_token: SessionToken(token.to_owned()),
+        vsock_cid: Some(11),
+        virtio_fs_mounts: Vec::new(),
         linux_kernel_path,
-        env:               Default::default(),
+        env: Default::default(),
         guest_console_log: None,
     }
 }
 
 fn fixture_mount(host_dir: PathBuf, guest_path: &str, mode: MountMode) -> WorkspaceMount {
     WorkspaceMount {
-        host_path:    host_dir,
-        guest_path:   guest_path.to_owned(),
+        host_path: host_dir,
+        guest_path: guest_path.to_owned(),
         mode,
         content_hash: Some(ContentHash([0u8; 32])),
     }

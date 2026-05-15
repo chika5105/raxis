@@ -19,7 +19,7 @@ pub fn run_abort(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
     let (mut conn, fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::AbortTask {
-        task_id:    task_id.clone(),
+        task_id: task_id.clone(),
         aborted_by: fingerprint,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
@@ -40,7 +40,7 @@ pub fn run_resume(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 
     let (mut conn, fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::ResumeTask {
-        task_id:    task_id.clone(),
+        task_id: task_id.clone(),
         resumed_by: fingerprint,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
@@ -49,7 +49,9 @@ pub fn run_resume(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
             "Task {} resumed at {}. Prior state: {}",
             task_id,
             ok["transitioned_at"].as_i64().unwrap_or(0),
-            ok["prior_state"].as_str().unwrap_or("BlockedRecoveryPending")
+            ok["prior_state"]
+                .as_str()
+                .unwrap_or("BlockedRecoveryPending")
         );
     })
 }
@@ -60,7 +62,9 @@ pub fn run_retry(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         .ok_or_else(|| CliError::Usage("task retry requires <task_id>".to_owned()))?;
 
     let (mut conn, _) = open_conn(flags)?;
-    let req = OperatorRequest::RetryTask { task_id: task_id.clone() };
+    let req = OperatorRequest::RetryTask {
+        task_id: task_id.clone(),
+    };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         println!(
@@ -91,7 +95,9 @@ pub fn run_outputs(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         .ok_or_else(|| CliError::Usage("task outputs requires <task_id>".to_owned()))?;
 
     let (mut conn, _) = open_conn(flags)?;
-    let req = OperatorRequest::ListTaskOutputs { task_id: task_id.clone() };
+    let req = OperatorRequest::ListTaskOutputs {
+        task_id: task_id.clone(),
+    };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         let outputs = ok["outputs"].as_array().cloned().unwrap_or_default();
@@ -102,10 +108,13 @@ pub fn run_outputs(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         println!("{} structured outputs for task {task_id}:", outputs.len());
         for entry in &outputs {
             let emitted_at = entry["emitted_at"].as_i64().unwrap_or(0);
-            let kind       = entry["kind"].as_str().unwrap_or("unknown");
-            let severity   = entry["severity"].as_str().map(|s| format!("/{s}")).unwrap_or_default();
-            let output_id  = entry["output_id"].as_str().unwrap_or("?");
-            let session    = entry["session_id"].as_str().unwrap_or("?");
+            let kind = entry["kind"].as_str().unwrap_or("unknown");
+            let severity = entry["severity"]
+                .as_str()
+                .map(|s| format!("/{s}"))
+                .unwrap_or_default();
+            let output_id = entry["output_id"].as_str().unwrap_or("?");
+            let session = entry["session_id"].as_str().unwrap_or("?");
 
             println!("  [{emitted_at}] {kind}{severity}  {output_id}  (session {session})");
 

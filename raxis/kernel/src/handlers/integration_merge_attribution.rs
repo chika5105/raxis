@@ -56,7 +56,7 @@ pub enum EscalationVerificationError {
     )]
     NotConsumed {
         escalation_id: String,
-        actual:        String,
+        actual: String,
     },
 
     /// The escalation exists and is Consumed but belongs to a
@@ -70,7 +70,7 @@ pub enum EscalationVerificationError {
     )]
     ClassMismatch {
         escalation_id: String,
-        actual:        String,
+        actual: String,
     },
 
     /// The escalation belongs to a different Orchestrator session.
@@ -82,8 +82,8 @@ pub enum EscalationVerificationError {
          '{owning_session}', not submitting session '{submitting_session}'"
     )]
     SessionMismatch {
-        escalation_id:      String,
-        owning_session:     String,
+        escalation_id: String,
+        owning_session: String,
         submitting_session: String,
     },
 
@@ -102,11 +102,11 @@ impl EscalationVerificationError {
     /// the eventual `IntegrationMergeRejected` audit variant.
     pub fn diagnostic_code(&self) -> &'static str {
         match self {
-            Self::NotFound       { .. } => "FAIL_ESCALATION_NOT_FOUND",
-            Self::NotConsumed    { .. } => "FAIL_ESCALATION_NOT_CONSUMED",
-            Self::ClassMismatch  { .. } => "FAIL_ESCALATION_CLASS_MISMATCH",
-            Self::SessionMismatch{ .. } => "FAIL_ESCALATION_SESSION_MISMATCH",
-            Self::Sqlite(_)             => "FAIL_STORE",
+            Self::NotFound { .. } => "FAIL_ESCALATION_NOT_FOUND",
+            Self::NotConsumed { .. } => "FAIL_ESCALATION_NOT_CONSUMED",
+            Self::ClassMismatch { .. } => "FAIL_ESCALATION_CLASS_MISMATCH",
+            Self::SessionMismatch { .. } => "FAIL_ESCALATION_SESSION_MISMATCH",
+            Self::Sqlite(_) => "FAIL_STORE",
         }
     }
 }
@@ -125,9 +125,9 @@ impl EscalationVerificationError {
 /// resolve flow (`raxis escalate resolve`); the kernel here only
 /// witnesses that update has been performed by the operator.
 pub fn verify_merge_conflict_resolution(
-    escalation_id:      &EscalationId,
+    escalation_id: &EscalationId,
     submitting_session: &SessionId,
-    store:              &Store,
+    store: &Store,
 ) -> Result<(), EscalationVerificationError> {
     let guard = store.lock_sync();
     let mut stmt = guard.prepare_cached(&format!(
@@ -159,7 +159,7 @@ pub fn verify_merge_conflict_resolution(
     if class_raw.as_str() != EscalationClass::MergeConflict.as_sql_str() {
         return Err(EscalationVerificationError::ClassMismatch {
             escalation_id: escalation_id.as_str().to_owned(),
-            actual:        class_raw,
+            actual: class_raw,
         });
     }
 
@@ -167,15 +167,15 @@ pub fn verify_merge_conflict_resolution(
     if status_raw.as_str() != EscalationStatus::Consumed.as_sql_str() {
         return Err(EscalationVerificationError::NotConsumed {
             escalation_id: escalation_id.as_str().to_owned(),
-            actual:        status_raw,
+            actual: status_raw,
         });
     }
 
     // Predicate 3: the escalation belongs to the submitting session.
     if owning_session_raw.as_str() != submitting_session.as_str() {
         return Err(EscalationVerificationError::SessionMismatch {
-            escalation_id:      escalation_id.as_str().to_owned(),
-            owning_session:     owning_session_raw,
+            escalation_id: escalation_id.as_str().to_owned(),
+            owning_session: owning_session_raw,
             submitting_session: submitting_session.as_str().to_owned(),
         });
     }
@@ -192,13 +192,7 @@ mod tests {
     /// bypass `escalation_request::handle` because that handler only
     /// admits `Pending` rows; Step 30 needs a row in `Consumed` (and
     /// other states) to exercise the verifier directly.
-    fn insert_escalation(
-        store:    &Store,
-        esc_id:   &str,
-        class:    &str,
-        status:   &str,
-        session:  &str,
-    ) {
+    fn insert_escalation(store: &Store, esc_id: &str, class: &str, status: &str, session: &str) {
         // Required FK targets — the schema enforces FKs even when the
         // value strings are not real UUIDs; we satisfy them with bare
         // sentinel rows so the test stays focused on the verifier
@@ -209,21 +203,24 @@ mod tests {
              (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
              VALUES ('init-1', 'Executing', '{}', 'sha-1', 1)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
         g.execute(
             "INSERT OR IGNORE INTO sessions \
              (session_id, role_id, session_token, lineage_id, fetch_quota, \
               created_at, expires_at, revoked) \
              VALUES (?1, 'planner', 'tok', 'lin-1', 0, 1, 9999, 0)",
             [session],
-        ).unwrap();
+        )
+        .unwrap();
         g.execute(
             "INSERT OR IGNORE INTO tasks \
              (task_id, initiative_id, lane_id, state, actor, \
               policy_epoch, admitted_at, transitioned_at) \
              VALUES ('task-1', 'init-1', 'default', 'Running', 'op', 1, 1, 1)",
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         g.execute(
             "INSERT INTO escalations \
@@ -233,7 +230,8 @@ mod tests {
              VALUES (?1, ?2, 'task-1', 'lin-1', 'init-1', \
                      ?3, '{}', 'why', ?1, ?4, 1, 9999)",
             rusqlite::params![esc_id, session, class, status],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn fixture_session() -> SessionId {
@@ -249,12 +247,17 @@ mod tests {
     #[test]
     fn verify_passes_when_all_four_predicates_hold() {
         let store = Store::open_in_memory().unwrap();
-        let esc   = fixture_escalation_id();
-        let sess  = fixture_session();
-        insert_escalation(&store, esc.as_str(), "MergeConflict", "Consumed", sess.as_str());
+        let esc = fixture_escalation_id();
+        let sess = fixture_session();
+        insert_escalation(
+            &store,
+            esc.as_str(),
+            "MergeConflict",
+            "Consumed",
+            sess.as_str(),
+        );
 
-        verify_merge_conflict_resolution(&esc, &sess, &store)
-            .expect("all four predicates hold");
+        verify_merge_conflict_resolution(&esc, &sess, &store).expect("all four predicates hold");
     }
 
     /// Missing row: a fabricated id returns NotFound. Defence
@@ -262,8 +265,8 @@ mod tests {
     #[test]
     fn verify_rejects_unknown_escalation_id() {
         let store = Store::open_in_memory().unwrap();
-        let esc   = fixture_escalation_id();
-        let sess  = fixture_session();
+        let esc = fixture_escalation_id();
+        let sess = fixture_session();
         // Note: NO row inserted.
         let err = verify_merge_conflict_resolution(&esc, &sess, &store)
             .expect_err("missing row must reject");
@@ -278,16 +281,24 @@ mod tests {
     fn verify_rejects_when_status_is_not_consumed() {
         for forbidden in ["Pending", "Approved", "Denied", "TimedOut", "TokenExpired"] {
             let store = Store::open_in_memory().unwrap();
-            let esc   = fixture_escalation_id();
-            let sess  = fixture_session();
-            insert_escalation(&store, esc.as_str(), "MergeConflict", forbidden, sess.as_str());
+            let esc = fixture_escalation_id();
+            let sess = fixture_session();
+            insert_escalation(
+                &store,
+                esc.as_str(),
+                "MergeConflict",
+                forbidden,
+                sess.as_str(),
+            );
 
             let err = verify_merge_conflict_resolution(&esc, &sess, &store)
                 .expect_err(&format!("{forbidden} must reject"));
             match &err {
                 EscalationVerificationError::NotConsumed { actual, .. } => {
-                    assert_eq!(actual, forbidden,
-                        "error must surface the actual rejected status");
+                    assert_eq!(
+                        actual, forbidden,
+                        "error must surface the actual rejected status"
+                    );
                 }
                 other => panic!("expected NotConsumed for {forbidden}, got {other:?}"),
             }
@@ -300,10 +311,15 @@ mod tests {
     /// preserves INV-05 attribution semantics.
     #[test]
     fn verify_rejects_when_class_is_not_merge_conflict() {
-        for forbidden in ["BudgetException", "CapabilityUpgrade", "DelegationRenewal", "QualityGateException"] {
+        for forbidden in [
+            "BudgetException",
+            "CapabilityUpgrade",
+            "DelegationRenewal",
+            "QualityGateException",
+        ] {
             let store = Store::open_in_memory().unwrap();
-            let esc   = fixture_escalation_id();
-            let sess  = fixture_session();
+            let esc = fixture_escalation_id();
+            let sess = fixture_session();
             insert_escalation(&store, esc.as_str(), forbidden, "Consumed", sess.as_str());
 
             let err = verify_merge_conflict_resolution(&esc, &sess, &store)
@@ -323,19 +339,27 @@ mod tests {
     /// commit. The third spec predicate enforces session identity.
     #[test]
     fn verify_rejects_when_session_does_not_match() {
-        let store      = Store::open_in_memory().unwrap();
-        let esc        = fixture_escalation_id();
-        let owner      = fixture_session();
-        let attacker   = SessionId::parse("99999999-9999-9999-9999-999999999999").unwrap();
-        insert_escalation(&store, esc.as_str(), "MergeConflict", "Consumed", owner.as_str());
+        let store = Store::open_in_memory().unwrap();
+        let esc = fixture_escalation_id();
+        let owner = fixture_session();
+        let attacker = SessionId::parse("99999999-9999-9999-9999-999999999999").unwrap();
+        insert_escalation(
+            &store,
+            esc.as_str(),
+            "MergeConflict",
+            "Consumed",
+            owner.as_str(),
+        );
 
         let err = verify_merge_conflict_resolution(&esc, &attacker, &store)
             .expect_err("cross-session reuse must reject");
         match &err {
             EscalationVerificationError::SessionMismatch {
-                owning_session, submitting_session, ..
+                owning_session,
+                submitting_session,
+                ..
             } => {
-                assert_eq!(owning_session,     owner.as_str());
+                assert_eq!(owning_session, owner.as_str());
                 assert_eq!(submitting_session, attacker.as_str());
             }
             other => panic!("expected SessionMismatch, got {other:?}"),
@@ -350,11 +374,19 @@ mod tests {
     #[test]
     fn verify_reports_first_failing_predicate_class_before_status() {
         let store = Store::open_in_memory().unwrap();
-        let esc   = fixture_escalation_id();
-        let sess  = fixture_session();
-        insert_escalation(&store, esc.as_str(), "BudgetException", "Pending", sess.as_str());
+        let esc = fixture_escalation_id();
+        let sess = fixture_session();
+        insert_escalation(
+            &store,
+            esc.as_str(),
+            "BudgetException",
+            "Pending",
+            sess.as_str(),
+        );
         let err = verify_merge_conflict_resolution(&esc, &sess, &store).unwrap_err();
-        assert!(matches!(err, EscalationVerificationError::ClassMismatch { .. }),
-            "class is checked before status; got {err:?}");
+        assert!(
+            matches!(err, EscalationVerificationError::ClassMismatch { .. }),
+            "class is checked before status; got {err:?}"
+        );
     }
 }

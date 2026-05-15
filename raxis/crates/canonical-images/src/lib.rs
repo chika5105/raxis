@@ -135,8 +135,7 @@ include!(concat!(env!("OUT_DIR"), "/trust_anchor.rs"));
 /// MUST NOT override the key at runtime; there is no environment
 /// variable, no policy field, no CLI flag the kernel reads at
 /// boot/activation time that affects this constant.
-pub const EXPECTED_KERNEL_SIGNING_KEY_BYTES: [u8; DIGEST_LEN] =
-    GENERATED_KERNEL_SIGNING_KEY_BYTES;
+pub const EXPECTED_KERNEL_SIGNING_KEY_BYTES: [u8; DIGEST_LEN] = GENERATED_KERNEL_SIGNING_KEY_BYTES;
 
 /// SHA-256 fingerprint of [`EXPECTED_KERNEL_SIGNING_KEY_BYTES`] —
 /// derived at runtime via [`compute_signing_key_fp`]. Used by audit
@@ -187,8 +186,7 @@ pub const UNPOPULATED_DIGEST: [u8; DIGEST_LEN] = [0u8; DIGEST_LEN];
 ///   ([`CanonicalImageKind::expected_digest`]) that carry the V1
 ///   digest as a stable identifier even when the V2 manifest path is
 ///   the one actually enforcing.
-pub const EXPECTED_REVIEWER_IMAGE_DIGEST: [u8; DIGEST_LEN] =
-    GENERATED_REVIEWER_IMAGE_DIGEST;
+pub const EXPECTED_REVIEWER_IMAGE_DIGEST: [u8; DIGEST_LEN] = GENERATED_REVIEWER_IMAGE_DIGEST;
 
 /// SHA-256 of the kernel-bundled `raxis-orchestrator-core-<kernel_version>.img`
 /// for callers using the V1 compile-time-pinned verification path.
@@ -211,7 +209,7 @@ pub enum CanonicalImageError {
     #[error("canonical image i/o error at {path}: {source}")]
     Io {
         /// The path the kernel was attempting to verify.
-        path:   String,
+        path: String,
         /// The underlying I/O error.
         #[source]
         source: std::io::Error,
@@ -223,12 +221,12 @@ pub enum CanonicalImageError {
     #[error("canonical image digest mismatch at {path}")]
     DigestMismatch {
         /// The path that was verified.
-        path:     String,
+        path: String,
         /// What the manifest (or compile-time constant) expected
         /// (hex-encoded for legibility).
         expected: String,
         /// What `compute_image_digest` actually observed (hex).
-        actual:   String,
+        actual: String,
     },
 
     /// The compile-time digest constant is the all-zero placeholder.
@@ -249,7 +247,7 @@ pub enum CanonicalImageError {
     #[error("manifest i/o error at {path}: {source}")]
     ManifestIo {
         /// Manifest path that failed.
-        path:   String,
+        path: String,
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,
@@ -261,11 +259,11 @@ pub enum CanonicalImageError {
     #[error("manifest role mismatch at {path}: manifest declares {found:?} but kernel asked for {kind:?}")]
     ManifestRoleMismatch {
         /// Manifest path.
-        path:  String,
+        path: String,
         /// What the manifest declared.
         found: Role,
         /// What the kernel was looking for.
-        kind:  CanonicalImageKind,
+        kind: CanonicalImageKind,
     },
 
     /// The manifest's `kernel_version` does not match the running
@@ -274,9 +272,9 @@ pub enum CanonicalImageError {
     #[error("manifest kernel_version mismatch at {path}: manifest pinned {found} but kernel is {expected}")]
     ManifestKernelVersionMismatch {
         /// Manifest path.
-        path:     String,
+        path: String,
         /// What the manifest declared.
-        found:    String,
+        found: String,
         /// What the running kernel is.
         expected: String,
     },
@@ -286,7 +284,7 @@ pub enum CanonicalImageError {
     #[error("manifest verification failed at {path}: {source}")]
     Manifest {
         /// Manifest path.
-        path:   String,
+        path: String,
         /// Underlying manifest error.
         #[source]
         source: ManifestError,
@@ -325,8 +323,8 @@ impl CanonicalImageKind {
     /// (`SecurityViolationDetected { kind: ... }`).
     pub fn audit_kind(self) -> &'static str {
         match self {
-            Self::Reviewer        => "ReviewerImageDigestMismatch",
-            Self::Orchestrator    => "OrchestratorImageDigestMismatch",
+            Self::Reviewer => "ReviewerImageDigestMismatch",
+            Self::Orchestrator => "OrchestratorImageDigestMismatch",
             Self::ExecutorStarter => "ExecutorStarterImageDigestMismatch",
         }
     }
@@ -346,8 +344,8 @@ impl CanonicalImageKind {
     /// is the supported entry point for this variant.
     pub fn expected_digest(self) -> [u8; DIGEST_LEN] {
         match self {
-            Self::Reviewer        => EXPECTED_REVIEWER_IMAGE_DIGEST,
-            Self::Orchestrator    => EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
+            Self::Reviewer => EXPECTED_REVIEWER_IMAGE_DIGEST,
+            Self::Orchestrator => EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
             Self::ExecutorStarter => UNPOPULATED_DIGEST,
         }
     }
@@ -357,8 +355,8 @@ impl CanonicalImageKind {
     /// manifest covers the role the caller asked for.
     pub fn manifest_role(self) -> Role {
         match self {
-            Self::Reviewer        => Role::Reviewer,
-            Self::Orchestrator    => Role::Orchestrator,
+            Self::Reviewer => Role::Reviewer,
+            Self::Orchestrator => Role::Orchestrator,
             Self::ExecutorStarter => Role::ExecutorStarter,
         }
     }
@@ -373,16 +371,16 @@ pub fn compute_image_digest(path: &Path) -> Result<[u8; DIGEST_LEN], CanonicalIm
     use std::io::Read;
 
     let mut file = File::open(path).map_err(|e| CanonicalImageError::Io {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         source: e,
     })?;
 
     let mut hasher = Sha256::new();
-    let mut buf    = vec![0u8; BUF_SIZE];
+    let mut buf = vec![0u8; BUF_SIZE];
 
     loop {
         let n = file.read(&mut buf).map_err(|e| CanonicalImageError::Io {
-            path:   path.display().to_string(),
+            path: path.display().to_string(),
             source: e,
         })?;
         if n == 0 {
@@ -404,7 +402,7 @@ pub fn compute_image_digest(path: &Path) -> Result<[u8; DIGEST_LEN], CanonicalIm
 ///
 /// V2 kernel boot paths use [`verify_canonical_image_via_manifest`].
 pub fn verify_canonical_image_pinned(
-    path:     &Path,
+    path: &Path,
     expected: [u8; DIGEST_LEN],
 ) -> Result<(), CanonicalImageError> {
     if expected == UNPOPULATED_DIGEST {
@@ -413,9 +411,9 @@ pub fn verify_canonical_image_pinned(
     let actual = compute_image_digest(path)?;
     if actual != expected {
         return Err(CanonicalImageError::DigestMismatch {
-            path:     path.display().to_string(),
+            path: path.display().to_string(),
             expected: hex_encode(&expected),
-            actual:   hex_encode(&actual),
+            actual: hex_encode(&actual),
         });
     }
     Ok(())
@@ -431,7 +429,8 @@ pub fn verify_canonical_image_pinned(
 /// sync.
 pub fn manifest_path_for_image(image_path: &Path) -> PathBuf {
     let mut p = image_path.to_path_buf();
-    let stem = p.file_stem()
+    let stem = p
+        .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_default();
     if let Some(parent) = image_path.parent() {
@@ -474,9 +473,9 @@ pub fn manifest_path_for_image(image_path: &Path) -> PathBuf {
 /// verified against an attacker-controlled key. Tests and `raxis
 /// doctor` use [`verify_canonical_image_via_manifest_with_key`].
 pub fn verify_canonical_image_via_manifest(
-    image_path:     &Path,
-    manifest_path:  &Path,
-    kind:           CanonicalImageKind,
+    image_path: &Path,
+    manifest_path: &Path,
+    kind: CanonicalImageKind,
     kernel_version: &str,
 ) -> Result<(), CanonicalImageError> {
     if EXPECTED_KERNEL_SIGNING_KEY_BYTES == UNPOPULATED_SIGNING_KEY_BYTES {
@@ -498,10 +497,10 @@ pub fn verify_canonical_image_via_manifest(
 /// for `raxis doctor` use cases where the operator passes the key
 /// explicitly.
 pub fn verify_canonical_image_via_manifest_with_key(
-    image_path:           &Path,
-    manifest_path:        &Path,
-    kind:                 CanonicalImageKind,
-    kernel_version:       &str,
+    image_path: &Path,
+    manifest_path: &Path,
+    kind: CanonicalImageKind,
+    kernel_version: &str,
     expected_signing_key: &VerifyingKey,
 ) -> Result<(), CanonicalImageError> {
     let manifest = load_manifest(manifest_path)?;
@@ -534,9 +533,9 @@ pub fn verify_canonical_image_via_manifest_with_key(
 /// anchor. Tests and `raxis doctor` use
 /// [`read_verified_image_format_with_key`].
 pub fn read_verified_image_format(
-    image_path:     &Path,
-    manifest_path:  &Path,
-    kind:           CanonicalImageKind,
+    image_path: &Path,
+    manifest_path: &Path,
+    kind: CanonicalImageKind,
     kernel_version: &str,
 ) -> Result<raxis_image_manifest::ImageFormat, CanonicalImageError> {
     if EXPECTED_KERNEL_SIGNING_KEY_BYTES == UNPOPULATED_SIGNING_KEY_BYTES {
@@ -544,23 +543,17 @@ pub fn read_verified_image_format(
     }
     let vk = VerifyingKey::from_bytes(&EXPECTED_KERNEL_SIGNING_KEY_BYTES)
         .map_err(|e| CanonicalImageError::SigningKeyMalformed(e.to_string()))?;
-    read_verified_image_format_with_key(
-        image_path,
-        manifest_path,
-        kind,
-        kernel_version,
-        &vk,
-    )
+    read_verified_image_format_with_key(image_path, manifest_path, kind, kernel_version, &vk)
 }
 
 /// Like [`read_verified_image_format`] but skips the kernel-anchor
 /// placeholder gate. Pulled out for testability and for `raxis
 /// doctor` use cases where the operator passes the key explicitly.
 pub fn read_verified_image_format_with_key(
-    image_path:           &Path,
-    manifest_path:        &Path,
-    kind:                 CanonicalImageKind,
-    kernel_version:       &str,
+    image_path: &Path,
+    manifest_path: &Path,
+    kind: CanonicalImageKind,
+    kernel_version: &str,
     expected_signing_key: &VerifyingKey,
 ) -> Result<raxis_image_manifest::ImageFormat, CanonicalImageError> {
     let manifest = load_manifest(manifest_path)?;
@@ -627,42 +620,41 @@ pub fn read_unverified_image_format_hint(
 }
 
 fn load_manifest(manifest_path: &Path) -> Result<ImageManifest, CanonicalImageError> {
-    let s = std::fs::read_to_string(manifest_path).map_err(|e| {
-        CanonicalImageError::ManifestIo {
-            path:   manifest_path.display().to_string(),
+    let s =
+        std::fs::read_to_string(manifest_path).map_err(|e| CanonicalImageError::ManifestIo {
+            path: manifest_path.display().to_string(),
             source: e,
-        }
-    })?;
+        })?;
     ImageManifest::from_toml(&s).map_err(|e| CanonicalImageError::Manifest {
-        path:   manifest_path.display().to_string(),
+        path: manifest_path.display().to_string(),
         source: e,
     })
 }
 
 fn verify_manifest_against_kernel_anchor(
-    manifest:             &ImageManifest,
-    manifest_path:        &Path,
-    kind:                 CanonicalImageKind,
-    kernel_version:       &str,
+    manifest: &ImageManifest,
+    manifest_path: &Path,
+    kind: CanonicalImageKind,
+    kernel_version: &str,
     expected_signing_key: &VerifyingKey,
 ) -> Result<(), CanonicalImageError> {
     raxis_image_manifest::verify(manifest, expected_signing_key).map_err(|e| {
         CanonicalImageError::Manifest {
-            path:   manifest_path.display().to_string(),
+            path: manifest_path.display().to_string(),
             source: e,
         }
     })?;
     if manifest.role != kind.manifest_role() {
         return Err(CanonicalImageError::ManifestRoleMismatch {
-            path:  manifest_path.display().to_string(),
+            path: manifest_path.display().to_string(),
             found: manifest.role,
             kind,
         });
     }
     if manifest.kernel_version != kernel_version {
         return Err(CanonicalImageError::ManifestKernelVersionMismatch {
-            path:     manifest_path.display().to_string(),
-            found:    manifest.kernel_version.clone(),
+            path: manifest_path.display().to_string(),
+            found: manifest.kernel_version.clone(),
             expected: kernel_version.to_owned(),
         });
     }
@@ -671,20 +663,21 @@ fn verify_manifest_against_kernel_anchor(
 
 fn verify_image_blob_against_manifest(
     image_path: &Path,
-    manifest:   &ImageManifest,
+    manifest: &ImageManifest,
 ) -> Result<(), CanonicalImageError> {
-    let expected = manifest.image_artefact_sha256_bytes().map_err(|e| {
-        CanonicalImageError::Manifest {
-            path:   image_path.display().to_string(),
-            source: e,
-        }
-    })?;
+    let expected =
+        manifest
+            .image_artefact_sha256_bytes()
+            .map_err(|e| CanonicalImageError::Manifest {
+                path: image_path.display().to_string(),
+                source: e,
+            })?;
     let actual = compute_image_digest(image_path)?;
     if actual != expected {
         return Err(CanonicalImageError::DigestMismatch {
-            path:     image_path.display().to_string(),
+            path: image_path.display().to_string(),
             expected: hex_encode(&expected),
-            actual:   hex_encode(&actual),
+            actual: hex_encode(&actual),
         });
     }
     Ok(())
@@ -708,8 +701,7 @@ mod tests {
     use ed25519_dalek::{Signer, SigningKey};
     use rand::{rngs::OsRng, RngCore};
     use raxis_image_manifest::{
-        fingerprint_signing_key, BuildEnv, ImageManifest, ManifestFile,
-        Role, SCHEMA_VERSION,
+        fingerprint_signing_key, BuildEnv, ImageManifest, ManifestFile, Role, SCHEMA_VERSION,
     };
     use std::io::Write;
 
@@ -736,38 +728,38 @@ mod tests {
     /// Assemble a manifest covering one fake "rootfs file" plus the
     /// supplied `image_artefact_sha256` and sign it.
     fn assemble_signed_manifest(
-        sk:                       &SigningKey,
-        vk:                       &VerifyingKey,
-        role:                     Role,
-        kernel_version:           &str,
+        sk: &SigningKey,
+        vk: &VerifyingKey,
+        role: Role,
+        kernel_version: &str,
         image_artefact_sha256_hex: String,
     ) -> ImageManifest {
         let files = vec![ManifestFile {
-            path:   "init".to_owned(),
+            path: "init".to_owned(),
             sha256: "0".repeat(64),
-            size:   1,
-            mode:   0o755,
+            size: 1,
+            mode: 0o755,
         }];
         let mut m = ImageManifest {
-            schema_version:        SCHEMA_VERSION,
+            schema_version: SCHEMA_VERSION,
             role,
-            kernel_version:        kernel_version.to_owned(),
-            bundle_hash:           String::new(),
+            kernel_version: kernel_version.to_owned(),
+            bundle_hash: String::new(),
             image_artefact_sha256: image_artefact_sha256_hex,
-            image_format:          raxis_image_manifest::ImageFormat::RootfsErofs,
+            image_format: raxis_image_manifest::ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(vk)),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let bh = m.recompute_bundle_hash().unwrap();
         m.bundle_hash = hex::encode(bh);
-        m.signature   = hex::encode(sk.sign(&bh).to_bytes());
+        m.signature = hex::encode(sk.sign(&bh).to_bytes());
         m
     }
 
@@ -818,11 +810,15 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            CanonicalImageError::DigestMismatch { expected, actual, .. } => {
-                assert_ne!(expected, actual,
-                    "expected and actual must differ for a real tamper case");
+            CanonicalImageError::DigestMismatch {
+                expected, actual, ..
+            } => {
+                assert_ne!(
+                    expected, actual,
+                    "expected and actual must differ for a real tamper case"
+                );
                 assert_eq!(expected.len(), DIGEST_LEN * 2);
-                assert_eq!(actual.len(),   DIGEST_LEN * 2);
+                assert_eq!(actual.len(), DIGEST_LEN * 2);
             }
             other => panic!("expected DigestMismatch, got {other:?}"),
         }
@@ -834,7 +830,7 @@ mod tests {
     #[test]
     fn verify_via_manifest_with_key_rejects_wrong_signing_key() {
         let (sk_a, vk_a) = fixture_signing_key();
-        let (_,    vk_b) = fixture_signing_key();
+        let (_, vk_b) = fixture_signing_key();
         let (img_file, img_sha) = write_image_blob(b"image");
         let manifest = assemble_signed_manifest(&sk_a, &vk_a, Role::Reviewer, "0.1.0", img_sha);
         let manifest_file = write_manifest_toml(&manifest);
@@ -847,8 +843,10 @@ mod tests {
             &vk_b,
         )
         .unwrap_err();
-        assert!(matches!(err, CanonicalImageError::Manifest { .. }),
-            "wrong-key manifest must surface Manifest(SigningKeyFpMismatch); got {err:?}");
+        assert!(
+            matches!(err, CanonicalImageError::Manifest { .. }),
+            "wrong-key manifest must surface Manifest(SigningKeyFpMismatch); got {err:?}"
+        );
     }
 
     /// Manifest declares Orchestrator role but the kernel asked for
@@ -896,8 +894,10 @@ mod tests {
         )
         .unwrap_err();
         match err {
-            CanonicalImageError::ManifestKernelVersionMismatch { found, expected, .. } => {
-                assert_eq!(found,    "0.1.0");
+            CanonicalImageError::ManifestKernelVersionMismatch {
+                found, expected, ..
+            } => {
+                assert_eq!(found, "0.1.0");
                 assert_eq!(expected, "0.2.0");
             }
             other => panic!("expected ManifestKernelVersionMismatch, got {other:?}"),
@@ -923,10 +923,12 @@ mod tests {
             "0.1.0",
         )
         .unwrap_err();
-        assert!(matches!(err, CanonicalImageError::SigningKeyFpNotPopulated),
+        assert!(
+            matches!(err, CanonicalImageError::SigningKeyFpNotPopulated),
             "while EXPECTED_KERNEL_SIGNING_KEY_BYTES is the placeholder, \
              verify_canonical_image_via_manifest must surface SigningKeyFpNotPopulated; \
-             got {err:?}");
+             got {err:?}"
+        );
     }
 
     /// `compute_signing_key_fp` returns the SHA-256 of the trust
@@ -955,8 +957,7 @@ mod tests {
         // EXPECTED_KERNEL_SIGNING_KEY_BYTES is `pub` and must alias
         // the build-script output verbatim.
         assert_eq!(
-            EXPECTED_KERNEL_SIGNING_KEY_BYTES,
-            GENERATED_KERNEL_SIGNING_KEY_BYTES,
+            EXPECTED_KERNEL_SIGNING_KEY_BYTES, GENERATED_KERNEL_SIGNING_KEY_BYTES,
             "`EXPECTED_KERNEL_SIGNING_KEY_BYTES` must alias \
              `GENERATED_KERNEL_SIGNING_KEY_BYTES` (the value emitted \
              by build.rs from RAXIS_KERNEL_SIGNING_KEY_HEX or \
@@ -988,8 +989,7 @@ mod tests {
             return;
         }
         assert_eq!(
-            EXPECTED_KERNEL_SIGNING_KEY_BYTES,
-            UNPOPULATED_SIGNING_KEY_BYTES,
+            EXPECTED_KERNEL_SIGNING_KEY_BYTES, UNPOPULATED_SIGNING_KEY_BYTES,
             "developer builds must default to the all-zero placeholder",
         );
     }
@@ -1007,8 +1007,7 @@ mod tests {
     #[test]
     fn generated_role_digests_are_wired_through_to_public_constants() {
         assert_eq!(
-            EXPECTED_REVIEWER_IMAGE_DIGEST,
-            GENERATED_REVIEWER_IMAGE_DIGEST,
+            EXPECTED_REVIEWER_IMAGE_DIGEST, GENERATED_REVIEWER_IMAGE_DIGEST,
             "`EXPECTED_REVIEWER_IMAGE_DIGEST` must alias \
              `GENERATED_REVIEWER_IMAGE_DIGEST` (build.rs output for \
              RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX); divergence \
@@ -1016,8 +1015,7 @@ mod tests {
              silently broken",
         );
         assert_eq!(
-            EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
-            GENERATED_ORCHESTRATOR_IMAGE_DIGEST,
+            EXPECTED_ORCHESTRATOR_IMAGE_DIGEST, GENERATED_ORCHESTRATOR_IMAGE_DIGEST,
             "`EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` must alias \
              `GENERATED_ORCHESTRATOR_IMAGE_DIGEST` (build.rs output \
              for RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX)",
@@ -1039,8 +1037,7 @@ mod tests {
             );
         } else {
             assert_eq!(
-                EXPECTED_REVIEWER_IMAGE_DIGEST,
-                UNPOPULATED_DIGEST,
+                EXPECTED_REVIEWER_IMAGE_DIGEST, UNPOPULATED_DIGEST,
                 "developer builds must default the Reviewer digest to \
                  the all-zero placeholder",
             );
@@ -1054,8 +1051,7 @@ mod tests {
             );
         } else {
             assert_eq!(
-                EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
-                UNPOPULATED_DIGEST,
+                EXPECTED_ORCHESTRATOR_IMAGE_DIGEST, UNPOPULATED_DIGEST,
                 "developer builds must default the Orchestrator digest \
                  to the all-zero placeholder",
             );
@@ -1089,9 +1085,7 @@ mod tests {
         ));
         assert_eq!(
             p,
-            PathBuf::from(
-                "/usr/local/lib/raxis/images/raxis-reviewer-core-0.1.0.manifest.toml",
-            ),
+            PathBuf::from("/usr/local/lib/raxis/images/raxis-reviewer-core-0.1.0.manifest.toml",),
         );
     }
 
@@ -1114,7 +1108,8 @@ mod tests {
     #[test]
     fn compute_image_digest_is_deterministic_across_two_reads() {
         let mut f = tempfile::NamedTempFile::new().unwrap();
-        f.write_all(b"raxis-canonical-image-stable-content").unwrap();
+        f.write_all(b"raxis-canonical-image-stable-content")
+            .unwrap();
         f.flush().unwrap();
 
         let a = compute_image_digest(f.path()).unwrap();
@@ -1147,10 +1142,12 @@ mod tests {
     /// out-of-band path.
     #[test]
     fn verify_canonical_image_pinned_returns_unpopulated_for_placeholder() {
-        let f   = tempfile::NamedTempFile::new().unwrap();
+        let f = tempfile::NamedTempFile::new().unwrap();
         let err = verify_canonical_image_pinned(f.path(), UNPOPULATED_DIGEST).unwrap_err();
-        assert!(matches!(err, CanonicalImageError::DigestNotPopulated),
-            "placeholder digest must surface DigestNotPopulated; got {err:?}");
+        assert!(
+            matches!(err, CanonicalImageError::DigestNotPopulated),
+            "placeholder digest must surface DigestNotPopulated; got {err:?}"
+        );
     }
 
     /// `verify_canonical_image_pinned` returns Ok when the streamed
@@ -1163,8 +1160,7 @@ mod tests {
         f.flush().unwrap();
 
         let actual = compute_image_digest(f.path()).unwrap();
-        verify_canonical_image_pinned(f.path(), actual)
-            .expect("matching digest must accept");
+        verify_canonical_image_pinned(f.path(), actual).expect("matching digest must accept");
     }
 
     /// `verify_canonical_image_pinned` reports DigestMismatch with
@@ -1183,11 +1179,15 @@ mod tests {
 
         let err = verify_canonical_image_pinned(f.path(), expected).unwrap_err();
         match err {
-            CanonicalImageError::DigestMismatch { expected: e_hex, actual: a_hex, path } => {
+            CanonicalImageError::DigestMismatch {
+                expected: e_hex,
+                actual: a_hex,
+                path,
+            } => {
                 assert_eq!(e_hex, hex_encode(&expected));
                 assert_ne!(e_hex, a_hex);
                 assert_eq!(a_hex.len(), DIGEST_LEN * 2);
-                assert_eq!(path,  f.path().display().to_string());
+                assert_eq!(path, f.path().display().to_string());
             }
             other => panic!("expected DigestMismatch, got {other:?}"),
         }
@@ -1197,10 +1197,11 @@ mod tests {
     /// non-existent path. Pins the fail-closed posture.
     #[test]
     fn compute_image_digest_missing_file_returns_io_error() {
-        let err = compute_image_digest(Path::new("/this/path/does/not/exist/raxis"))
-            .unwrap_err();
-        assert!(matches!(err, CanonicalImageError::Io { .. }),
-            "missing file must surface Io; got {err:?}");
+        let err = compute_image_digest(Path::new("/this/path/does/not/exist/raxis")).unwrap_err();
+        assert!(
+            matches!(err, CanonicalImageError::Io { .. }),
+            "missing file must surface Io; got {err:?}"
+        );
     }
 
     /// `audit_kind` strings are pinned at the SQL/audit level.

@@ -44,9 +44,9 @@ pub enum AdmissionDecision {
     /// surfaces `FAIL_VM_CONCURRENCY_AT_CAP` to the agent and
     /// emits `AdmissionDeferredAtCap`.
     Deferred {
-        reason:          AdmissionDeferReason,
+        reason: AdmissionDeferReason,
         current_running: u32,
-        cap:             u32,
+        cap: u32,
     },
 }
 
@@ -62,10 +62,7 @@ pub enum AdmissionDecision {
 /// SQLite store, hold any lock, or do any I/O. The caller is
 /// responsible for providing a current count and emitting the
 /// audit event after observing `Deferred`.
-pub fn check_vm_concurrency_cap(
-    current_running: u32,
-    cap:             u32,
-) -> AdmissionDecision {
+pub fn check_vm_concurrency_cap(current_running: u32, cap: u32) -> AdmissionDecision {
     if current_running >= cap {
         AdmissionDecision::Deferred {
             reason: AdmissionDeferReason::VmCountAtCap,
@@ -83,7 +80,7 @@ mod tests {
 
     #[test]
     fn allow_when_strictly_below_cap() {
-        assert_eq!(check_vm_concurrency_cap(0,  16), AdmissionDecision::Allow);
+        assert_eq!(check_vm_concurrency_cap(0, 16), AdmissionDecision::Allow);
         assert_eq!(check_vm_concurrency_cap(15, 16), AdmissionDecision::Allow);
     }
 
@@ -91,7 +88,11 @@ mod tests {
     fn defer_at_cap() {
         let d = check_vm_concurrency_cap(16, 16);
         match d {
-            AdmissionDecision::Deferred { reason, current_running, cap } => {
+            AdmissionDecision::Deferred {
+                reason,
+                current_running,
+                cap,
+            } => {
                 assert_eq!(reason, AdmissionDeferReason::VmCountAtCap);
                 assert_eq!(current_running, 16);
                 assert_eq!(cap, 16);

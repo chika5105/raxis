@@ -48,7 +48,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

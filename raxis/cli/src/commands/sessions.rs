@@ -77,12 +77,15 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy)]
 struct SessionsOpts {
     limit: usize,
-    json:  bool,
+    json: bool,
 }
 
 impl Default for SessionsOpts {
     fn default() -> Self {
-        Self { limit: DEFAULT_LIMIT, json: false }
+        Self {
+            limit: DEFAULT_LIMIT,
+            json: false,
+        }
     }
 }
 
@@ -101,9 +104,7 @@ fn parse_args(args: &[String]) -> Result<SessionsOpts, CliError> {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if opts.limit == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
             }
             "-h" | "--help" => {
@@ -143,10 +144,10 @@ fn render_human<W: Write>(out: &mut W, counts: &SessionStateCounts, rows: &[Sess
     let _ = writeln!(
         out,
         "Sessions ({active} active, {expired} expired, {revoked} revoked, {total} total):",
-        active  = counts.active,
+        active = counts.active,
         expired = counts.expired,
         revoked = counts.revoked,
-        total   = counts.total,
+        total = counts.total,
     );
     if rows.is_empty() {
         let _ = writeln!(out, "  (no active sessions)");
@@ -155,10 +156,10 @@ fn render_human<W: Write>(out: &mut W, counts: &SessionStateCounts, rows: &[Sess
     let _ = writeln!(
         out,
         "  {sid:<26} {role:<10} {lineage:<20} {seq:>4} {expires_in:>10}",
-        sid        = "session_id",
-        role       = "role",
-        lineage    = "lineage_id",
-        seq        = "seq",
+        sid = "session_id",
+        role = "role",
+        lineage = "lineage_id",
+        seq = "seq",
         expires_in = "expires",
     );
     let now = unix_now_secs();
@@ -167,10 +168,10 @@ fn render_human<W: Write>(out: &mut W, counts: &SessionStateCounts, rows: &[Sess
         let _ = writeln!(
             out,
             "  {sid:<26} {role:<10} {lineage:<20} {seq:>4} {expires:>10}",
-            sid     = truncate(&r.session_id, 26),
-            role    = truncate(&r.role_id,    10),
+            sid = truncate(&r.session_id, 26),
+            role = truncate(&r.role_id, 10),
             lineage = truncate(&r.lineage_id, 20),
-            seq     = r.sequence_number,
+            seq = r.sequence_number,
             expires = format_secs_relative(expires_in),
         );
     }
@@ -230,10 +231,18 @@ fn unix_now_secs() -> u64 {
 /// Render a duration-in-seconds as a compact relative label
 /// (`12s`, `5m`, `3h`, `2d`). Caps at days; weeks roll up to "+Nd".
 fn format_secs_relative(secs: u64) -> String {
-    if secs == 0                 { return "expired".to_owned(); }
-    if secs < 60                 { return format!("{secs}s"); }
-    if secs < 60 * 60            { return format!("{}m", secs / 60); }
-    if secs < 24 * 60 * 60       { return format!("{}h", secs / 3600); }
+    if secs == 0 {
+        return "expired".to_owned();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 60 * 60 {
+        return format!("{}m", secs / 60);
+    }
+    if secs < 24 * 60 * 60 {
+        return format!("{}h", secs / 3600);
+    }
     format!("{}d", secs / 86_400)
 }
 
@@ -246,20 +255,25 @@ mod tests {
     use super::*;
 
     fn sample_counts() -> SessionStateCounts {
-        SessionStateCounts { active: 2, expired: 1, revoked: 0, total: 3 }
+        SessionStateCounts {
+            active: 2,
+            expired: 1,
+            revoked: 0,
+            total: 3,
+        }
     }
 
     fn sample_row(id: &str, role: &str, expires_at: u64) -> SessionRow {
         SessionRow {
-            session_id:      id.to_owned(),
-            role_id:         role.to_owned(),
-            lineage_id:      "lin-1".to_owned(),
-            worktree_root:   None,
+            session_id: id.to_owned(),
+            role_id: role.to_owned(),
+            lineage_id: "lin-1".to_owned(),
+            worktree_root: None,
             sequence_number: 1,
-            created_at:      0,
+            created_at: 0,
             expires_at,
-            revoked:         false,
-            revoked_at:      None,
+            revoked: false,
+            revoked_at: None,
         }
     }
 
@@ -272,12 +286,7 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_limit_and_json() {
-        let o = parse_args(&[
-            "--limit".to_owned(),
-            "10".to_owned(),
-            "--json".to_owned(),
-        ])
-        .unwrap();
+        let o = parse_args(&["--limit".to_owned(), "10".to_owned(), "--json".to_owned()]).unwrap();
         assert_eq!(o.limit, 10);
         assert!(o.json);
     }
@@ -297,11 +306,7 @@ mod tests {
     #[test]
     fn render_human_with_no_rows_says_so() {
         let mut buf: Vec<u8> = Vec::new();
-        render_human(
-            &mut buf,
-            &SessionStateCounts::default(),
-            &[],
-        );
+        render_human(&mut buf, &SessionStateCounts::default(), &[]);
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("(no active sessions)"), "got: {s}");
     }
@@ -328,7 +333,11 @@ mod tests {
     #[test]
     fn render_json_emits_object_with_counts_and_array() {
         let mut buf: Vec<u8> = Vec::new();
-        render_json(&mut buf, &sample_counts(), &[sample_row("s-a", "planner", 9999)]);
+        render_json(
+            &mut buf,
+            &sample_counts(),
+            &[sample_row("s-a", "planner", 9999)],
+        );
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["counts"]["active"], 2);
         assert_eq!(v["counts"]["total"], 3);

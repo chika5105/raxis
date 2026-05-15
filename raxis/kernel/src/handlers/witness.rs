@@ -33,9 +33,9 @@
 
 use std::path::PathBuf;
 
-use raxis_types::{unix_now_secs, GateType, WitnessSubmission};
 use raxis_store::Table;
 use raxis_types::TaskState;
+use raxis_types::{unix_now_secs, GateType, WitnessSubmission};
 
 use crate::authority::verifier_token;
 use crate::gates::{self, GateEvalResult};
@@ -70,7 +70,10 @@ pub enum WitnessAck {
     /// gates STILL needing a `Pass` witness; an empty vec MEANS the task may
     /// now advance out of `GatesPending`. Only `result_class == Pass`
     /// submissions take this path.
-    Accepted { run_id: String, remaining_gates: Vec<GateType> },
+    Accepted {
+        run_id: String,
+        remaining_gates: Vec<GateType>,
+    },
 
     /// Submission accepted and witness written, but the result was NOT a
     /// `Pass`, so the gate cannot be cleared by this submission. The task
@@ -92,10 +95,7 @@ pub enum WitnessAck {
 pub enum WitnessRejectionReason {
     /// sub.evaluation_sha != task.evaluation_sha. Spec §2.3 witness.rs:
     /// "no witness write, no token consume, no WitnessAccepted audit".
-    EvaluationShaMismatch {
-        expected: String,
-        presented: String,
-    },
+    EvaluationShaMismatch { expected: String, presented: String },
     /// The task is not in GatesPending state — the submission arrived too late
     /// (task already recovered/aborted) or for the wrong task state.
     TaskNotGatesPending { current_state: String },
@@ -190,83 +190,101 @@ pub async fn handle(
     let body_bytes_owned = body_bytes.clone();
 
     enum CommitOutcome {
-        Accepted { run_id: String, task_row: TaskRowData },
+        Accepted {
+            run_id: String,
+            task_row: TaskRowData,
+        },
         Rejected(WitnessRejectionReason),
     }
 
     let presented_sha_for_closure = presented_sha.clone();
-    let outcome: CommitOutcome = tokio::task::spawn_blocking(move || -> Result<CommitOutcome, HandlerError> {
-        // (a) FS blob write outside the transaction — content-addressed,
-        // idempotent, no SQL state to roll back if a later step fails.
-        let provisional_record = WitnessRecord {
-            verifier_run_id: String::new(),
-            evaluation_sha:  presented_sha_for_closure.clone(),
-            task_id:         task_id_owned.clone(),
-            gate_type:       gate_type_owned.clone(),
-            result_class:    result_class_for_record.clone(),
-            blob_sha256:     blob_sha256_owned.clone(),
-            blob_path:       blob_sha256_owned.clone(),
-            recorded_at:     0,
-        };
-        witness_index::write_blob_to_disk(&provisional_record, &body_bytes_owned, &witness_dir)
-            .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
+    let outcome: CommitOutcome =
+        tokio::task::spawn_blocking(move || -> Result<CommitOutcome, HandlerError> {
+            // (a) FS blob write outside the transaction — content-addressed,
+            // idempotent, no SQL state to roll back if a later step fails.
+            let provisional_record = WitnessRecord {
+                verifier_run_id: String::new(),
+                evaluation_sha: presented_sha_for_closure.clone(),
+                task_id: task_id_owned.clone(),
+                gate_type: gate_type_owned.clone(),
+                result_class: result_class_for_record.clone(),
+                blob_sha256: blob_sha256_owned.clone(),
+                blob_path: blob_sha256_owned.clone(),
+                recorded_at: 0,
+            };
+            witness_index::write_blob_to_disk(&provisional_record, &body_bytes_owned, &witness_dir)
+                .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
 
-        // (b) SQL portion — single transaction.
-        let mut conn = store.lock_sync();
-        let tx = conn.transaction().map_err(|e| HandlerError::Store(e.to_string()))?;
+            // (b) SQL portion — single transaction.
+            let mut conn = store.lock_sync();
+            let tx = conn
+                .transaction()
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
 
-        // Step 1 (in-tx): validate token. If it fails for any reason, the
-        // transaction rolls back on drop — no witness row is committed.
-        let run_id = verifier_token::validate_verifier_token_in_tx(&tx, &raw_token)
-            .map_err(|e| HandlerError::Unauthorized { reason: e.to_string() })?;
+            // Step 1 (in-tx): validate token. If it fails for any reason, the
+            // transaction rolls back on drop — no witness row is committed.
+            let run_id =
+                verifier_token::validate_verifier_token_in_tx(&tx, &raw_token).map_err(|e| {
+                    HandlerError::Unauthorized {
+                        reason: e.to_string(),
+                    }
+                })?;
 
-        // Step 2 (in-tx): load task row + binding check. Re-checking inside
-        // the transaction (vs a pre-tx read) closes the TOCTOU window
-        // where the task could have been swept to BlockedRecoveryPending
-        // or had its evaluation_sha rebound between any pre-tx read and
-        // this point.
-        let task_row = load_task_row_in_tx(&tx, &task_id_owned)?;
-        if task_row.state != TaskState::GatesPending.as_sql_str() {
-            drop(tx); // rollback — token is NOT consumed.
-            return Ok(CommitOutcome::Rejected(WitnessRejectionReason::TaskNotGatesPending {
-                current_state: task_row.state,
-            }));
-        }
-        let stored_sha = task_row.evaluation_sha.clone().unwrap_or_default();
-        if presented_sha_for_closure != stored_sha {
-            drop(tx);
-            return Ok(CommitOutcome::Rejected(WitnessRejectionReason::EvaluationShaMismatch {
-                expected:  stored_sha,
-                presented: presented_sha_for_closure,
-            }));
-        }
+            // Step 2 (in-tx): load task row + binding check. Re-checking inside
+            // the transaction (vs a pre-tx read) closes the TOCTOU window
+            // where the task could have been swept to BlockedRecoveryPending
+            // or had its evaluation_sha rebound between any pre-tx read and
+            // this point.
+            let task_row = load_task_row_in_tx(&tx, &task_id_owned)?;
+            if task_row.state != TaskState::GatesPending.as_sql_str() {
+                drop(tx); // rollback — token is NOT consumed.
+                return Ok(CommitOutcome::Rejected(
+                    WitnessRejectionReason::TaskNotGatesPending {
+                        current_state: task_row.state,
+                    },
+                ));
+            }
+            let stored_sha = task_row.evaluation_sha.clone().unwrap_or_default();
+            if presented_sha_for_closure != stored_sha {
+                drop(tx);
+                return Ok(CommitOutcome::Rejected(
+                    WitnessRejectionReason::EvaluationShaMismatch {
+                        expected: stored_sha,
+                        presented: presented_sha_for_closure,
+                    },
+                ));
+            }
 
-        // Step 3 (in-tx): insert witness index row.
-        let record = WitnessRecord {
-            verifier_run_id: run_id.clone(),
-            evaluation_sha:  presented_sha_for_closure.clone(),
-            task_id:         task_id_owned.clone(),
-            gate_type:       gate_type_owned.clone(),
-            result_class:    result_class_for_record.clone(),
-            blob_sha256:     blob_sha256_owned.clone(),
-            blob_path:       blob_sha256_owned,
-            recorded_at:     unix_now_secs(),
-        };
-        witness_index::insert_witness_index_in_tx(&tx, &record, record.recorded_at)
-            .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
+            // Step 3 (in-tx): insert witness index row.
+            let record = WitnessRecord {
+                verifier_run_id: run_id.clone(),
+                evaluation_sha: presented_sha_for_closure.clone(),
+                task_id: task_id_owned.clone(),
+                gate_type: gate_type_owned.clone(),
+                result_class: result_class_for_record.clone(),
+                blob_sha256: blob_sha256_owned.clone(),
+                blob_path: blob_sha256_owned,
+                recorded_at: unix_now_secs(),
+            };
+            witness_index::insert_witness_index_in_tx(&tx, &record, record.recorded_at)
+                .map_err(|e| HandlerError::WitnessWrite(e.to_string()))?;
 
-        // Step 4 (in-tx): consume token. If a concurrent reconcile expired
-        // it between (a) and now, this returns TokenConsumed → we propagate
-        // an Unauthorized error and the transaction is rolled back, undoing
-        // the witness INSERT we just wrote. INV-INIT-08 holds.
-        verifier_token::consume_verifier_token_in_tx(&tx, &raw_token)
-            .map_err(|e| HandlerError::Unauthorized { reason: format!("consume failed: {e}") })?;
+            // Step 4 (in-tx): consume token. If a concurrent reconcile expired
+            // it between (a) and now, this returns TokenConsumed → we propagate
+            // an Unauthorized error and the transaction is rolled back, undoing
+            // the witness INSERT we just wrote. INV-INIT-08 holds.
+            verifier_token::consume_verifier_token_in_tx(&tx, &raw_token).map_err(|e| {
+                HandlerError::Unauthorized {
+                    reason: format!("consume failed: {e}"),
+                }
+            })?;
 
-        tx.commit().map_err(|e| HandlerError::Store(e.to_string()))?;
-        Ok(CommitOutcome::Accepted { run_id, task_row })
-    })
-    .await
-    .map_err(|e| HandlerError::Store(format!("witness commit join: {e}")))??;
+            tx.commit()
+                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            Ok(CommitOutcome::Accepted { run_id, task_row })
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("witness commit join: {e}")))??;
 
     let (run_id, task_row) = match outcome {
         CommitOutcome::Accepted { run_id, task_row } => (run_id, task_row),
@@ -302,14 +320,13 @@ pub async fn handle(
         });
     }
 
-    let remaining_gates = gate_recheck(
-        sub.task_id.as_str(),
-        &presented_sha,
-        &task_row,
-        ctx,
-    ).await?;
+    let remaining_gates =
+        gate_recheck(sub.task_id.as_str(), &presented_sha, &task_row, ctx).await?;
 
-    Ok(WitnessAck::Accepted { run_id, remaining_gates })
+    Ok(WitnessAck::Accepted {
+        run_id,
+        remaining_gates,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -336,33 +353,33 @@ async fn gate_recheck(
 
     // Re-derive touched_paths using the stored base/head SHAs.
     // This mirrors exactly what handlers/intent.rs computed at intent time.
-    let touched_paths: Vec<PathBuf> = if let (Some(base), Some(head)) =
-        (&task_row.base_sha, &task_row.evaluation_sha)
-    {
-        // V2 migration: dispatch through the `DomainAdapter`
-        // (`extensibility-traits.md §2.2.B`). Newtype validation is
-        // preserved so we surface a parsing error before the trait
-        // call, mirroring the regular intent admission path.
-        let _base_sha = vcs::diff::CommitSha::new(base)
-            .map_err(|e| HandlerError::GateRecheck(format!("invalid base_sha: {e}")))?;
-        let _head_sha = vcs::diff::CommitSha::new(head)
-            .map_err(|e| HandlerError::GateRecheck(format!("invalid evaluation_sha: {e}")))?;
-        let resources = ctx.domain
-            .compute_touched_paths(base, head, &worktree_root)
-            .await
-            .map_err(|e| HandlerError::GateRecheck(format!("domain diff failed: {e}")))?;
-        resources
-            .resources
-            .into_iter()
-            .map(|r| {
-                let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
-                PathBuf::from(stripped)
-            })
-            .collect()
-    } else {
-        // No SHA range — no touched paths, no gate requirements.
-        vec![]
-    };
+    let touched_paths: Vec<PathBuf> =
+        if let (Some(base), Some(head)) = (&task_row.base_sha, &task_row.evaluation_sha) {
+            // V2 migration: dispatch through the `DomainAdapter`
+            // (`extensibility-traits.md §2.2.B`). Newtype validation is
+            // preserved so we surface a parsing error before the trait
+            // call, mirroring the regular intent admission path.
+            let _base_sha = vcs::diff::CommitSha::new(base)
+                .map_err(|e| HandlerError::GateRecheck(format!("invalid base_sha: {e}")))?;
+            let _head_sha = vcs::diff::CommitSha::new(head)
+                .map_err(|e| HandlerError::GateRecheck(format!("invalid evaluation_sha: {e}")))?;
+            let resources = ctx
+                .domain
+                .compute_touched_paths(base, head, &worktree_root)
+                .await
+                .map_err(|e| HandlerError::GateRecheck(format!("domain diff failed: {e}")))?;
+            resources
+                .resources
+                .into_iter()
+                .map(|r| {
+                    let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
+                    PathBuf::from(stripped)
+                })
+                .collect()
+        } else {
+            // No SHA range — no touched paths, no gate requirements.
+            vec![]
+        };
 
     // Parse session_id from task row (used for gate evaluation, not the verifier session).
     let session_id = {
@@ -382,7 +399,8 @@ async fn gate_recheck(
         &[], // submitted_claims: re-loaded from task row in production; empty stub for v1
         &worktree_root,
         ctx,
-    ).await
+    )
+    .await
     .map_err(|e| HandlerError::GateRecheck(e.to_string()))?;
 
     match gate_result {
@@ -426,7 +444,8 @@ async fn gate_recheck(
                         &worktree_root,
                         &vconfig,
                         ctx.store.as_ref(),
-                    ).await;
+                    )
+                    .await;
                 }
             }
 
@@ -459,12 +478,12 @@ async fn gate_recheck(
 /// Subset of task columns needed by the witness handler.
 #[derive(Debug)]
 struct TaskRowData {
-    state:          String,
+    state: String,
     evaluation_sha: Option<String>,
-    base_sha:       Option<String>,
-    session_id:     Option<String>,
-    worktree_root:  Option<String>, // denormalised from sessions at admit time (v1 simplification)
-    lane_id:        String,
+    base_sha: Option<String>,
+    session_id: Option<String>,
+    worktree_root: Option<String>, // denormalised from sessions at admit time (v1 simplification)
+    lane_id: String,
 }
 
 #[allow(dead_code)]
@@ -482,7 +501,7 @@ fn load_task_row(task_id: &str, store: &raxis_store::Store) -> Result<TaskRowDat
 /// the task could have been swept to BlockedRecoveryPending or had its
 /// evaluation_sha rebound between a pre-tx read and the witness commit.
 fn load_task_row_in_tx(
-    conn:    &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     task_id: &str,
 ) -> Result<TaskRowData, HandlerError> {
     conn.query_row(
@@ -522,8 +541,8 @@ fn resolve_worktree_root(task_row: &TaskRowData, ctx: &HandlerContext) -> PathBu
 
 fn map_result_class(rc: raxis_types::WitnessResultClass) -> ResultClass {
     match rc {
-        raxis_types::WitnessResultClass::Pass        => ResultClass::Pass,
-        raxis_types::WitnessResultClass::Fail        => ResultClass::Fail,
+        raxis_types::WitnessResultClass::Pass => ResultClass::Pass,
+        raxis_types::WitnessResultClass::Fail => ResultClass::Fail,
         raxis_types::WitnessResultClass::Inconclusive => ResultClass::Inconclusive,
     }
 }
@@ -542,12 +561,15 @@ mod tests {
     #[test]
     fn evaluation_sha_mismatch_reason_carries_both_values() {
         let reason = WitnessRejectionReason::EvaluationShaMismatch {
-            expected:  "aaaa".to_owned(),
+            expected: "aaaa".to_owned(),
             presented: "bbbb".to_owned(),
         };
         match reason {
-            WitnessRejectionReason::EvaluationShaMismatch { expected, presented } => {
-                assert_eq!(expected,  "aaaa");
+            WitnessRejectionReason::EvaluationShaMismatch {
+                expected,
+                presented,
+            } => {
+                assert_eq!(expected, "aaaa");
                 assert_eq!(presented, "bbbb");
             }
             _ => panic!("wrong variant"),
@@ -571,12 +593,18 @@ mod tests {
 
     #[test]
     fn pass_maps_to_pass() {
-        assert_eq!(map_result_class(WitnessResultClass::Pass), ResultClass::Pass);
+        assert_eq!(
+            map_result_class(WitnessResultClass::Pass),
+            ResultClass::Pass
+        );
     }
 
     #[test]
     fn fail_maps_to_fail() {
-        assert_eq!(map_result_class(WitnessResultClass::Fail), ResultClass::Fail);
+        assert_eq!(
+            map_result_class(WitnessResultClass::Fail),
+            ResultClass::Fail
+        );
     }
 
     #[test]
@@ -591,9 +619,14 @@ mod tests {
 
     #[test]
     fn accepted_empty_remaining_gates_means_all_clear() {
-        let ack = WitnessAck::Accepted { run_id: "r-1".to_owned(), remaining_gates: vec![] };
+        let ack = WitnessAck::Accepted {
+            run_id: "r-1".to_owned(),
+            remaining_gates: vec![],
+        };
         match ack {
-            WitnessAck::Accepted { remaining_gates, .. } => assert!(remaining_gates.is_empty()),
+            WitnessAck::Accepted {
+                remaining_gates, ..
+            } => assert!(remaining_gates.is_empty()),
             _ => panic!("wrong variant"),
         }
     }
@@ -642,7 +675,9 @@ mod tests {
 
     #[test]
     fn handler_error_invalid_task_includes_id() {
-        let err = HandlerError::InvalidTask { task_id: "t-99".to_owned() };
+        let err = HandlerError::InvalidTask {
+            task_id: "t-99".to_owned(),
+        };
         assert!(err.to_string().contains("t-99"));
     }
 
@@ -654,12 +689,12 @@ mod tests {
     // committed witness row whose producer received an Unauthorized
     // reply. We pin the SQL portion of that contract here.
 
-    use raxis_store::{Store, Table};
-    use raxis_crypto::token::{generate_verifier_token, sha256_hex};
     use crate::authority::verifier_token::{
-        validate_verifier_token_in_tx, consume_verifier_token_in_tx,
+        consume_verifier_token_in_tx, validate_verifier_token_in_tx,
     };
     use crate::witness_index::{insert_witness_index_in_tx, ResultClass, WitnessRecord};
+    use raxis_crypto::token::{generate_verifier_token, sha256_hex};
+    use raxis_store::{Store, Table};
 
     /// Insert: `initiative` → `task` (GatesPending) → `verifier_run_token`.
     /// Returns (raw_token_hex, run_id).
@@ -696,13 +731,13 @@ mod tests {
         let blob_sha = sha256_hex(b"witness-body");
         WitnessRecord {
             verifier_run_id: run_id.to_owned(),
-            evaluation_sha:  "sha-eval".to_owned(),
-            task_id:         task_id.to_owned(),
-            gate_type:       "TestGate".to_owned(),
-            result_class:    ResultClass::Pass,
-            blob_sha256:     blob_sha.clone(),
-            blob_path:       blob_sha,
-            recorded_at:     0,
+            evaluation_sha: "sha-eval".to_owned(),
+            task_id: task_id.to_owned(),
+            gate_type: "TestGate".to_owned(),
+            result_class: ResultClass::Pass,
+            blob_sha256: blob_sha.clone(),
+            blob_path: blob_sha,
+            recorded_at: 0,
         }
     }
 
@@ -723,15 +758,23 @@ mod tests {
         drop(conn);
 
         let conn = store.lock_sync();
-        let n_witness: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
-            [], |r| r.get(0),
-        ).unwrap();
-        let consumed: i64 = conn.query_row(
-            &format!("SELECT consumed FROM {} WHERE verifier_run_id=?1",
-                Table::VerifierRunTokens.as_str()),
-            rusqlite::params![&run_id], |r| r.get(0),
-        ).unwrap();
+        let n_witness: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let consumed: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT consumed FROM {} WHERE verifier_run_id=?1",
+                    Table::VerifierRunTokens.as_str()
+                ),
+                rusqlite::params![&run_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n_witness, 1, "witness row must be visible after commit");
         assert_eq!(consumed, 1, "token must be marked consumed after commit");
     }
@@ -754,10 +797,13 @@ mod tests {
         {
             let conn = store.lock_sync();
             conn.execute(
-                &format!("UPDATE {} SET consumed=1 WHERE verifier_run_id=?1",
-                    Table::VerifierRunTokens.as_str()),
+                &format!(
+                    "UPDATE {} SET consumed=1 WHERE verifier_run_id=?1",
+                    Table::VerifierRunTokens.as_str()
+                ),
                 rusqlite::params![&run_id],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let mut conn = store.lock_sync();
@@ -765,17 +811,22 @@ mod tests {
         // Validate fails first because the token is already consumed —
         // good: the witness INSERT never runs.
         let validate_err = validate_verifier_token_in_tx(&tx, &raw_token).unwrap_err();
-        assert!(matches!(validate_err,
-            crate::authority::keys::AuthorityError::TokenConsumed));
+        assert!(matches!(
+            validate_err,
+            crate::authority::keys::AuthorityError::TokenConsumed
+        ));
         drop(tx); // rollback
 
         // Even though we dropped without committing, no witness row exists.
         drop(conn);
         let conn = store.lock_sync();
-        let n_witness: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
-            [], |r| r.get(0),
-        ).unwrap();
+        let n_witness: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n_witness, 0, "no witness row may exist when validate fails");
     }
 
@@ -801,8 +852,10 @@ mod tests {
         // Calling consume AGAIN inside the same tx returns TokenConsumed
         // (rows=0) — modeling a parallel race outcome.
         let err = consume_verifier_token_in_tx(&tx, &raw_token).unwrap_err();
-        assert!(matches!(err,
-            crate::authority::keys::AuthorityError::TokenConsumed));
+        assert!(matches!(
+            err,
+            crate::authority::keys::AuthorityError::TokenConsumed
+        ));
         // The witness handler's contract: on consume failure, drop the
         // tx (rollback) instead of committing. Verify the rollback
         // actually erases our witness INSERT.
@@ -810,11 +863,16 @@ mod tests {
         drop(conn);
 
         let conn = store.lock_sync();
-        let n_witness: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(n_witness, 0,
-            "witness INSERT must be rolled back when consume reports a race");
+        let n_witness: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {}", Table::WitnessRecords.as_str()),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n_witness, 0,
+            "witness INSERT must be rolled back when consume reports a race"
+        );
     }
 }

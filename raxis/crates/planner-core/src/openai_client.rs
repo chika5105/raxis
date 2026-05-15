@@ -70,8 +70,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError,
-    ToolSpec, Usage,
+    ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError, ToolSpec, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -220,7 +219,11 @@ fn join_text_blocks(blocks: &[ContentBlock]) -> Option<String> {
             parts.push(text);
         }
     }
-    if parts.is_empty() { None } else { Some(parts.join("\n\n")) }
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
 }
 
 fn collect_tool_calls(blocks: &[ContentBlock]) -> Vec<OpenAiToolCall> {
@@ -271,7 +274,11 @@ fn build_messages(req: &MessageRequest) -> Vec<OpenAiMessage> {
                 for b in &m.content {
                     match b {
                         ContentBlock::Text { text } => text_blocks.push(text),
-                        ContentBlock::ToolResult { tool_use_id, content, .. } => {
+                        ContentBlock::ToolResult {
+                            tool_use_id,
+                            content,
+                            ..
+                        } => {
                             tool_results.push((tool_use_id.as_str(), content.clone()));
                         }
                         _ => { /* tool_use cannot appear in a user role on egress */ }
@@ -310,14 +317,17 @@ fn build_messages(req: &MessageRequest) -> Vec<OpenAiMessage> {
 }
 
 fn build_tools<'a>(tools: &'a [ToolSpec]) -> Vec<OpenAiToolWrapper<'a>> {
-    tools.iter().map(|t| OpenAiToolWrapper {
-        kind: "function",
-        function: OpenAiFunctionDef {
-            name: t.name.as_str(),
-            description: t.description.as_str(),
-            parameters: &t.input_schema,
-        },
-    }).collect()
+    tools
+        .iter()
+        .map(|t| OpenAiToolWrapper {
+            kind: "function",
+            function: OpenAiFunctionDef {
+                name: t.name.as_str(),
+                description: t.description.as_str(),
+                parameters: &t.input_schema,
+            },
+        })
+        .collect()
 }
 
 fn build_request_body<'a>(req: &'a MessageRequest) -> OpenAiRequest<'a> {
@@ -336,15 +346,17 @@ fn build_request_body<'a>(req: &'a MessageRequest) -> OpenAiRequest<'a> {
 
 fn map_finish_reason(s: &str) -> String {
     match s {
-        "stop"       => "end_turn".to_owned(),
-        "length"     => "max_tokens".to_owned(),
+        "stop" => "end_turn".to_owned(),
+        "length" => "max_tokens".to_owned(),
         "tool_calls" => "tool_use".to_owned(),
-        other        => other.to_owned(),
+        other => other.to_owned(),
     }
 }
 
 fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
-    let choice = raw.choices.first()
+    let choice = raw
+        .choices
+        .first()
         .ok_or_else(|| ModelError::Json("OpenAI response had no choices".to_owned()))?;
     let msg = &choice.message;
 
@@ -364,7 +376,11 @@ fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
         }
     }
 
-    let role = if msg.role.is_empty() { "assistant".to_owned() } else { msg.role.clone() };
+    let role = if msg.role.is_empty() {
+        "assistant".to_owned()
+    } else {
+        msg.role.clone()
+    };
     let stop_reason = choice.finish_reason.as_deref().map(map_finish_reason);
     // OpenAI surfaces cache-hit counts at
     // `prompt_tokens_details.cached_tokens` per the current
@@ -377,16 +393,16 @@ fn parse_response(raw: &OpenAiResponse) -> Result<MessageResponse, ModelError> {
         raw.usage.cached_tokens,
     );
     Ok(MessageResponse {
-        id:    raw.id.clone(),
-        kind:  "message".to_owned(),
+        id: raw.id.clone(),
+        kind: "message".to_owned(),
         role,
         content,
         stop_reason,
         usage: Usage {
-            input_tokens:                raw.usage.prompt_tokens,
-            output_tokens:               raw.usage.completion_tokens,
+            input_tokens: raw.usage.prompt_tokens,
+            output_tokens: raw.usage.completion_tokens,
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     cache_read,
+            cache_read_input_tokens: cache_read,
         },
         model: raw.model.clone(),
     })
@@ -443,30 +459,30 @@ impl OpenAiClient {
 
 #[async_trait]
 impl ModelClient for OpenAiClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         let url = format!("{}/v1/chat/completions", self.base_url);
         let body = build_request_body(req);
-        let body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "POST",
+            url: &url,
+            method: "POST",
             headers: vec![
                 ("content-type", "application/json".to_owned()),
-                ("accept",       "application/json".to_owned()),
+                ("accept", "application/json".to_owned()),
             ],
-            body:    body_bytes,
+            body: body_bytes,
             timeout: self.request_timeout,
         };
 
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             let snippet = if resp.body.len() <= 4096 {
@@ -478,11 +494,14 @@ impl ModelClient for OpenAiClient {
                     resp.body.len() - 4096,
                 )
             };
-            return Err(ModelError::Upstream { status: resp.status, body: snippet });
+            return Err(ModelError::Upstream {
+                status: resp.status,
+                body: snippet,
+            });
         }
 
-        let raw: OpenAiResponse = serde_json::from_slice(&resp.body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let raw: OpenAiResponse =
+            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
         parse_response(&raw)
     }
 }
@@ -505,15 +524,19 @@ mod tests {
             messages: vec![
                 Message {
                     role: "user".to_owned(),
-                    content: vec![ContentBlock::Text { text: "what is 1+1?".to_owned() }],
+                    content: vec![ContentBlock::Text {
+                        text: "what is 1+1?".to_owned(),
+                    }],
                 },
                 Message {
                     role: "assistant".to_owned(),
                     content: vec![
-                        ContentBlock::Text { text: "let me compute".to_owned() },
+                        ContentBlock::Text {
+                            text: "let me compute".to_owned(),
+                        },
                         ContentBlock::ToolUse {
-                            id:    "call-A".to_owned(),
-                            name:  "calc".to_owned(),
+                            id: "call-A".to_owned(),
+                            name: "calc".to_owned(),
                             input: serde_json::json!({"expr": "1+1"}),
                         },
                     ],
@@ -522,8 +545,8 @@ mod tests {
                     role: "user".to_owned(),
                     content: vec![ContentBlock::ToolResult {
                         tool_use_id: "call-A".to_owned(),
-                        content:     "2".to_owned(),
-                        is_error:    None,
+                        content: "2".to_owned(),
+                        is_error: None,
                     }],
                 },
             ],
@@ -660,10 +683,10 @@ mod tests {
 
     #[test]
     fn maps_finish_reason_table_is_complete() {
-        assert_eq!(map_finish_reason("stop"),       "end_turn");
-        assert_eq!(map_finish_reason("length"),     "max_tokens");
+        assert_eq!(map_finish_reason("stop"), "end_turn");
+        assert_eq!(map_finish_reason("length"), "max_tokens");
         assert_eq!(map_finish_reason("tool_calls"), "tool_use");
-        assert_eq!(map_finish_reason("safety"),     "safety");
+        assert_eq!(map_finish_reason("safety"), "safety");
     }
 
     /// **Prompt-caching attribution — nested `prompt_tokens_details`.**
@@ -692,9 +715,11 @@ mod tests {
         let raw: OpenAiResponse = serde_json::from_value(raw).unwrap();
         let canonical = parse_response(&raw).unwrap();
         assert_eq!(canonical.usage.input_tokens, 2006);
-        assert_eq!(canonical.usage.cache_read_input_tokens, 1920,
+        assert_eq!(
+            canonical.usage.cache_read_input_tokens, 1920,
             "OpenAI cached_tokens MUST fold into Usage::cache_read_input_tokens \
-             so dispatch-side budget accounting matches Anthropic semantics");
+             so dispatch-side budget accounting matches Anthropic semantics"
+        );
         // OpenAI does not surface a per-call cache-write counter.
         assert_eq!(canonical.usage.cache_creation_input_tokens, 0);
     }
@@ -749,9 +774,13 @@ mod tests {
             // Read until headers + a small body land
             loop {
                 let n = sock.read(&mut buf[total..]).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 total += n;
-                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             let body = br#"{"id":"chatcmpl-1","model":"gpt-4o-mini","choices":[{"index":0,"finish_reason":"stop","message":{"role":"assistant","content":"hi"}}],"usage":{"prompt_tokens":3,"completion_tokens":1}}"#;
             let resp = format!(

@@ -69,8 +69,8 @@ pub mod initiative_bus;
 pub use initiative_bus::{BroadcastingAuditSink, InitiativeEventBus};
 
 use std::collections::HashMap;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_types::push::{KernelPush, KernelPushFrame};
@@ -95,15 +95,15 @@ pub type Subscriber = broadcast::Receiver<KernelPushFrame>;
 /// out to all currently-subscribed receivers, plus a monotonic
 /// `push_id` allocator.
 struct PerSession {
-    sender:     broadcast::Sender<KernelPushFrame>,
-    next_id:    AtomicU64,
+    sender: broadcast::Sender<KernelPushFrame>,
+    next_id: AtomicU64,
 }
 
 /// Process-wide kernel-push registry. One instance lives in
 /// `HandlerContext::push_dispatcher` so every IPC handler can
 /// publish without re-injecting the registry.
 pub struct KernelPushDispatcher {
-    audit:    Arc<dyn AuditSink>,
+    audit: Arc<dyn AuditSink>,
     sessions: std::sync::Mutex<HashMap<SessionId, Arc<PerSession>>>,
 }
 
@@ -162,10 +162,10 @@ impl KernelPushDispatcher {
     /// `initiative_id` column without re-querying the DB.
     pub fn enqueue_with_context(
         &self,
-        session_id:     SessionId,
-        push:           KernelPush,
-        now_unix:       i64,
-        initiative_id:  Option<InitiativeId>,
+        session_id: SessionId,
+        push: KernelPush,
+        now_unix: i64,
+        initiative_id: Option<InitiativeId>,
     ) -> KernelPushFrame {
         let session = self.session(session_id.clone());
         let push_id = session.next_id.fetch_add(1, Ordering::SeqCst);
@@ -176,10 +176,10 @@ impl KernelPushDispatcher {
             push: push.clone(),
         };
 
-        let push_kind   = push_kind_str(&push);
+        let push_kind = push_kind_str(&push);
         let task_id_obj = push_task_id(&push).cloned();
         let task_id_str = task_id_obj.as_ref().map(|t| t.to_string());
-        let init_str    = initiative_id.as_ref().map(|i| i.to_string());
+        let init_str = initiative_id.as_ref().map(|i| i.to_string());
         let session_str = session_id.to_string();
         if let Err(e) = self.audit.emit(
             AuditEventKind::KernelPushEnqueued {
@@ -213,8 +213,7 @@ impl KernelPushDispatcher {
         guard
             .entry(session_id)
             .or_insert_with(|| {
-                let (sender, _initial_rx) =
-                    broadcast::channel(PER_SESSION_BROADCAST_CAPACITY);
+                let (sender, _initial_rx) = broadcast::channel(PER_SESSION_BROADCAST_CAPACITY);
                 Arc::new(PerSession {
                     sender,
                     next_id: AtomicU64::new(1),
@@ -226,21 +225,21 @@ impl KernelPushDispatcher {
 
 fn push_kind_str(push: &KernelPush) -> &'static str {
     match push {
-        KernelPush::SubTaskActivated { .. }         => "SubTaskActivated",
-        KernelPush::SubTaskCompleted { .. }         => "SubTaskCompleted",
-        KernelPush::AllReviewersPassed { .. }       => "AllReviewersPassed",
-        KernelPush::ReviewRejected { .. }           => "ReviewRejected",
+        KernelPush::SubTaskActivated { .. } => "SubTaskActivated",
+        KernelPush::SubTaskCompleted { .. } => "SubTaskCompleted",
+        KernelPush::AllReviewersPassed { .. } => "AllReviewersPassed",
+        KernelPush::ReviewRejected { .. } => "ReviewRejected",
         KernelPush::SubTaskSecurityViolation { .. } => "SubTaskSecurityViolation",
     }
 }
 
 fn push_task_id(push: &KernelPush) -> Option<&TaskId> {
     match push {
-        KernelPush::SubTaskActivated { task_id, .. }         => Some(task_id),
-        KernelPush::SubTaskCompleted { task_id, .. }         => Some(task_id),
-        KernelPush::AllReviewersPassed { task_id }           => Some(task_id),
-        KernelPush::ReviewRejected { task_id, .. }           => Some(task_id),
-        KernelPush::SubTaskSecurityViolation { task_id }     => Some(task_id),
+        KernelPush::SubTaskActivated { task_id, .. } => Some(task_id),
+        KernelPush::SubTaskCompleted { task_id, .. } => Some(task_id),
+        KernelPush::AllReviewersPassed { task_id } => Some(task_id),
+        KernelPush::ReviewRejected { task_id, .. } => Some(task_id),
+        KernelPush::SubTaskSecurityViolation { task_id } => Some(task_id),
     }
 }
 
@@ -263,9 +262,9 @@ mod tests {
     }
 
     struct CapturedEvent {
-        kind:          AuditEventKind,
-        session_id:    Option<String>,
-        task_id:       Option<String>,
+        kind: AuditEventKind,
+        session_id: Option<String>,
+        task_id: Option<String>,
         initiative_id: Option<String>,
     }
 
@@ -355,7 +354,10 @@ mod tests {
         assert_eq!(events.len(), 1);
         match &events[0].kind {
             AuditEventKind::KernelPushEnqueued {
-                push_id, push_kind, task_id, ..
+                push_id,
+                push_kind,
+                task_id,
+                ..
             } => {
                 assert_eq!(*push_id, 1u64);
                 assert_eq!(push_kind, "SubTaskCompleted");

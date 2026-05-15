@@ -51,9 +51,7 @@ pub fn check_fd_limit_at_boot(required: u32) -> FdLimitOutcome {
         // as filling the struct on success.
         use std::mem::MaybeUninit;
         let mut limits: MaybeUninit<libc::rlimit> = MaybeUninit::uninit();
-        let rc = unsafe {
-            libc::getrlimit(libc::RLIMIT_NOFILE, limits.as_mut_ptr())
-        };
+        let rc = unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, limits.as_mut_ptr()) };
         if rc != 0 {
             return FdLimitOutcome::Unknown;
         }
@@ -66,12 +64,12 @@ pub fn check_fd_limit_at_boot(required: u32) -> FdLimitOutcome {
         if soft_u64 < required_u64 {
             return FdLimitOutcome::Insufficient {
                 current_soft: soft_u64,
-                required:     required_u64,
+                required: required_u64,
             };
         }
         FdLimitOutcome::Ok {
             current_soft: soft_u64,
-            required:     required_u64,
+            required: required_u64,
         }
     }
     #[cfg(not(unix))]
@@ -87,8 +85,16 @@ mod tests {
 
     #[test]
     fn fatal_outcome_only_for_insufficient() {
-        assert!(FdLimitOutcome::Insufficient { current_soft: 100, required: 4096 }.is_fatal());
-        assert!(!FdLimitOutcome::Ok { current_soft: 4096, required: 4096 }.is_fatal());
+        assert!(FdLimitOutcome::Insufficient {
+            current_soft: 100,
+            required: 4096
+        }
+        .is_fatal());
+        assert!(!FdLimitOutcome::Ok {
+            current_soft: 4096,
+            required: 4096
+        }
+        .is_fatal());
         assert!(!FdLimitOutcome::Unknown.is_fatal());
     }
 
@@ -100,7 +106,10 @@ mod tests {
         let outcome = check_fd_limit_at_boot(1);
         match outcome {
             FdLimitOutcome::Ok { .. } | FdLimitOutcome::Unknown => {}
-            FdLimitOutcome::Insufficient { current_soft, required } => panic!(
+            FdLimitOutcome::Insufficient {
+                current_soft,
+                required,
+            } => panic!(
                 "host has soft FD limit {current_soft} below floor {required}; \
                  raise `ulimit -n` to run this test"
             ),

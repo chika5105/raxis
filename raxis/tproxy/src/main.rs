@@ -47,9 +47,7 @@ fn main() -> std::process::ExitCode {
                          ({} entries) — INV-CRED-PROXY-VM-REACHABILITY-01",
                         plan.len()
                     );
-                    if let Err(e) =
-                        raxis_tproxy::loopback_forwarder::spawn_forwarder(&plan).await
-                    {
+                    if let Err(e) = raxis_tproxy::loopback_forwarder::spawn_forwarder(&plan).await {
                         eprintln!("raxis-tproxy: vsock-loopback forwarder bind failed: {e}");
                         return std::process::ExitCode::from(64);
                     }

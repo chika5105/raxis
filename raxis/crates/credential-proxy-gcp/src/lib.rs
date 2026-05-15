@@ -92,13 +92,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -106,7 +106,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-pub use forwarding::{ForwardOutcome, ForwardingConfig, GCP_JSON_CONTENT_TYPE, GcpCacheValue};
+pub use forwarding::{ForwardOutcome, ForwardingConfig, GcpCacheValue, GCP_JSON_CONTENT_TYPE};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -119,13 +119,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -143,26 +146,26 @@ pub struct ProxyConfig {
     /// Address the inbound listener binds to. Production wires
     /// `127.0.0.1:9002` so an `/etc/hosts` rewrite of
     /// `metadata.google.internal → 127.0.0.1` reaches the proxy.
-    pub listen_addr:        String,
+    pub listen_addr: String,
     /// Credential to resolve per request. Bytes must parse as
     /// either `KEY=VALUE` env-style or as a JSON object containing
     /// at least an `access_token` (or `GCP_ACCESS_TOKEN`) field.
-    pub credential_name:    CredentialName,
+    pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:           OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Lease length advertised in `expires_in`. SDKs refresh shortly
     /// before this elapses.
-    pub lease_seconds:      u64,
+    pub lease_seconds: u64,
     /// GCP project ID (e.g. `"my-staging-project"`). Returned
     /// verbatim by `/computeMetadata/v1/project/project-id`.
-    pub project_id:         String,
+    pub project_id: String,
     /// Numeric project ID. Returned by
     /// `/computeMetadata/v1/project/numeric-project-id`. `None`
     /// renders as `"0"` so SDKs that demand the field do not panic.
     pub numeric_project_id: Option<u64>,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:       Restrictions,
+    pub restrictions: Restrictions,
     /// V3 forwarding configuration. When `Some`, the
     /// `/computeMetadata/v1/.../token` endpoint drives a real
     /// JWT-bearer-grant exchange against the closed-allowlist
@@ -170,7 +173,7 @@ pub struct ProxyConfig {
     /// endpoints (`/email`, `/project-id`) keep their V2
     /// behaviour but read identity fields from the service-
     /// account JSON. See `specs/v3/cloud-proxy-forwarding.md`.
-    pub forwarding:         Option<ForwardingConfig>,
+    pub forwarding: Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -186,9 +189,9 @@ pub struct ProxyStats {
     pub credentials_served: AtomicU32,
     /// Number of requests rejected by `Restrictions` or missing
     /// `Metadata-Flavor: Google` header.
-    pub requests_blocked:   AtomicU32,
+    pub requests_blocked: AtomicU32,
     /// Bytes in the served response bodies.
-    pub bytes_served:       AtomicU64,
+    pub bytes_served: AtomicU64,
 }
 
 impl ProxyStats {
@@ -197,8 +200,8 @@ impl ProxyStats {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
             credentials_served: self.credentials_served.load(Ordering::Relaxed),
-            requests_blocked:   self.requests_blocked  .load(Ordering::Relaxed),
-            bytes_served:       self.bytes_served      .load(Ordering::Relaxed),
+            requests_blocked: self.requests_blocked.load(Ordering::Relaxed),
+            bytes_served: self.bytes_served.load(Ordering::Relaxed),
         }
     }
 }
@@ -211,9 +214,9 @@ pub struct ProxyStatsSnapshot {
     /// Number of requests that returned a credential.
     pub credentials_served: u32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   u32,
+    pub requests_blocked: u32,
     /// Bytes in the served response bodies.
-    pub bytes_served:       u64,
+    pub bytes_served: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -242,16 +245,16 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Request path (`/computeMetadata/v1/...`) — never the
         /// SDK request body.
-        path:        String,
+        path: String,
         /// SHA-256 of `"<METHOD> <path>"`.
         path_sha256: String,
         /// GCP project ID associated with the proxy.
-        project_id:  String,
+        project_id: String,
         /// V2_GAPS §9 Phase 2 — operator-declared OAuth scopes
         /// (e.g. `["https://www.googleapis.com/auth/devstorage.read_only"]`).
         /// Echoed in audit so reviewers can confirm the scope
@@ -260,7 +263,7 @@ pub enum AuditEvent {
         allowed_scopes: Vec<String>,
         /// True if a restriction or missing header blocked this
         /// request.
-        blocked:     bool,
+        blocked: bool,
     },
 }
 
@@ -275,7 +278,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error.
         source: std::io::Error,
     },
@@ -289,8 +292,8 @@ pub enum ProxyError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct TokenResponse {
     access_token: String,
-    expires_in:   u64,
-    token_type:   String,
+    expires_in: u64,
+    token_type: String,
     /// Space-separated list of OAuth scopes the token grants.
     /// V2.3 emits the operator-declared
     /// `Restrictions::allowed_scopes` verbatim so downstream
@@ -301,15 +304,15 @@ struct TokenResponse {
     /// omitted so SDKs fall back to the credential's full
     /// scopes.
     #[serde(skip_serializing_if = "Option::is_none")]
-    scope:        Option<String>,
+    scope: Option<String>,
 }
 
 /// Internal envelope the proxy resolves the credential body into.
 /// Either env-style or JSON, parsed to the same shape.
 #[derive(Debug, Clone)]
 struct ResolvedKey {
-    access_token:           String,
-    service_account_email:  Option<String>,
+    access_token: String,
+    service_account_email: Option<String>,
 }
 
 fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
@@ -317,38 +320,53 @@ fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
     if trimmed.starts_with('{') {
         let v: serde_json::Value = serde_json::from_str(trimmed)
             .map_err(|_| "credential body is not valid JSON despite leading `{`")?;
-        let obj = v.as_object().ok_or("JSON credential body is not an object")?;
+        let obj = v
+            .as_object()
+            .ok_or("JSON credential body is not an object")?;
         let access_token = pick_str(obj, &["access_token", "GCP_ACCESS_TOKEN"])
             .ok_or("missing access_token / GCP_ACCESS_TOKEN")?
             .to_owned();
         let service_account_email = pick_str(
             obj,
-            &["client_email", "service_account_email", "GCP_SERVICE_ACCOUNT_EMAIL"],
-        ).map(str::to_owned);
-        Ok(ResolvedKey { access_token, service_account_email })
+            &[
+                "client_email",
+                "service_account_email",
+                "GCP_SERVICE_ACCOUNT_EMAIL",
+            ],
+        )
+        .map(str::to_owned);
+        Ok(ResolvedKey {
+            access_token,
+            service_account_email,
+        })
     } else {
-        let mut access_token          = None;
+        let mut access_token = None;
         let mut service_account_email = None;
         for line in body.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
                 let v = v.trim().trim_matches(['"', '\''].as_ref());
                 match k {
-                    "GCP_ACCESS_TOKEN"           => access_token          = Some(v.to_owned()),
-                    "GCP_SERVICE_ACCOUNT_EMAIL"  => service_account_email = Some(v.to_owned()),
+                    "GCP_ACCESS_TOKEN" => access_token = Some(v.to_owned()),
+                    "GCP_SERVICE_ACCOUNT_EMAIL" => service_account_email = Some(v.to_owned()),
                     _ => {}
                 }
             }
         }
         let access_token = access_token.ok_or("missing GCP_ACCESS_TOKEN")?;
-        Ok(ResolvedKey { access_token, service_account_email })
+        Ok(ResolvedKey {
+            access_token,
+            service_account_email,
+        })
     }
 }
 
 fn pick_str<'a>(
-    obj:  &'a serde_json::Map<String, serde_json::Value>,
+    obj: &'a serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
 ) -> Option<&'a str> {
     for k in keys {
@@ -365,12 +383,12 @@ fn pick_str<'a>(
 
 /// GCP metadata-server-compatible credential proxy.
 pub struct GcpProxy {
-    listener:    TcpListener,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    listener: TcpListener,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<GcpCacheValue>>>,
 }
@@ -381,12 +399,13 @@ impl GcpProxy {
     /// V3-cloud-forwarding-aware constructor.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -395,7 +414,7 @@ impl GcpProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  None,
+            audit_sink: None,
             http_client: None,
             token_cache: None,
         })
@@ -405,16 +424,17 @@ impl GcpProxy {
     /// [`ProxyConfig::forwarding`] is `Some`, the `/token`
     /// path drives a real JWT-bearer-grant OAuth2 exchange.
     pub async fn bind_v3(
-        backend:     Arc<dyn CredentialBackend>,
-        config:      ProxyConfig,
-        audit:       Arc<dyn AuditChannel>,
-        audit_sink:  Arc<dyn AuditSink>,
+        backend: Arc<dyn CredentialBackend>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
+        audit_sink: Arc<dyn AuditSink>,
         http_client: Arc<CloudHttpClient>,
         token_cache: Arc<TokenCache<GcpCacheValue>>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -423,7 +443,7 @@ impl GcpProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  Some(audit_sink),
+            audit_sink: Some(audit_sink),
             http_client: Some(http_client),
             token_cache: Some(token_cache),
         })
@@ -435,29 +455,43 @@ impl GcpProxy {
     }
 
     /// Counters snapshot.
-    pub fn stats(&self) -> ProxyStatsSnapshot { self.stats.snapshot() }
+    pub fn stats(&self) -> ProxyStatsSnapshot {
+        self.stats.snapshot()
+    }
 
     /// Borrow the underlying counters Arc.
-    pub fn stats_handle(&self) -> Arc<ProxyStats> { Arc::clone(&self.stats) }
+    pub fn stats_handle(&self) -> Arc<ProxyStats> {
+        Arc::clone(&self.stats)
+    }
 
     /// Run the accept loop until dropped.
     pub async fn serve(self) {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend     = Arc::clone(&self.backend);
-                    let config      = self.config.clone();
-                    let stats       = Arc::clone(&self.stats);
-                    let audit       = Arc::clone(&self.audit);
-                    let audit_sink  = self.audit_sink.clone();
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
+                    let backend = Arc::clone(&self.backend);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
+                    let audit_sink = self.audit_sink.clone();
                     let http_client = self.http_client.clone();
                     let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(
-                            stream, backend, config, stats, audit,
-                            audit_sink, http_client, token_cache,
-                        ).await {
+                            stream,
+                            backend,
+                            config,
+                            stats,
+                            audit,
+                            audit_sink,
+                            http_client,
+                            token_cache,
+                        )
+                        .await
+                        {
                             tracing::warn!(error = %e, "gcp proxy connection ended with error");
                         }
                     });
@@ -478,12 +512,12 @@ impl GcpProxy {
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream:  TcpStream,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    mut stream: TcpStream,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<GcpCacheValue>>>,
 ) -> std::io::Result<()> {
@@ -491,26 +525,32 @@ async fn serve_one(
     let mut chunk = [0u8; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
         if buf.len() > 8192 {
             write_status(&mut stream, 431, "Request Header Fields Too Large").await?;
             return Ok(());
         }
     }
-    if buf.is_empty() { return Ok(()); }
+    if buf.is_empty() {
+        return Ok(());
+    }
 
     let mut headers = [httparse::EMPTY_HEADER; 32];
-    let mut req     = httparse::Request::new(&mut headers);
+    let mut req = httparse::Request::new(&mut headers);
     let (method, path, has_metadata_flavor) = match req.parse(&buf) {
         Ok(httparse::Status::Complete(_)) => {
             let method = req.method.unwrap_or("GET").to_owned();
-            let path   = req.path.unwrap_or("/").to_owned();
-            let has    = req.headers.iter().any(|h|
+            let path = req.path.unwrap_or("/").to_owned();
+            let has = req.headers.iter().any(|h| {
                 h.name.eq_ignore_ascii_case("Metadata-Flavor")
-                && h.value.eq_ignore_ascii_case(b"Google")
-            );
+                    && h.value.eq_ignore_ascii_case(b"Google")
+            });
             (method, path, has)
         }
         _ => {
@@ -547,44 +587,59 @@ async fn serve_one(
                 http_client.as_ref(),
                 token_cache.as_ref(),
             ) {
-                let resolved_bytes = match backend.resolve(
-                    &config.credential_name, config.consumer.as_ref(),
-                ) {
-                    Ok(v) => v,
-                    Err(e) => {
-                        tracing::warn!(error = %e, "gcp proxy credential resolve failed");
-                        write_oauth2_error(&mut stream, 502,
-                            "invalid_client", "credential resolve failed").await?;
-                        return Ok(());
-                    }
-                };
+                let resolved_bytes =
+                    match backend.resolve(&config.credential_name, config.consumer.as_ref()) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            tracing::warn!(error = %e, "gcp proxy credential resolve failed");
+                            write_oauth2_error(
+                                &mut stream,
+                                502,
+                                "invalid_client",
+                                "credential resolve failed",
+                            )
+                            .await?;
+                            return Ok(());
+                        }
+                    };
                 let body_str = match resolved_bytes.as_utf8() {
                     Some(s) => s.to_owned(),
-                    None    => {
+                    None => {
                         tracing::warn!("gcp proxy credential body is not UTF-8");
-                        write_oauth2_error(&mut stream, 502,
-                            "invalid_client", "credential body not UTF-8").await?;
+                        write_oauth2_error(
+                            &mut stream,
+                            502,
+                            "invalid_client",
+                            "credential body not UTF-8",
+                        )
+                        .await?;
                         return Ok(());
                     }
                 };
                 let sa = match forwarding::parse_service_account_key(&body_str) {
                     Ok(s) => s,
                     Err(_) => {
-                        write_oauth2_error(&mut stream, 502,
+                        write_oauth2_error(
+                            &mut stream,
+                            502,
                             "invalid_client",
-                            "service-account JSON parse failed").await?;
+                            "service-account JSON parse failed",
+                        )
+                        .await?;
                         return Ok(());
                     }
                 };
-                let session_id = format!(
-                    "{}:{}", config.consumer.kind, config.consumer.id,
-                );
+                let session_id = format!("{}:{}", config.consumer.kind, config.consumer.id,);
                 let outcome = forwarding::forward_or_serve_from_cache(
-                    fwd, http, cache, sink,
+                    fwd,
+                    http,
+                    cache,
+                    sink,
                     &session_id,
                     config.credential_name.as_str(),
                     &sa,
-                ).await;
+                )
+                .await;
                 match outcome {
                     ForwardOutcome::Ok(body) => {
                         let body_len = body.len();
@@ -596,14 +651,16 @@ async fn serve_one(
                              Cache-Control: no-store\r\n\
                              Connection: close\r\n\
                              \r\n",
-                            ct  = GCP_JSON_CONTENT_TYPE,
+                            ct = GCP_JSON_CONTENT_TYPE,
                             len = body_len,
                         );
                         stream.write_all(header.as_bytes()).await?;
                         stream.write_all(&body).await?;
                         stream.flush().await?;
                         stats.credentials_served.fetch_add(1, Ordering::Relaxed);
-                        stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                        stats
+                            .bytes_served
+                            .fetch_add(body_len as u64, Ordering::Relaxed);
                         audit.emit(audit_event(&config, &method, &path, false));
                     }
                     ForwardOutcome::UpstreamEnvelope { status, body } => {
@@ -617,13 +674,15 @@ async fn serve_one(
                              Connection: close\r\n\
                              \r\n",
                             reason = oauth2_reason_phrase(status),
-                            ct     = GCP_JSON_CONTENT_TYPE,
-                            len    = body_len,
+                            ct = GCP_JSON_CONTENT_TYPE,
+                            len = body_len,
                         );
                         stream.write_all(header.as_bytes()).await?;
                         stream.write_all(&body).await?;
                         stream.flush().await?;
-                        stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                        stats
+                            .bytes_served
+                            .fetch_add(body_len as u64, Ordering::Relaxed);
                     }
                 }
                 return Ok(());
@@ -644,10 +703,11 @@ async fn serve_one(
             };
             let body = serde_json::to_vec(&TokenResponse {
                 access_token: resolved.access_token,
-                expires_in:   config.lease_seconds,
-                token_type:   "Bearer".to_owned(),
+                expires_in: config.lease_seconds,
+                token_type: "Bearer".to_owned(),
                 scope,
-            }).map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
+            })
+            .map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
             (body, "application/json")
         }
         "/computeMetadata/v1/instance/service-accounts/default/email" => {
@@ -658,7 +718,8 @@ async fn serve_one(
                     return Ok(());
                 }
             };
-            let email = resolved.service_account_email
+            let email = resolved
+                .service_account_email
                 .unwrap_or_else(|| "default".to_owned());
             (email.into_bytes(), "application/text")
         }
@@ -687,7 +748,7 @@ async fn serve_one(
          Cache-Control: no-store\r\n\
          Connection: close\r\n\
          \r\n",
-        ct  = content_type,
+        ct = content_type,
         len = body_len,
     );
     stream.write_all(header.as_bytes()).await?;
@@ -695,35 +756,36 @@ async fn serve_one(
     stream.flush().await?;
 
     stats.credentials_served.fetch_add(1, Ordering::Relaxed);
-    stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+    stats
+        .bytes_served
+        .fetch_add(body_len as u64, Ordering::Relaxed);
     audit.emit(audit_event(&config, &method, &path, false));
     Ok(())
 }
 
 fn resolve_key(
     backend: &Arc<dyn CredentialBackend>,
-    config:  &ProxyConfig,
+    config: &ProxyConfig,
 ) -> Result<ResolvedKey, ()> {
-    let resolved = backend.resolve(&config.credential_name, config.consumer.as_ref())
+    let resolved = backend
+        .resolve(&config.credential_name, config.consumer.as_ref())
         .map_err(|e| {
             tracing::warn!(error = %e, "gcp proxy credential resolve failed");
         })?;
-    let body_str = resolved.as_utf8().ok_or_else(|| {
-        tracing::warn!("gcp proxy credential body is not UTF-8");
-    })?.to_owned();
+    let body_str = resolved
+        .as_utf8()
+        .ok_or_else(|| {
+            tracing::warn!("gcp proxy credential body is not UTF-8");
+        })?
+        .to_owned();
     parse_credential_body(&body_str).map_err(|e| {
         tracing::warn!(reason = %e, "gcp proxy credential body is malformed");
     })
 }
 
-async fn write_status(
-    stream: &mut TcpStream,
-    code:   u16,
-    reason: &str,
-) -> std::io::Result<()> {
-    let line = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+async fn write_status(stream: &mut TcpStream, code: u16, reason: &str) -> std::io::Result<()> {
+    let line =
+        format!("HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",);
     stream.write_all(line.as_bytes()).await?;
     stream.flush().await
 }
@@ -749,9 +811,9 @@ fn oauth2_reason_phrase(status: u16) -> &'static str {
 
 /// Write a canonical OAuth2 RFC 6749 JSON error envelope.
 async fn write_oauth2_error(
-    stream:      &mut TcpStream,
-    status:      u16,
-    error:       &str,
+    stream: &mut TcpStream,
+    status: u16,
+    error: &str,
     description: &str,
 ) -> std::io::Result<()> {
     let body = forwarding::synthesise_oauth2_error_envelope(error, description);
@@ -763,8 +825,8 @@ async fn write_oauth2_error(
          Connection: close\r\n\
          \r\n",
         reason = oauth2_reason_phrase(status),
-        ct     = GCP_JSON_CONTENT_TYPE,
-        len    = body.len(),
+        ct = GCP_JSON_CONTENT_TYPE,
+        len = body.len(),
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&body).await?;
@@ -773,7 +835,7 @@ async fn write_oauth2_error(
 
 async fn write_status_with_metadata_flavor(
     stream: &mut TcpStream,
-    code:   u16,
+    code: u16,
     reason: &str,
 ) -> std::io::Result<()> {
     let line = format!(
@@ -787,12 +849,7 @@ async fn write_status_with_metadata_flavor(
     stream.flush().await
 }
 
-fn audit_event(
-    config:  &ProxyConfig,
-    method:  &str,
-    path:    &str,
-    blocked: bool,
-) -> AuditEvent {
+fn audit_event(config: &ProxyConfig, method: &str, path: &str, blocked: bool) -> AuditEvent {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(method.as_bytes());
@@ -801,13 +858,15 @@ fn audit_event(
     let path_sha256 = hex::encode(h.finalize());
     AuditEvent::GcpMetadataServed {
         timestamp_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        path:        path.to_owned(),
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        path: path.to_owned(),
         path_sha256,
         allowed_scopes: config.restrictions.allowed_scopes.clone(),
-        project_id:  config.project_id.clone(),
+        project_id: config.project_id.clone(),
         blocked,
     }
 }

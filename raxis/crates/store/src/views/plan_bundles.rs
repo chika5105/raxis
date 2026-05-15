@@ -35,9 +35,7 @@
 //! Future redaction: §8.5 mentions a `--bundle` extraction surface;
 //! that lives in `raxis-cli`, not here.
 
-use raxis_types::{
-    BundleSha256, OperatorFingerprint, PlanBundleNonceOutcome, SchemaVersion,
-};
+use raxis_types::{BundleSha256, OperatorFingerprint, PlanBundleNonceOutcome, SchemaVersion};
 use rusqlite::{params, OptionalExtension};
 use thiserror::Error;
 
@@ -73,23 +71,23 @@ pub enum PlanBundleViewError {
 /// `bundle_bytes` round-trip is a debug aid, not a runtime path).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBundleHeader {
-    pub bundle_sha256:       BundleSha256,
-    pub schema_version:      SchemaVersion,
-    pub artifact_count:      usize,
-    pub bundle_bytes_len:    usize,
-    pub signed_by:           OperatorFingerprint,
+    pub bundle_sha256: BundleSha256,
+    pub schema_version: SchemaVersion,
+    pub artifact_count: usize,
+    pub bundle_bytes_len: usize,
+    pub signed_by: OperatorFingerprint,
     pub sealed_at_unix_secs: i64,
     /// `Some` for V2.1, `None` for legacy V2.0 envelopes.
     pub signed_at_unix_secs: Option<i64>,
     /// `Some` for V2.1, `None` for legacy V2.0 envelopes.
-    pub bundle_nonce:        Option<[u8; 16]>,
+    pub bundle_nonce: Option<[u8; 16]>,
 }
 
 /// One row of `plan_bundle_artifacts` projected to (seq, name).
 /// Returned by [`list_artifact_names`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlanBundleArtifactName {
-    pub artifact_seq:  usize,
+    pub artifact_seq: usize,
     pub artifact_name: String,
 }
 
@@ -99,12 +97,12 @@ pub struct PlanBundleArtifactName {
 /// for the operator-facing `raxis log` / forensic surface.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NonceRow {
-    pub bundle_nonce:            [u8; 16],
-    pub bundle_sha256:           BundleSha256,
-    pub signed_at_unix_secs:     i64,
+    pub bundle_nonce: [u8; 16],
+    pub bundle_sha256: BundleSha256,
+    pub signed_at_unix_secs: i64,
     pub first_seen_at_unix_secs: i64,
-    pub outcome:                 PlanBundleNonceOutcome,
-    pub initiative_id:           Option<String>,
+    pub outcome: PlanBundleNonceOutcome,
+    pub initiative_id: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -115,7 +113,7 @@ pub struct NonceRow {
 /// `None` for an unknown `bundle_sha256` (the operator passed a
 /// stale or mistyped digest).
 pub fn header_by_sha256(
-    conn:          &RoConn,
+    conn: &RoConn,
     bundle_sha256: &BundleSha256,
 ) -> Result<Option<PlanBundleHeader>, PlanBundleViewError> {
     let plan_bundles = Table::PlanBundles.as_str();
@@ -141,56 +139,64 @@ fn decode_header_row(
     // rusqlite::Result wrapper while we surface a structured
     // PlanBundleViewError for any post-fetch decode failure (e.g.
     // a malformed schema_version on a corrupted row).
-    let sha_blob: Vec<u8>           = r.get(0)?;
-    let schema_int: i64              = r.get(1)?;
-    let artifact_count: i64          = r.get(2)?;
-    let bundle_bytes_len: i64        = r.get(3)?;
-    let signed_by_blob: Vec<u8>      = r.get(4)?;
-    let sealed_at: i64               = r.get(5)?;
-    let signed_at: Option<i64>       = r.get(6)?;
-    let nonce_blob: Option<Vec<u8>>  = r.get(7)?;
+    let sha_blob: Vec<u8> = r.get(0)?;
+    let schema_int: i64 = r.get(1)?;
+    let artifact_count: i64 = r.get(2)?;
+    let bundle_bytes_len: i64 = r.get(3)?;
+    let signed_by_blob: Vec<u8> = r.get(4)?;
+    let sealed_at: i64 = r.get(5)?;
+    let signed_at: Option<i64> = r.get(6)?;
+    let nonce_blob: Option<Vec<u8>> = r.get(7)?;
 
     let sha_arr: [u8; 32] = match sha_blob.as_slice().try_into() {
         Ok(a) => a,
-        Err(_) => return Ok(Err(PlanBundleViewError::MalformedColumn {
-            field:  "bundle_sha256",
-            detail: format!("expected 32 bytes, got {}", sha_blob.len()),
-        })),
+        Err(_) => {
+            return Ok(Err(PlanBundleViewError::MalformedColumn {
+                field: "bundle_sha256",
+                detail: format!("expected 32 bytes, got {}", sha_blob.len()),
+            }))
+        }
     };
     let schema = match SchemaVersion::from_u16(schema_int as u16) {
         Some(s) => s,
-        None    => return Ok(Err(PlanBundleViewError::MalformedColumn {
-            field:  "schema_version",
-            detail: format!("unknown wire value {schema_int}"),
-        })),
+        None => {
+            return Ok(Err(PlanBundleViewError::MalformedColumn {
+                field: "schema_version",
+                detail: format!("unknown wire value {schema_int}"),
+            }))
+        }
     };
     let signed_by_arr: [u8; 8] = match signed_by_blob.as_slice().try_into() {
         Ok(a) => a,
-        Err(_) => return Ok(Err(PlanBundleViewError::MalformedColumn {
-            field:  "signed_by",
-            detail: format!("expected 8 bytes, got {}", signed_by_blob.len()),
-        })),
+        Err(_) => {
+            return Ok(Err(PlanBundleViewError::MalformedColumn {
+                field: "signed_by",
+                detail: format!("expected 8 bytes, got {}", signed_by_blob.len()),
+            }))
+        }
     };
     let nonce: Option<[u8; 16]> = match nonce_blob {
-        None    => None,
+        None => None,
         Some(b) => match b.as_slice().try_into() {
-            Ok(a)  => Some(a),
-            Err(_) => return Ok(Err(PlanBundleViewError::MalformedColumn {
-                field:  "bundle_nonce",
-                detail: format!("expected 16 bytes, got {}", b.len()),
-            })),
+            Ok(a) => Some(a),
+            Err(_) => {
+                return Ok(Err(PlanBundleViewError::MalformedColumn {
+                    field: "bundle_nonce",
+                    detail: format!("expected 16 bytes, got {}", b.len()),
+                }))
+            }
         },
     };
 
     Ok(Ok(PlanBundleHeader {
-        bundle_sha256:       BundleSha256::new(sha_arr),
-        schema_version:      schema,
-        artifact_count:      artifact_count as usize,
-        bundle_bytes_len:    bundle_bytes_len as usize,
-        signed_by:           OperatorFingerprint::new(signed_by_arr),
+        bundle_sha256: BundleSha256::new(sha_arr),
+        schema_version: schema,
+        artifact_count: artifact_count as usize,
+        bundle_bytes_len: bundle_bytes_len as usize,
+        signed_by: OperatorFingerprint::new(signed_by_arr),
         sealed_at_unix_secs: sealed_at,
         signed_at_unix_secs: signed_at,
-        bundle_nonce:        nonce,
+        bundle_nonce: nonce,
     }))
 }
 
@@ -210,9 +216,9 @@ fn decode_header_row(
 /// artifact MUST call this function — not open files under the
 /// plan root, not read `bundle_bytes` directly out of `plan_bundles`.
 pub fn read_artifact(
-    conn:          &RoConn,
+    conn: &RoConn,
     bundle_sha256: &BundleSha256,
-    artifact_seq:  usize,
+    artifact_seq: usize,
 ) -> Result<Option<Vec<u8>>, PlanBundleViewError> {
     let plan_bundle_artifacts = Table::PlanBundleArtifacts.as_str();
     let bytes = conn
@@ -236,24 +242,21 @@ pub fn read_artifact(
 /// one bundle, ordered by `artifact_seq` ascending. Empty list for
 /// an unknown bundle.
 pub fn list_artifact_names(
-    conn:          &RoConn,
+    conn: &RoConn,
     bundle_sha256: &BundleSha256,
 ) -> Result<Vec<PlanBundleArtifactName>, PlanBundleViewError> {
     let plan_bundle_artifacts = Table::PlanBundleArtifacts.as_str();
-    let mut stmt = conn.prepare(
-        &format!(
-            "SELECT artifact_seq, artifact_name FROM {plan_bundle_artifacts} \
+    let mut stmt = conn.prepare(&format!(
+        "SELECT artifact_seq, artifact_name FROM {plan_bundle_artifacts} \
              WHERE bundle_sha256 = ?1 \
              ORDER BY artifact_seq ASC"
-        ),
-    )?;
-    let rows = stmt.query_map(
-        params![bundle_sha256.as_bytes().as_slice()],
-        |r| Ok(PlanBundleArtifactName {
-            artifact_seq:  r.get::<_, i64>(0)? as usize,
+    ))?;
+    let rows = stmt.query_map(params![bundle_sha256.as_bytes().as_slice()], |r| {
+        Ok(PlanBundleArtifactName {
+            artifact_seq: r.get::<_, i64>(0)? as usize,
             artifact_name: r.get(1)?,
-        }),
-    )?;
+        })
+    })?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -271,7 +274,7 @@ pub fn list_artifact_names(
 /// [`crate::plan_bundles::nonce_status_in_tx`] so the read shares
 /// the admission transaction's snapshot.
 pub fn nonce_row_by_nonce(
-    conn:         &RoConn,
+    conn: &RoConn,
     bundle_nonce: &[u8; 16],
 ) -> Result<Option<NonceRow>, PlanBundleViewError> {
     let plan_bundle_nonces_seen = Table::PlanBundleNoncesSeen.as_str();
@@ -284,13 +287,20 @@ pub fn nonce_row_by_nonce(
             ),
             params![bundle_nonce.as_slice()],
             |r| {
-                let nonce_blob: Vec<u8>     = r.get(0)?;
-                let sha_blob: Vec<u8>       = r.get(1)?;
-                let signed_at: i64          = r.get(2)?;
-                let first_seen: i64         = r.get(3)?;
-                let outcome_str: String     = r.get(4)?;
+                let nonce_blob: Vec<u8> = r.get(0)?;
+                let sha_blob: Vec<u8> = r.get(1)?;
+                let signed_at: i64 = r.get(2)?;
+                let first_seen: i64 = r.get(3)?;
+                let outcome_str: String = r.get(4)?;
                 let init_id: Option<String> = r.get(5)?;
-                Ok((nonce_blob, sha_blob, signed_at, first_seen, outcome_str, init_id))
+                Ok((
+                    nonce_blob,
+                    sha_blob,
+                    signed_at,
+                    first_seen,
+                    outcome_str,
+                    init_id,
+                ))
             },
         )
         .optional()?;
@@ -299,29 +309,36 @@ pub fn nonce_row_by_nonce(
         return Ok(None);
     };
 
-    let n_arr: [u8; 16] = n_blob.as_slice().try_into().map_err(|_|
+    let n_arr: [u8; 16] =
+        n_blob
+            .as_slice()
+            .try_into()
+            .map_err(|_| PlanBundleViewError::MalformedColumn {
+                field: "bundle_nonce",
+                detail: format!("expected 16 bytes, got {}", n_blob.len()),
+            })?;
+    let s_arr: [u8; 32] =
+        s_blob
+            .as_slice()
+            .try_into()
+            .map_err(|_| PlanBundleViewError::MalformedColumn {
+                field: "bundle_sha256",
+                detail: format!("expected 32 bytes, got {}", s_blob.len()),
+            })?;
+    let outcome = PlanBundleNonceOutcome::from_sql_str(&outcome_str).ok_or_else(|| {
         PlanBundleViewError::MalformedColumn {
-            field:  "bundle_nonce",
-            detail: format!("expected 16 bytes, got {}", n_blob.len()),
-        })?;
-    let s_arr: [u8; 32] = s_blob.as_slice().try_into().map_err(|_|
-        PlanBundleViewError::MalformedColumn {
-            field:  "bundle_sha256",
-            detail: format!("expected 32 bytes, got {}", s_blob.len()),
-        })?;
-    let outcome = PlanBundleNonceOutcome::from_sql_str(&outcome_str)
-        .ok_or_else(|| PlanBundleViewError::MalformedColumn {
-            field:  "outcome",
+            field: "outcome",
             detail: format!("unknown sql string {outcome_str:?}"),
-        })?;
+        }
+    })?;
 
     Ok(Some(NonceRow {
-        bundle_nonce:            n_arr,
-        bundle_sha256:           BundleSha256::new(s_arr),
-        signed_at_unix_secs:     signed_at,
+        bundle_nonce: n_arr,
+        bundle_sha256: BundleSha256::new(s_arr),
+        signed_at_unix_secs: signed_at,
         first_seen_at_unix_secs: first_seen,
         outcome,
-        initiative_id:           init_id,
+        initiative_id: init_id,
     }))
 }
 
@@ -343,7 +360,7 @@ mod tests {
     /// it holds RoConn handles).
     fn fresh_seeded_store() -> (TempDir, BundleSha256) {
         let tmp = TempDir::new().unwrap();
-        let db  = tmp.path().join("kernel.db");
+        let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
 
         // Seed initiative for the FK target on the nonce row.
@@ -358,7 +375,8 @@ mod tests {
                     Table::Initiatives.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let plan_bytes = b"[orchestrator]\n".to_vec();
@@ -377,11 +395,21 @@ mod tests {
         };
 
         let bundle = PlanBundle::new_v2_1(
-            100, 200, BundleNonce::new([0xAAu8; 16]),
+            100,
+            200,
+            BundleNonce::new([0xAAu8; 16]),
             "myplan".to_owned(),
             vec![
-                BundleArtifact { name: "plan.toml".into(), bytes: plan_bytes,  sha256: plan_sha },
-                BundleArtifact { name: "ref.md".into(),    bytes: extra_bytes, sha256: extra_sha },
+                BundleArtifact {
+                    name: "plan.toml".into(),
+                    bytes: plan_bytes,
+                    sha256: plan_sha,
+                },
+                BundleArtifact {
+                    name: "ref.md".into(),
+                    bytes: extra_bytes,
+                    sha256: extra_sha,
+                },
             ],
         );
         let bundle_sha = BundleSha256::new([0x11u8; 32]);
@@ -389,26 +417,30 @@ mod tests {
         // Insert via the typed helpers from `crate::plan_bundles`.
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            ).unwrap();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
             crate::plan_bundles::insert_bundle(
-                &tx, &bundle_sha,
+                &tx,
+                &bundle_sha,
                 b"placeholder-canonical-bytes",
                 &[0x77u8; 64],
                 &OperatorFingerprint::new([0x88u8; 8]),
-                &bundle, 1_700_000_999,
-            ).unwrap();
-            crate::plan_bundles::insert_artifacts(
-                &tx, &bundle_sha, &bundle.artifacts,
-            ).unwrap();
+                &bundle,
+                1_700_000_999,
+            )
+            .unwrap();
+            crate::plan_bundles::insert_artifacts(&tx, &bundle_sha, &bundle.artifacts).unwrap();
             crate::plan_bundles::record_nonce(
                 &tx,
                 &BundleNonce::new([0xAAu8; 16]),
                 &bundle_sha,
-                200, 1_700_000_999,
-                PlanBundleNonceOutcome::Admitted, Some("init-1"),
-            ).unwrap();
+                200,
+                1_700_000_999,
+                PlanBundleNonceOutcome::Admitted,
+                Some("init-1"),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
@@ -421,15 +453,16 @@ mod tests {
     fn header_by_sha256_round_trips_v2_1_envelope_fields() {
         let (tmp, sha) = fresh_seeded_store();
         let conn = open_ro(tmp.path()).unwrap();
-        let header = header_by_sha256(&conn, &sha).unwrap()
+        let header = header_by_sha256(&conn, &sha)
+            .unwrap()
             .expect("seeded bundle must be present");
-        assert_eq!(header.bundle_sha256,         sha);
-        assert_eq!(header.schema_version,        SchemaVersion::V2_1);
-        assert_eq!(header.artifact_count,        2);
-        assert_eq!(header.signed_by.as_bytes(),  &[0x88u8; 8]);
-        assert_eq!(header.sealed_at_unix_secs,   1_700_000_999);
-        assert_eq!(header.signed_at_unix_secs,   Some(200));
-        assert_eq!(header.bundle_nonce,          Some([0xAAu8; 16]));
+        assert_eq!(header.bundle_sha256, sha);
+        assert_eq!(header.schema_version, SchemaVersion::V2_1);
+        assert_eq!(header.artifact_count, 2);
+        assert_eq!(header.signed_by.as_bytes(), &[0x88u8; 8]);
+        assert_eq!(header.sealed_at_unix_secs, 1_700_000_999);
+        assert_eq!(header.signed_at_unix_secs, Some(200));
+        assert_eq!(header.bundle_nonce, Some([0xAAu8; 16]));
     }
 
     #[test]
@@ -475,12 +508,20 @@ mod tests {
         let conn = open_ro(tmp.path()).unwrap();
         let names = list_artifact_names(&conn, &sha).unwrap();
         assert_eq!(names.len(), 2);
-        assert_eq!(names[0], PlanBundleArtifactName {
-            artifact_seq: 0, artifact_name: "plan.toml".to_owned(),
-        });
-        assert_eq!(names[1], PlanBundleArtifactName {
-            artifact_seq: 1, artifact_name: "ref.md".to_owned(),
-        });
+        assert_eq!(
+            names[0],
+            PlanBundleArtifactName {
+                artifact_seq: 0,
+                artifact_name: "plan.toml".to_owned(),
+            }
+        );
+        assert_eq!(
+            names[1],
+            PlanBundleArtifactName {
+                artifact_seq: 1,
+                artifact_name: "ref.md".to_owned(),
+            }
+        );
     }
 
     #[test]
@@ -497,13 +538,14 @@ mod tests {
     fn nonce_row_by_nonce_round_trips_an_admitted_row() {
         let (tmp, sha) = fresh_seeded_store();
         let conn = open_ro(tmp.path()).unwrap();
-        let row = nonce_row_by_nonce(&conn, &[0xAAu8; 16]).unwrap()
+        let row = nonce_row_by_nonce(&conn, &[0xAAu8; 16])
+            .unwrap()
             .expect("seeded nonce row");
-        assert_eq!(row.bundle_nonce,             [0xAAu8; 16]);
-        assert_eq!(row.bundle_sha256,            sha);
-        assert_eq!(row.signed_at_unix_secs,      200);
-        assert_eq!(row.first_seen_at_unix_secs,  1_700_000_999);
-        assert_eq!(row.outcome,                  PlanBundleNonceOutcome::Admitted);
+        assert_eq!(row.bundle_nonce, [0xAAu8; 16]);
+        assert_eq!(row.bundle_sha256, sha);
+        assert_eq!(row.signed_at_unix_secs, 200);
+        assert_eq!(row.first_seen_at_unix_secs, 1_700_000_999);
+        assert_eq!(row.outcome, PlanBundleNonceOutcome::Admitted);
         assert_eq!(row.initiative_id.as_deref(), Some("init-1"));
     }
 

@@ -56,28 +56,28 @@ fn fixture_image() -> VerifiedImage {
     // /bin/cat as the "guest"); we only need a syntactically valid
     // VerifiedImage value to populate the SpawnRequest.
     VerifiedImage {
-        kind:      ImageKind::RootfsErofs,
-        body:      ImageBody::Path(std::path::PathBuf::from("/dev/null")),
+        kind: ImageKind::RootfsErofs,
+        body: ImageBody::Path(std::path::PathBuf::from("/dev/null")),
         signature: ImageSignature(b"unsigned-test-image".to_vec()),
-        image_id:  "raxis-test-substrate-image".into(),
+        image_id: "raxis-test-substrate-image".into(),
     }
 }
 
 fn fixture_spec() -> VmSpec {
     VmSpec {
-        vcpu_count:        1,
-        mem_mib:           64,
-        egress_tier:       EgressTier::Tier2CredProxy,
-        cgroup_quota:      None,
-        boot_args:         Vec::new(),
-        entrypoint_argv:   Vec::new(),
-        session_token:     SessionToken("session-token-spawn-test".into()),
-        vsock_cid:         Some(0xC1D_0001),
-        virtio_fs_mounts:  Vec::new(),
+        vcpu_count: 1,
+        mem_mib: 64,
+        egress_tier: EgressTier::Tier2CredProxy,
+        cgroup_quota: None,
+        boot_args: Vec::new(),
+        entrypoint_argv: Vec::new(),
+        session_token: SessionToken("session-token-spawn-test".into()),
+        vsock_cid: Some(0xC1D_0001),
+        virtio_fs_mounts: Vec::new(),
         // SubprocessIsolation ignores the kernel path; the spec's
         // `linux_kernel_path` doc covers this contract explicitly.
         linux_kernel_path: std::path::PathBuf::new(),
-        env:               BTreeMap::new(),
+        env: BTreeMap::new(),
         guest_console_log: None,
     }
 }
@@ -119,10 +119,13 @@ async fn spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly() 
 
     // --- Build the spawn request. --------------------------------------
     let credentials = vec![TaskCredentialDecl {
-        name:     CredentialName::new("db-staging".to_owned()),
+        name: CredentialName::new("db-staging".to_owned()),
         mount_as: "DATABASE_URL".to_owned(),
-        proxy:    ProxyDecl::Postgres {
-            restrictions: PostgresRestrictions { allow_only_select: true, ..Default::default() },
+        proxy: ProxyDecl::Postgres {
+            restrictions: PostgresRestrictions {
+                allow_only_select: true,
+                ..Default::default()
+            },
         },
     }];
 
@@ -134,12 +137,12 @@ async fn spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly() 
     let admission = Box::new(PolicyAdmissionService::new(allowlist));
 
     let req = SpawnRequest {
-        session_id:        "sess-spawn-1".into(),
-        task_id:           Some("task-spawn-1".into()),
-        initiative_id:     "init-spawn-1".into(),
-        image:             fixture_image(),
-        workspace_mounts:  vec![],
-        vm_spec:           fixture_spec(),
+        session_id: "sess-spawn-1".into(),
+        task_id: Some("task-spawn-1".into()),
+        initiative_id: "init-spawn-1".into(),
+        image: fixture_image(),
+        workspace_mounts: vec![],
+        vm_spec: fixture_spec(),
         credentials,
         admission_service: admission,
     };
@@ -167,19 +170,21 @@ async fn spawn_session_binds_proxies_admission_and_vm_then_terminates_cleanly() 
     // --- Drive a real admission round-trip over the listener. ----------
     // This is what the in-guest `raxis-tproxy` would do over loopback
     // (dev) or vsock (V2 GA) — frame a request, read the response.
-    let mut admission_sock =
-        tokio::net::TcpStream::connect(handle.admission_loopback)
-            .await
-            .expect("connect to admission listener");
+    let mut admission_sock = tokio::net::TcpStream::connect(handle.admission_loopback)
+        .await
+        .expect("connect to admission listener");
     let req = tp::ProxyAdmissionRequest {
-        connection_id:     1,
-        original_dst_ip:   "203.0.113.10".into(),
+        connection_id: 1,
+        original_dst_ip: "203.0.113.10".into(),
         original_dst_port: 443,
-        host_or_sni:       Some("api.anthropic.com".into()),
-        protocol:          tp::AdmissionProtocol::Https,
+        host_or_sni: Some("api.anthropic.com".into()),
+        protocol: tp::AdmissionProtocol::Https,
     };
     let frame = tp::encode_request(&req).expect("encode");
-    admission_sock.write_all(&frame).await.expect("write request");
+    admission_sock
+        .write_all(&frame)
+        .await
+        .expect("write request");
 
     // Read length-prefixed response.
     let mut len_buf = [0u8; 4];
@@ -305,13 +310,13 @@ async fn spawn_session_with_no_credentials_still_binds_admission_listener() {
     );
 
     let req = SpawnRequest {
-        session_id:        "sess-no-creds-1".into(),
-        task_id:           None, // canonical Orchestrator session
-        initiative_id:     "init-no-creds-1".into(),
-        image:             fixture_image(),
-        workspace_mounts:  vec![],
-        vm_spec:           fixture_spec(),
-        credentials:       vec![], // empty
+        session_id: "sess-no-creds-1".into(),
+        task_id: None, // canonical Orchestrator session
+        initiative_id: "init-no-creds-1".into(),
+        image: fixture_image(),
+        workspace_mounts: vec![],
+        vm_spec: fixture_spec(),
+        credentials: vec![], // empty
         admission_service: Box::new(PolicyAdmissionService::new(EgressAllowlist::default())),
     };
 
@@ -349,13 +354,13 @@ async fn double_terminate_returns_session_not_active() {
     );
 
     let req = SpawnRequest {
-        session_id:        "sess-double-1".into(),
-        task_id:           Some("task-double-1".into()),
-        initiative_id:     "init-double-1".into(),
-        image:             fixture_image(),
-        workspace_mounts:  vec![],
-        vm_spec:           fixture_spec(),
-        credentials:       vec![],
+        session_id: "sess-double-1".into(),
+        task_id: Some("task-double-1".into()),
+        initiative_id: "init-double-1".into(),
+        image: fixture_image(),
+        workspace_mounts: vec![],
+        vm_spec: fixture_spec(),
+        credentials: vec![],
         admission_service: Box::new(PolicyAdmissionService::new(EgressAllowlist::default())),
     };
 

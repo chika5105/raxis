@@ -370,19 +370,19 @@ pub(crate) struct DefaultExecutorImageSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VmImageConfig {
     /// Operator-declared alias.
-    pub name:               String,
+    pub name: String,
     /// `sha256:<64-hex>` digest. Lower-case, validated.
-    pub oci_digest:         String,
+    pub oci_digest: String,
     /// Roles this image may back. Always non-empty after
     /// validation; never contains `"Reviewer"` or `"Orchestrator"`.
-    pub role_restriction:   Vec<String>,
+    pub role_restriction: Vec<String>,
     /// `(major, minor)` parsed from `linux_kernel_version_min`.
     /// Always ≥ `(5, 14)` after validation per
     /// `INV-PLANNER-HARNESS-03`. Refers to the **Linux** kernel
     /// inside the guest VM, not the RAXIS kernel.
     pub linux_kernel_version_min: (u32, u32),
     /// Operator description, trimmed; empty when omitted.
-    pub description:        String,
+    pub description: String,
 }
 
 impl VmImageConfig {
@@ -409,9 +409,7 @@ pub struct DefaultExecutorImageConfig {
 /// Validate the operator-supplied `[[vm_images]]` array. Mirrors
 /// `validate_environments` / `validate_permitted_credentials` for
 /// shape; emits stable `FAIL_*` codes per §13 / §INV-VM-CAP-03.
-fn validate_vm_images(
-    raw: &[VmImageEntry],
-) -> Result<Vec<VmImageConfig>, PolicyError> {
+fn validate_vm_images(raw: &[VmImageEntry]) -> Result<Vec<VmImageConfig>, PolicyError> {
     use std::collections::HashSet;
     let mut seen: HashSet<&str> = HashSet::new();
     let mut out = Vec::with_capacity(raw.len());
@@ -524,8 +522,8 @@ fn validate_vm_images(
 /// to an Executor-permitted entry, and a typed
 /// `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` otherwise.
 fn validate_default_executor_image(
-    raw:        Option<&DefaultExecutorImageSection>,
-    vm_images:  &[VmImageConfig],
+    raw: Option<&DefaultExecutorImageSection>,
+    vm_images: &[VmImageConfig],
 ) -> Result<Option<DefaultExecutorImageConfig>, PolicyError> {
     let Some(section) = raw else {
         return Ok(None);
@@ -535,7 +533,8 @@ fn validate_default_executor_image(
         return Err(PolicyError::MalformedArtifact(
             "FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE: \
              [default_executor_image] alias must be non-empty \
-             (operator-ergonomics.md §3 D1)".to_owned(),
+             (operator-ergonomics.md §3 D1)"
+                .to_owned(),
         ));
     }
     let entry = vm_images.iter().find(|e| e.name == alias).ok_or_else(|| {
@@ -586,7 +585,7 @@ fn is_valid_vm_image_name(s: &str) -> bool {
     let mut chars = s.chars();
     let first = match chars.next() {
         Some(c) => c,
-        None    => return false,
+        None => return false,
     };
     if !first.is_ascii_lowercase() {
         return false;
@@ -598,12 +597,15 @@ fn is_valid_oci_digest(s: &str) -> bool {
     let Some(hex) = s.strip_prefix("sha256:") else {
         return false;
     };
-    hex.len() == 64 && hex.chars().all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
+    hex.len() == 64
+        && hex
+            .chars()
+            .all(|c| c.is_ascii_digit() || ('a'..='f').contains(&c))
 }
 
 fn parse_and_check_linux_kernel_version_min(
     image_name: &str,
-    raw:        &str,
+    raw: &str,
 ) -> Result<(u32, u32), PolicyError> {
     let trimmed = raw.trim();
     let (maj_str, min_str) = trimmed.split_once('.').ok_or_else(|| {
@@ -715,12 +717,12 @@ pub struct HostCapacityConfig {
 impl Default for HostCapacityConfig {
     fn default() -> Self {
         Self {
-            max_concurrent_vms:    16,
-            min_free_disk_mb:      5120,
-            disk_full_behavior:    "halt_admit".to_owned(),
+            max_concurrent_vms: 16,
+            min_free_disk_mb: 5120,
+            disk_full_behavior: "halt_admit".to_owned(),
             required_min_fd_limit: 4096,
             admission_queue_depth: 64,
-            disk_root:             None,
+            disk_root: None,
         }
     }
 }
@@ -775,7 +777,7 @@ pub(crate) struct IsolationSection {
     /// Memory ceiling (MiB) for orchestrator-role VMs. Default
     /// 1024 (1 GiB).
     #[serde(default)]
-    pub(crate) orchestrator_mem_mib:    Option<u32>,
+    pub(crate) orchestrator_mem_mib: Option<u32>,
 
     /// vCPU count for executor-role VMs. Default 2.
     #[serde(default)]
@@ -783,7 +785,7 @@ pub(crate) struct IsolationSection {
     /// Memory ceiling (MiB) for executor-role VMs. Default 4096
     /// (4 GiB).
     #[serde(default)]
-    pub(crate) executor_mem_mib:    Option<u32>,
+    pub(crate) executor_mem_mib: Option<u32>,
 
     /// vCPU count for reviewer-role VMs. Default 1.
     #[serde(default)]
@@ -791,7 +793,7 @@ pub(crate) struct IsolationSection {
     /// Memory ceiling (MiB) for reviewer-role VMs. Default 1024
     /// (1 GiB).
     #[serde(default)]
-    pub(crate) reviewer_mem_mib:    Option<u32>,
+    pub(crate) reviewer_mem_mib: Option<u32>,
 }
 
 /// V2 effective `[isolation]` config — every field resolved to a
@@ -803,17 +805,17 @@ pub struct IsolationConfig {
     /// vCPU count for orchestrator-role VMs.
     pub orchestrator_vcpu_count: u32,
     /// Memory ceiling (MiB) for orchestrator-role VMs.
-    pub orchestrator_mem_mib:    u32,
+    pub orchestrator_mem_mib: u32,
 
     /// vCPU count for executor-role VMs.
     pub executor_vcpu_count: u32,
     /// Memory ceiling (MiB) for executor-role VMs.
-    pub executor_mem_mib:    u32,
+    pub executor_mem_mib: u32,
 
     /// vCPU count for reviewer-role VMs.
     pub reviewer_vcpu_count: u32,
     /// Memory ceiling (MiB) for reviewer-role VMs.
-    pub reviewer_mem_mib:    u32,
+    pub reviewer_mem_mib: u32,
 }
 
 impl Default for IsolationConfig {
@@ -843,11 +845,11 @@ impl Default for IsolationConfig {
     fn default() -> Self {
         Self {
             orchestrator_vcpu_count: 1,
-            orchestrator_mem_mib:    1024,
-            executor_vcpu_count:     2,
-            executor_mem_mib:        4096,
-            reviewer_vcpu_count:     1,
-            reviewer_mem_mib:        1024,
+            orchestrator_mem_mib: 1024,
+            executor_vcpu_count: 2,
+            executor_mem_mib: 4096,
+            reviewer_vcpu_count: 1,
+            reviewer_mem_mib: 1024,
         }
     }
 }
@@ -1003,16 +1005,16 @@ impl Default for ElasticConfig {
             // above the V2 reference Executor budget (2 vCPU /
             // 4 GiB) so a 4× scale-up is admissible without an
             // operator policy bump.
-            max_vcpus_per_session:                    8,
-            max_memory_mb_per_session:                16 * 1024,
+            max_vcpus_per_session: 8,
+            max_memory_mb_per_session: 16 * 1024,
             // Six events / minute is one event every ten seconds
             // — enough headroom for a host-wide noisy-neighbour
             // event to flush its scaling decisions without
             // overwhelming the audit dashboard.
             max_concurrent_scaling_events_per_minute: 6,
-            transient_retry_max_attempts:             3,
-            transient_retry_initial_backoff_ms:       250,
-            transient_retry_max_backoff_ms:           4_000,
+            transient_retry_max_attempts: 3,
+            transient_retry_initial_backoff_ms: 250,
+            transient_retry_max_backoff_ms: 4_000,
         }
     }
 }
@@ -1041,7 +1043,7 @@ const ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING: u32 = 60;
 /// individually validated so the diagnostic mentions the
 /// resolved values rather than the raw TOML.
 fn validate_elastic_section(
-    raw:       &Option<ElasticSection>,
+    raw: &Option<ElasticSection>,
     isolation: &IsolationConfig,
 ) -> Result<ElasticConfig, PolicyError> {
     let mut cfg = ElasticConfig::default();
@@ -1089,7 +1091,8 @@ fn validate_elastic_section(
                     "FAIL_ELASTIC_INVALID: \
                      [elastic] max_concurrent_scaling_events_per_minute must \
                      be ≥ 1 (use enabled = false to disable scaling \
-                     entirely)".to_owned(),
+                     entirely)"
+                        .to_owned(),
                 ));
             }
             if v > ELASTIC_MAX_EVENTS_PER_MINUTE_CEILING {
@@ -1120,16 +1123,14 @@ fn validate_elastic_section(
         if let Some(v) = s.transient_retry_max_backoff_ms {
             cfg.transient_retry_max_backoff_ms = v;
         }
-        if cfg.transient_retry_initial_backoff_ms
-            > cfg.transient_retry_max_backoff_ms
-        {
+        if cfg.transient_retry_initial_backoff_ms > cfg.transient_retry_max_backoff_ms {
             return Err(PolicyError::MalformedArtifact(format!(
                 "FAIL_ELASTIC_INVALID: \
                  [elastic] transient_retry_initial_backoff_ms = {init} > \
                  transient_retry_max_backoff_ms = {max}; the exponential \
                  backoff schedule must start at or below its ceiling",
                 init = cfg.transient_retry_initial_backoff_ms,
-                max  = cfg.transient_retry_max_backoff_ms,
+                max = cfg.transient_retry_max_backoff_ms,
             )));
         }
     }
@@ -1147,7 +1148,7 @@ fn validate_elastic_section(
              [elastic] max_vcpus_per_session = {cap} < the largest \
              [isolation] role baseline ({base}). Raise the ceiling \
              or lower the baseline so scale-up has admissible room.",
-            cap  = cfg.max_vcpus_per_session,
+            cap = cfg.max_vcpus_per_session,
             base = max_baseline_vcpu,
         )));
     }
@@ -1161,7 +1162,7 @@ fn validate_elastic_section(
              [elastic] max_memory_mb_per_session = {cap} MiB < the largest \
              [isolation] role baseline ({base} MiB). Raise the ceiling \
              or lower the baseline so scale-up has admissible room.",
-            cap  = cfg.max_memory_mb_per_session,
+            cap = cfg.max_memory_mb_per_session,
             base = max_baseline_mem,
         )));
     }
@@ -1177,7 +1178,9 @@ fn validate_isolation_section(
     raw: &Option<IsolationSection>,
 ) -> Result<IsolationConfig, PolicyError> {
     let mut cfg = IsolationConfig::default();
-    let Some(s) = raw else { return Ok(cfg); };
+    let Some(s) = raw else {
+        return Ok(cfg);
+    };
 
     let check_vcpu = |label: &'static str, v: u32| -> Result<u32, PolicyError> {
         if v < 1 {
@@ -1467,7 +1470,7 @@ pub struct SleepCapsSection {
     /// dispatch loop will reject larger values regardless of policy
     /// to keep one runaway agent from monopolising a VM slot.
     #[serde(default)]
-    pub max_seconds_per_call:    u32,
+    pub max_seconds_per_call: u32,
 
     /// Cumulative cap across the session. Once the running total of
     /// previously-completed `sleep` calls hits this value, every
@@ -1475,7 +1478,7 @@ pub struct SleepCapsSection {
     /// `FAIL_SLEEP_BUDGET_EXCEEDED`. 0 ⇒ disabled (forces every
     /// `sleep` to fail; same as `max_seconds_per_call = 0`).
     #[serde(default)]
-    pub max_cumulative_seconds:  u32,
+    pub max_cumulative_seconds: u32,
 }
 
 /// **`v2_extended_gaps.md §2.5` — per-session LLM token ceilings.**
@@ -1518,8 +1521,12 @@ pub struct TokenCapsSection {
     pub max_total_tokens_per_session: Option<u64>,
 }
 
-fn default_cost_per_touched_path() -> u64 { 1 }
-fn default_max_cost_per_task() -> u64 { 10_000 }
+fn default_cost_per_touched_path() -> u64 {
+    1
+}
+fn default_max_cost_per_task() -> u64 {
+    10_000
+}
 
 /// A `[[lanes]]` entry defining one execution lane.
 ///
@@ -1541,9 +1548,15 @@ pub struct LaneEntry {
     pub priority: u8,
 }
 
-fn default_max_concurrent() -> u32 { 4 }
-fn default_max_cost() -> u64 { 10_000 }
-fn default_priority() -> u8 { 100 }
+fn default_max_concurrent() -> u32 {
+    4
+}
+fn default_max_cost() -> u64 {
+    10_000
+}
+fn default_priority() -> u8 {
+    100
+}
 
 // ---------------------------------------------------------------------------
 // Operators block
@@ -1640,12 +1653,12 @@ pub struct BypassedCertMisconfig {
     pub operator_fingerprint: String,
     /// Operator display name as declared on the entry (NOT the cert,
     /// since the cert may itself be the source of the mismatch).
-    pub display_name:         String,
-    pub kind:                 CertKind,
+    pub display_name: String,
+    pub kind: CertKind,
     /// The structural validation errors the operator chose to bypass.
     /// Stored as their `Display` strings so the audit event captures
     /// the exact wording the operator saw at validate time.
-    pub violations:           Vec<String>,
+    pub violations: Vec<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1866,7 +1879,9 @@ impl Default for ClaimRequirementsSection {
     }
 }
 
-fn default_claim_action() -> String { "permit".to_owned() }
+fn default_claim_action() -> String {
+    "permit".to_owned()
+}
 
 /// One rule in `[[claim_requirements.rules]]`.
 #[derive(Debug, Clone, Deserialize)]
@@ -1929,8 +1944,12 @@ pub struct EgressSection {
     pub deny_provider: Vec<String>,
 }
 
-fn default_max_fetches() -> u32 { 100 }
-fn default_implicit_provider_grants() -> bool { true }
+fn default_max_fetches() -> u32 {
+    100
+}
+fn default_implicit_provider_grants() -> bool {
+    true
+}
 
 /// Hand-rolled `Default` so the all-fields-defaulted form
 /// (triggered by `#[serde(default)] egress: EgressSection` when
@@ -1942,11 +1961,11 @@ fn default_implicit_provider_grants() -> bool { true }
 impl Default for EgressSection {
     fn default() -> Self {
         Self {
-            max_fetches_per_window:   default_max_fetches(),
-            domains:                  Vec::new(),
-            patterns:                 Vec::new(),
+            max_fetches_per_window: default_max_fetches(),
+            domains: Vec::new(),
+            patterns: Vec::new(),
             implicit_provider_grants: default_implicit_provider_grants(),
-            deny_provider:            Vec::new(),
+            deny_provider: Vec::new(),
         }
     }
 }
@@ -1963,12 +1982,12 @@ impl Default for EgressSection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DefaultProviderEgressGrant {
     /// The provider entry's `provider_id` (e.g. `"anthropic-prod"`).
-    pub provider_id:   String,
+    pub provider_id: String,
     /// The provider entry's `kind` string (e.g. `"Anthropic"`).
     pub provider_kind: String,
     /// The FQDN auto-added to the egress allowlist (e.g.
     /// `"api.anthropic.com"`).
-    pub fqdn:          String,
+    pub fqdn: String,
 }
 
 /// V2 — canonical mapping from a `[[providers]] kind` to the
@@ -1983,15 +2002,15 @@ pub struct DefaultProviderEgressGrant {
 /// would invert the dependency direction.
 fn fqdn_for_provider_kind(kind: &str) -> Option<&'static str> {
     match kind {
-        "Anthropic"    => Some("api.anthropic.com"),
-        "OpenAI"       => Some("api.openai.com"),
-        "Gemini"       => Some("generativelanguage.googleapis.com"),
-        "Bedrock"      => Some("bedrock-runtime.us-east-1.amazonaws.com"),
+        "Anthropic" => Some("api.anthropic.com"),
+        "OpenAI" => Some("api.openai.com"),
+        "Gemini" => Some("generativelanguage.googleapis.com"),
+        "Bedrock" => Some("bedrock-runtime.us-east-1.amazonaws.com"),
         // Sidecar providers carry their host on
         // `ProviderEntry::sidecar_endpoint`; resolved separately by
         // `derive_default_provider_egress_grants`.
         "http_sidecar" => None,
-        _              => None,
+        _ => None,
     }
 }
 
@@ -2021,15 +2040,14 @@ fn extract_sidecar_host(endpoint: &str) -> Option<String> {
 /// pre-computed `PolicyBundle::default_provider_egress_grants()`
 /// accessor.
 pub(crate) fn derive_default_provider_egress_grants(
-    providers:                 &[ProviderEntry],
-    implicit_provider_grants:  bool,
-    deny_provider:             &[String],
+    providers: &[ProviderEntry],
+    implicit_provider_grants: bool,
+    deny_provider: &[String],
 ) -> Vec<DefaultProviderEgressGrant> {
     if !implicit_provider_grants {
         return Vec::new();
     }
-    let deny: std::collections::HashSet<&str> =
-        deny_provider.iter().map(String::as_str).collect();
+    let deny: std::collections::HashSet<&str> = deny_provider.iter().map(String::as_str).collect();
     let mut out = Vec::with_capacity(providers.len());
     for p in providers {
         if deny.contains(p.provider_id.as_str()) {
@@ -2037,23 +2055,19 @@ pub(crate) fn derive_default_provider_egress_grants(
         }
         if let Some(fqdn) = fqdn_for_provider_kind(&p.kind) {
             out.push(DefaultProviderEgressGrant {
-                provider_id:   p.provider_id.clone(),
+                provider_id: p.provider_id.clone(),
                 provider_kind: p.kind.clone(),
-                fqdn:          fqdn.to_owned(),
+                fqdn: fqdn.to_owned(),
             });
             continue;
         }
         // Sidecar provider — carry the operator-declared endpoint host.
         if p.kind == "http_sidecar" {
-            if let Some(host) = p
-                .sidecar_endpoint
-                .as_deref()
-                .and_then(extract_sidecar_host)
-            {
+            if let Some(host) = p.sidecar_endpoint.as_deref().and_then(extract_sidecar_host) {
                 out.push(DefaultProviderEgressGrant {
-                    provider_id:   p.provider_id.clone(),
+                    provider_id: p.provider_id.clone(),
                     provider_kind: p.kind.clone(),
-                    fqdn:          host,
+                    fqdn: host,
                 });
             }
         }
@@ -2182,9 +2196,15 @@ pub struct GatewaySection {
     pub planner_max_turns_step_default: Option<u32>,
 }
 
-fn default_gateway_spawn_timeout_secs() -> u64 { 5 }
-fn default_gateway_respawn_backoff_ms() -> u64 { 1000 }
-fn default_gateway_max_consecutive_respawns() -> u32 { 5 }
+fn default_gateway_spawn_timeout_secs() -> u64 {
+    5
+}
+fn default_gateway_respawn_backoff_ms() -> u64 {
+    1000
+}
+fn default_gateway_max_consecutive_respawns() -> u32 {
+    5
+}
 
 // ---------------------------------------------------------------------------
 // Plan-signing freshness / replay-protection — `[plan_signing]`
@@ -2279,10 +2299,10 @@ pub struct PlanSigningSection {
 impl Default for PlanSigningSection {
     fn default() -> Self {
         Self {
-            max_plan_bundle_age_secs:    default_max_plan_bundle_age_secs(),
-            max_clock_skew_secs:         default_max_clock_skew_secs(),
-            nonce_retention_grace_secs:  default_nonce_retention_grace_secs(),
-            nonce_sweep_interval_secs:   default_nonce_sweep_interval_secs(),
+            max_plan_bundle_age_secs: default_max_plan_bundle_age_secs(),
+            max_clock_skew_secs: default_max_clock_skew_secs(),
+            nonce_retention_grace_secs: default_nonce_retention_grace_secs(),
+            nonce_sweep_interval_secs: default_nonce_sweep_interval_secs(),
             accept_unfresh_v2_0_bundles: false,
         }
     }
@@ -2305,16 +2325,13 @@ impl PlanSigningSection {
     /// it in `FAIL_POLICY_PLAN_SIGNING_INVALID`.
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.max_plan_bundle_age_secs == 0 {
-            return Err(
-                "[plan_signing].max_plan_bundle_age_secs must be > 0".to_owned(),
-            );
+            return Err("[plan_signing].max_plan_bundle_age_secs must be > 0".to_owned());
         }
         if self.max_plan_bundle_age_secs > PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS {
             return Err(format!(
                 "[plan_signing].max_plan_bundle_age_secs ({}) exceeds the hard \
                  ceiling of {} seconds (30 days)",
-                self.max_plan_bundle_age_secs,
-                PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS,
+                self.max_plan_bundle_age_secs, PLAN_BUNDLE_MAX_AGE_HARD_CEILING_SECS,
             ));
         }
         if self.max_clock_skew_secs > self.max_plan_bundle_age_secs / 4 {
@@ -2329,31 +2346,35 @@ impl PlanSigningSection {
             return Err(format!(
                 "[plan_signing].nonce_retention_grace_secs ({}) must be <= \
                  max_plan_bundle_age_secs ({})",
-                self.nonce_retention_grace_secs,
-                self.max_plan_bundle_age_secs,
+                self.nonce_retention_grace_secs, self.max_plan_bundle_age_secs,
             ));
         }
         if self.nonce_sweep_interval_secs == 0 {
-            return Err(
-                "[plan_signing].nonce_sweep_interval_secs must be > 0".to_owned(),
-            );
+            return Err("[plan_signing].nonce_sweep_interval_secs must be > 0".to_owned());
         }
         if self.nonce_sweep_interval_secs > PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS {
             return Err(format!(
                 "[plan_signing].nonce_sweep_interval_secs ({}) exceeds the hard \
                  ceiling of {} seconds (24 hours)",
-                self.nonce_sweep_interval_secs,
-                PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS,
+                self.nonce_sweep_interval_secs, PLAN_SIGNING_NONCE_SWEEP_INTERVAL_HARD_CEILING_SECS,
             ));
         }
         Ok(())
     }
 }
 
-fn default_max_plan_bundle_age_secs()    -> u64 { 24 * 60 * 60 } // 24 h
-fn default_max_clock_skew_secs()         -> u64 { 5 * 60 }       // 5 min
-fn default_nonce_retention_grace_secs()  -> u64 { 60 * 60 }      // 1 h
-fn default_nonce_sweep_interval_secs()   -> u64 { 60 * 60 }      // 1 h
+fn default_max_plan_bundle_age_secs() -> u64 {
+    24 * 60 * 60
+} // 24 h
+fn default_max_clock_skew_secs() -> u64 {
+    5 * 60
+} // 5 min
+fn default_nonce_retention_grace_secs() -> u64 {
+    60 * 60
+} // 1 h
+fn default_nonce_sweep_interval_secs() -> u64 {
+    60 * 60
+} // 1 h
 
 // ---------------------------------------------------------------------------
 // Plan-bundle size limits — `[plan_bundle_limits]`
@@ -2441,7 +2462,7 @@ impl Default for PlanBundleLimitsSection {
     fn default() -> Self {
         Self {
             max_artifact_bytes: default_max_artifact_bytes(),
-            max_bundle_bytes:   default_max_bundle_bytes(),
+            max_bundle_bytes: default_max_bundle_bytes(),
             max_artifact_count: default_max_artifact_count(),
         }
     }
@@ -2453,42 +2474,33 @@ impl PlanBundleLimitsSection {
     /// loader can wrap it in `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING`.
     pub(crate) fn validate(&self) -> Result<(), String> {
         if self.max_artifact_bytes == 0 {
-            return Err(
-                "[plan_bundle_limits].max_artifact_bytes must be > 0".to_owned(),
-            );
+            return Err("[plan_bundle_limits].max_artifact_bytes must be > 0".to_owned());
         }
         if self.max_artifact_bytes > PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING {
             return Err(format!(
                 "[plan_bundle_limits].max_artifact_bytes ({}) exceeds the hard \
                  ceiling of {} bytes (64 MiB)",
-                self.max_artifact_bytes,
-                PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING,
+                self.max_artifact_bytes, PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING,
             ));
         }
         if self.max_bundle_bytes == 0 {
-            return Err(
-                "[plan_bundle_limits].max_bundle_bytes must be > 0".to_owned(),
-            );
+            return Err("[plan_bundle_limits].max_bundle_bytes must be > 0".to_owned());
         }
         if self.max_bundle_bytes > PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING {
             return Err(format!(
                 "[plan_bundle_limits].max_bundle_bytes ({}) exceeds the hard \
                  ceiling of {} bytes (128 MiB)",
-                self.max_bundle_bytes,
-                PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING,
+                self.max_bundle_bytes, PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING,
             ));
         }
         if self.max_artifact_count == 0 {
-            return Err(
-                "[plan_bundle_limits].max_artifact_count must be > 0".to_owned(),
-            );
+            return Err("[plan_bundle_limits].max_artifact_count must be > 0".to_owned());
         }
         if self.max_artifact_count > PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING {
             return Err(format!(
                 "[plan_bundle_limits].max_artifact_count ({}) exceeds the hard \
                  ceiling of {}",
-                self.max_artifact_count,
-                PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING,
+                self.max_artifact_count, PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING,
             ));
         }
         if self.max_artifact_bytes > self.max_bundle_bytes {
@@ -2496,17 +2508,22 @@ impl PlanBundleLimitsSection {
                 "[plan_bundle_limits].max_artifact_bytes ({}) must be <= \
                  max_bundle_bytes ({}) — a single artifact cannot exceed the \
                  total bundle cap",
-                self.max_artifact_bytes,
-                self.max_bundle_bytes,
+                self.max_artifact_bytes, self.max_bundle_bytes,
             ));
         }
         Ok(())
     }
 }
 
-fn default_max_artifact_bytes() -> u64 { 1 * 1024 * 1024 }       // 1 MiB
-fn default_max_bundle_bytes()   -> u64 { 10 * 1024 * 1024 }      // 10 MiB
-fn default_max_artifact_count() -> u32 { 200 }
+fn default_max_artifact_bytes() -> u64 {
+    1 * 1024 * 1024
+} // 1 MiB
+fn default_max_bundle_bytes() -> u64 {
+    10 * 1024 * 1024
+} // 10 MiB
+fn default_max_artifact_count() -> u32 {
+    200
+}
 
 // ---------------------------------------------------------------------------
 // Provider entries — `[[providers]]`
@@ -2597,7 +2614,6 @@ pub struct ProviderEntry {
     // sidecar provider declares both `sidecar_endpoint` and
     // `sidecar_hmac_secret`; non-sidecar providers MUST leave both
     // unset (PolicyBundle::validate rejects anything else).
-
     /// **Sidecar only.** Base URL of the operator-run sidecar process
     /// (e.g. `"http://127.0.0.1:9100"`). Plumbed to
     /// `SidecarModelClient::new` at planner-binary boot. Unset for
@@ -2657,9 +2673,15 @@ pub struct ProviderEntry {
     pub pricing: Option<ProviderPricing>,
 }
 
-fn default_inference_timeout_ms() -> u32 { 30_000 }
-fn default_data_fetch_timeout_ms() -> u32 { 10_000 }
-fn default_max_response_bytes() -> u64 { 16 * 1024 * 1024 }
+fn default_inference_timeout_ms() -> u32 {
+    30_000
+}
+fn default_data_fetch_timeout_ms() -> u32 {
+    10_000
+}
+fn default_max_response_bytes() -> u64 {
+    16 * 1024 * 1024
+}
 
 /// **`v2_extended_gaps.md §2.5` — per-provider pricing table.**
 ///
@@ -2722,15 +2744,17 @@ impl ProviderPricing {
     /// panics.
     pub fn cost_micro_dollars(
         &self,
-        input_tokens:           u64,
-        output_tokens:          u64,
-        cache_read_tokens:      u64,
-        cache_creation_tokens:  u64,
+        input_tokens: u64,
+        output_tokens: u64,
+        cache_read_tokens: u64,
+        cache_creation_tokens: u64,
     ) -> u64 {
         const SCALE: u128 = 1_000_000;
 
         fn quotient(tokens: u64, rate: u64) -> u128 {
-            if rate == 0 { return 0; }
+            if rate == 0 {
+                return 0;
+            }
             (tokens as u128 * SCALE) / rate as u128
         }
 
@@ -2741,10 +2765,10 @@ impl ProviderPricing {
             .cache_creation_tokens_per_dollar
             .unwrap_or(self.input_tokens_per_dollar);
 
-        let total: u128 = quotient(input_tokens,          self.input_tokens_per_dollar)
-                        + quotient(output_tokens,         self.output_tokens_per_dollar)
-                        + quotient(cache_read_tokens,     cache_read_rate)
-                        + quotient(cache_creation_tokens, cache_creation_rate);
+        let total: u128 = quotient(input_tokens, self.input_tokens_per_dollar)
+            + quotient(output_tokens, self.output_tokens_per_dollar)
+            + quotient(cache_read_tokens, cache_read_rate)
+            + quotient(cache_creation_tokens, cache_creation_rate);
 
         u64::try_from(total).unwrap_or(u64::MAX)
     }
@@ -2755,13 +2779,8 @@ impl ProviderPricing {
 /// treated as a non-LLM provider (e.g. a future `"DataFetch"` kind)
 /// and MUST leave `pricing` unset; mismatches are rejected at
 /// `PolicyBundle::validate` time.
-pub(crate) const LLM_PROVIDER_KINDS: &[&str] = &[
-    "Anthropic",
-    "OpenAI",
-    "Gemini",
-    "Bedrock",
-    "http_sidecar",
-];
+pub(crate) const LLM_PROVIDER_KINDS: &[&str] =
+    &["Anthropic", "OpenAI", "Gemini", "Bedrock", "http_sidecar"];
 
 /// Hard cap on inference timeout, normative per peripherals.md §3.2.
 pub const MAX_INFERENCE_TIMEOUT_MS: u32 = 120_000;
@@ -2852,8 +2871,8 @@ pub enum NotificationChannelKind {
 pub struct NotificationChannel {
     /// Operator-chosen short identifier referenced from `[[notifications.routes]].channels`.
     /// Must be unique across the channels array; PolicyBundle::validate enforces.
-    pub id:     String,
-    pub kind:   NotificationChannelKind,
+    pub id: String,
+    pub kind: NotificationChannelKind,
     /// For `File`: an absolute filesystem path the kernel will
     /// `O_APPEND | O_CREAT`.
     /// For `Email`: the recipient address (validated only as non-empty in v1).
@@ -2872,7 +2891,9 @@ pub struct NotificationChannel {
     pub max_in_flight: u32,
 }
 
-fn default_max_in_flight() -> u32 { 8 }
+fn default_max_in_flight() -> u32 {
+    8
+}
 
 /// One `[[notifications.routes]]` entry: which channels receive
 /// notifications for a given audit event-kind.
@@ -2890,7 +2911,7 @@ pub struct NotificationRoute {
     /// MUST match a real `AuditEventKind` discriminant string. Validated
     /// against [`KNOWN_AUDIT_EVENT_KINDS`] at policy load time.
     pub event_kind: String,
-    pub channels:   Vec<String>,
+    pub channels: Vec<String>,
 }
 
 /// `[notifications]` raw TOML shape. Consumed by `PolicyBundle::validate`.
@@ -2926,46 +2947,70 @@ pub const INBOX_FILENAME: &str = "inbox.jsonl";
 /// A unit test in this crate cross-checks the two lists.
 pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // lifecycle
-    "KernelStarted", "KernelStopped",
+    "KernelStarted",
+    "KernelStopped",
     // V2 agent-runtime substrate (extensibility-traits.md §3.8)
-    "IsolationSubstrateSelected", "IsolationFallbackBypass",
+    "IsolationSubstrateSelected",
+    "IsolationFallbackBypass",
     "IsolationSubstrateRefused",
     // V2 per-session VM lifecycle (extensibility-traits.md §3.5,
     // credential-proxy.md §2; paired-class — see audit-paired-writes.md §4.1).
-    "SessionVmSpawned", "SessionVmExited",
+    "SessionVmSpawned",
+    "SessionVmExited",
     // V2 elastic-vm-scaling.md §3.2, §4 — bounded retry on transient
     // spawn failure + dynamic resource adjustment + per-minute rate
     // limit deferral. `SessionVmFailedFinal` is mutually exclusive
     // with `SessionVmSpawned` for the same lineage; see
     // `audit-paired-writes.md §4` extension.
-    "SessionVmRespawnAttempted", "SessionVmFailedFinal",
-    "SessionVmScaleEvent", "SessionVmScaleDeferred",
+    "SessionVmRespawnAttempted",
+    "SessionVmFailedFinal",
+    "SessionVmScaleEvent",
+    "SessionVmScaleDeferred",
     // initiative
-    "InitiativeCreated", "PlanApproved", "PlanRejected",
-    "PathScopeOverrideApplied", "InitiativeStateChanged", "InitiativeAborted",
+    "InitiativeCreated",
+    "PlanApproved",
+    "PlanRejected",
+    "PathScopeOverrideApplied",
+    "InitiativeStateChanged",
+    "InitiativeAborted",
     // task
-    "TaskAdmitted", "TaskStateChanged",
+    "TaskAdmitted",
+    "TaskStateChanged",
     // intent
-    "IntentAccepted", "IntentRejected",
+    "IntentAccepted",
+    "IntentRejected",
     "IntegrationMergeCompleted",
     // V2_GAPS §C6 — kernel push protocol
-    "PushAttempted", "PushCompleted", "PushFailed",
+    "PushAttempted",
+    "PushCompleted",
+    "PushFailed",
     // session
-    "SessionCreated", "SessionRevoked",
+    "SessionCreated",
+    "SessionRevoked",
     // delegation
-    "DelegationGranted", "DelegationMarkedStale",
+    "DelegationGranted",
+    "DelegationMarkedStale",
     // witness/gate
-    "WitnessAccepted", "WitnessRejected", "VerifierProcessFailed",
+    "WitnessAccepted",
+    "WitnessRejected",
+    "VerifierProcessFailed",
     // escalation
-    "EscalationSubmitted", "EscalationApproved", "EscalationDenied",
-    "EscalationTimedOut", "EscalationConsumed", "LineageQuarantined",
+    "EscalationSubmitted",
+    "EscalationApproved",
+    "EscalationDenied",
+    "EscalationTimedOut",
+    "EscalationConsumed",
+    "LineageQuarantined",
     "EscalationRateLimitExceeded",
     // policy
-    "PolicyEpochAdvanced", "PolicyAdvanceRejected", "PolicyAdvanceFailed",
+    "PolicyEpochAdvanced",
+    "PolicyAdvanceRejected",
+    "PolicyAdvanceFailed",
     // ipc
     "ReplayRejected",
     // recovery
-    "ReconciliationGap", "TaskBlockedForRecovery",
+    "ReconciliationGap",
+    "TaskBlockedForRecovery",
     "DelegationSignatureUnverifiable",
     // V2.5 self-healing-supervisor.md §3.5 — auto-resume after
     // supervisor-triggered restart (per
@@ -2976,26 +3021,36 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // tasks are excluded; see audit event doc-comment).
     "TaskAutoResumedAfterSupervisorRestart",
     // gateway
-    "GatewaySpawned", "GatewayCrashed", "GatewayQuarantined",
+    "GatewaySpawned",
+    "GatewayCrashed",
+    "GatewayQuarantined",
     "GatewaySignalFailed",
     // notifications (self-reflective)
     "NotificationDeliveryFailed",
     // operator certificates (kernel-store.md §2.5.7, security-model.md §cert-lifecycle)
     "OperatorCertInstalled",
-    "OperatorCertMisconfigBypassed", "OperatorCertExpiringSoon",
-    "OperatorCertInGracePeriod", "OperatorCertExpiredOpDenied",
+    "OperatorCertMisconfigBypassed",
+    "OperatorCertExpiringSoon",
+    "OperatorCertInGracePeriod",
+    "OperatorCertExpiredOpDenied",
     "EmergencyOperatorUsed",
     // read-only CLI redaction reveal (cli-readonly.md §5.4.2 / §5.7.2)
     "PathReadAccessed",
     // initiative quarantine (kernel-store.md §2.5.8)
-    "InitiativeQuarantined", "OperatorQuarantineSwept",
+    "InitiativeQuarantined",
+    "OperatorQuarantineSwept",
     // V2_GAPS §C7 — credential CLI ceremony events
-    "CredentialRegistered", "CredentialRemoved", "CredentialVerified",
+    "CredentialRegistered",
+    "CredentialRemoved",
+    "CredentialVerified",
     // V2_GAPS §D1 — operator-cert revocation ceremony events
-    "OperatorCertRevoked", "OperatorCertRevokedOpDenied",
+    "OperatorCertRevoked",
+    "OperatorCertRevokedOpDenied",
     // V2_GAPS §D2 — host-capacity admission + watchdogs
-    "AdmissionDeferredAtCap", "AdmissionQueueFull",
-    "DiskFullHaltEntered", "DiskHealthyAfterFull",
+    "AdmissionDeferredAtCap",
+    "AdmissionQueueFull",
+    "DiskFullHaltEntered",
+    "DiskHealthyAfterFull",
     "OperatorAttentionRequired",
     "KernelPushEnqueued",
     // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
@@ -3156,16 +3211,15 @@ fn validate_integration_merge_verifiers_operator_side(
         }
 
         // Rule 3 — timeout parses and is ≥ 5s.
-        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout)
-            .ok_or_else(|| {
-                PolicyError::MalformedArtifact(format!(
-                    "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_INVALID: \
+        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout).ok_or_else(|| {
+            PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_INVALID: \
                      [[integration_merge_verifiers]] `{}` has unparseable \
                      `timeout = {:?}` — expected a duration string like \
                      \"30s\", \"10m\", or \"1h\".",
-                    entry.name, entry.timeout,
-                ))
-            })?;
+                entry.name, entry.timeout,
+            ))
+        })?;
         if timeout_secs < VERIFIER_TIMEOUT_MIN_SECS {
             return Err(PolicyError::MalformedArtifact(format!(
                 "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_TOO_SHORT: \
@@ -3203,8 +3257,7 @@ fn validate_integration_merge_verifiers_operator_side(
                     )));
                 }
             }
-            IntegrationMergeVerifierAppliesTo::All
-            | IntegrationMergeVerifierAppliesTo::Last => {
+            IntegrationMergeVerifierAppliesTo::All | IntegrationMergeVerifierAppliesTo::Last => {
                 if !entry.task_set.is_empty() {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT: \
@@ -3245,7 +3298,9 @@ fn validate_integration_merge_verifiers_operator_side(
                 "FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_MANY_ENTRIES: \
                  [[integration_merge_verifiers]] `{}` declared {} env \
                  entries; max is {}.",
-                entry.name, entry.env.len(), VERIFIER_ENV_MAX_ENTRIES,
+                entry.name,
+                entry.env.len(),
+                VERIFIER_ENV_MAX_ENTRIES,
             )));
         }
         let mut env_byte_total = 0usize;
@@ -3377,22 +3432,16 @@ pub fn validate_target_ref_format(target_ref: &str) -> Result<(), String> {
     }
     for &b in suffix.as_bytes() {
         if b < 0x20 || b == 0x7F {
-            return Err(format!(
-                "contains control character 0x{b:02X}"
-            ));
+            return Err(format!("contains control character 0x{b:02X}"));
         }
         match b {
             b' ' | b'~' | b'^' | b':' | b'?' | b'*' | b'[' | b'\\' => {
-                return Err(format!(
-                    "contains forbidden character {:?}", b as char
-                ));
+                return Err(format!("contains forbidden character {:?}", b as char));
             }
             _ => {}
         }
         if !b.is_ascii() {
-            return Err(format!(
-                "contains non-ASCII byte 0x{b:02X}"
-            ));
+            return Err(format!("contains non-ASCII byte 0x{b:02X}"));
         }
     }
     for component in suffix.split('/') {
@@ -3400,24 +3449,16 @@ pub fn validate_target_ref_format(target_ref: &str) -> Result<(), String> {
             return Err("contains empty path component".to_owned());
         }
         if component.starts_with('-') {
-            return Err(format!(
-                "path component {component:?} starts with `-`"
-            ));
+            return Err(format!("path component {component:?} starts with `-`"));
         }
         if component.starts_with('.') {
-            return Err(format!(
-                "path component {component:?} starts with `.`"
-            ));
+            return Err(format!("path component {component:?} starts with `.`"));
         }
         if component.ends_with('.') {
-            return Err(format!(
-                "path component {component:?} ends with `.`"
-            ));
+            return Err(format!("path component {component:?} ends with `.`"));
         }
         if component.ends_with(".lock") {
-            return Err(format!(
-                "path component {component:?} ends with `.lock`"
-            ));
+            return Err(format!("path component {component:?} ends with `.lock`"));
         }
     }
     Ok(())
@@ -3458,14 +3499,17 @@ fn validate_host_capacity_section(
     raw: &Option<HostCapacitySection>,
 ) -> Result<HostCapacityConfig, PolicyError> {
     let mut cfg = HostCapacityConfig::default();
-    let Some(s) = raw else { return Ok(cfg); };
+    let Some(s) = raw else {
+        return Ok(cfg);
+    };
 
     if let Some(v) = s.max_concurrent_vms {
         if v == 0 {
             return Err(PolicyError::MalformedArtifact(
                 "FAIL_HOST_CAPACITY_INVALID: \
                  [host_capacity] max_concurrent_vms must be ≥ 1 \
-                 (host-capacity.md §4)".to_owned(),
+                 (host-capacity.md §4)"
+                    .to_owned(),
             ));
         }
         cfg.max_concurrent_vms = v;
@@ -3511,7 +3555,8 @@ fn validate_host_capacity_section(
         if v == 0 {
             return Err(PolicyError::MalformedArtifact(
                 "FAIL_HOST_CAPACITY_INVALID: \
-                 [host_capacity] admission_queue_depth must be ≥ 1".to_owned(),
+                 [host_capacity] admission_queue_depth must be ≥ 1"
+                    .to_owned(),
             ));
         }
         cfg.admission_queue_depth = v;
@@ -3523,7 +3568,8 @@ fn validate_host_capacity_section(
             return Err(PolicyError::MalformedArtifact(
                 "FAIL_HOST_CAPACITY_INVALID: \
                  [host_capacity] disk_root must be a non-empty path \
-                 when present".to_owned(),
+                 when present"
+                    .to_owned(),
             ));
         }
         if !std::path::Path::new(trimmed).is_absolute() {
@@ -3551,9 +3597,9 @@ fn is_valid_env_label(label: &str) -> bool {
     if !first.is_ascii_lowercase() {
         return false;
     }
-    bytes.iter().all(|&b| {
-        b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_'
-    })
+    bytes
+        .iter()
+        .all(|&b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-' || b == b'_')
 }
 
 /// V2_GAPS §E1 — list of fields the parser TOLERATES on
@@ -3608,10 +3654,13 @@ fn validate_environments(
                 )));
             }
         }
-        out.insert(label.clone(), EnvironmentConfig {
-            description,
-            same_cluster_acknowledged: section.same_cluster_acknowledged,
-        });
+        out.insert(
+            label.clone(),
+            EnvironmentConfig {
+                description,
+                same_cluster_acknowledged: section.same_cluster_acknowledged,
+            },
+        );
     }
     Ok(out)
 }
@@ -3634,7 +3683,8 @@ fn validate_permitted_credentials(
             return Err(PolicyError::MalformedArtifact(
                 "FAIL_POLICY_PERMITTED_CRED_INVALID: \
                  [[permitted_credentials]] name must be non-empty \
-                 (environment-access-control.md §5.2)".to_owned(),
+                 (environment-access-control.md §5.2)"
+                    .to_owned(),
             ));
         }
         if !seen.insert(name) {
@@ -3660,7 +3710,7 @@ fn validate_permitted_credentials(
             _ => None,
         };
         out.push(PermittedCredentialConfig {
-            name:        name.to_owned(),
+            name: name.to_owned(),
             environment: env,
             description: entry.description.clone(),
         });
@@ -3671,7 +3721,11 @@ fn validate_permitted_credentials(
 fn validate_notifications(
     raw: &NotificationsSection,
 ) -> Result<
-    (Vec<NotificationChannel>, HashMap<String, Vec<String>>, Vec<String>),
+    (
+        Vec<NotificationChannel>,
+        HashMap<String, Vec<String>>,
+        Vec<String>,
+    ),
     PolicyError,
 > {
     use std::collections::HashSet;
@@ -3764,8 +3818,7 @@ fn validate_notifications(
     // Validate every route: event_kind is a real audit kind, channels
     // resolve. An empty channels list is the spec's silenced form;
     // we keep it (the dispatcher reads it as "drop on the floor").
-    let known_kinds: HashSet<&str> =
-        KNOWN_AUDIT_EVENT_KINDS.iter().copied().collect();
+    let known_kinds: HashSet<&str> = KNOWN_AUDIT_EVENT_KINDS.iter().copied().collect();
     let mut routes: HashMap<String, Vec<String>> = HashMap::new();
     for r in &raw.routes_raw {
         if !known_kinds.contains(r.event_kind.as_str()) {
@@ -3786,7 +3839,10 @@ fn validate_notifications(
         // Last-write-wins on duplicate event_kind — operators with two
         // entries for the same kind almost certainly want the second.
         // We log so the operator notices the override.
-        if routes.insert(r.event_kind.clone(), r.channels.clone()).is_some() {
+        if routes
+            .insert(r.event_kind.clone(), r.channels.clone())
+            .is_some()
+        {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"notification_route_overridden\",\
                  \"event_kind\":\"{}\"}}",
@@ -3930,7 +3986,7 @@ pub struct PolicyBundle {
     /// kernel boot reads it during the audit-chain warm-up. Tests
     /// that care about misconfig handling (step 3 unit tests) read
     /// it through [`PolicyBundle::bypassed_cert_misconfigs`].
-    bypassed_cert_misconfigs:      Vec<BypassedCertMisconfig>,
+    bypassed_cert_misconfigs: Vec<BypassedCertMisconfig>,
 
     /// V2 selector for the active `CredentialBackend` impl. Defaults
     /// to [`CredentialBackendKind::File`] when `policy.toml` omits the
@@ -4090,19 +4146,19 @@ pub struct PermittedCredentialConfig {
 #[cfg(any(debug_assertions, test))]
 #[derive(Debug, Clone, Copy)]
 pub struct EscalationPolicyForTests {
-    pub timeout:               Duration,
-    pub window:                Duration,
-    pub max_per_window:        u32,
-    pub quarantine_threshold:  u32,
+    pub timeout: Duration,
+    pub window: Duration,
+    pub max_per_window: u32,
+    pub quarantine_threshold: u32,
 }
 
 #[cfg(any(debug_assertions, test))]
 impl Default for EscalationPolicyForTests {
     fn default() -> Self {
         Self {
-            timeout:              Duration::from_secs(0),
-            window:               Duration::from_secs(0),
-            max_per_window:       0,
+            timeout: Duration::from_secs(0),
+            window: Duration::from_secs(0),
+            max_per_window: 0,
             quarantine_threshold: 0,
         }
     }
@@ -4278,14 +4334,14 @@ impl PolicyBundle {
             // above that defeats the purpose (the per-request
             // ceiling is the meaningful boundary).
             if let Some(ms) = p.stream_idle_timeout_ms {
-                if !(STREAM_IDLE_TIMEOUT_FLOOR_MS..=STREAM_IDLE_TIMEOUT_CEILING_MS)
-                    .contains(&ms)
-                {
+                if !(STREAM_IDLE_TIMEOUT_FLOOR_MS..=STREAM_IDLE_TIMEOUT_CEILING_MS).contains(&ms) {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[[providers]] {:?} stream_idle_timeout_ms ({}) must be in \
                          [{}, {}] ms (V2_GAPS §C9)",
-                        p.provider_id, ms,
-                        STREAM_IDLE_TIMEOUT_FLOOR_MS, STREAM_IDLE_TIMEOUT_CEILING_MS,
+                        p.provider_id,
+                        ms,
+                        STREAM_IDLE_TIMEOUT_FLOOR_MS,
+                        STREAM_IDLE_TIMEOUT_CEILING_MS,
                     )));
                 }
             }
@@ -4328,7 +4384,8 @@ impl PolicyBundle {
                     return Err(PolicyError::MalformedArtifact(format!(
                         "[[providers]] {:?} sidecar_hmac_secret must be even-length \
                          lowercase hex (got {} chars)",
-                        p.provider_id, secret.len()
+                        p.provider_id,
+                        secret.len()
                     )));
                 }
                 // Recommend (but do not require) ≥32 bytes (64 hex
@@ -4340,7 +4397,8 @@ impl PolicyBundle {
                         "[[providers]] {:?} sidecar_hmac_secret is {} hex chars; \
                          minimum is 32 (16 bytes) for HMAC-SHA256 security. \
                          Operator-grade is 64 hex chars (32 bytes).",
-                        p.provider_id, secret.len()
+                        p.provider_id,
+                        secret.len()
                     )));
                 }
             } else {
@@ -4441,9 +4499,18 @@ impl PolicyBundle {
         // caps" (skip env stamping) from "explicit caps".
         if let Some(caps) = raw.budget.token_caps.as_ref() {
             for (name, value) in [
-                ("max_input_tokens_per_session",  caps.max_input_tokens_per_session),
-                ("max_output_tokens_per_session", caps.max_output_tokens_per_session),
-                ("max_total_tokens_per_session",  caps.max_total_tokens_per_session),
+                (
+                    "max_input_tokens_per_session",
+                    caps.max_input_tokens_per_session,
+                ),
+                (
+                    "max_output_tokens_per_session",
+                    caps.max_output_tokens_per_session,
+                ),
+                (
+                    "max_total_tokens_per_session",
+                    caps.max_total_tokens_per_session,
+                ),
             ] {
                 if let Some(0) = value {
                     return Err(PolicyError::MalformedArtifact(format!(
@@ -4469,14 +4536,16 @@ impl PolicyBundle {
                 return Err(PolicyError::MalformedArtifact(
                     "[budget.sleep_caps] max_seconds_per_call = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
-                     (v2_extended_gaps.md §3.1)".to_owned()
+                     (v2_extended_gaps.md §3.1)"
+                        .to_owned(),
                 ));
             }
             if caps.max_cumulative_seconds == 0 {
                 return Err(PolicyError::MalformedArtifact(
                     "[budget.sleep_caps] max_cumulative_seconds = 0 is never useful; \
                      omit the entire section to disable the Sleep tool \
-                     (v2_extended_gaps.md §3.1)".to_owned()
+                     (v2_extended_gaps.md §3.1)"
+                        .to_owned(),
                 ));
             }
             if caps.max_seconds_per_call > 600 {
@@ -4490,8 +4559,7 @@ impl PolicyBundle {
                 return Err(PolicyError::MalformedArtifact(format!(
                     "[budget.sleep_caps] max_cumulative_seconds ({}) MUST be \
                      >= max_seconds_per_call ({}) (v2_extended_gaps.md §3.1)",
-                    caps.max_cumulative_seconds,
-                    caps.max_seconds_per_call,
+                    caps.max_cumulative_seconds, caps.max_seconds_per_call,
                 )));
             }
         }
@@ -4500,9 +4568,7 @@ impl PolicyBundle {
         let (notification_channels, notification_routes, default_notification_channels) =
             validate_notifications(&raw.notifications)?;
 
-        validate_integration_merge_verifiers_operator_side(
-            &raw.integration_merge_verifiers,
-        )?;
+        validate_integration_merge_verifiers_operator_side(&raw.integration_merge_verifiers)?;
 
         // V2 — validate `[egress] deny_provider` against the
         // `[[providers]]` array. Every entry MUST resolve to a
@@ -4623,10 +4689,7 @@ impl PolicyBundle {
             notification_routes,
             default_notification_channels,
             bypassed_cert_misconfigs,
-            credential_backend: raw
-                .credential_backend
-                .map(|s| s.kind)
-                .unwrap_or_default(),
+            credential_backend: raw.credential_backend.map(|s| s.kind).unwrap_or_default(),
             integration_merge_verifiers: raw.integration_merge_verifiers,
             git_default_target_ref: {
                 let raw_value = raw
@@ -4642,11 +4705,7 @@ impl PolicyBundle {
                 })?;
                 raw_value.to_owned()
             },
-            git_auto_push: raw
-                .git
-                .as_ref()
-                .map(|g| g.auto_push)
-                .unwrap_or(false),
+            git_auto_push: raw.git.as_ref().map(|g| g.auto_push).unwrap_or(false),
             git_push_remote: {
                 let auto = raw.git.as_ref().map(|g| g.auto_push).unwrap_or(false);
                 let remote = raw
@@ -4657,7 +4716,8 @@ impl PolicyBundle {
                 if auto && remote.trim().is_empty() {
                     return Err(PolicyError::MalformedArtifact(
                         "[git] auto_push = true requires a non-empty \
-                         [git] push_remote (V2_GAPS §C6)".to_owned(),
+                         [git] push_remote (V2_GAPS §C6)"
+                            .to_owned(),
                     ));
                 }
                 if !auto {
@@ -4672,7 +4732,7 @@ impl PolicyBundle {
                 .map(|g| g.target_ref_locked)
                 .unwrap_or(false),
             host_capacity: validate_host_capacity_section(&raw.host_capacity)?,
-            isolation:     validate_isolation_section(&raw.isolation)?,
+            isolation: validate_isolation_section(&raw.isolation)?,
             // V2 elastic-vm-scaling.md §2.1 — built after
             // `[isolation]` so the cross-section consistency check
             // (ceilings ≥ baselines) can read the resolved
@@ -4994,13 +5054,9 @@ impl PolicyBundle {
         // combination so a malformed fingerprint can never resolve
         // by accident.
         if fingerprint.len() == 16 {
-            return self
-                .operators
-                .iter()
-                .find(|op| {
-                    op.pubkey_fingerprint.len() == 32
-                        && op.pubkey_fingerprint.starts_with(fingerprint)
-                });
+            return self.operators.iter().find(|op| {
+                op.pubkey_fingerprint.len() == 32 && op.pubkey_fingerprint.starts_with(fingerprint)
+            });
         }
 
         None
@@ -5063,7 +5119,7 @@ impl PolicyBundle {
     /// relying on real wall-clock budgets.
     #[cfg(any(debug_assertions, test))]
     pub fn for_tests_with_operators_and_escalation_policy(
-        operators:         Vec<OperatorEntry>,
+        operators: Vec<OperatorEntry>,
         escalation_policy: EscalationPolicyForTests,
     ) -> Self {
         Self {
@@ -5113,16 +5169,16 @@ impl PolicyBundle {
             integration_merge_verifiers: Vec::new(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
-            git_auto_push:          false,
-            git_push_remote:        String::new(),
-            host_capacity:          HostCapacityConfig::default(),
-            isolation:              IsolationConfig::default(),
-            elastic:                ElasticConfig::default(),
-            environments:           HashMap::new(),
-            permitted_credentials:  Vec::new(),
-            vm_images:              Vec::new(),
+            git_auto_push: false,
+            git_push_remote: String::new(),
+            host_capacity: HostCapacityConfig::default(),
+            isolation: IsolationConfig::default(),
+            elastic: ElasticConfig::default(),
+            environments: HashMap::new(),
+            permitted_credentials: Vec::new(),
+            vm_images: Vec::new(),
             default_executor_image: None,
-            observability:          crate::observability::ObservabilityConfig::disabled_default(),
+            observability: crate::observability::ObservabilityConfig::disabled_default(),
         }
     }
 
@@ -5211,9 +5267,7 @@ impl PolicyBundle {
             }
             // Require a path-separator boundary after the root prefix to
             // prevent the `/srv/work` ⊃ `/srv/work_secret` false positive.
-            path.len() > root.len()
-                && path.starts_with(root)
-                && path.as_bytes()[root.len()] == b'/'
+            path.len() > root.len() && path.starts_with(root) && path.as_bytes()[root.len()] == b'/'
         })
     }
 
@@ -5527,7 +5581,9 @@ impl PolicyBundle {
     /// silenced" from "operator forgot to route" — important because
     /// the second case fires the default channels.
     pub fn notification_route(&self, event_kind: &str) -> Option<&[String]> {
-        self.notification_routes.get(event_kind).map(|v| v.as_slice())
+        self.notification_routes
+            .get(event_kind)
+            .map(|v| v.as_slice())
     }
 
     /// Resolve the absolute filesystem path for the kernel's
@@ -5584,9 +5640,7 @@ impl PolicyBundle {
 fn validate_operator_certs(
     entries: &mut [OperatorEntry],
 ) -> Result<Vec<BypassedCertMisconfig>, PolicyError> {
-    use raxis_crypto::cert::{
-        validate_cert_structurally, verify_cert_self_signature,
-    };
+    use raxis_crypto::cert::{validate_cert_structurally, verify_cert_self_signature};
     use sha2::{Digest, Sha256};
 
     let mut bypassed = Vec::new();
@@ -5606,8 +5660,8 @@ fn validate_operator_certs(
         };
         if computed_fp != entry.pubkey_fingerprint {
             return Err(PolicyError::FingerprintMismatch {
-                fingerprint:          entry.pubkey_fingerprint.clone(),
-                entry_pubkey_hex:     entry.pubkey_hex.clone(),
+                fingerprint: entry.pubkey_fingerprint.clone(),
+                entry_pubkey_hex: entry.pubkey_hex.clone(),
                 computed_fingerprint: computed_fp,
             });
         }
@@ -5617,9 +5671,9 @@ fn validate_operator_certs(
         // ── Pubkey consistency between entry and cert (NEVER bypassable) ──
         if cert.pubkey_hex != entry.pubkey_hex {
             return Err(PolicyError::CertPubkeyMismatch {
-                fingerprint:      entry.pubkey_fingerprint.clone(),
+                fingerprint: entry.pubkey_fingerprint.clone(),
                 entry_pubkey_hex: entry.pubkey_hex.clone(),
-                cert_pubkey_hex:  cert.pubkey_hex.clone(),
+                cert_pubkey_hex: cert.pubkey_hex.clone(),
             });
         }
 
@@ -5630,9 +5684,9 @@ fn validate_operator_certs(
         // get into the bypass path. Signature first, structure second.
         if let Err(sig_err) = verify_cert_self_signature(&cert) {
             return Err(PolicyError::CertValidation {
-                fingerprint:  entry.pubkey_fingerprint.clone(),
+                fingerprint: entry.pubkey_fingerprint.clone(),
                 display_name: entry.display_name.clone(),
-                errors:       format!("  - {sig_err}"),
+                errors: format!("  - {sig_err}"),
             });
         }
 
@@ -5646,17 +5700,16 @@ fn validate_operator_certs(
                     .collect::<Vec<_>>()
                     .join("\n");
                 return Err(PolicyError::CertValidation {
-                    fingerprint:  entry.pubkey_fingerprint.clone(),
+                    fingerprint: entry.pubkey_fingerprint.clone(),
                     display_name: entry.display_name.clone(),
-                    errors:       joined,
+                    errors: joined,
                 });
             }
             // Bypass path: capture the violations for audit AND log
             // a structured warning so the operator sees what just
             // got swallowed (the boot audit event is the canonical
             // record; this stderr line is a redundant safety net).
-            let violation_strs: Vec<String> =
-                violations.iter().map(|e| e.to_string()).collect();
+            let violation_strs: Vec<String> = violations.iter().map(|e| e.to_string()).collect();
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"operator_cert_misconfig_bypassed\",\
                  \"operator_fp\":\"{}\",\"display_name\":\"{}\",\
@@ -5672,9 +5725,9 @@ fn validate_operator_certs(
             );
             bypassed.push(BypassedCertMisconfig {
                 operator_fingerprint: entry.pubkey_fingerprint.clone(),
-                display_name:         entry.display_name.clone(),
-                kind:                 cert.kind,
-                violations:           violation_strs,
+                display_name: entry.display_name.clone(),
+                kind: cert.kind,
+                violations: violation_strs,
             });
         }
 
@@ -5768,16 +5821,16 @@ mod tests {
             integration_merge_verifiers: Vec::new(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
-            git_auto_push:          false,
-            git_push_remote:        String::new(),
-            host_capacity:          HostCapacityConfig::default(),
-            isolation:              IsolationConfig::default(),
-            elastic:                ElasticConfig::default(),
-            environments:           HashMap::new(),
-            permitted_credentials:  Vec::new(),
-            vm_images:              Vec::new(),
+            git_auto_push: false,
+            git_push_remote: String::new(),
+            host_capacity: HostCapacityConfig::default(),
+            isolation: IsolationConfig::default(),
+            elastic: ElasticConfig::default(),
+            environments: HashMap::new(),
+            permitted_credentials: Vec::new(),
+            vm_images: Vec::new(),
             default_executor_image: None,
-            observability:          crate::observability::ObservabilityConfig::disabled_default(),
+            observability: crate::observability::ObservabilityConfig::disabled_default(),
         }
     }
 
@@ -5799,22 +5852,36 @@ mod tests {
     #[test]
     fn sibling_with_byte_prefix_is_rejected() {
         let b = bundle_with_roots(vec!["/srv/work"]);
-        assert!(!b.worktree_root_allowed("/srv/work_secret"),
-                "/srv/work_secret must NOT match /srv/work");
-        assert!(!b.worktree_root_allowed("/srv/work_secret/repo"),
-                "subdir of /srv/work_secret must NOT match /srv/work");
-        assert!(!b.worktree_root_allowed("/srv/working"),
-                "/srv/working must NOT match /srv/work");
+        assert!(
+            !b.worktree_root_allowed("/srv/work_secret"),
+            "/srv/work_secret must NOT match /srv/work"
+        );
+        assert!(
+            !b.worktree_root_allowed("/srv/work_secret/repo"),
+            "subdir of /srv/work_secret must NOT match /srv/work"
+        );
+        assert!(
+            !b.worktree_root_allowed("/srv/working"),
+            "/srv/working must NOT match /srv/work"
+        );
     }
 
     /// Operator-supplied trailing slash is normalised away so both forms work.
     #[test]
     fn trailing_slash_in_root_is_tolerated() {
         let b = bundle_with_roots(vec!["/srv/work/"]);
-        assert!(b.worktree_root_allowed("/srv/work"),       "exact root, no trailing /");
-        assert!(b.worktree_root_allowed("/srv/work/repo"),  "subdir under root with trailing /");
-        assert!(!b.worktree_root_allowed("/srv/work_secret"),
-                "trailing-slash root must STILL reject the byte-prefix sibling");
+        assert!(
+            b.worktree_root_allowed("/srv/work"),
+            "exact root, no trailing /"
+        );
+        assert!(
+            b.worktree_root_allowed("/srv/work/repo"),
+            "subdir under root with trailing /"
+        );
+        assert!(
+            !b.worktree_root_allowed("/srv/work_secret"),
+            "trailing-slash root must STILL reject the byte-prefix sibling"
+        );
     }
 
     #[test]
@@ -5939,12 +6006,11 @@ lane_id              = "default"
 max_concurrent_tasks = 4
 max_cost_per_epoch   = 10000
 priority             = 100
-"#)
+"#
+        )
     }
 
-    fn write_and_load(
-        toml_str: &str,
-    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+    fn write_and_load(toml_str: &str) -> Result<crate::PolicyBundle, crate::PolicyError> {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), toml_str).unwrap();
         load_policy(tmp.path()).map(|(b, _, _)| b)
@@ -5958,8 +6024,7 @@ priority             = 100
     /// These rates mirror Anthropic's published Sonnet pricing
     /// ($5 / 1M input, $20 / 1M output) so the fixture is realistic
     /// without being load-bearing on any specific provider.
-    const LLM_PRICING_BLOCK: &str =
-        "  pricing.input_tokens_per_dollar  = 200000\n\
+    const LLM_PRICING_BLOCK: &str = "  pricing.input_tokens_per_dollar  = 200000\n\
           pricing.output_tokens_per_dollar = 50000\n";
 
     // ── No-section happy path ─────────────────────────────────────────────
@@ -5972,7 +6037,10 @@ priority             = 100
         let bundle = write_and_load(&minimal_policy_toml())
             .expect("genesis-template policy must load even without [gateway]");
         assert!(bundle.gateway().is_none(), "no [gateway] section → None");
-        assert!(bundle.providers().is_empty(), "no [[providers]] → empty slice");
+        assert!(
+            bundle.providers().is_empty(),
+            "no [[providers]] → empty slice"
+        );
     }
 
     // ── [gateway] happy path + accessor ───────────────────────────────────
@@ -5982,7 +6050,9 @@ priority             = 100
         let mut t = minimal_policy_toml();
         t.push_str("\n[gateway]\nbinary_path = \"/usr/local/bin/raxis-gateway\"\n");
         let bundle = write_and_load(&t).expect("valid [gateway] must load");
-        let g = bundle.gateway().expect("gateway() returns Some after [gateway]");
+        let g = bundle
+            .gateway()
+            .expect("gateway() returns Some after [gateway]");
         assert_eq!(g.binary_path, "/usr/local/bin/raxis-gateway");
         // Defaults applied:
         assert_eq!(g.spawn_timeout_secs, 5);
@@ -5999,8 +6069,10 @@ priority             = 100
         let mut t = minimal_policy_toml();
         t.push_str("\n[gateway]\nbinary_path = \"raxis-gateway\"\n");
         let err = write_and_load(&t).expect_err("relative path must fail");
-        assert!(format!("{err}").contains("must be absolute"),
-            "error must explain WHY rejected; got: {err}");
+        assert!(
+            format!("{err}").contains("must be absolute"),
+            "error must explain WHY rejected; got: {err}"
+        );
     }
 
     #[test]
@@ -6029,8 +6101,10 @@ priority             = 100
         let err = write_and_load(&t).expect_err("zero respawn cap must fail");
         let s = format!("{err}");
         assert!(s.contains("max_consecutive_respawns"));
-        assert!(s.contains("set to 1"),
-            "error should hint operator to use 1, not 0; got: {s}");
+        assert!(
+            s.contains("set to 1"),
+            "error should hint operator to use 1, not 0; got: {s}"
+        );
     }
 
     // ── [[providers]] happy path + accessor + defaults ───────────────────
@@ -6047,7 +6121,9 @@ priority             = 100
         ));
         let bundle = write_and_load(&t).expect("minimal provider entry must load");
         assert_eq!(bundle.providers().len(), 1);
-        let p = bundle.provider("anthropic-prod").expect("lookup by id works");
+        let p = bundle
+            .provider("anthropic-prod")
+            .expect("lookup by id works");
         assert_eq!(p.kind, "Anthropic");
         assert_eq!(p.credentials_file, "anthropic-prod.toml");
         // Defaults from `default_*_ms` and `default_max_response_bytes`:
@@ -6105,7 +6181,13 @@ priority             = 100
     fn credentials_file_with_path_separator_is_rejected() {
         // `../etc/shadow`-style payloads must be rejected at validate time,
         // before the gateway opens the file.
-        for evil in &["../etc/shadow", "subdir/file.toml", "/etc/shadow", "..", "."] {
+        for evil in &[
+            "../etc/shadow",
+            "subdir/file.toml",
+            "/etc/shadow",
+            "..",
+            ".",
+        ] {
             let mut t = minimal_policy_toml();
             t.push_str(&format!(
                 "\n[[providers]]\n\
@@ -6117,9 +6199,11 @@ priority             = 100
                 panic!("expected Err for credentials_file={evil:?}, got Ok");
             });
             let s = format!("{err}");
-            assert!(s.contains("bare filename"),
+            assert!(
+                s.contains("bare filename"),
                 "credentials_file={evil:?} should be rejected as path-traversal; \
-                 got error: {s}");
+                 got error: {s}"
+            );
         }
     }
 
@@ -6237,12 +6321,8 @@ priority             = 100
              stream_idle_timeout_ms = 120000\n\
              {LLM_PRICING_BLOCK}",
         ));
-        let bundle = write_and_load(&t)
-            .expect("120s must load — primary o1/o3 use case");
-        assert_eq!(
-            bundle.providers()[0].stream_idle_timeout_ms,
-            Some(120_000),
-        );
+        let bundle = write_and_load(&t).expect("120s must load — primary o1/o3 use case");
+        assert_eq!(bundle.providers()[0].stream_idle_timeout_ms, Some(120_000),);
     }
 
     /// Absent field MUST default to `None` (gateway-side fallback
@@ -6425,13 +6505,14 @@ priority             = 100
                  kind             = \"{kind}\"\n\
                  credentials_file = \"creds.toml\"\n",
             ));
-            let err = write_and_load(&t).expect_err(&format!(
-                "{kind} without pricing must be rejected (§2.5)"
-            ));
+            let err = write_and_load(&t)
+                .expect_err(&format!("{kind} without pricing must be rejected (§2.5)"));
             let s = format!("{err}");
             assert!(s.contains("pricing"), "[{kind}] msg = {s}");
-            assert!(s.contains("v2_extended_gaps.md §2.5"),
-                "[{kind}] error must cite the spec; got: {s}");
+            assert!(
+                s.contains("v2_extended_gaps.md §2.5"),
+                "[{kind}] error must cite the spec; got: {s}"
+            );
         }
     }
 
@@ -6448,9 +6529,8 @@ priority             = 100
              credentials_file = \"future.toml\"\n\
              {LLM_PRICING_BLOCK}",
         ));
-        let err = write_and_load(&t).expect_err(
-            "non-LLM kind with pricing must be rejected (§2.5)"
-        );
+        let err =
+            write_and_load(&t).expect_err("non-LLM kind with pricing must be rejected (§2.5)");
         let s = format!("{err}");
         assert!(s.contains("pricing"), "msg = {s}");
         assert!(s.contains("not a model provider"), "msg = {s}");
@@ -6529,9 +6609,9 @@ priority             = 100
         let bundle = write_and_load(&t).expect("full pricing must load");
         let p = bundle.provider("anthropic-prod").unwrap();
         let pricing = p.pricing.as_ref().expect("pricing decoded");
-        assert_eq!(pricing.input_tokens_per_dollar,         200_000);
-        assert_eq!(pricing.output_tokens_per_dollar,        50_000);
-        assert_eq!(pricing.cache_read_tokens_per_dollar,     Some(2_000_000));
+        assert_eq!(pricing.input_tokens_per_dollar, 200_000);
+        assert_eq!(pricing.output_tokens_per_dollar, 50_000);
+        assert_eq!(pricing.cache_read_tokens_per_dollar, Some(2_000_000));
         assert_eq!(pricing.cache_creation_tokens_per_dollar, Some(160_000));
     }
 
@@ -6539,10 +6619,10 @@ priority             = 100
 
     fn anthropic_sonnet_pricing() -> ProviderPricing {
         ProviderPricing {
-            input_tokens_per_dollar:           200_000,   // $5  / 1M input
-            output_tokens_per_dollar:          50_000,    // $20 / 1M output
-            cache_read_tokens_per_dollar:      Some(2_000_000),  // $0.50 / 1M
-            cache_creation_tokens_per_dollar:  Some(160_000),    // $6.25 / 1M
+            input_tokens_per_dollar: 200_000,                // $5  / 1M input
+            output_tokens_per_dollar: 50_000,                // $20 / 1M output
+            cache_read_tokens_per_dollar: Some(2_000_000),   // $0.50 / 1M
+            cache_creation_tokens_per_dollar: Some(160_000), // $6.25 / 1M
         }
     }
 
@@ -6574,10 +6654,10 @@ priority             = 100
     #[test]
     fn cost_micro_dollars_cache_rates_default_to_input_rate() {
         let p = ProviderPricing {
-            input_tokens_per_dollar:           200_000,
-            output_tokens_per_dollar:          50_000,
-            cache_read_tokens_per_dollar:      None,  // ← inherit
-            cache_creation_tokens_per_dollar:  None,  // ← inherit
+            input_tokens_per_dollar: 200_000,
+            output_tokens_per_dollar: 50_000,
+            cache_read_tokens_per_dollar: None,     // ← inherit
+            cache_creation_tokens_per_dollar: None, // ← inherit
         };
         // 200 cache_read at the inherited input rate ($5/1M) =
         // $0.001 = 1000 µ$.
@@ -6592,10 +6672,10 @@ priority             = 100
     #[test]
     fn cost_micro_dollars_saturates_on_extreme_input() {
         let p = ProviderPricing {
-            input_tokens_per_dollar:           1, // 1 token per dollar
-            output_tokens_per_dollar:          1,
-            cache_read_tokens_per_dollar:      None,
-            cache_creation_tokens_per_dollar:  None,
+            input_tokens_per_dollar: 1, // 1 token per dollar
+            output_tokens_per_dollar: 1,
+            cache_read_tokens_per_dollar: None,
+            cache_creation_tokens_per_dollar: None,
         };
         let _ = p.cost_micro_dollars(u64::MAX, 0, 0, 0);
         let _ = p.cost_micro_dollars(0, u64::MAX, 0, 0);
@@ -6612,8 +6692,10 @@ priority             = 100
     fn token_caps_section_absent_is_none() {
         let bundle = write_and_load(&minimal_policy_toml())
             .expect("minimal policy without token_caps must load");
-        assert!(bundle.token_caps().is_none(),
-            "absent [budget.token_caps] MUST surface as None");
+        assert!(
+            bundle.token_caps().is_none(),
+            "absent [budget.token_caps] MUST surface as None"
+        );
     }
 
     /// All three caps round-trip verbatim into the accessor.
@@ -6628,9 +6710,9 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("token_caps must load");
         let caps = bundle.token_caps().expect("token_caps decoded");
-        assert_eq!(caps.max_input_tokens_per_session,  Some(200_000));
+        assert_eq!(caps.max_input_tokens_per_session, Some(200_000));
         assert_eq!(caps.max_output_tokens_per_session, Some(100_000));
-        assert_eq!(caps.max_total_tokens_per_session,  Some(250_000));
+        assert_eq!(caps.max_total_tokens_per_session, Some(250_000));
     }
 
     /// Partial table — operators can declare only one axis.
@@ -6643,9 +6725,9 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("partial token_caps must load");
         let caps = bundle.token_caps().expect("token_caps decoded");
-        assert_eq!(caps.max_input_tokens_per_session,  None);
+        assert_eq!(caps.max_input_tokens_per_session, None);
         assert_eq!(caps.max_output_tokens_per_session, None);
-        assert_eq!(caps.max_total_tokens_per_session,  Some(50_000));
+        assert_eq!(caps.max_total_tokens_per_session, Some(50_000));
     }
 
     /// `cap = 0` is rejected: it would terminate the dispatch loop
@@ -6695,8 +6777,10 @@ priority             = 100
     fn sleep_caps_section_absent_is_none() {
         let bundle = write_and_load(&minimal_policy_toml())
             .expect("minimal policy without sleep_caps must load");
-        assert!(bundle.sleep_caps().is_none(),
-            "absent [budget.sleep_caps] MUST surface as None");
+        assert!(
+            bundle.sleep_caps().is_none(),
+            "absent [budget.sleep_caps] MUST surface as None"
+        );
     }
 
     #[test]
@@ -6709,7 +6793,7 @@ priority             = 100
         );
         let bundle = write_and_load(&t).expect("sleep_caps must load");
         let caps = bundle.sleep_caps().expect("sleep_caps decoded");
-        assert_eq!(caps.max_seconds_per_call,   60);
+        assert_eq!(caps.max_seconds_per_call, 60);
         assert_eq!(caps.max_cumulative_seconds, 300);
     }
 
@@ -6760,9 +6844,8 @@ priority             = 100
              max_seconds_per_call   = 60\n\
              max_cumulative_seconds = 30\n",
         );
-        let err = write_and_load(&t).expect_err(
-            "cumulative < per-call MUST be rejected as nonsensical",
-        );
+        let err =
+            write_and_load(&t).expect_err("cumulative < per-call MUST be rejected as nonsensical");
         let s = format!("{err}");
         assert!(s.contains("max_cumulative_seconds"), "msg = {s}");
     }
@@ -6788,9 +6871,7 @@ mod plan_signing_tests {
         t
     }
 
-    fn write_and_load(
-        toml_str: &str,
-    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+    fn write_and_load(toml_str: &str) -> Result<crate::PolicyBundle, crate::PolicyError> {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), toml_str).unwrap();
         load_policy(tmp.path()).map(|(b, _, _)| b)
@@ -6798,15 +6879,14 @@ mod plan_signing_tests {
 
     #[test]
     fn omitted_plan_signing_section_yields_spec_defaults() {
-        let bundle = write_and_load(
-            &super::gateway_providers_tests::minimal_policy_toml_for_tests(),
-        )
-        .expect("policy without [plan_signing] must load");
+        let bundle =
+            write_and_load(&super::gateway_providers_tests::minimal_policy_toml_for_tests())
+                .expect("policy without [plan_signing] must load");
         let p = bundle.plan_signing();
-        assert_eq!(p.max_plan_bundle_age_secs,    24 * 60 * 60);
-        assert_eq!(p.max_clock_skew_secs,         5 * 60);
-        assert_eq!(p.nonce_retention_grace_secs,  60 * 60);
-        assert_eq!(p.nonce_sweep_interval_secs,   60 * 60);
+        assert_eq!(p.max_plan_bundle_age_secs, 24 * 60 * 60);
+        assert_eq!(p.max_clock_skew_secs, 5 * 60);
+        assert_eq!(p.nonce_retention_grace_secs, 60 * 60);
+        assert_eq!(p.nonce_sweep_interval_secs, 60 * 60);
         assert!(!p.accept_unfresh_v2_0_bundles);
     }
 
@@ -6815,8 +6895,8 @@ mod plan_signing_tests {
         let bundle = write_and_load(&minimal_with_plan_signing("\n[plan_signing]\n"))
             .expect("[plan_signing] with no fields must inherit field defaults");
         let p = bundle.plan_signing();
-        assert_eq!(p.max_plan_bundle_age_secs,   24 * 60 * 60);
-        assert_eq!(p.nonce_sweep_interval_secs,  60 * 60);
+        assert_eq!(p.max_plan_bundle_age_secs, 24 * 60 * 60);
+        assert_eq!(p.nonce_sweep_interval_secs, 60 * 60);
     }
 
     #[test]
@@ -6831,10 +6911,10 @@ mod plan_signing_tests {
         ))
         .expect("explicit values must validate cleanly");
         let p = bundle.plan_signing();
-        assert_eq!(p.max_plan_bundle_age_secs,   3600);
-        assert_eq!(p.max_clock_skew_secs,        60);
+        assert_eq!(p.max_plan_bundle_age_secs, 3600);
+        assert_eq!(p.max_clock_skew_secs, 60);
         assert_eq!(p.nonce_retention_grace_secs, 300);
-        assert_eq!(p.nonce_sweep_interval_secs,  120);
+        assert_eq!(p.nonce_sweep_interval_secs, 120);
         assert!(p.accept_unfresh_v2_0_bundles);
     }
 
@@ -6847,7 +6927,10 @@ mod plan_signing_tests {
              nonce_retention_grace_secs  = 300\n",
         ))
         .expect("explicit values must validate cleanly");
-        assert_eq!(bundle.plan_signing().nonce_live_window_secs(), 3600 + 60 + 300);
+        assert_eq!(
+            bundle.plan_signing().nonce_live_window_secs(),
+            3600 + 60 + 300
+        );
     }
 
     #[test]
@@ -6870,7 +6953,10 @@ mod plan_signing_tests {
         .expect_err("ceiling overshoot must fail policy load");
         let s = format!("{err}");
         assert!(s.contains("FAIL_POLICY_PLAN_SIGNING_INVALID"), "got: {s}");
-        assert!(s.contains("hard ceiling"), "error must mention ceiling; got: {s}");
+        assert!(
+            s.contains("hard ceiling"),
+            "error must mention ceiling; got: {s}"
+        );
     }
 
     #[test]
@@ -6943,7 +7029,7 @@ mod plan_signing_tests {
         )))
         .expect("ceiling exact-match must be accepted");
         let p = bundle.plan_signing();
-        assert_eq!(p.max_plan_bundle_age_secs,  max_age);
+        assert_eq!(p.max_plan_bundle_age_secs, max_age);
         assert_eq!(p.nonce_sweep_interval_secs, max_sweep);
     }
 }
@@ -6972,9 +7058,7 @@ mod plan_bundle_limits_tests {
         t
     }
 
-    fn write_and_load(
-        toml_str: &str,
-    ) -> Result<crate::PolicyBundle, crate::PolicyError> {
+    fn write_and_load(toml_str: &str) -> Result<crate::PolicyBundle, crate::PolicyError> {
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), toml_str).unwrap();
         load_policy(tmp.path()).map(|(b, _, _)| b)
@@ -6982,25 +7066,22 @@ mod plan_bundle_limits_tests {
 
     #[test]
     fn omitted_plan_bundle_limits_section_yields_spec_defaults() {
-        let bundle = write_and_load(
-            &super::gateway_providers_tests::minimal_policy_toml_for_tests(),
-        )
-        .expect("policy without [plan_bundle_limits] must load");
+        let bundle =
+            write_and_load(&super::gateway_providers_tests::minimal_policy_toml_for_tests())
+                .expect("policy without [plan_bundle_limits] must load");
         let p = bundle.plan_bundle_limits();
         assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
-        assert_eq!(p.max_bundle_bytes,   10 * 1024 * 1024);
+        assert_eq!(p.max_bundle_bytes, 10 * 1024 * 1024);
         assert_eq!(p.max_artifact_count, 200);
     }
 
     #[test]
     fn empty_plan_bundle_limits_section_uses_field_level_defaults() {
-        let bundle = write_and_load(&minimal_with_plan_bundle_limits(
-            "\n[plan_bundle_limits]\n",
-        ))
-        .expect("[plan_bundle_limits] with no fields must inherit field defaults");
+        let bundle = write_and_load(&minimal_with_plan_bundle_limits("\n[plan_bundle_limits]\n"))
+            .expect("[plan_bundle_limits] with no fields must inherit field defaults");
         let p = bundle.plan_bundle_limits();
         assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
-        assert_eq!(p.max_bundle_bytes,   10 * 1024 * 1024);
+        assert_eq!(p.max_bundle_bytes, 10 * 1024 * 1024);
         assert_eq!(p.max_artifact_count, 200);
     }
 
@@ -7015,7 +7096,7 @@ mod plan_bundle_limits_tests {
         .expect("explicit values must validate cleanly");
         let p = bundle.plan_bundle_limits();
         assert_eq!(p.max_artifact_bytes, 524_288);
-        assert_eq!(p.max_bundle_bytes,   5_242_880);
+        assert_eq!(p.max_bundle_bytes, 5_242_880);
         assert_eq!(p.max_artifact_count, 50);
     }
 
@@ -7026,7 +7107,10 @@ mod plan_bundle_limits_tests {
         ))
         .expect_err("zero artifact cap must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
         assert!(s.contains("max_artifact_bytes"), "got: {s}");
     }
 
@@ -7038,8 +7122,14 @@ mod plan_bundle_limits_tests {
         )))
         .expect_err("artifact cap above hard ceiling must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
-        assert!(s.contains("hard ceiling"), "error must mention ceiling; got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
+        assert!(
+            s.contains("hard ceiling"),
+            "error must mention ceiling; got: {s}"
+        );
     }
 
     #[test]
@@ -7049,7 +7139,10 @@ mod plan_bundle_limits_tests {
         ))
         .expect_err("zero bundle cap must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
         assert!(s.contains("max_bundle_bytes"), "got: {s}");
     }
 
@@ -7061,7 +7154,10 @@ mod plan_bundle_limits_tests {
         )))
         .expect_err("bundle cap above hard ceiling must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -7071,7 +7167,10 @@ mod plan_bundle_limits_tests {
         ))
         .expect_err("zero artifact count must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
         assert!(s.contains("max_artifact_count"), "got: {s}");
     }
 
@@ -7083,7 +7182,10 @@ mod plan_bundle_limits_tests {
         )))
         .expect_err("artifact count above hard ceiling must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
     }
 
     #[test]
@@ -7096,7 +7198,10 @@ mod plan_bundle_limits_tests {
         ))
         .expect_err("artifact > bundle cap must fail policy load");
         let s = format!("{err}");
-        assert!(s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"), "got: {s}");
+        assert!(
+            s.contains("FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING"),
+            "got: {s}"
+        );
         assert!(s.contains("must be <="), "got: {s}");
     }
 
@@ -7104,8 +7209,8 @@ mod plan_bundle_limits_tests {
     fn ceiling_at_max_is_accepted() {
         // Boundary-inclusive: exactly-at-ceiling values are accepted.
         let max_artifact = PLAN_BUNDLE_MAX_ARTIFACT_BYTES_HARD_CEILING;
-        let max_bundle   = PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING;
-        let max_count    = PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING;
+        let max_bundle = PLAN_BUNDLE_MAX_BUNDLE_BYTES_HARD_CEILING;
+        let max_count = PLAN_BUNDLE_MAX_ARTIFACT_COUNT_HARD_CEILING;
         let bundle = write_and_load(&minimal_with_plan_bundle_limits(&format!(
             "\n[plan_bundle_limits]\n\
              max_artifact_bytes  = {max_artifact}\n\
@@ -7115,7 +7220,7 @@ mod plan_bundle_limits_tests {
         .expect("ceiling exact-match must be accepted");
         let p = bundle.plan_bundle_limits();
         assert_eq!(p.max_artifact_bytes, max_artifact);
-        assert_eq!(p.max_bundle_bytes,   max_bundle);
+        assert_eq!(p.max_bundle_bytes, max_bundle);
         assert_eq!(p.max_artifact_count, max_count);
     }
 }
@@ -7155,41 +7260,52 @@ mod notifications_tests {
             .expect("policy without [notifications] must load cleanly");
 
         let chans = bundle.notification_channels();
-        assert!(chans.is_empty(), "no channels when section is omitted; got {chans:?}");
+        assert!(
+            chans.is_empty(),
+            "no channels when section is omitted; got {chans:?}"
+        );
 
         let defaults = bundle.default_notification_channels();
-        assert!(defaults.is_empty(),
-            "default_channels is empty when omitted (inbox is unconditional)");
+        assert!(
+            defaults.is_empty(),
+            "default_channels is empty when omitted (inbox is unconditional)"
+        );
 
-        assert!(bundle.notification_route("EscalationApproved").is_none(),
-            "no explicit routes ⇒ None ⇒ caller uses default channels");
+        assert!(
+            bundle.notification_route("EscalationApproved").is_none(),
+            "no explicit routes ⇒ None ⇒ caller uses default channels"
+        );
     }
 
     #[test]
     fn inbox_path_for_data_dir_is_canonical_path() {
         let p = PolicyBundle::inbox_path_for(std::path::Path::new("/tmp/raxis"));
-        assert!(p.ends_with("notifications/inbox.jsonl"),
-            "got {p:?}");
+        assert!(p.ends_with("notifications/inbox.jsonl"), "got {p:?}");
     }
 
     // ── default_channels validation ──────────────────────────────────
 
     #[test]
     fn default_channels_referencing_unknown_id_is_rejected() {
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [notifications]
 default_channels = [\"does-not-exist\"]
-");
+",
+        );
         let err = write_and_load(&toml).expect_err("unknown id must fail");
-        assert!(format!("{err}").contains("unknown channel id"),
-            "error must explain WHY rejected; got: {err}");
+        assert!(
+            format!("{err}").contains("unknown channel id"),
+            "error must explain WHY rejected; got: {err}"
+        );
     }
 
     // ── route validation ─────────────────────────────────────────────
 
     #[test]
     fn route_with_unknown_event_kind_is_rejected() {
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [[notifications.channels]]
 id     = \"audit-mirror\"
 kind   = \"File\"
@@ -7198,16 +7314,20 @@ target = \"/tmp/audit.jsonl\"
 [[notifications.routes]]
 event_kind = \"NotARealAuditEventKind\"
 channels   = [\"audit-mirror\"]
-");
+",
+        );
         let err = write_and_load(&toml).expect_err("typo must fail");
         let s = format!("{err}");
-        assert!(s.contains("not a known AuditEventKind"),
-            "error must mention the AuditEventKind list; got: {s}");
+        assert!(
+            s.contains("not a known AuditEventKind"),
+            "error must mention the AuditEventKind list; got: {s}"
+        );
     }
 
     #[test]
     fn route_with_unknown_channel_id_is_rejected() {
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [[notifications.channels]]
 id     = \"audit-mirror\"
 kind   = \"File\"
@@ -7216,7 +7336,8 @@ target = \"/tmp/audit.jsonl\"
 [[notifications.routes]]
 event_kind = \"EscalationApproved\"
 channels   = [\"ghost\"]
-");
+",
+        );
         let err = write_and_load(&toml).expect_err("unknown id must fail");
         assert!(format!("{err}").contains("unknown channel id"));
     }
@@ -7227,20 +7348,25 @@ channels   = [\"ghost\"]
         // form. We accept it and surface it as Some(&[]) so the
         // dispatcher distinguishes "no route" (None → fall through to
         // default_channels) from "explicit silence" (Some(&[]) → drop).
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [[notifications.routes]]
 event_kind = \"TaskStateChanged\"
 channels   = []
-");
+",
+        );
         let bundle = write_and_load(&toml).expect("silenced route must load");
         let route = bundle.notification_route("TaskStateChanged");
-        assert!(matches!(route, Some(slice) if slice.is_empty()),
-            "silenced ⇒ Some(empty), got {route:?}");
+        assert!(
+            matches!(route, Some(slice) if slice.is_empty()),
+            "silenced ⇒ Some(empty), got {route:?}"
+        );
     }
 
     #[test]
     fn duplicate_channel_id_is_rejected() {
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [[notifications.channels]]
 id     = \"file-mirror\"
 kind   = \"File\"
@@ -7250,19 +7376,22 @@ target = \"/var/log/raxis.jsonl\"
 id     = \"file-mirror\"
 kind   = \"File\"
 target = \"/var/log/raxis-2.jsonl\"
-");
+",
+        );
         let err = write_and_load(&toml).expect_err("dup ids must fail");
         assert!(format!("{err}").contains("duplicated"));
     }
 
     #[test]
     fn file_channel_with_empty_target_is_rejected() {
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [[notifications.channels]]
 id     = \"file-mirror\"
 kind   = \"File\"
 target = \"\"
-");
+",
+        );
         let err = write_and_load(&toml).expect_err("File channel needs target");
         assert!(format!("{err}").contains("non-empty target"));
     }
@@ -7278,7 +7407,8 @@ target = \"\"
         // comment). All channel ids referenced by `default_channels`
         // and routes MUST therefore be declared in
         // `[[notifications.channels]]`.
-        let toml = minimal_with_notifications("
+        let toml = minimal_with_notifications(
+            "
 [notifications]
 default_channels = [\"audit-mirror\"]
 
@@ -7303,7 +7433,8 @@ channels   = [\"audit-mirror\"]
 [[notifications.routes]]
 event_kind = \"TaskStateChanged\"
 channels   = []
-");
+",
+        );
         let bundle = write_and_load(&toml).expect("must load");
 
         // Both explicit channels round-trip.
@@ -7340,59 +7471,365 @@ channels   = []
         // policy crate's KNOWN_AUDIT_EVENT_KINDS is updated.
         use raxis_audit_tools::AuditEventKind;
         let probes: Vec<&'static str> = vec![
-            AuditEventKind::KernelStarted { data_dir: "x".into(), policy_epoch: 0, schema_version: 0 }.as_str(),
+            AuditEventKind::KernelStarted {
+                data_dir: "x".into(),
+                policy_epoch: 0,
+                schema_version: 0,
+            }
+            .as_str(),
             AuditEventKind::KernelStopped { reason: "x".into() }.as_str(),
-            AuditEventKind::IsolationSubstrateSelected { backend_id: "x".into(), tier: "x".into(), fallback_bypass: false }.as_str(),
-            AuditEventKind::IsolationFallbackBypass { reason: "x".into(), backend_id: "x".into() }.as_str(),
-            AuditEventKind::InitiativeCreated { initiative_id: "x".into(), plan_hash: "x".into(), signed_by: "x".into(), signed_at: 0 }.as_str(),
-            AuditEventKind::PlanApproved { initiative_id: "x".into(), task_count: 0 }.as_str(),
-            AuditEventKind::PlanRejected { initiative_id: "x".into() }.as_str(),
-            AuditEventKind::PathScopeOverrideApplied { initiative_id: "x".into(), task_id: "x".into(), approving_operator: "x".into(), approving_operator_display_name: None }.as_str(),
-            AuditEventKind::InitiativeStateChanged { initiative_id: "x".into(), from_state: "x".into(), to_state: "x".into() }.as_str(),
-            AuditEventKind::InitiativeAborted { initiative_id: "x".into(), triggered_by_operator: None, triggered_by_operator_display_name: None }.as_str(),
-            AuditEventKind::TaskAdmitted { task_id: "x".into(), initiative_id: "x".into(), lane_id: "x".into() }.as_str(),
-            AuditEventKind::TaskStateChanged { task_id: "x".into(), from_state: "x".into(), to_state: "x".into(), actor: "x".into(), policy_epoch: 0 }.as_str(),
-            AuditEventKind::IntentAccepted { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), base_sha: None, head_sha: None, sequence_number: 0, remaining_units: 0 }.as_str(),
-            AuditEventKind::IntentRejected { task_id: "x".into(), session_id: "x".into(), intent_kind: "x".into(), error_code: "x".into(), sequence_number: 0 }.as_str(),
-            AuditEventKind::IntegrationMergeCompleted { initiative_id: "x".into(), session_id: "x".into(), commit_sha: "x".into(), previous_sha: "x".into(), operator_assisted: false, escalation_id: None, target_ref: "refs/heads/main".into() }.as_str(),
-            AuditEventKind::PushAttempted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into() }.as_str(),
-            AuditEventKind::PushCompleted { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), summary: "x".into() }.as_str(),
-            AuditEventKind::PushFailed    { initiative_id: "x".into(), commit_sha: "x".into(), remote: "x".into(), refspec: "x".into(), category: "x".into(), reason: "x".into() }.as_str(),
-            AuditEventKind::SessionCreated { session_id: "x".into(), role: "x".into(), lineage_id: "x".into(), worktree_root: None, initiative_id: None, plan_bundle_sha256: None, policy_epoch: None, session_agent_type: None }.as_str(),
-            AuditEventKind::SessionRevoked { session_id: "x".into(), revoked_by: "x".into(), revoked_by_display_name: None }.as_str(),
-            AuditEventKind::DelegationGranted { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), expires_at: 0, granted_by: "x".into(), granted_by_display_name: None }.as_str(),
-            AuditEventKind::DelegationMarkedStale { delegation_id: "x".into(), session_id: "x".into(), capability_class: "x".into(), reason: "x".into() }.as_str(),
-            AuditEventKind::WitnessAccepted { verifier_run_id: "x".into(), task_id: "x".into(), gate_type: "x".into(), result_class: "x".into(), evaluation_sha: "x".into() }.as_str(),
-            AuditEventKind::WitnessRejected { verifier_run_id: "x".into(), task_id: "x".into(), reason: "x".into() }.as_str(),
-            AuditEventKind::VerifierProcessFailed { task_id: "x".into(), exit_code: None, gate_type: "x".into() }.as_str(),
-            AuditEventKind::EscalationSubmitted { escalation_id: "x".into(), task_id: "x".into(), class: "x".into(), lineage_id: "x".into() }.as_str(),
-            AuditEventKind::EscalationApproved { escalation_id: "x".into(), approved_by: "x".into(), approved_by_display_name: None }.as_str(),
-            AuditEventKind::EscalationDenied { escalation_id: "x".into(), denied_by: "x".into(), reason: None, denied_by_display_name: None }.as_str(),
-            AuditEventKind::EscalationTimedOut { escalation_id: "x".into() }.as_str(),
-            AuditEventKind::EscalationConsumed { escalation_id: "x".into(), approval_token_id: "x".into(), action_hash: "x".into(), policy_epoch: 0 }.as_str(),
-            AuditEventKind::LineageQuarantined { lineage_id: "x".into(), trigger_count: 0 }.as_str(),
-            AuditEventKind::EscalationRateLimitExceeded { lineage_id: "x".into(), attempted_count: 0, window_start: 0 }.as_str(),
-            AuditEventKind::PolicyEpochAdvanced { new_epoch_id: 0, policy_sha256: "x".into(), triggered_by: "x".into(), delegations_marked_stale: 0, sessions_invalidated: 0, triggered_by_display_name: None }.as_str(),
-            AuditEventKind::PolicyAdvanceRejected { reason: "x".into(), artifact_epoch: None, current_epoch: 0 }.as_str(),
-            AuditEventKind::PolicyAdvanceFailed { reason: "x".into(), new_epoch_id: 0 }.as_str(),
-            AuditEventKind::ReplayRejected { session_id: "x".into(), sequence_num: 0, reason: "x".into() }.as_str(),
-            AuditEventKind::ReconciliationGap { missing_seq: 0, reconstructed_event: "x".into(), reconstructed: false }.as_str(),
-            AuditEventKind::TaskBlockedForRecovery { task_id: "x".into(), block_reason: "x".into() }.as_str(),
-            AuditEventKind::DelegationSignatureUnverifiable { delegation_id: "x".into(), expected_signer_unknown_in_current_policy: false }.as_str(),
-            AuditEventKind::GatewaySpawned { token_prefix: "x".into(), binary_path: "x".into(), attempt: 0 }.as_str(),
-            AuditEventKind::GatewayCrashed { token_prefix: "x".into(), exit_code: None, attempt: 0 }.as_str(),
-            AuditEventKind::GatewayQuarantined { reason: "x".into(), total_attempts: 0 }.as_str(),
-            AuditEventKind::GatewaySignalFailed { signal: "x".into(), new_epoch_id: None, reason: "x".into() }.as_str(),
-            AuditEventKind::NotificationDeliveryFailed { channel_id: "x".into(), event_kind: "x".into(), reason: "x".into() }.as_str(),
-            AuditEventKind::OperatorCertInstalled { pubkey_fingerprint: "x".into(), epoch_id: 0, cert_kind: "x".into(), display_name: "x".into(), not_before: 0, not_after: 0, permitted_ops: vec![], force_misconfig_bypass: false, previous_fingerprint: None }.as_str(),
-            AuditEventKind::OperatorCertMisconfigBypassed { pubkey_fingerprint: "x".into(), epoch_id: 0, cert_kind: "x".into(), display_name: "x".into(), violations: vec![] }.as_str(),
-            AuditEventKind::OperatorCertExpiringSoon { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, days_remaining: 0 }.as_str(),
-            AuditEventKind::OperatorCertInGracePeriod { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, grace_ends_at: 0 }.as_str(),
-            AuditEventKind::OperatorCertExpiredOpDenied { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into(), not_after: 0, expired_at: 0 }.as_str(),
-            AuditEventKind::EmergencyOperatorUsed { pubkey_fingerprint: "x".into(), epoch_id: 0, op: "x".into() }.as_str(),
-            AuditEventKind::PathReadAccessed { actor: "x".into(), table: "x".into(), column: "x".into(), task_id: "x".into(), command: "x".into() }.as_str(),
-            AuditEventKind::InitiativeQuarantined { initiative_id: "x".into(), quarantined_by: "x".into(), reason: None, quarantined_by_display_name: None }.as_str(),
-            AuditEventKind::OperatorQuarantineSwept { target_fingerprint: "x".into(), quarantined_by: "x".into(), count: 0, reason: None, quarantined_by_display_name: None, target_display_name: None }.as_str(),
+            AuditEventKind::IsolationSubstrateSelected {
+                backend_id: "x".into(),
+                tier: "x".into(),
+                fallback_bypass: false,
+            }
+            .as_str(),
+            AuditEventKind::IsolationFallbackBypass {
+                reason: "x".into(),
+                backend_id: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::InitiativeCreated {
+                initiative_id: "x".into(),
+                plan_hash: "x".into(),
+                signed_by: "x".into(),
+                signed_at: 0,
+            }
+            .as_str(),
+            AuditEventKind::PlanApproved {
+                initiative_id: "x".into(),
+                task_count: 0,
+            }
+            .as_str(),
+            AuditEventKind::PlanRejected {
+                initiative_id: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::PathScopeOverrideApplied {
+                initiative_id: "x".into(),
+                task_id: "x".into(),
+                approving_operator: "x".into(),
+                approving_operator_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::InitiativeStateChanged {
+                initiative_id: "x".into(),
+                from_state: "x".into(),
+                to_state: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::InitiativeAborted {
+                initiative_id: "x".into(),
+                triggered_by_operator: None,
+                triggered_by_operator_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::TaskAdmitted {
+                task_id: "x".into(),
+                initiative_id: "x".into(),
+                lane_id: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::TaskStateChanged {
+                task_id: "x".into(),
+                from_state: "x".into(),
+                to_state: "x".into(),
+                actor: "x".into(),
+                policy_epoch: 0,
+            }
+            .as_str(),
+            AuditEventKind::IntentAccepted {
+                task_id: "x".into(),
+                session_id: "x".into(),
+                intent_kind: "x".into(),
+                base_sha: None,
+                head_sha: None,
+                sequence_number: 0,
+                remaining_units: 0,
+            }
+            .as_str(),
+            AuditEventKind::IntentRejected {
+                task_id: "x".into(),
+                session_id: "x".into(),
+                intent_kind: "x".into(),
+                error_code: "x".into(),
+                sequence_number: 0,
+            }
+            .as_str(),
+            AuditEventKind::IntegrationMergeCompleted {
+                initiative_id: "x".into(),
+                session_id: "x".into(),
+                commit_sha: "x".into(),
+                previous_sha: "x".into(),
+                operator_assisted: false,
+                escalation_id: None,
+                target_ref: "refs/heads/main".into(),
+            }
+            .as_str(),
+            AuditEventKind::PushAttempted {
+                initiative_id: "x".into(),
+                commit_sha: "x".into(),
+                remote: "x".into(),
+                refspec: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::PushCompleted {
+                initiative_id: "x".into(),
+                commit_sha: "x".into(),
+                remote: "x".into(),
+                refspec: "x".into(),
+                summary: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::PushFailed {
+                initiative_id: "x".into(),
+                commit_sha: "x".into(),
+                remote: "x".into(),
+                refspec: "x".into(),
+                category: "x".into(),
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::SessionCreated {
+                session_id: "x".into(),
+                role: "x".into(),
+                lineage_id: "x".into(),
+                worktree_root: None,
+                initiative_id: None,
+                plan_bundle_sha256: None,
+                policy_epoch: None,
+                session_agent_type: None,
+            }
+            .as_str(),
+            AuditEventKind::SessionRevoked {
+                session_id: "x".into(),
+                revoked_by: "x".into(),
+                revoked_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::DelegationGranted {
+                delegation_id: "x".into(),
+                session_id: "x".into(),
+                capability_class: "x".into(),
+                expires_at: 0,
+                granted_by: "x".into(),
+                granted_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::DelegationMarkedStale {
+                delegation_id: "x".into(),
+                session_id: "x".into(),
+                capability_class: "x".into(),
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::WitnessAccepted {
+                verifier_run_id: "x".into(),
+                task_id: "x".into(),
+                gate_type: "x".into(),
+                result_class: "x".into(),
+                evaluation_sha: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::WitnessRejected {
+                verifier_run_id: "x".into(),
+                task_id: "x".into(),
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::VerifierProcessFailed {
+                task_id: "x".into(),
+                exit_code: None,
+                gate_type: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::EscalationSubmitted {
+                escalation_id: "x".into(),
+                task_id: "x".into(),
+                class: "x".into(),
+                lineage_id: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::EscalationApproved {
+                escalation_id: "x".into(),
+                approved_by: "x".into(),
+                approved_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::EscalationDenied {
+                escalation_id: "x".into(),
+                denied_by: "x".into(),
+                reason: None,
+                denied_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::EscalationTimedOut {
+                escalation_id: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::EscalationConsumed {
+                escalation_id: "x".into(),
+                approval_token_id: "x".into(),
+                action_hash: "x".into(),
+                policy_epoch: 0,
+            }
+            .as_str(),
+            AuditEventKind::LineageQuarantined {
+                lineage_id: "x".into(),
+                trigger_count: 0,
+            }
+            .as_str(),
+            AuditEventKind::EscalationRateLimitExceeded {
+                lineage_id: "x".into(),
+                attempted_count: 0,
+                window_start: 0,
+            }
+            .as_str(),
+            AuditEventKind::PolicyEpochAdvanced {
+                new_epoch_id: 0,
+                policy_sha256: "x".into(),
+                triggered_by: "x".into(),
+                delegations_marked_stale: 0,
+                sessions_invalidated: 0,
+                triggered_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::PolicyAdvanceRejected {
+                reason: "x".into(),
+                artifact_epoch: None,
+                current_epoch: 0,
+            }
+            .as_str(),
+            AuditEventKind::PolicyAdvanceFailed {
+                reason: "x".into(),
+                new_epoch_id: 0,
+            }
+            .as_str(),
+            AuditEventKind::ReplayRejected {
+                session_id: "x".into(),
+                sequence_num: 0,
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::ReconciliationGap {
+                missing_seq: 0,
+                reconstructed_event: "x".into(),
+                reconstructed: false,
+            }
+            .as_str(),
+            AuditEventKind::TaskBlockedForRecovery {
+                task_id: "x".into(),
+                block_reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::DelegationSignatureUnverifiable {
+                delegation_id: "x".into(),
+                expected_signer_unknown_in_current_policy: false,
+            }
+            .as_str(),
+            AuditEventKind::GatewaySpawned {
+                token_prefix: "x".into(),
+                binary_path: "x".into(),
+                attempt: 0,
+            }
+            .as_str(),
+            AuditEventKind::GatewayCrashed {
+                token_prefix: "x".into(),
+                exit_code: None,
+                attempt: 0,
+            }
+            .as_str(),
+            AuditEventKind::GatewayQuarantined {
+                reason: "x".into(),
+                total_attempts: 0,
+            }
+            .as_str(),
+            AuditEventKind::GatewaySignalFailed {
+                signal: "x".into(),
+                new_epoch_id: None,
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::NotificationDeliveryFailed {
+                channel_id: "x".into(),
+                event_kind: "x".into(),
+                reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::OperatorCertInstalled {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                cert_kind: "x".into(),
+                display_name: "x".into(),
+                not_before: 0,
+                not_after: 0,
+                permitted_ops: vec![],
+                force_misconfig_bypass: false,
+                previous_fingerprint: None,
+            }
+            .as_str(),
+            AuditEventKind::OperatorCertMisconfigBypassed {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                cert_kind: "x".into(),
+                display_name: "x".into(),
+                violations: vec![],
+            }
+            .as_str(),
+            AuditEventKind::OperatorCertExpiringSoon {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                op: "x".into(),
+                not_after: 0,
+                days_remaining: 0,
+            }
+            .as_str(),
+            AuditEventKind::OperatorCertInGracePeriod {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                op: "x".into(),
+                not_after: 0,
+                grace_ends_at: 0,
+            }
+            .as_str(),
+            AuditEventKind::OperatorCertExpiredOpDenied {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                op: "x".into(),
+                not_after: 0,
+                expired_at: 0,
+            }
+            .as_str(),
+            AuditEventKind::EmergencyOperatorUsed {
+                pubkey_fingerprint: "x".into(),
+                epoch_id: 0,
+                op: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::PathReadAccessed {
+                actor: "x".into(),
+                table: "x".into(),
+                column: "x".into(),
+                task_id: "x".into(),
+                command: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::InitiativeQuarantined {
+                initiative_id: "x".into(),
+                quarantined_by: "x".into(),
+                reason: None,
+                quarantined_by_display_name: None,
+            }
+            .as_str(),
+            AuditEventKind::OperatorQuarantineSwept {
+                target_fingerprint: "x".into(),
+                quarantined_by: "x".into(),
+                count: 0,
+                reason: None,
+                quarantined_by_display_name: None,
+                target_display_name: None,
+            }
+            .as_str(),
             // V2 isolation-substrate refusal at boot. Single-class
             // observability event (no SQLite row mutates); listed in
             // `audit-paired-writes.md §4.3` single-class roster.
@@ -7401,165 +7838,190 @@ channels   = []
             // SessionVmSpawned must be matched by a SessionVmExited
             // somewhere in the chain (`audit-paired-writes.md §4.1`).
             AuditEventKind::SessionVmSpawned {
-                session_id:         "x".into(),
-                task_id:            None,
-                initiative_id:      "x".into(),
-                backend_id:         "x".into(),
-                egress_tier:        "x".into(),
+                session_id: "x".into(),
+                task_id: None,
+                initiative_id: "x".into(),
+                backend_id: "x".into(),
+                egress_tier: "x".into(),
                 admission_loopback: "x".into(),
                 credential_proxies: 0,
-            }.as_str(),
+            }
+            .as_str(),
             AuditEventKind::SessionVmExited {
-                session_id:    "x".into(),
-                signal_class:  "x".into(),
-                exit_code:     0,
+                session_id: "x".into(),
+                signal_class: "x".into(),
+                exit_code: 0,
                 backend_error: None,
-            }.as_str(),
+            }
+            .as_str(),
             // V2 elastic-vm-scaling.md §3.2, §4 — bounded retry +
             // dynamic resource adjustment + rate-limit deferral.
             AuditEventKind::SessionVmRespawnAttempted {
-                session_id:      "x".into(),
-                task_id:         None,
-                initiative_id:   "x".into(),
-                attempt:         1,
-                max_attempts:    3,
-                failure_class:   "Transient".into(),
-                previous_reason: "x".into(),
-                backoff_ms:      250,
-            }.as_str(),
-            AuditEventKind::SessionVmFailedFinal {
-                session_id:     "x".into(),
-                task_id:        None,
-                initiative_id:  "x".into(),
-                total_attempts: 1,
-                failure_class:  "Permanent".into(),
-                final_reason:   "x".into(),
-            }.as_str(),
-            AuditEventKind::SessionVmScaleEvent {
-                session_id:     "x".into(),
-                task_id:        None,
-                initiative_id:  "x".into(),
-                direction:      "Up".into(),
-                prev_vcpus:     2,
-                new_vcpus:      4,
-                prev_memory_mb: 4096,
-                new_memory_mb:  6144,
-                reason:         "MemoryPressure".into(),
-            }.as_str(),
-            AuditEventKind::SessionVmScaleDeferred {
-                session_id:    "x".into(),
-                task_id:       None,
+                session_id: "x".into(),
+                task_id: None,
                 initiative_id: "x".into(),
-                direction:     "Up".into(),
-                reason:        "RateLimit".into(),
-            }.as_str(),
+                attempt: 1,
+                max_attempts: 3,
+                failure_class: "Transient".into(),
+                previous_reason: "x".into(),
+                backoff_ms: 250,
+            }
+            .as_str(),
+            AuditEventKind::SessionVmFailedFinal {
+                session_id: "x".into(),
+                task_id: None,
+                initiative_id: "x".into(),
+                total_attempts: 1,
+                failure_class: "Permanent".into(),
+                final_reason: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::SessionVmScaleEvent {
+                session_id: "x".into(),
+                task_id: None,
+                initiative_id: "x".into(),
+                direction: "Up".into(),
+                prev_vcpus: 2,
+                new_vcpus: 4,
+                prev_memory_mb: 4096,
+                new_memory_mb: 6144,
+                reason: "MemoryPressure".into(),
+            }
+            .as_str(),
+            AuditEventKind::SessionVmScaleDeferred {
+                session_id: "x".into(),
+                task_id: None,
+                initiative_id: "x".into(),
+                direction: "Up".into(),
+                reason: "RateLimit".into(),
+            }
+            .as_str(),
             // V2_GAPS §C7 — credential CLI ceremony events.
             AuditEventKind::CredentialRegistered {
-                name:               "x".into(),
-                proxy_type:         "x".into(),
-                environment:        "x".into(),
-                actor_fingerprint:  "x".into(),
-                backend_kind:       "x".into(),
-            }.as_str(),
+                name: "x".into(),
+                proxy_type: "x".into(),
+                environment: "x".into(),
+                actor_fingerprint: "x".into(),
+                backend_kind: "x".into(),
+            }
+            .as_str(),
             AuditEventKind::CredentialRemoved {
-                name:               "x".into(),
-                actor_fingerprint:  "x".into(),
-                backend_kind:       "x".into(),
-                forced:             false,
-            }.as_str(),
+                name: "x".into(),
+                actor_fingerprint: "x".into(),
+                backend_kind: "x".into(),
+                forced: false,
+            }
+            .as_str(),
             AuditEventKind::CredentialVerified {
-                name:               "x".into(),
-                proxy_type:         "x".into(),
-                success:            false,
-                latency_ms:         0,
-                actor_fingerprint:  "x".into(),
-                backend_kind:       "x".into(),
-            }.as_str(),
+                name: "x".into(),
+                proxy_type: "x".into(),
+                success: false,
+                latency_ms: 0,
+                actor_fingerprint: "x".into(),
+                backend_kind: "x".into(),
+            }
+            .as_str(),
             // V2_GAPS §D1 — cert-revocation ceremony events.
             AuditEventKind::OperatorCertRevoked {
-                subject_pubkey_fingerprint:    "x".into(),
-                subject_display_name:          None,
-                reason:                        "Rotation".into(),
-                revoked_at:                    0,
-                reference:                     "x".into(),
+                subject_pubkey_fingerprint: "x".into(),
+                subject_display_name: None,
+                reason: "Rotation".into(),
+                revoked_at: 0,
+                reference: "x".into(),
                 revoked_by_pubkey_fingerprint: "x".into(),
-            }.as_str(),
+            }
+            .as_str(),
             AuditEventKind::OperatorCertRevokedOpDenied {
                 pubkey_fingerprint: "x".into(),
-                epoch_id:           0,
-                op:                 "x".into(),
-                reason:             "Rotation".into(),
-                revoked_at:         0,
-            }.as_str(),
+                epoch_id: 0,
+                op: "x".into(),
+                reason: "Rotation".into(),
+                revoked_at: 0,
+            }
+            .as_str(),
             // V2_GAPS §D2 — host-capacity admission + watchdogs.
             AuditEventKind::AdmissionDeferredAtCap {
-                cap_kind:        "VmCount".into(),
+                cap_kind: "VmCount".into(),
                 current_running: 0,
-                cap:             0,
-                initiative_id:   None,
-                task_id:         None,
-            }.as_str(),
+                cap: 0,
+                initiative_id: None,
+                task_id: None,
+            }
+            .as_str(),
             AuditEventKind::AdmissionQueueFull {
-                intent_kind:        "x".into(),
-                operator:           None,
-                rejected_at_depth:  0,
-            }.as_str(),
+                intent_kind: "x".into(),
+                operator: None,
+                rejected_at_depth: 0,
+            }
+            .as_str(),
             AuditEventKind::DiskFullHaltEntered {
-                free_mb:  0,
-                cap_mb:   0,
+                free_mb: 0,
+                cap_mb: 0,
                 behavior: "halt_admit".into(),
-            }.as_str(),
+            }
+            .as_str(),
             AuditEventKind::DiskHealthyAfterFull {
-                previous_free_mb:      0,
-                current_free_mb:       0,
+                previous_free_mb: 0,
+                current_free_mb: 0,
                 halt_duration_seconds: 0,
-            }.as_str(),
+            }
+            .as_str(),
             AuditEventKind::OperatorAttentionRequired {
                 attention_kind: "DiskFull".into(),
-                details:        "x".into(),
-            }.as_str(),
+                details: "x".into(),
+            }
+            .as_str(),
             AuditEventKind::KernelPushEnqueued {
-                session_id:    "sess-1".into(),
-                push_id:       1,
-                push_kind:     "SubTaskActivated".into(),
+                session_id: "sess-1".into(),
+                push_id: 1,
+                push_kind: "SubTaskActivated".into(),
                 initiative_id: None,
-                task_id:       None,
-            }.as_str(),
+                task_id: None,
+            }
+            .as_str(),
             // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
             AuditEventKind::DryRunAdmitted {
-                submitted_by:   "x".into(),
-                policy_epoch:   0,
-                plan_sha256:    "x".into(),
-                target_ref:     "x".into(),
+                submitted_by: "x".into(),
+                policy_epoch: 0,
+                plan_sha256: "x".into(),
+                target_ref: "x".into(),
                 warnings_count: 0,
-                lane_id:        "x".into(),
-                task_count:     0,
-            }.as_str(),
+                lane_id: "x".into(),
+                task_count: 0,
+            }
+            .as_str(),
             // V2.5 self-healing-supervisor.md §3.5 (auto-resume).
             AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
-                task_id:                 "x".into(),
-                initiative_id:           "x".into(),
-                prior_state:             "Running".into(),
+                task_id: "x".into(),
+                initiative_id: "x".into(),
+                prior_state: "Running".into(),
                 witness_count_preserved: 0,
-                supervisor_restart_id:   "x".into(),
-            }.as_str(),
+                supervisor_restart_id: "x".into(),
+            }
+            .as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =
             KNOWN_AUDIT_EVENT_KINDS.iter().copied().collect();
         for k in &probes {
-            assert!(policy_kinds.contains(*k),
+            assert!(
+                policy_kinds.contains(*k),
                 "AuditEventKind::{k} is missing from KNOWN_AUDIT_EVENT_KINDS \
                  in policy/src/bundle.rs — operator routes for that kind would \
-                 be silently rejected. Add it to the const array.");
+                 be silently rejected. Add it to the const array."
+            );
         }
         // Reverse direction: every entry in KNOWN_AUDIT_EVENT_KINDS must be a real
         // variant. The probe list above is exhaustive, so any extra entry would
         // be unreachable. Pinning the cardinality keeps drift loud.
-        assert_eq!(probes.len(), KNOWN_AUDIT_EVENT_KINDS.len(),
+        assert_eq!(
+            probes.len(),
+            KNOWN_AUDIT_EVENT_KINDS.len(),
             "KNOWN_AUDIT_EVENT_KINDS has {} entries but probe list has {}; \
              the two lists must be in 1:1 correspondence (cli-readonly.md §5.6.2)",
-            KNOWN_AUDIT_EVENT_KINDS.len(), probes.len());
+            KNOWN_AUDIT_EVENT_KINDS.len(),
+            probes.len()
+        );
     }
 }
 
@@ -7593,15 +8055,21 @@ mod cert_validation_tests {
     use super::*;
     use ed25519_dalek::SigningKey;
     use raxis_crypto::cert::sign_cert;
-    use raxis_test_support::{ephemeral_signing_key, ephemeral_cert_with_key, pubkey_hex, CertOpts};
+    use raxis_test_support::{
+        ephemeral_cert_with_key, ephemeral_signing_key, pubkey_hex, CertOpts,
+    };
     use raxis_types::operator_cert::{CertKind, OperatorCert};
 
     // Deterministic seed → same pubkey + signatures across test runs.
     const TEST_SEED: [u8; 32] = [0x42u8; 32];
 
-    fn test_signing_key() -> SigningKey { ephemeral_signing_key(TEST_SEED) }
+    fn test_signing_key() -> SigningKey {
+        ephemeral_signing_key(TEST_SEED)
+    }
 
-    fn test_pubkey_hex() -> String { pubkey_hex(&test_signing_key()) }
+    fn test_pubkey_hex() -> String {
+        pubkey_hex(&test_signing_key())
+    }
 
     fn test_fingerprint() -> String {
         use sha2::{Digest, Sha256};
@@ -7615,13 +8083,13 @@ mod cert_validation_tests {
         ephemeral_cert_with_key(
             &test_signing_key(),
             CertOpts {
-                kind:                    CertKind::Standard,
-                display_name:            "Chika".to_owned(),
-                now_unix_secs:           now,
+                kind: CertKind::Standard,
+                display_name: "Chika".to_owned(),
+                now_unix_secs: now,
                 warn_before_expiry_days: 30,
-                grace_period_days:       7,
-                permitted_ops:           perms.into_iter().map(str::to_owned).collect(),
-                contact_info:            None,
+                grace_period_days: 7,
+                permitted_ops: perms.into_iter().map(str::to_owned).collect(),
+                contact_info: None,
             },
         )
     }
@@ -7635,7 +8103,7 @@ mod cert_validation_tests {
         let mut c = ephemeral_cert_with_key(
             &test_signing_key(),
             CertOpts {
-                kind:         CertKind::EmergencyRecovery,
+                kind: CertKind::EmergencyRecovery,
                 display_name: "break-glass".to_owned(),
                 ..CertOpts::default()
             },
@@ -7650,10 +8118,10 @@ mod cert_validation_tests {
 
     fn entry_with_cert(cert: OperatorCert, force_bypass: bool) -> OperatorEntry {
         OperatorEntry {
-            pubkey_fingerprint:    test_fingerprint(),
-            display_name:          "Chika".to_owned(),
-            pubkey_hex:            test_pubkey_hex(),
-            permitted_ops:         vec!["CreateInitiative".to_owned()],
+            pubkey_fingerprint: test_fingerprint(),
+            display_name: "Chika".to_owned(),
+            pubkey_hex: test_pubkey_hex(),
+            permitted_ops: vec!["CreateInitiative".to_owned()],
             cert,
             force_misconfig_bypass: force_bypass,
         }
@@ -7741,7 +8209,10 @@ permitted_ops      = ["CreateInitiative"]
         let cert = signed_emergency_cert(vec!["RotateEpoch"]);
         let mut entries = vec![entry_with_cert(cert, false)];
         let bypassed = validate_operator_certs(&mut entries).unwrap();
-        assert!(bypassed.is_empty(), "emergency cert with correct ops should not bypass");
+        assert!(
+            bypassed.is_empty(),
+            "emergency cert with correct ops should not bypass"
+        );
         assert_eq!(entries[0].permitted_ops, vec!["RotateEpoch".to_owned()]);
         assert_eq!(
             entries[0].cert.permitted_ops,
@@ -7809,8 +8280,10 @@ permitted_ops      = ["CreateInitiative"]
         // The error message must mention self-signature so the
         // operator can debug.
         let s = format!("{err}");
-        assert!(s.to_lowercase().contains("self-sig") || s.contains("signature"),
-            "error must describe signature failure; got: {s}");
+        assert!(
+            s.to_lowercase().contains("self-sig") || s.contains("signature"),
+            "error must describe signature failure; got: {s}"
+        );
     }
 
     // ── Soft failures: bypass path ────────────────────────────────────
@@ -7823,8 +8296,10 @@ permitted_ops      = ["CreateInitiative"]
         let err = validate_operator_certs(&mut entries).expect_err("must fail");
         let s = format!("{err}");
         assert!(matches!(err, PolicyError::CertValidation { .. }));
-        assert!(s.contains("EmergencyRecovery") || s.contains("RotateEpoch"),
-            "error must explain WHICH structural rule was violated; got: {s}");
+        assert!(
+            s.contains("EmergencyRecovery") || s.contains("RotateEpoch"),
+            "error must explain WHICH structural rule was violated; got: {s}"
+        );
     }
 
     #[test]
@@ -7832,18 +8307,26 @@ permitted_ops      = ["CreateInitiative"]
         let cert = signed_emergency_cert(vec!["RotateEpoch", "AbortInitiative"]);
         let mut entries = vec![entry_with_cert(cert, true)];
         let bypassed = validate_operator_certs(&mut entries).unwrap();
-        assert_eq!(bypassed.len(), 1, "bypass must produce exactly one audit record");
+        assert_eq!(
+            bypassed.len(),
+            1,
+            "bypass must produce exactly one audit record"
+        );
 
         let bp = &bypassed[0];
         assert_eq!(bp.operator_fingerprint, test_fingerprint());
         assert_eq!(bp.display_name, "Chika");
         assert_eq!(bp.kind, CertKind::EmergencyRecovery);
-        assert!(!bp.violations.is_empty(),
-            "violations list must be non-empty (operator sees what they bypassed)");
+        assert!(
+            !bp.violations.is_empty(),
+            "violations list must be non-empty (operator sees what they bypassed)"
+        );
         // The violation strings must include the full Display message.
         let joined = bp.violations.join("\n");
-        assert!(joined.contains("EmergencyRecovery") || joined.contains("RotateEpoch"),
-            "violation Display strings must be preserved verbatim; got:\n{joined}");
+        assert!(
+            joined.contains("EmergencyRecovery") || joined.contains("RotateEpoch"),
+            "violation Display strings must be preserved verbatim; got:\n{joined}"
+        );
 
         // Crucially: structural pinning still happened. The kernel
         // ENFORCES emergency_cert.permitted_ops = ["RotateEpoch"] even
@@ -7866,9 +8349,12 @@ permitted_ops      = ["CreateInitiative"]
         let err = validate_operator_certs(&mut entries).expect_err("must fail");
         let s = format!("{err}");
         assert!(matches!(err, PolicyError::CertValidation { .. }));
-        assert!(s.contains("not_before") || s.contains("InvertedValidityWindow") ||
-                s.contains("not_after"),
-            "error must mention the inverted-window violation; got: {s}");
+        assert!(
+            s.contains("not_before")
+                || s.contains("InvertedValidityWindow")
+                || s.contains("not_after"),
+            "error must mention the inverted-window violation; got: {s}"
+        );
     }
 
     #[test]
@@ -7949,10 +8435,16 @@ permitted_ops      = ["AbortTask"]   # ignored — cert is the authority
 
         // Cert overrides entry-level permitted_ops.
         let op = &bundle.operators()[0];
-        assert_eq!(op.permitted_ops, vec!["CreateInitiative".to_owned()],
-            "cert-driven permitted_ops must be installed (entry's AbortTask discarded)");
-        assert_eq!(op.cert.pubkey_hex, test_pubkey_hex(),
-            "cert pubkey must round-trip through TOML intact");
+        assert_eq!(
+            op.permitted_ops,
+            vec!["CreateInitiative".to_owned()],
+            "cert-driven permitted_ops must be installed (entry's AbortTask discarded)"
+        );
+        assert_eq!(
+            op.cert.pubkey_hex,
+            test_pubkey_hex(),
+            "cert pubkey must round-trip through TOML intact"
+        );
     }
 }
 
@@ -7971,18 +8463,18 @@ mod integration_merge_verifiers_tests {
 
     fn entry(name: &str) -> IntegrationMergeVerifierEntry {
         IntegrationMergeVerifierEntry {
-            name:                       name.to_owned(),
-            image:                      "operator/deploy-smoke@sha256:aaaa".to_owned(),
-            command:                    "./scripts/smoke.sh".to_owned(),
-            timeout:                    "10m".to_owned(),
-            on_failure:                 IntegrationMergeVerifierOnFailure::BlockMerge,
-            applies_to:                 IntegrationMergeVerifierAppliesTo::All,
-            task_set:                   Vec::new(),
-            artifact:                   None,
-            artifact_max_bytes:         None,
-            env:                        HashMap::new(),
-            allowed_egress:             Vec::new(),
-            required_for_environments:  None,
+            name: name.to_owned(),
+            image: "operator/deploy-smoke@sha256:aaaa".to_owned(),
+            command: "./scripts/smoke.sh".to_owned(),
+            timeout: "10m".to_owned(),
+            on_failure: IntegrationMergeVerifierOnFailure::BlockMerge,
+            applies_to: IntegrationMergeVerifierAppliesTo::All,
+            task_set: Vec::new(),
+            artifact: None,
+            artifact_max_bytes: None,
+            env: HashMap::new(),
+            allowed_egress: Vec::new(),
+            required_for_environments: None,
         }
     }
 
@@ -8008,8 +8500,10 @@ mod integration_merge_verifiers_tests {
         let err = validate_integration_merge_verifiers_operator_side(&entries)
             .expect_err("uppercase name must be rejected");
         let msg = format!("{err}");
-        assert!(msg.contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID"),
-            "diagnostic must surface the failure code, got: {msg}");
+        assert!(
+            msg.contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_NAME_INVALID"),
+            "diagnostic must surface the failure code, got: {msg}"
+        );
     }
 
     #[test]
@@ -8051,7 +8545,9 @@ mod integration_merge_verifiers_tests {
         e.command = String::new();
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("blank command must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_REQUIRED"));
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_COMMAND_REQUIRED")
+        );
     }
 
     /// Operator surface MUST NOT downgrade to `warn_only`.
@@ -8061,8 +8557,10 @@ mod integration_merge_verifiers_tests {
         e.on_failure = IntegrationMergeVerifierOnFailure::WarnOnly;
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("warn_only must be rejected on operator surface");
-        assert!(format!("{err}").contains("FAIL_VERIFIER_INVALID_ON_FAILURE"),
-            "must surface the canonical FAIL_VERIFIER_INVALID_ON_FAILURE code");
+        assert!(
+            format!("{err}").contains("FAIL_VERIFIER_INVALID_ON_FAILURE"),
+            "must surface the canonical FAIL_VERIFIER_INVALID_ON_FAILURE code"
+        );
     }
 
     /// `applies_to = "task_set"` requires a non-empty `task_set`.
@@ -8070,7 +8568,7 @@ mod integration_merge_verifiers_tests {
     fn task_set_applies_with_empty_task_set_is_rejected() {
         let mut e = entry("smoke");
         e.applies_to = IntegrationMergeVerifierAppliesTo::TaskSet;
-        e.task_set   = Vec::new();
+        e.task_set = Vec::new();
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("empty task_set must be rejected");
         assert!(format!("{err}").contains("FAIL_VERIFIER_TASK_SET_EMPTY"));
@@ -8081,11 +8579,13 @@ mod integration_merge_verifiers_tests {
     fn all_applies_with_populated_task_set_is_rejected() {
         let mut e = entry("smoke");
         e.applies_to = IntegrationMergeVerifierAppliesTo::All;
-        e.task_set   = vec!["task-a".to_owned()];
+        e.task_set = vec!["task-a".to_owned()];
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("populated task_set with applies_to=all must be rejected");
-        assert!(format!("{err})").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT")
-            || format!("{err}").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT"));
+        assert!(
+            format!("{err})").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT")
+                || format!("{err}").contains("INTEGRATION_MERGE_VERIFIER_TASK_SET_INCONSISTENT")
+        );
     }
 
     /// Timeout strings must be parseable into the `Ns|Nm|Nh` shape.
@@ -8105,7 +8605,9 @@ mod integration_merge_verifiers_tests {
         e.timeout = "4s".to_owned();
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("4s timeout must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_TOO_SHORT"));
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_TIMEOUT_TOO_SHORT")
+        );
     }
 
     /// Timeout exactly at the floor (5s) is accepted.
@@ -8124,22 +8626,28 @@ mod integration_merge_verifiers_tests {
         e.artifact = Some("/var/run/secrets/x".to_owned());
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("non-/raxis artifact path must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_INVALID"));
+        assert!(format!("{err}")
+            .contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_INVALID"));
     }
 
     #[test]
     fn artifact_path_too_long_is_rejected() {
         let mut e = entry("smoke");
-        e.artifact = Some(format!("/raxis/{}", "x".repeat(VERIFIER_ARTIFACT_MAX_PATH_CHARS)));
+        e.artifact = Some(format!(
+            "/raxis/{}",
+            "x".repeat(VERIFIER_ARTIFACT_MAX_PATH_CHARS)
+        ));
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("oversize artifact path must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_TOO_LONG"));
+        assert!(format!("{err}")
+            .contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ARTIFACT_PATH_TOO_LONG"));
     }
 
     #[test]
     fn env_with_raxis_prefix_key_is_rejected() {
         let mut e = entry("smoke");
-        e.env.insert("RAXIS_VERIFIER_HOOK_KIND".to_owned(), "spoof".to_owned());
+        e.env
+            .insert("RAXIS_VERIFIER_HOOK_KIND".to_owned(), "spoof".to_owned());
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("RAXIS_-prefixed env key must be rejected");
         assert!(format!("{err}").contains("FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY"));
@@ -8153,13 +8661,15 @@ mod integration_merge_verifiers_tests {
         }
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("too many env entries must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_MANY_ENTRIES"));
+        assert!(format!("{err}")
+            .contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_MANY_ENTRIES"));
     }
 
     #[test]
     fn env_total_size_above_cap_is_rejected() {
         let mut e = entry("smoke");
-        e.env.insert("BIG".to_owned(), "x".repeat(VERIFIER_ENV_MAX_TOTAL_BYTES));
+        e.env
+            .insert("BIG".to_owned(), "x".repeat(VERIFIER_ENV_MAX_TOTAL_BYTES));
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("env total above 16 KiB must be rejected");
         assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_ENV_TOO_LARGE"));
@@ -8171,7 +8681,9 @@ mod integration_merge_verifiers_tests {
         e.required_for_environments = Some(Vec::new());
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("empty required_for_environments must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_EMPTY"));
+        assert!(
+            format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_EMPTY")
+        );
     }
 
     #[test]
@@ -8180,7 +8692,8 @@ mod integration_merge_verifiers_tests {
         e.required_for_environments = Some(vec!["prod".to_owned(), "prod".to_owned()]);
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("duplicate environments entry must be rejected");
-        assert!(format!("{err}").contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_DUPLICATE"));
+        assert!(format!("{err}")
+            .contains("FAIL_POLICY_INTEGRATION_MERGE_VERIFIER_REQUIRED_ENVS_DUPLICATE"));
     }
 
     /// End-to-end TOML round-trip exercising every accepted shape:
@@ -8217,22 +8730,34 @@ applies_to  = "last"
 "#;
         let parsed: HashMap<String, Vec<IntegrationMergeVerifierEntry>> =
             toml::from_str(toml).expect("toml parse");
-        let entries = parsed.get("integration_merge_verifiers")
+        let entries = parsed
+            .get("integration_merge_verifiers")
             .expect("section present");
         assert_eq!(entries.len(), 3);
         validate_integration_merge_verifiers_operator_side(entries)
             .expect("all three canonical entries must validate");
 
         // Per-entry sanity checks.
-        assert_eq!(entries[0].applies_to, IntegrationMergeVerifierAppliesTo::All);
+        assert_eq!(
+            entries[0].applies_to,
+            IntegrationMergeVerifierAppliesTo::All
+        );
         assert_eq!(
             entries[0].required_for_environments.as_deref(),
             Some(&["production".to_owned()][..]),
         );
-        assert_eq!(entries[1].applies_to, IntegrationMergeVerifierAppliesTo::TaskSet);
-        assert_eq!(entries[1].task_set,
-            vec!["implement_auth".to_owned(), "implement_session".to_owned()]);
-        assert_eq!(entries[2].applies_to, IntegrationMergeVerifierAppliesTo::Last);
+        assert_eq!(
+            entries[1].applies_to,
+            IntegrationMergeVerifierAppliesTo::TaskSet
+        );
+        assert_eq!(
+            entries[1].task_set,
+            vec!["implement_auth".to_owned(), "implement_session".to_owned()]
+        );
+        assert_eq!(
+            entries[2].applies_to,
+            IntegrationMergeVerifierAppliesTo::Last
+        );
     }
 }
 
@@ -8246,21 +8771,25 @@ mod environment_tests {
 
     fn env_section(description: &str, ack: bool) -> EnvironmentSection {
         EnvironmentSection {
-            description:               Some(description.to_owned()),
+            description: Some(description.to_owned()),
             same_cluster_acknowledged: ack,
-            extras:                    HashMap::new(),
+            extras: HashMap::new(),
         }
     }
 
     fn env_section_with_extras(
-        description: &str, ack: bool, extras: Vec<(&str, toml::Value)>,
+        description: &str,
+        ack: bool,
+        extras: Vec<(&str, toml::Value)>,
     ) -> EnvironmentSection {
         let mut e = HashMap::new();
-        for (k, v) in extras { e.insert(k.to_owned(), v); }
+        for (k, v) in extras {
+            e.insert(k.to_owned(), v);
+        }
         EnvironmentSection {
-            description:               Some(description.to_owned()),
+            description: Some(description.to_owned()),
             same_cluster_acknowledged: ack,
-            extras:                    e,
+            extras: e,
         }
     }
 
@@ -8273,8 +8802,14 @@ mod environment_tests {
 
     #[test]
     fn label_syntax_rejects_uppercase_and_long_labels() {
-        for bad in &["", "Beta", "PROD", "1prod", "-prod",
-                     "a234567890123456789012345678901234"] {
+        for bad in &[
+            "",
+            "Beta",
+            "PROD",
+            "1prod",
+            "-prod",
+            "a234567890123456789012345678901234",
+        ] {
             assert!(!is_valid_env_label(bad), "expected `{bad}` to be rejected");
         }
     }
@@ -8294,8 +8829,7 @@ mod environment_tests {
     fn validate_environments_rejects_invalid_label() {
         let mut raw = HashMap::new();
         raw.insert("Beta".to_owned(), env_section("beta cluster", false));
-        let err = validate_environments(&raw)
-            .expect_err("uppercase label must be rejected");
+        let err = validate_environments(&raw).expect_err("uppercase label must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("FAIL_POLICY_ENV_LABEL_INVALID"), "{msg}");
     }
@@ -8303,22 +8837,29 @@ mod environment_tests {
     #[test]
     fn validate_environments_rejects_missing_description() {
         let mut raw = HashMap::new();
-        raw.insert("beta".to_owned(), EnvironmentSection {
-            description: None, same_cluster_acknowledged: false,
-            extras: HashMap::new(),
-        });
-        let err = validate_environments(&raw)
-            .expect_err("missing description must be rejected");
+        raw.insert(
+            "beta".to_owned(),
+            EnvironmentSection {
+                description: None,
+                same_cluster_acknowledged: false,
+                extras: HashMap::new(),
+            },
+        );
+        let err = validate_environments(&raw).expect_err("missing description must be rejected");
         assert!(err.to_string().contains("FAIL_POLICY_ENV_UNKNOWN_FIELD"));
     }
 
     #[test]
     fn validate_environments_tolerates_reserved_extra_fields() {
         let mut raw = HashMap::new();
-        raw.insert("beta".to_owned(), env_section_with_extras(
-            "beta cluster", false,
-            vec![("blast_radius", toml::Value::String("high".into()))],
-        ));
+        raw.insert(
+            "beta".to_owned(),
+            env_section_with_extras(
+                "beta cluster",
+                false,
+                vec![("blast_radius", toml::Value::String("high".into()))],
+            ),
+        );
         validate_environments(&raw)
             .expect("reserved fields must be tolerated (V2.x forward-compat)");
     }
@@ -8326,12 +8867,15 @@ mod environment_tests {
     #[test]
     fn validate_environments_rejects_unknown_extra_field() {
         let mut raw = HashMap::new();
-        raw.insert("beta".to_owned(), env_section_with_extras(
-            "beta cluster", false,
-            vec![("frobnitz", toml::Value::String("x".into()))],
-        ));
-        let err = validate_environments(&raw)
-            .expect_err("unknown field must be rejected");
+        raw.insert(
+            "beta".to_owned(),
+            env_section_with_extras(
+                "beta cluster",
+                false,
+                vec![("frobnitz", toml::Value::String("x".into()))],
+            ),
+        );
+        let err = validate_environments(&raw).expect_err("unknown field must be rejected");
         assert!(err.to_string().contains("FAIL_POLICY_ENV_UNKNOWN_FIELD"));
     }
 
@@ -8340,7 +8884,7 @@ mod environment_tests {
         let mut envs = HashMap::new();
         envs.insert("beta".to_owned(), env_section("beta", false));
         let raw = vec![PermittedCredentialEntry {
-            name:        "k8s-beta".to_owned(),
+            name: "k8s-beta".to_owned(),
             environment: Some("beta".to_owned()),
             description: None,
         }];
@@ -8353,7 +8897,7 @@ mod environment_tests {
     fn validate_permitted_credentials_rejects_undeclared_environment() {
         let envs = HashMap::new();
         let raw = vec![PermittedCredentialEntry {
-            name:        "k8s-prod".to_owned(),
+            name: "k8s-prod".to_owned(),
             environment: Some("production".to_owned()),
             description: None,
         }];
@@ -8365,7 +8909,7 @@ mod environment_tests {
     fn validate_permitted_credentials_accepts_neutral_credential() {
         let envs = HashMap::new();
         let raw = vec![PermittedCredentialEntry {
-            name:        "npm-registry".to_owned(),
+            name: "npm-registry".to_owned(),
             environment: None,
             description: Some("public npm read token".to_owned()),
         }];
@@ -8379,22 +8923,28 @@ mod environment_tests {
         let envs = HashMap::new();
         let raw = vec![
             PermittedCredentialEntry {
-                name: "tok".to_owned(), environment: None, description: None,
+                name: "tok".to_owned(),
+                environment: None,
+                description: None,
             },
             PermittedCredentialEntry {
-                name: "tok".to_owned(), environment: None, description: None,
+                name: "tok".to_owned(),
+                environment: None,
+                description: None,
             },
         ];
         let err = validate_permitted_credentials(&raw, &envs).expect_err("must reject");
-        assert!(err.to_string().contains("FAIL_POLICY_PERMITTED_CRED_INVALID"));
+        assert!(err
+            .to_string()
+            .contains("FAIL_POLICY_PERMITTED_CRED_INVALID"));
     }
 
     // ── V2.5 `[[vm_images]]` tests ──────────────────────────────────────────
 
     fn vm_image_entry(
-        name:                     &str,
-        digest_hex:               &str,
-        roles:                    &[&str],
+        name: &str,
+        digest_hex: &str,
+        roles: &[&str],
         linux_kernel_version_min: Option<&str>,
     ) -> VmImageEntry {
         VmImageEntry {
@@ -8437,7 +8987,8 @@ mod environment_tests {
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
-            err.to_string().contains("FAIL_POLICY_VM_IMAGE_NAME_INVALID"),
+            err.to_string()
+                .contains("FAIL_POLICY_VM_IMAGE_NAME_INVALID"),
             "{err}"
         );
     }
@@ -8473,9 +9024,7 @@ mod environment_tests {
 
     #[test]
     fn validate_vm_images_rejects_invalid_digest() {
-        let mut entry = vm_image_entry(
-            "img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
-        );
+        let mut entry = vm_image_entry("img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.14"));
         entry.oci_digest = "sha256:NOTHEX".to_owned();
         let err = validate_vm_images(&[entry]).expect_err("must reject");
         assert!(
@@ -8487,9 +9036,7 @@ mod environment_tests {
 
     #[test]
     fn validate_vm_images_rejects_missing_role_restriction() {
-        let raw = vec![vm_image_entry(
-            "img-a", STUB_DIGEST_HEX, &[], Some("5.14"),
-        )];
+        let raw = vec![vm_image_entry("img-a", STUB_DIGEST_HEX, &[], Some("5.14"))];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
             err.to_string()
@@ -8501,7 +9048,10 @@ mod environment_tests {
     #[test]
     fn validate_vm_images_rejects_reviewer_role_restriction() {
         let raw = vec![vm_image_entry(
-            "img-rev", STUB_DIGEST_HEX, &["Reviewer"], Some("5.14"),
+            "img-rev",
+            STUB_DIGEST_HEX,
+            &["Reviewer"],
+            Some("5.14"),
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
@@ -8514,7 +9064,10 @@ mod environment_tests {
     #[test]
     fn validate_vm_images_rejects_orchestrator_role_restriction() {
         let raw = vec![vm_image_entry(
-            "img-orch", STUB_DIGEST_HEX, &["Orchestrator"], Some("5.14"),
+            "img-orch",
+            STUB_DIGEST_HEX,
+            &["Orchestrator"],
+            Some("5.14"),
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
@@ -8527,7 +9080,10 @@ mod environment_tests {
     #[test]
     fn validate_vm_images_rejects_unknown_role() {
         let raw = vec![vm_image_entry(
-            "img-x", STUB_DIGEST_HEX, &["Frobnitz"], Some("5.14"),
+            "img-x",
+            STUB_DIGEST_HEX,
+            &["Frobnitz"],
+            Some("5.14"),
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
@@ -8540,11 +9096,15 @@ mod environment_tests {
     #[test]
     fn validate_vm_images_rejects_kernel_version_below_floor() {
         let raw = vec![vm_image_entry(
-            "img-a", STUB_DIGEST_HEX, &["Executor"], Some("5.4"),
+            "img-a",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            Some("5.4"),
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
-            err.to_string().contains("FAIL_VM_GUEST_LINUX_KERNEL_TOO_OLD"),
+            err.to_string()
+                .contains("FAIL_VM_GUEST_LINUX_KERNEL_TOO_OLD"),
             "{err}"
         );
     }
@@ -8552,28 +9112,32 @@ mod environment_tests {
     #[test]
     fn validate_vm_images_rejects_missing_kernel_version() {
         let raw = vec![vm_image_entry(
-            "img-a", STUB_DIGEST_HEX, &["Executor"], None,
+            "img-a",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            None,
         )];
         let err = validate_vm_images(&raw).expect_err("must reject");
         assert!(
-            err.to_string().contains(
-                "FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_REQUIRED"
-            ),
+            err.to_string()
+                .contains("FAIL_POLICY_VM_IMAGE_LINUX_KERNEL_VERSION_MIN_REQUIRED"),
             "{err}"
         );
     }
 
     #[test]
     fn validate_default_executor_image_returns_none_when_omitted() {
-        let out = validate_default_executor_image(None, &[])
-            .expect("must accept omission");
+        let out = validate_default_executor_image(None, &[]).expect("must accept omission");
         assert!(out.is_none());
     }
 
     #[test]
     fn validate_default_executor_image_resolves_alias() {
         let registry = validate_vm_images(&[vm_image_entry(
-            "primary-exec", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
+            "primary-exec",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            Some("5.14"),
         )])
         .expect("registry must validate");
         let section = DefaultExecutorImageSection {
@@ -8588,14 +9152,17 @@ mod environment_tests {
     #[test]
     fn validate_default_executor_image_rejects_unknown_alias() {
         let registry = validate_vm_images(&[vm_image_entry(
-            "primary-exec", STUB_DIGEST_HEX, &["Executor"], Some("5.14"),
+            "primary-exec",
+            STUB_DIGEST_HEX,
+            &["Executor"],
+            Some("5.14"),
         )])
         .expect("registry must validate");
         let section = DefaultExecutorImageSection {
             alias: "missing".to_owned(),
         };
-        let err = validate_default_executor_image(Some(&section), &registry)
-            .expect_err("must reject");
+        let err =
+            validate_default_executor_image(Some(&section), &registry).expect_err("must reject");
         assert!(
             err.to_string()
                 .contains("FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE"),
@@ -8606,14 +9173,17 @@ mod environment_tests {
     #[test]
     fn validate_default_executor_image_rejects_non_executor_alias() {
         let registry = validate_vm_images(&[vm_image_entry(
-            "ver-only", STUB_DIGEST_HEX, &["Verifier"], Some("5.14"),
+            "ver-only",
+            STUB_DIGEST_HEX,
+            &["Verifier"],
+            Some("5.14"),
         )])
         .expect("registry must validate");
         let section = DefaultExecutorImageSection {
             alias: "ver-only".to_owned(),
         };
-        let err = validate_default_executor_image(Some(&section), &registry)
-            .expect_err("must reject");
+        let err =
+            validate_default_executor_image(Some(&section), &registry).expect_err("must reject");
         assert!(
             err.to_string()
                 .contains("FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE"),
@@ -8642,8 +9212,7 @@ mod implicit_provider_grants_tests {
 
     /// LLM pricing block — every `LLM_PROVIDER_KINDS` entry MUST
     /// declare pricing or the validator rejects it.
-    const LLM_PRICING_BLOCK: &str =
-        "  pricing.input_tokens_per_dollar  = 200000\n\
+    const LLM_PRICING_BLOCK: &str = "  pricing.input_tokens_per_dollar  = 200000\n\
           pricing.output_tokens_per_dollar = 50000\n";
 
     fn write_and_load(toml_str: &str) -> Result<PolicyBundle, PolicyError> {
@@ -8684,9 +9253,9 @@ mod implicit_provider_grants_tests {
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
         assert_eq!(grants.len(), 1, "exactly one provider → one grant");
-        assert_eq!(grants[0].provider_id,   "anthropic-prod");
+        assert_eq!(grants[0].provider_id, "anthropic-prod");
         assert_eq!(grants[0].provider_kind, "Anthropic");
-        assert_eq!(grants[0].fqdn,          "api.anthropic.com");
+        assert_eq!(grants[0].fqdn, "api.anthropic.com");
     }
 
     #[test]
@@ -8758,7 +9327,7 @@ mod implicit_provider_grants_tests {
     fn multiple_providers_yield_one_grant_per_provider() {
         let mut t = minimal_policy_toml_for_tests();
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
-        t.push_str(&provider_block("openai-prod",    "OpenAI"));
+        t.push_str(&provider_block("openai-prod", "OpenAI"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
         assert_eq!(grants.len(), 2);
@@ -8779,14 +9348,17 @@ mod implicit_provider_grants_tests {
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         let bundle = write_and_load(&t).expect("policy must load");
         let domains = bundle.effective_egress_domains();
-        assert_eq!(domains[0], "explicit.example.com",
-            "operator-declared domains MUST come first");
-        assert_eq!(domains[1], "api.anthropic.com",
-            "implicit grant follows");
+        assert_eq!(
+            domains[0], "explicit.example.com",
+            "operator-declared domains MUST come first"
+        );
+        assert_eq!(domains[1], "api.anthropic.com", "implicit grant follows");
         // Patterns are operator-declared verbatim; implicit grants
         // never land in the pattern list.
-        assert_eq!(bundle.effective_egress_patterns(),
-                   vec!["*.cdn.example.com".to_owned()]);
+        assert_eq!(
+            bundle.effective_egress_patterns(),
+            vec!["*.cdn.example.com".to_owned()]
+        );
     }
 
     #[test]
@@ -8816,8 +9388,10 @@ mod implicit_provider_grants_tests {
         let bundle = write_and_load(&t).expect("policy must load");
         let domains = bundle.effective_egress_domains();
         assert_eq!(domains.len(), 1);
-        assert_eq!(domains[0], "API.Anthropic.COM",
-            "operator's exact casing wins");
+        assert_eq!(
+            domains[0], "API.Anthropic.COM",
+            "operator's exact casing wins"
+        );
     }
 
     // ─── Opt-out: implicit_provider_grants = false ───────────────────────
@@ -8833,8 +9407,10 @@ mod implicit_provider_grants_tests {
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         let bundle = write_and_load(&t).expect("policy must load");
         assert!(bundle.default_provider_egress_grants().is_empty());
-        assert_eq!(bundle.effective_egress_domains(),
-                   vec!["explicit.example.com".to_owned()]);
+        assert_eq!(
+            bundle.effective_egress_domains(),
+            vec!["explicit.example.com".to_owned()]
+        );
     }
 
     #[test]
@@ -8879,12 +9455,14 @@ mod implicit_provider_grants_tests {
              deny_provider = [\"openai-prod\"]\n",
         );
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
-        t.push_str(&provider_block("openai-prod",    "OpenAI"));
+        t.push_str(&provider_block("openai-prod", "OpenAI"));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
         assert_eq!(grants.len(), 1);
-        assert_eq!(grants[0].provider_id, "anthropic-prod",
-            "openai-prod MUST be excluded by deny_provider");
+        assert_eq!(
+            grants[0].provider_id, "anthropic-prod",
+            "openai-prod MUST be excluded by deny_provider"
+        );
     }
 
     #[test]
@@ -8928,11 +9506,15 @@ mod implicit_provider_grants_tests {
         let mut t = minimal_policy_toml_for_tests();
         t.push_str(&provider_block("anthropic-prod", "Anthropic"));
         let bundle = write_and_load(&t).expect("default-egress policy must load");
-        assert!(bundle.egress_implicit_provider_grants(),
-            "missing [egress] MUST default to implicit_provider_grants = true");
+        assert!(
+            bundle.egress_implicit_provider_grants(),
+            "missing [egress] MUST default to implicit_provider_grants = true"
+        );
         assert_eq!(bundle.default_provider_egress_grants().len(), 1);
-        assert_eq!(bundle.effective_egress_domains(),
-                   vec!["api.anthropic.com".to_owned()]);
+        assert_eq!(
+            bundle.effective_egress_domains(),
+            vec!["api.anthropic.com".to_owned()]
+        );
     }
 
     // ─── Sidecar endpoint host extraction ────────────────────────────────
@@ -8940,7 +9522,10 @@ mod implicit_provider_grants_tests {
     #[test]
     fn sidecar_endpoint_extraction_handles_https_and_paths() {
         let mut t = minimal_policy_toml_for_tests();
-        t.push_str(&sidecar_block("vendor", "https://sidecar.internal.example/api"));
+        t.push_str(&sidecar_block(
+            "vendor",
+            "https://sidecar.internal.example/api",
+        ));
         let bundle = write_and_load(&t).expect("policy must load");
         let grants = bundle.default_provider_egress_grants();
         assert_eq!(grants.len(), 1);

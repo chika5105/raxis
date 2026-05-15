@@ -85,11 +85,11 @@
 //!   4. Assert: status is 4xx, body parses as JSON with an
 //!      `error` field in the RFC 6749 §5.2 closed enum.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_azure::{
     AzureCacheValue, AzureProxy, ForwardingConfig as AzureForwardingConfig, NoopAuditChannel,
@@ -110,30 +110,39 @@ const REAL_ENDPOINT: &str = "https://login.microsoftonline.com/common/oauth2/v2.
 /// tenant / client / secret are not real — AAD rejects the
 /// client_credentials exchange.
 struct SyntheticSpBackend {
-    body:     Vec<u8>,
+    body: Vec<u8>,
     resolves: AtomicU32,
 }
 
 impl CredentialBackend for SyntheticSpBackend {
     fn resolve(
         &self,
-        _name:     &CredentialName,
+        _name: &CredentialName,
         _consumer: ConsumerIdentity<'_>,
     ) -> std::result::Result<CredentialValue, CredentialError> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         Ok(CredentialValue::from_bytes(self.body.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+        &self,
+        name: &CredentialName,
+        _v: CredentialValue,
+        _a: OperatorId,
     ) -> std::result::Result<(), CredentialError> {
         Err(CredentialError::Malformed {
-            name:   name.clone(),
+            name: name.clone(),
             reason: "live-e2e V3 Azure witness does not rotate".to_owned(),
         })
     }
-    fn exists(&self, _name: &CredentialName) -> bool { true }
-    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e-v3-azure-witness" }
+    fn exists(&self, _name: &CredentialName) -> bool {
+        true
+    }
+    fn lease(&self, _: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e-v3-azure-witness"
+    }
 }
 
 const RFC6749_ERROR_CODES: &[&str] = &[
@@ -269,12 +278,11 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     // GUID-shaped but non-existent tenant + client + secret —
     // AAD rejects with `invalid_request` /
     // `unauthorized_client`.
-    let sp_env =
-        "AZURE_TENANT_ID=00000000-0000-0000-0000-000000000001\n\
+    let sp_env = "AZURE_TENANT_ID=00000000-0000-0000-0000-000000000001\n\
          AZURE_CLIENT_ID=00000000-0000-0000-0000-000000000002\n\
          AZURE_CLIENT_SECRET=raxis-v3-witness-opaque-secret-not-real\n";
     let backend: Arc<dyn CredentialBackend> = Arc::new(SyntheticSpBackend {
-        body:     sp_env.as_bytes().to_vec(),
+        body: sp_env.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
@@ -292,16 +300,16 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     };
 
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("live-e2e-v3-azure"),
-        consumer:        OwnedConsumer::new("live-e2e-azure-slice", "v3-witness"),
-        lease_seconds:   3600,
-        tenant_id:       "live-e2e-v3-tenant".to_owned(),
-        client_id:       None,
-        forwarding:      Some(fwd),
+        consumer: OwnedConsumer::new("live-e2e-azure-slice", "v3-witness"),
+        lease_seconds: 3600,
+        tenant_id: "live-e2e-v3-tenant".to_owned(),
+        client_id: None,
+        forwarding: Some(fwd),
         restrictions: Restrictions {
             allowed_resources: vec!["https://management.azure.com/".to_owned()],
-            allowed_actions:   Vec::new(),
+            allowed_actions: Vec::new(),
         },
     };
 
@@ -316,7 +324,9 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     .await
     .context("bind AzureProxy V3")?;
     let addr = proxy.local_addr().context("AzureProxy local_addr")?;
-    tokio::spawn(async move { proxy.serve().await; });
+    tokio::spawn(async move {
+        proxy.serve().await;
+    });
 
     let url = format!(
         "http://{addr}/metadata/identity/oauth2/token\
@@ -329,12 +339,14 @@ async fn run_v3_forwarding_witness() -> Result<()> {
         .no_proxy()
         .build()
         .context("build reqwest client")?;
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .header("Metadata", "true")
-        .send().await
+        .send()
+        .await
         .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
-    let body   = resp.text().await.context("read response body")?;
+    let body = resp.text().await.context("read response body")?;
 
     if status.is_success() {
         return Err(anyhow!(
@@ -350,11 +362,12 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     }
     let parsed: JsonValue = serde_json::from_str(&body)
         .with_context(|| format!("parse V3 envelope JSON: {body:.500}"))?;
-    let error_field = parsed.get("error").and_then(|v| v.as_str()).ok_or_else(|| {
-        anyhow!(
-            "V3-forwarding response body has no `error` field; body={body:.500}",
-        )
-    })?;
+    let error_field = parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow!("V3-forwarding response body has no `error` field; body={body:.500}",)
+        })?;
     if !RFC6749_ERROR_CODES.contains(&error_field) {
         return Err(anyhow!(
             "V3-forwarding response `error` = {error_field:?} not in RFC 6749 §5.2 \

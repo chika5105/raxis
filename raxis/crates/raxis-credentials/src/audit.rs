@@ -65,7 +65,9 @@ impl AuditingBackend {
     /// Inner-backend handle. Useful in tests when you want to
     /// inspect the wrapped concrete impl without un-wrapping the
     /// `Arc<dyn ...>`.
-    pub fn inner(&self) -> &Arc<dyn CredentialBackend> { &self.inner }
+    pub fn inner(&self) -> &Arc<dyn CredentialBackend> {
+        &self.inner
+    }
 }
 
 impl CredentialBackend for AuditingBackend {

@@ -20,7 +20,7 @@
 
 use std::path::Path;
 
-use ed25519_dalek::{SigningKey, Signature, Signer, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 
 use crate::errors::KernelError;
@@ -46,7 +46,10 @@ pub struct KeyRegistry {
 impl std::fmt::Debug for KeyRegistry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KeyRegistry")
-            .field("authority_pubkey", &hex::encode(self.authority.verifying_key().as_bytes()))
+            .field(
+                "authority_pubkey",
+                &hex::encode(self.authority.verifying_key().as_bytes()),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -70,8 +73,12 @@ impl KeyRegistry {
         // care about its randomness for our test surface (it only HMACs
         // a deterministic input + caller-supplied bytes).
         let authority = SigningKey::from_bytes(&[0u8; 32]);
-        let quality   = SigningKey::from_bytes(&[1u8; 32]);
-        Self { authority, quality, verifier_token_key: [0u8; 32] }
+        let quality = SigningKey::from_bytes(&[1u8; 32]);
+        Self {
+            authority,
+            quality,
+            verifier_token_key: [0u8; 32],
+        }
     }
 
     /// Build a `KeyRegistry` from a caller-supplied authority signing
@@ -84,7 +91,11 @@ impl KeyRegistry {
     #[cfg(test)]
     pub(crate) fn for_tests_with_authority(authority: SigningKey) -> Self {
         let quality = SigningKey::from_bytes(&[0xA1u8; 32]);
-        Self { authority, quality, verifier_token_key: [0xCCu8; 32] }
+        Self {
+            authority,
+            quality,
+            verifier_token_key: [0xCCu8; 32],
+        }
     }
 }
 
@@ -103,7 +114,11 @@ pub fn load_key_registry(data_dir: &Path) -> Result<KeyRegistry, KernelError> {
     let quality = load_signing_key(&keys_dir.join("quality_keypair.pem"))?;
     let verifier_token_key = load_verifier_token_key(&keys_dir.join("verifier_token_key.bin"))?;
 
-    Ok(KeyRegistry { authority, quality, verifier_token_key })
+    Ok(KeyRegistry {
+        authority,
+        quality,
+        verifier_token_key,
+    })
 }
 
 fn load_signing_key(pem_path: &Path) -> Result<SigningKey, KernelError> {
@@ -117,7 +132,10 @@ fn load_signing_key(pem_path: &Path) -> Result<SigningKey, KernelError> {
         .skip_while(|l| !l.contains("BEGIN ED25519 PRIVATE KEY"))
         .nth(1)
         .ok_or_else(|| KernelError::KeyRegistry {
-            reason: format!("malformed PEM in {}: no private key line", pem_path.display()),
+            reason: format!(
+                "malformed PEM in {}: no private key line",
+                pem_path.display()
+            ),
         })?
         .trim();
 
@@ -125,9 +143,11 @@ fn load_signing_key(pem_path: &Path) -> Result<SigningKey, KernelError> {
         reason: format!("cannot hex-decode seed in {}: {e}", pem_path.display()),
     })?;
 
-    let seed: [u8; 32] = seed_bytes.try_into().map_err(|_| KernelError::KeyRegistry {
-        reason: format!("seed in {} is not 32 bytes", pem_path.display()),
-    })?;
+    let seed: [u8; 32] = seed_bytes
+        .try_into()
+        .map_err(|_| KernelError::KeyRegistry {
+            reason: format!("seed in {} is not 32 bytes", pem_path.display()),
+        })?;
 
     Ok(SigningKey::from_bytes(&seed))
 }
@@ -189,7 +209,6 @@ pub fn verify_hmac(
     msg_bytes: &[u8],
     registry: &KeyRegistry,
 ) -> Result<(), AuthorityError> {
-    
     // Use ring-style HMAC: H(K XOR opad || H(K XOR ipad || message))
     // We implement a simple HMAC-SHA256 inline to avoid pulling in the `hmac`
     // crate outside raxis-crypto. This is acceptable because keys.rs is the
@@ -252,7 +271,10 @@ pub enum AuthorityError {
     #[error("delegation TTL out of range (requested={requested}, max={max})")]
     DelegationTtlOutOfRange { requested: u64, max: u64 },
     #[error("capability above role ceiling")]
-    CapabilityAboveCeiling { role_id: String, capability_class: String },
+    CapabilityAboveCeiling {
+        role_id: String,
+        capability_class: String,
+    },
     #[error("delegation signature invalid")]
     DelegationSignatureInvalid,
     #[error("delegation row not in StaleOnNextUse — double-call guard")]

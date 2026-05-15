@@ -11,8 +11,8 @@
 //                same socket as IntentRequest, different IpcMessage
 //                variant per kernel-core.md §2.3 dispatcher table).
 pub mod escalation;
-pub mod intent;
 pub mod integration_merge_attribution;
+pub mod intent;
 pub mod planner_fetch;
 pub mod witness;
 

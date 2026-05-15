@@ -49,7 +49,7 @@ use crate::Table;
 /// [`get_by_initiative_id`] and [`list_all`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitiativeQuarantineRow {
-    pub initiative_id:  String,
+    pub initiative_id: String,
     pub quarantined_at: i64,
     /// Operator pubkey_fingerprint that issued the command; 32 hex
     /// chars (SHA-256[:16] of the operator's Ed25519 pubkey, per
@@ -57,11 +57,11 @@ pub struct InitiativeQuarantineRow {
     pub quarantined_by: String,
     /// Free-form operator-supplied label; capped to 512 bytes by the
     /// CLI before submission.
-    pub reason:         Option<String>,
+    pub reason: Option<String>,
     /// `Some(fingerprint)` ⇒ this row was inserted as collateral by
     /// `sweep_for_operator` for the named operator. `None` ⇒
     /// individually quarantined via `insert_single`.
-    pub sweep_target:   Option<String>,
+    pub sweep_target: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -78,16 +78,15 @@ pub enum QuarantineViewError {
 // Reads (RoConn)
 // ---------------------------------------------------------------------------
 
-const SELECT_ALL_COLS: &str =
-    "initiative_id, quarantined_at, quarantined_by, reason, sweep_target";
+const SELECT_ALL_COLS: &str = "initiative_id, quarantined_at, quarantined_by, reason, sweep_target";
 
 fn row_to_quarantine_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeQuarantineRow> {
     Ok(InitiativeQuarantineRow {
-        initiative_id:  row.get::<_, String>(0)?,
+        initiative_id: row.get::<_, String>(0)?,
         quarantined_at: row.get::<_, i64>(1)?,
         quarantined_by: row.get::<_, String>(2)?,
-        reason:         row.get::<_, Option<String>>(3)?,
-        sweep_target:   row.get::<_, Option<String>>(4)?,
+        reason: row.get::<_, Option<String>>(3)?,
+        sweep_target: row.get::<_, Option<String>>(4)?,
     })
 }
 
@@ -126,7 +125,7 @@ pub fn is_quarantined(conn: &RoConn, initiative_id: &str) -> Result<bool, Quaran
 /// `is_quarantined` exactly so a future schema change touches one
 /// SQL string in two callers.
 pub fn is_quarantined_rw(
-    conn:          &Connection,
+    conn: &Connection,
     initiative_id: &str,
 ) -> Result<bool, QuarantineViewError> {
     let table = Table::InitiativeQuarantines.as_str();
@@ -141,7 +140,7 @@ pub fn is_quarantined_rw(
 /// Fetch a single row by initiative_id (for `raxis inspect` and
 /// future doctor surfaces).
 pub fn get_by_initiative_id(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<Option<InitiativeQuarantineRow>, QuarantineViewError> {
     let table = Table::InitiativeQuarantines.as_str();
@@ -178,11 +177,11 @@ pub fn list_all(conn: &RoConn) -> Result<Vec<InitiativeQuarantineRow>, Quarantin
 /// kernel is `handle_quarantine_initiative` in
 /// `kernel/src/ipc/operator.rs`.
 pub fn insert_single(
-    conn:           &Connection,
-    initiative_id:  &str,
+    conn: &Connection,
+    initiative_id: &str,
     quarantined_by: &str,
     quarantined_at: i64,
-    reason:         Option<&str>,
+    reason: Option<&str>,
 ) -> Result<bool, QuarantineViewError> {
     if is_quarantined_rw(conn, initiative_id)? {
         return Ok(false);
@@ -219,15 +218,15 @@ pub fn insert_single(
 /// `signed_plan_artifacts` row; v1 keeps the contract narrow to
 /// "plans that were actually approved".
 pub fn sweep_for_operator(
-    conn:               &Connection,
+    conn: &Connection,
     target_fingerprint: &str,
-    quarantined_by:     &str,
-    quarantined_at:     i64,
-    reason:             Option<&str>,
+    quarantined_by: &str,
+    quarantined_at: i64,
+    reason: Option<&str>,
 ) -> Result<Vec<String>, QuarantineViewError> {
-    let initiatives        = Table::Initiatives.as_str();
-    let signed_plans       = Table::SignedPlanArtifacts.as_str();
-    let quarantines        = Table::InitiativeQuarantines.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let signed_plans = Table::SignedPlanArtifacts.as_str();
+    let quarantines = Table::InitiativeQuarantines.as_str();
 
     // Step 1: gather candidate initiative_ids. We materialise into a
     // Vec<String> rather than driving the INSERT off the SELECT
@@ -296,7 +295,7 @@ mod tests {
         let tx = conn.transaction().unwrap();
         // Two initiatives signed by Chika, one by Jinanwa. Minimum shape
         // the sweep query joins against.
-        const INITIATIVES: &str           = Table::Initiatives.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
         const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
         tx.execute_batch(&format!(
             "INSERT INTO {INITIATIVES} \
@@ -311,7 +310,8 @@ mod tests {
                 ('init-chika-1', x'00', x'00', 0, 'chika-fp'), \
                 ('init-chika-2', x'00', x'00', 0, 'chika-fp'), \
                 ('init-jinanwa-1',   x'00', x'00', 0, 'jinanwa-fp');"
-        )).unwrap();
+        ))
+        .unwrap();
         tx.commit().unwrap();
         drop(conn);
         drop(store);
@@ -362,7 +362,10 @@ mod tests {
         assert_eq!(row.quarantined_by, "op-fp");
         assert_eq!(row.quarantined_at, 1700);
         assert_eq!(row.reason.as_deref(), Some("compromised"));
-        assert!(row.sweep_target.is_none(), "single insert leaves sweep_target NULL");
+        assert!(
+            row.sweep_target.is_none(),
+            "single insert leaves sweep_target NULL"
+        );
     }
 
     #[test]
@@ -386,7 +389,10 @@ mod tests {
         let again = with_writer(&tmp, |c| {
             sweep_for_operator(c, "chika-fp", "rotator-fp", 3000, None).unwrap()
         });
-        assert!(again.is_empty(), "sweep is idempotent over already-quarantined ids");
+        assert!(
+            again.is_empty(),
+            "sweep is idempotent over already-quarantined ids"
+        );
     }
 
     #[test]

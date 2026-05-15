@@ -73,9 +73,9 @@ use anyhow::{bail, Result};
 pub struct Check {
     /// Stable identifier (e.g. `"linux.dev_kvm.openable"`). Stable
     /// across versions so JSON consumers can pin against it.
-    pub id:      String,
+    pub id: String,
     pub outcome: Outcome,
-    pub detail:  String,
+    pub detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -88,7 +88,7 @@ pub enum Outcome {
 impl Outcome {
     pub fn label(self) -> &'static str {
         match self {
-            Self::Ok   => "OK",
+            Self::Ok => "OK",
             Self::Warn => "WARN",
             Self::Fail => "FAIL",
         }
@@ -103,9 +103,9 @@ pub struct Report {
 impl Report {
     fn push(&mut self, id: &str, outcome: Outcome, detail: impl Into<String>) {
         self.checks.push(Check {
-            id:      id.to_owned(),
+            id: id.to_owned(),
             outcome,
-            detail:  detail.into(),
+            detail: detail.into(),
         });
     }
 
@@ -124,7 +124,7 @@ impl Report {
 
     pub fn exit_code(&self) -> i32 {
         match self.worst() {
-            Outcome::Ok   => 0,
+            Outcome::Ok => 0,
             Outcome::Warn => 1,
             Outcome::Fail => 2,
         }
@@ -343,11 +343,12 @@ fn current_user_in_kvm_group() -> Result<bool> {
 
 fn check_vhost_vsock(r: &mut Report) {
     let modules_path = PathBuf::from("/proc/modules");
-    let dev_path     = PathBuf::from("/dev/vhost-vsock");
+    let dev_path = PathBuf::from("/dev/vhost-vsock");
     let module_loaded = std::fs::read_to_string(&modules_path)
-        .map(|body| body.lines().any(|line| {
-            line.split_whitespace().next() == Some("vhost_vsock")
-        }))
+        .map(|body| {
+            body.lines()
+                .any(|line| line.split_whitespace().next() == Some("vhost_vsock"))
+        })
         .unwrap_or(false);
     let device_present = std::fs::metadata(&dev_path).is_ok();
     if module_loaded || device_present {
@@ -511,8 +512,8 @@ fn render_human(report: &Report) {
     for c in &report.checks {
         eprintln!(
             "  [{lvl:<4}] {id:<32} {detail}",
-            lvl    = c.outcome.label(),
-            id     = c.id,
+            lvl = c.outcome.label(),
+            id = c.id,
             detail = c.detail,
         );
     }
@@ -548,7 +549,7 @@ fn push_json_string(out: &mut String, s: &str) {
     for ch in s.chars() {
         match ch {
             '\\' => out.push_str("\\\\"),
-            '"'  => out.push_str("\\\""),
+            '"' => out.push_str("\\\""),
             '\n' => out.push_str("\\n"),
             '\r' => out.push_str("\\r"),
             '\t' => out.push_str("\\t"),
@@ -570,10 +571,10 @@ mod tests {
     #[test]
     fn parse_osrelease_handles_canonical_layouts() {
         for (s, want) in &[
-            ("5.10.225",            (5u32, 10u32)),
-            ("5.15.0-105-generic",  (5,    15)),
-            ("6.1.0-21-amd64",      (6,    1)),
-            ("4.19.0",              (4,    19)),
+            ("5.10.225", (5u32, 10u32)),
+            ("5.15.0-105-generic", (5, 15)),
+            ("6.1.0-21-amd64", (6, 1)),
+            ("4.19.0", (4, 19)),
         ] {
             let got = parse_osrelease(s).unwrap();
             assert_eq!(got, *want, "input: {s}");
@@ -601,7 +602,7 @@ mod tests {
     #[test]
     fn worst_of_ok_warn_fail_is_fail() {
         let mut r = Report::default();
-        r.push("a", Outcome::Ok,   "ok");
+        r.push("a", Outcome::Ok, "ok");
         r.push("b", Outcome::Warn, "warn");
         r.push("c", Outcome::Fail, "fail");
         assert_eq!(r.worst(), Outcome::Fail);
@@ -611,7 +612,7 @@ mod tests {
     #[test]
     fn worst_of_ok_warn_is_warn() {
         let mut r = Report::default();
-        r.push("a", Outcome::Ok,   "ok");
+        r.push("a", Outcome::Ok, "ok");
         r.push("b", Outcome::Warn, "warn");
         assert_eq!(r.worst(), Outcome::Warn);
         assert_eq!(r.exit_code(), 1);
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn render_json_round_trips_through_a_minimal_parser() {
         let mut r = Report::default();
-        r.push("linux.dev_kvm.exists", Outcome::Ok,   "/dev/kvm present");
+        r.push("linux.dev_kvm.exists", Outcome::Ok, "/dev/kvm present");
         r.push("linux.cgroup_v2.mounted", Outcome::Fail, "missing");
         // Capture stdout via a temp redirect would require process
         // gymnastics; we validate the on-the-wire shape directly by
@@ -638,7 +639,9 @@ mod tests {
         out.push_str(r.worst().label());
         out.push_str("\",\"checks\":[");
         for (i, c) in r.checks.iter().enumerate() {
-            if i > 0 { out.push(','); }
+            if i > 0 {
+                out.push(',');
+            }
             out.push_str("{\"id\":");
             push_json_string(&mut out, &c.id);
             out.push_str(",\"outcome\":\"");
@@ -704,7 +707,8 @@ mod tests {
             "linux.virtiofsd.binary",
         ] {
             assert!(
-                ids.iter().any(|&i| i == id || i.starts_with(&format!("{id}."))),
+                ids.iter()
+                    .any(|&i| i == id || i.starts_with(&format!("{id}."))),
                 "expected check id {id} in report; got {ids:?}"
             );
         }

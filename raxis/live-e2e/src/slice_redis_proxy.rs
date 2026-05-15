@@ -54,14 +54,14 @@
 //!    e. `CredentialBackend::resolve` was called at least once
 //!       per connection (rotation semantics).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -94,7 +94,7 @@ fn uuid_v7() -> String {
 // ---------------------------------------------------------------------------
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -111,16 +111,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -135,17 +144,21 @@ pub async fn run() -> Result<()> {
 
     // Step 2 — bind the real RedisProxy.
     let backend = Arc::new(LiveBackend {
-        value:    REDIS_REQUIREPASS.as_bytes().to_vec(),
+        value: REDIS_REQUIREPASS.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
-        listen_addr:        "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         upstream_host_port: REDIS_HOST_PORT.to_owned(),
-        credential_name:    CredentialName::new("live-e2e"),
-        consumer:           OwnedConsumer::new("live-e2e-redis-slice", "session-1"),
+        credential_name: CredentialName::new("live-e2e"),
+        consumer: OwnedConsumer::new("live-e2e-redis-slice", "session-1"),
         restrictions: Restrictions {
             allowed_commands: vec![
-                "PING".into(), "SET".into(), "GET".into(), "DEL".into(), "EXISTS".into(),
+                "PING".into(),
+                "SET".into(),
+                "GET".into(),
+                "DEL".into(),
+                "EXISTS".into(),
             ],
         },
         upstream_tls: false,
@@ -159,40 +172,49 @@ pub async fn run() -> Result<()> {
     .context("bind RedisProxy")?;
     let proxy_addr = proxy.local_addr()?;
     let stats_handle = proxy.stats_handle();
-    tokio::spawn(async move { proxy.serve().await; });
+    tokio::spawn(async move {
+        proxy.serve().await;
+    });
 
     // Give the proxy a tick to be ready.
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let key   = unique_key();
+    let key = unique_key();
     let value = "v1.2.3-real-redis";
 
     // Step 3 — drive a real RESP conversation through the proxy.
-    let mut client = TcpStream::connect(proxy_addr).await
+    let mut client = TcpStream::connect(proxy_addr)
+        .await
         .context("connect to RedisProxy listener")?;
 
     // Junk AUTH (must be discarded by the proxy and replied +OK by
     // the proxy itself; never forwarded).
-    client.write_all(b"*2\r\n$4\r\nAUTH\r\n$25\r\nagent-supplied-junk-bytes\r\n").await?;
-    expect_simple_string(&mut client, "+OK\r\n").await
+    client
+        .write_all(b"*2\r\n$4\r\nAUTH\r\n$25\r\nagent-supplied-junk-bytes\r\n")
+        .await?;
+    expect_simple_string(&mut client, "+OK\r\n")
+        .await
         .context("proxy must reply +OK to agent AUTH (discarded)")?;
 
     // PING — allowed, forwarded. Real Redis answers +PONG.
     client.write_all(b"*1\r\n$4\r\nPING\r\n").await?;
-    expect_simple_string(&mut client, "+PONG\r\n").await
+    expect_simple_string(&mut client, "+PONG\r\n")
+        .await
         .context("PING must round-trip to real Redis and return +PONG")?;
 
     // SET — allowed, forwarded. Real Redis stores the key.
     let set_frame = build_set_frame(&key, value);
     client.write_all(&set_frame).await?;
-    expect_simple_string(&mut client, "+OK\r\n").await
+    expect_simple_string(&mut client, "+OK\r\n")
+        .await
         .context("SET must be forwarded to real Redis and return +OK")?;
 
     // GET — allowed, forwarded. Real Redis returns the value we
     // just SET — proving the SET landed in real memory.
     let get_frame = build_get_frame(&key);
     client.write_all(&get_frame).await?;
-    expect_bulk_string(&mut client, value.as_bytes()).await
+    expect_bulk_string(&mut client, value.as_bytes())
+        .await
         .context("GET must round-trip from real Redis with the value SET wrote")?;
 
     // FLUSHDB — denied by allowlist; must never reach upstream.
@@ -208,9 +230,11 @@ pub async fn run() -> Result<()> {
 
     // Cleanly close the proxy session.
     client.write_all(b"*1\r\n$4\r\nQUIT\r\n").await?;
-    let _ = tokio::time::timeout(Duration::from_millis(200),
-        async { let mut buf = [0u8; 64]; let _ = client.read(&mut buf).await; },
-    ).await;
+    let _ = tokio::time::timeout(Duration::from_millis(200), async {
+        let mut buf = [0u8; 64];
+        let _ = client.read(&mut buf).await;
+    })
+    .await;
 
     // Step 4 — assertions against the real upstream.
     //
@@ -218,14 +242,18 @@ pub async fn run() -> Result<()> {
     // (FLUSHDB was denied at the proxy boundary; the database must
     // be intact). We open an out-of-band TCP connection straight to
     // the container and authenticate with the real credential.
-    let upstream_value = direct_get(REDIS_HOST_PORT, REDIS_REQUIREPASS, &key).await
+    let upstream_value = direct_get(REDIS_HOST_PORT, REDIS_REQUIREPASS, &key)
+        .await
         .context("direct upstream GET to verify FLUSHDB never landed")?;
     if upstream_value.as_deref() != Some(value.as_bytes()) {
         return Err(anyhow!(
             "post-conversation upstream GET mismatch — expected {:?}, got {:?}.\n\
              Either SET never reached real Redis (proxy-forwarding regression) or\n\
              FLUSHDB sneaked through (allowlist regression).",
-            value, upstream_value.as_ref().map(|v| String::from_utf8_lossy(v).into_owned()),
+            value,
+            upstream_value
+                .as_ref()
+                .map(|v| String::from_utf8_lossy(v).into_owned()),
         ));
     }
 
@@ -260,9 +288,9 @@ pub async fn run() -> Result<()> {
 
     tracing::info!(
         commands_forwarded = snap.commands_forwarded,
-        commands_blocked   = snap.commands_blocked,
+        commands_blocked = snap.commands_blocked,
         bytes_out_to_upstream = snap.bytes_out_to_upstream,
-        backend_resolves   = backend.resolves.load(Ordering::Relaxed),
+        backend_resolves = backend.resolves.load(Ordering::Relaxed),
         "redis-proxy slice OK (real upstream)",
     );
     Ok(())
@@ -276,8 +304,10 @@ async fn require_redis_container() -> Result<()> {
     match tokio::time::timeout(
         Duration::from_millis(800),
         TcpStream::connect(REDIS_HOST_PORT),
-    ).await {
-        Ok(Ok(_))  => Ok(()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "Redis container not reachable at {REDIS_HOST_PORT} ({e}).\n\
              Run:\n  \
@@ -375,14 +405,16 @@ async fn expect_simple_string(client: &mut TcpStream, expected: &str) -> Result<
     if resp != expected.as_bytes() {
         return Err(anyhow!(
             "expected {:?}, got {:?}",
-            expected, String::from_utf8_lossy(&resp),
+            expected,
+            String::from_utf8_lossy(&resp),
         ));
     }
     Ok(())
 }
 
 async fn expect_bulk_string(client: &mut TcpStream, expected_body: &[u8]) -> Result<()> {
-    let body = read_bulk_or_nil(client).await?
+    let body = read_bulk_or_nil(client)
+        .await?
         .ok_or_else(|| anyhow!("expected non-null bulk, got null"))?;
     if body != expected_body {
         return Err(anyhow!(
@@ -398,13 +430,17 @@ async fn read_bulk_or_nil(client: &mut TcpStream) -> Result<Option<Vec<u8>>> {
     let header = read_until_crlf_stream(client).await?;
     if !header.starts_with(b"$") {
         return Err(anyhow!(
-            "expected bulk-string header, got {:?}", String::from_utf8_lossy(&header),
+            "expected bulk-string header, got {:?}",
+            String::from_utf8_lossy(&header),
         ));
     }
-    let n: i64 = std::str::from_utf8(&header[1..header.len()-2])
-        .ok().and_then(|s| s.parse().ok())
+    let n: i64 = std::str::from_utf8(&header[1..header.len() - 2])
+        .ok()
+        .and_then(|s| s.parse().ok())
         .ok_or_else(|| anyhow!("bad bulk header"))?;
-    if n < 0 { return Ok(None); }
+    if n < 0 {
+        return Ok(None);
+    }
     let mut body = vec![0u8; (n as usize) + 2];
     client.read_exact(&mut body).await?;
     body.truncate(n as usize);
@@ -420,9 +456,13 @@ async fn read_until_crlf_stream(client: &mut TcpStream) -> Result<Vec<u8>> {
     let mut byte = [0u8; 1];
     loop {
         let n = client.read(&mut byte).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         acc.push(byte[0]);
-        if acc.ends_with(b"\r\n") { break; }
+        if acc.ends_with(b"\r\n") {
+            break;
+        }
     }
     if !acc.ends_with(b"\r\n") {
         return Err(anyhow!("short read mid-frame"));

@@ -39,8 +39,8 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use serde::{Deserialize, Serialize};
 use raxis_credentials::CredentialName;
+use serde::{Deserialize, Serialize};
 
 /// One `[[tasks.credentials]]` entry from a `[[tasks]]` block in plan
 /// TOML.
@@ -49,7 +49,7 @@ pub struct TaskCredentialDecl {
     /// Policy-declared credential name. The kernel resolves the
     /// VALUE through `CredentialBackend::resolve` at proxy-bind
     /// time. NEVER the value.
-    pub name:       CredentialName,
+    pub name: CredentialName,
     /// Environment variable name the agent VM gets injected with;
     /// the value is the proxy's loopback URL (e.g.
     /// `postgresql://raxis@127.0.0.1:54321/` for Postgres,
@@ -63,10 +63,10 @@ pub struct TaskCredentialDecl {
     ///   - `CACHE_REDIS_URL` / `QUEUE_REDIS_URL` (not `REDIS_URL`)
     /// A generic name like `DATABASE_URL` is only appropriate when
     /// exactly one credential of that type is declared.
-    pub mount_as:   String,
+    pub mount_as: String,
     /// Concrete proxy shape — determines which proxy implementation
     /// the kernel binds for this credential.
-    pub proxy:      ProxyDecl,
+    pub proxy: ProxyDecl,
 }
 
 /// Concrete proxy shape declared in `[[tasks.credentials]]`. Each
@@ -281,31 +281,51 @@ pub enum ProxyDecl {
     Unknown,
 }
 
-fn default_http_auth_mode() -> HttpAuthMode { HttpAuthMode::Bearer }
-
-fn default_smtp_auth_mode() -> SmtpAuthMode {
-    SmtpAuthMode::Plain { user: String::new() }
+fn default_http_auth_mode() -> HttpAuthMode {
+    HttpAuthMode::Bearer
 }
 
-fn default_aws_lease_seconds() -> u64 { 900 }
+fn default_smtp_auth_mode() -> SmtpAuthMode {
+    SmtpAuthMode::Plain {
+        user: String::new(),
+    }
+}
 
-fn default_gcp_lease_seconds() -> u64 { 3600 }
+fn default_aws_lease_seconds() -> u64 {
+    900
+}
 
-fn default_azure_lease_seconds() -> u64 { 3600 }
+fn default_gcp_lease_seconds() -> u64 {
+    3600
+}
+
+fn default_azure_lease_seconds() -> u64 {
+    3600
+}
 
 // ---------------------------------------------------------------------------
 // V3 cloud-forwarding decls (one per cloud provider)
 // ---------------------------------------------------------------------------
 
-fn default_true() -> bool { true }
+fn default_true() -> bool {
+    true
+}
 
-fn default_aws_duration_seconds() -> u64 { 900 }
+fn default_aws_duration_seconds() -> u64 {
+    900
+}
 
-fn default_cache_safety_window_seconds() -> u64 { 300 }
+fn default_cache_safety_window_seconds() -> u64 {
+    300
+}
 
-fn default_jwt_lifetime_seconds() -> u64 { 3600 }
+fn default_jwt_lifetime_seconds() -> u64 {
+    3600
+}
 
-fn default_aws_endpoint_kind() -> String { "global".to_owned() }
+fn default_aws_endpoint_kind() -> String {
+    "global".to_owned()
+}
 
 /// `[tasks.credentials.forwarding]` block for an AWS proxy. When
 /// declared and `enabled = true`, the proxy drives a real
@@ -475,15 +495,17 @@ impl Default for PostgresRestrictions {
     fn default() -> Self {
         Self {
             allow_only_select: false,
-            allowed_tables:    Vec::new(),
-            forbidden_tables:  Vec::new(),
-            max_result_rows:   0,
-            enforce:           true,
+            allowed_tables: Vec::new(),
+            forbidden_tables: Vec::new(),
+            max_result_rows: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_postgres_enforce() -> bool { true }
+fn default_postgres_enforce() -> bool {
+    true
+}
 
 /// HTTP/k8s restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "http"`
@@ -581,9 +603,9 @@ pub struct AwsRestrictions {
 impl Default for AwsRestrictions {
     fn default() -> Self {
         Self {
-            allowed_paths:    default_aws_allowed_paths(),
+            allowed_paths: default_aws_allowed_paths(),
             allowed_services: Vec::new(),
-            allowed_regions:  Vec::new(),
+            allowed_regions: Vec::new(),
         }
     }
 }
@@ -631,9 +653,9 @@ pub struct GcpRestrictions {
 impl Default for GcpRestrictions {
     fn default() -> Self {
         Self {
-            allowed_paths:  default_gcp_allowed_paths(),
+            allowed_paths: default_gcp_allowed_paths(),
             allowed_scopes: Vec::new(),
-            project:        String::new(),
+            project: String::new(),
         }
     }
 }
@@ -686,15 +708,17 @@ impl Default for MysqlRestrictions {
     fn default() -> Self {
         Self {
             allow_only_select: false,
-            allowed_tables:    Vec::new(),
-            forbidden_tables:  Vec::new(),
-            max_result_rows:   0,
-            enforce:           true,
+            allowed_tables: Vec::new(),
+            forbidden_tables: Vec::new(),
+            max_result_rows: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_mysql_enforce() -> bool { true }
+fn default_mysql_enforce() -> bool {
+    true
+}
 
 /// MSSQL restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mssql"`).
@@ -737,15 +761,17 @@ impl Default for MssqlRestrictions {
     fn default() -> Self {
         Self {
             allow_only_select: false,
-            allowed_tables:    Vec::new(),
-            forbidden_tables:  Vec::new(),
-            max_result_rows:   0,
-            enforce:           true,
+            allowed_tables: Vec::new(),
+            forbidden_tables: Vec::new(),
+            max_result_rows: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_mssql_enforce() -> bool { true }
+fn default_mssql_enforce() -> bool {
+    true
+}
 
 /// MongoDB restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "mongodb"`).
@@ -794,16 +820,18 @@ pub struct MongodbRestrictions {
 impl Default for MongodbRestrictions {
     fn default() -> Self {
         Self {
-            allow_read_only:        false,
-            allowed_collections:    Vec::new(),
-            forbidden_collections:  Vec::new(),
-            max_documents:          0,
-            enforce:                true,
+            allow_read_only: false,
+            allowed_collections: Vec::new(),
+            forbidden_collections: Vec::new(),
+            max_documents: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_mongodb_enforce() -> bool { true }
+fn default_mongodb_enforce() -> bool {
+    true
+}
 
 /// Azure restrictions
 /// (`[tasks.credentials.restrictions]` for `proxy_type = "azure"`).
@@ -861,27 +889,29 @@ pub enum ParseError {
     #[error("[[tasks.credentials]] entry {index} of task {task_id:?}: {detail}")]
     Malformed {
         /// Index within the tasks.credentials array.
-        index:   usize,
+        index: usize,
         /// Owning task id from the plan TOML.
         task_id: String,
         /// Free-form diagnostic.
-        detail:  String,
+        detail: String,
     },
     /// Two `[[tasks.credentials]]` entries in the same task declare
     /// the same `mount_as` env-var name. The second would overwrite
     /// the first in the agent's environment, silently making one
     /// proxy unreachable. Caught at plan admission (shift-left) so
     /// the operator gets an immediate, actionable diagnostic.
-    #[error("task {task_id:?}: duplicate mount_as `{mount_as}` on credentials `{first}` and `{second}`")]
+    #[error(
+        "task {task_id:?}: duplicate mount_as `{mount_as}` on credentials `{first}` and `{second}`"
+    )]
     DuplicateMountAs {
         /// Owning task id.
-        task_id:  String,
+        task_id: String,
         /// The colliding env-var name.
         mount_as: String,
         /// Credential name of the first declaration.
-        first:    String,
+        first: String,
         /// Credential name of the second declaration.
-        second:   String,
+        second: String,
     },
     /// The TOML value carrying the task block is not actually a table.
     #[error("[[tasks]] entry is not a table")]
@@ -896,9 +926,7 @@ pub enum ParseError {
 /// `[[tasks]]` block. Returns an empty vector when the sub-array is
 /// absent.
 pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl>, ParseError> {
-    let task_table = task_value
-        .as_table()
-        .ok_or(ParseError::TaskNotTable)?;
+    let task_table = task_value.as_table().ok_or(ParseError::TaskNotTable)?;
     let task_id = task_table
         .get("task_id")
         .and_then(|v| v.as_str())
@@ -909,9 +937,9 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
         Some(toml::Value::Array(a)) => a,
         Some(other) => {
             return Err(ParseError::Malformed {
-                index:   0,
+                index: 0,
                 task_id,
-                detail:  format!(
+                detail: format!(
                     "credentials must be a TOML array of tables, got {}",
                     other.type_str(),
                 ),
@@ -923,7 +951,7 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
     let mut out = Vec::with_capacity(arr.len());
     for (i, entry) in arr.iter().enumerate() {
         let parsed = parse_one_decl(entry).map_err(|detail| ParseError::Malformed {
-            index:   i,
+            index: i,
             task_id: task_id.clone(),
             detail,
         })?;
@@ -940,10 +968,10 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
         for decl in &out {
             if let Some(&first_name) = seen.get(decl.mount_as.as_str()) {
                 return Err(ParseError::DuplicateMountAs {
-                    task_id:  task_id.clone(),
+                    task_id: task_id.clone(),
                     mount_as: decl.mount_as.clone(),
-                    first:    first_name.to_owned(),
-                    second:   decl.name.as_str().to_owned(),
+                    first: first_name.to_owned(),
+                    second: decl.name.as_str().to_owned(),
                 });
             }
             seen.insert(&decl.mount_as, decl.name.as_str());
@@ -954,18 +982,22 @@ pub fn parse_for_task(task_value: &toml::Value) -> Result<Vec<TaskCredentialDecl
 }
 
 fn parse_one_decl(value: &toml::Value) -> Result<TaskCredentialDecl, String> {
-    let table = value.as_table()
+    let table = value
+        .as_table()
         .ok_or_else(|| "entry must be a TOML table".to_owned())?;
 
-    let name_str = table.get("name")
+    let name_str = table
+        .get("name")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing required `name`".to_owned())?;
     let name = CredentialName::new(name_str);
-    let mount_as = table.get("mount_as")
+    let mount_as = table
+        .get("mount_as")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing required `mount_as`".to_owned())?
         .to_owned();
-    let proxy_type = table.get("proxy_type")
+    let proxy_type = table
+        .get("proxy_type")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing required `proxy_type`".to_owned())?;
 
@@ -978,7 +1010,11 @@ fn parse_one_decl(value: &toml::Value) -> Result<TaskCredentialDecl, String> {
         .try_into()
         .map_err(|e| format!("failed to decode proxy variant {proxy_type:?}: {e}"))?;
 
-    Ok(TaskCredentialDecl { name, mount_as, proxy })
+    Ok(TaskCredentialDecl {
+        name,
+        mount_as,
+        proxy,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -991,7 +1027,8 @@ mod tests {
 
     fn parse(input: &str) -> Result<Vec<TaskCredentialDecl>, ParseError> {
         let doc: toml::Value = toml::from_str(input).expect("valid toml");
-        let task = doc.get("tasks")
+        let task = doc
+            .get("tasks")
             .and_then(|v| v.as_array())
             .and_then(|a| a.first())
             .expect("tasks[0]");
@@ -1069,7 +1106,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Http { auth_mode, upstream_url, .. } => {
+            ProxyDecl::Http {
+                auth_mode,
+                upstream_url,
+                ..
+            } => {
                 assert!(matches!(auth_mode, HttpAuthMode::Bearer));
                 assert_eq!(upstream_url, "https://k8s.example.com/");
             }
@@ -1094,12 +1135,10 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Http { auth_mode, .. } => {
-                match auth_mode {
-                    HttpAuthMode::Basic { user } => assert_eq!(user, "alice"),
-                    other => panic!("expected Basic, got {other:?}"),
-                }
-            }
+            ProxyDecl::Http { auth_mode, .. } => match auth_mode {
+                HttpAuthMode::Basic { user } => assert_eq!(user, "alice"),
+                other => panic!("expected Basic, got {other:?}"),
+            },
             other => panic!("expected Http, got {other:?}"),
         }
     }
@@ -1123,10 +1162,14 @@ mod tests {
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
             ProxyDecl::Http { restrictions, .. } => {
-                assert_eq!(restrictions.allowed_methods,
-                    vec!["GET".to_owned(), "HEAD".to_owned()]);
-                assert_eq!(restrictions.allowed_path_prefixes,
-                    vec!["/v1/widgets".to_owned()]);
+                assert_eq!(
+                    restrictions.allowed_methods,
+                    vec!["GET".to_owned(), "HEAD".to_owned()]
+                );
+                assert_eq!(
+                    restrictions.allowed_path_prefixes,
+                    vec!["/v1/widgets".to_owned()]
+                );
             }
             other => panic!("expected Http, got {other:?}"),
         }
@@ -1169,9 +1212,16 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Aws { role_arn, lease_seconds, forwarding, restrictions } => {
-                assert_eq!(role_arn.as_deref(),
-                    Some("arn:aws:iam::123456789:role/raxis-staging-agent"));
+            ProxyDecl::Aws {
+                role_arn,
+                lease_seconds,
+                forwarding,
+                restrictions,
+            } => {
+                assert_eq!(
+                    role_arn.as_deref(),
+                    Some("arn:aws:iam::123456789:role/raxis-staging-agent")
+                );
                 assert_eq!(*lease_seconds, 900);
                 assert_eq!(*forwarding, None);
                 assert_eq!(restrictions, &AwsRestrictions::default());
@@ -1197,7 +1247,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Aws { lease_seconds, restrictions, .. } => {
+            ProxyDecl::Aws {
+                lease_seconds,
+                restrictions,
+                ..
+            } => {
                 assert_eq!(*lease_seconds, 1800);
                 assert_eq!(
                     restrictions.allowed_paths,
@@ -1222,7 +1276,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Redis { upstream_host_port, require_upstream_tls, restrictions } => {
+            ProxyDecl::Redis {
+                upstream_host_port,
+                require_upstream_tls,
+                restrictions,
+            } => {
                 assert_eq!(upstream_host_port, "redis.example.com:6379");
                 assert!(!*require_upstream_tls);
                 assert_eq!(restrictions, &RedisRestrictions::default());
@@ -1272,7 +1330,13 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Gcp { project, numeric_project, lease_seconds, forwarding, restrictions } => {
+            ProxyDecl::Gcp {
+                project,
+                numeric_project,
+                lease_seconds,
+                forwarding,
+                restrictions,
+            } => {
                 assert_eq!(project, "my-staging-project");
                 assert_eq!(*numeric_project, None);
                 assert_eq!(*lease_seconds, 3600);
@@ -1304,7 +1368,13 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Gcp { project, numeric_project, lease_seconds, restrictions, .. } => {
+            ProxyDecl::Gcp {
+                project,
+                numeric_project,
+                lease_seconds,
+                restrictions,
+                ..
+            } => {
                 assert_eq!(project, "my-prod-project");
                 assert_eq!(*numeric_project, Some(1234567890));
                 assert_eq!(*lease_seconds, 1800);
@@ -1337,7 +1407,13 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Azure { tenant_id, client_id, lease_seconds, forwarding, restrictions } => {
+            ProxyDecl::Azure {
+                tenant_id,
+                client_id,
+                lease_seconds,
+                forwarding,
+                restrictions,
+            } => {
                 assert_eq!(tenant_id, "aaaa-bbbb-cccc-dddd");
                 assert_eq!(*client_id, None);
                 assert_eq!(*lease_seconds, 3600);
@@ -1373,7 +1449,11 @@ mod tests {
         "#;
         let decls = parse(toml).unwrap();
         match &decls[0].proxy {
-            ProxyDecl::Azure { client_id, lease_seconds, .. } => {
+            ProxyDecl::Azure {
+                client_id,
+                lease_seconds,
+                ..
+            } => {
                 assert_eq!(client_id.as_deref(), Some("client-1"));
                 assert_eq!(*lease_seconds, 1800);
             }
@@ -1520,8 +1600,10 @@ mod tests {
                 }
                 assert_eq!(upstream_host_port, "mail.example.com:25");
                 assert!(*require_upstream_tls);
-                assert_eq!(restrictions.allowed_sender_address.as_deref(),
-                    Some("noreply@example.com"));
+                assert_eq!(
+                    restrictions.allowed_sender_address.as_deref(),
+                    Some("noreply@example.com")
+                );
                 assert_eq!(
                     restrictions.allowed_recipient_domains,
                     vec![
@@ -1564,7 +1646,11 @@ mod tests {
         "#;
         let err = parse(toml).unwrap_err();
         match err {
-            ParseError::Malformed { task_id, index, detail } => {
+            ParseError::Malformed {
+                task_id,
+                index,
+                detail,
+            } => {
                 assert_eq!(task_id, "demo");
                 assert_eq!(index, 0);
                 assert!(detail.contains("name"), "got {detail:?}");
@@ -1630,7 +1716,7 @@ mod tests {
         let decls = parse(toml).unwrap();
         assert_eq!(decls.len(), 2);
         assert!(matches!(decls[0].proxy, ProxyDecl::Postgres { .. }));
-        assert!(matches!(decls[1].proxy, ProxyDecl::K8s     { .. }));
+        assert!(matches!(decls[1].proxy, ProxyDecl::K8s { .. }));
     }
 
     // ── mount_as uniqueness tests ────────────────────────────────────
@@ -1657,9 +1743,18 @@ mod tests {
             msg.contains("duplicate mount_as"),
             "expected DuplicateMountAs error, got: {msg}"
         );
-        assert!(msg.contains("DATABASE_URL"), "error should name the colliding env var: {msg}");
-        assert!(msg.contains("users-db"), "error should name the first credential: {msg}");
-        assert!(msg.contains("analytics-db"), "error should name the second credential: {msg}");
+        assert!(
+            msg.contains("DATABASE_URL"),
+            "error should name the colliding env var: {msg}"
+        );
+        assert!(
+            msg.contains("users-db"),
+            "error should name the first credential: {msg}"
+        );
+        assert!(
+            msg.contains("analytics-db"),
+            "error should name the second credential: {msg}"
+        );
     }
 
     #[test]

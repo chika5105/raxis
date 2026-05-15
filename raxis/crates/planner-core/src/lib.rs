@@ -71,13 +71,13 @@ use std::env;
 use std::ffi::OsString;
 use std::fmt;
 
-mod error;
 pub mod bedrock_client;
 pub mod circuit;
 pub mod cmdline_env;
 pub mod custom_tools;
 pub mod dispatch;
 pub mod driver;
+mod error;
 pub mod gemini_client;
 pub mod guest_init;
 pub mod http_fetch;
@@ -93,6 +93,15 @@ pub mod tools_vm_capabilities;
 pub mod transport;
 pub mod vm_capabilities;
 
+pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
+pub use circuit::{
+    circuit_state_wire_str, CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
+    CircuitState, CircuitStore, InMemoryCircuitStore,
+};
+pub use cmdline_env::{
+    apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline, HydrationOutcome,
+    CMDLINE_ENV_TOKEN,
+};
 pub use custom_tools::{
     load_custom_tools, validate_custom_tool, CustomToolDecl, CustomToolError, SubprocessTool,
 };
@@ -102,58 +111,46 @@ pub use driver::{
     DEFAULT_PLANNER_MAX_TOKENS, DEFAULT_PLANNER_MAX_TURNS, DEFAULT_WORKSPACE_PATH,
 };
 pub use error::PlannerError;
-pub use intent::{
-    executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
-    reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError, SubmitReviewInput,
-    TaskCompleteInput,
-};
-pub use raxis_ksb::{
-    assemble_system_prompt, render_ksb, DagRow, KsbError, KsbSnapshot, KSB_DELIMITER_CLOSE,
-    KSB_DELIMITER_OPEN,
-};
-pub use model::{
-    AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse,
-    ModelClient, ModelError, ToolSpec, Usage,
-};
-#[cfg(any(debug_assertions, test))]
-pub use model::MockModelClient;
-pub use provider_model::{
-    emit_model_deprecation_warning, find_known_model, resolve_model_from_env,
-    resolve_model_from_env_fn, validate_model_id, KnownModel, ProviderId,
-    ProviderModelError, DEFAULT_MODEL, KNOWN_MODELS,
-};
-pub use circuit::{
-    CircuitBreakerModelClient, CircuitConfig, CircuitRow, CircuitSnapshot,
-    CircuitState, CircuitStore, InMemoryCircuitStore, circuit_state_wire_str,
+pub use gemini_client::GeminiClient;
+pub use guest_init::{
+    ensure_cargo_offline_default, init_pid1_a3_egress, init_pid1_filesystem,
+    mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit, CargoOfflineDefaultOutcome,
+    MountAttempt, MountStatus, VirtioFsMountSpec, WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT,
+    A3_TPROXY_PORT_ENV, CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
 };
 pub use http_fetch::{
     DirectHttpFetch, HttpFetch, HttpFetchError, HttpFetchRequest, HttpFetchResponse,
     KernelMediatedHttpFetch,
 };
-pub use cmdline_env::{
-    apply_envb64_payload, hydrate_from_path, hydrate_from_proc_cmdline,
-    HydrationOutcome, CMDLINE_ENV_TOKEN,
+pub use intent::{
+    executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
+    reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError, SubmitReviewInput,
+    TaskCompleteInput,
 };
-pub use guest_init::{
-    ensure_cargo_offline_default, init_pid1_a3_egress, init_pid1_filesystem,
-    mount_workspace_shares, parse_virtiofs_mounts, shutdown_or_exit,
-    CargoOfflineDefaultOutcome, MountAttempt, MountStatus, VirtioFsMountSpec,
-    WorkspaceMountOutcome, A3_DEFAULT_TPROXY_PORT, A3_TPROXY_PORT_ENV,
-    CARGO_OFFLINE_ENV, VIRTIOFS_MOUNTS_ENV,
+#[cfg(any(debug_assertions, test))]
+pub use model::MockModelClient;
+pub use model::{
+    AnthropicClient, ContentBlock, Message, MessageRequest, MessageResponse, ModelClient,
+    ModelError, ToolSpec, Usage,
 };
-pub use bedrock_client::{BedrockClient, ANTHROPIC_VERSION_BEDROCK};
-pub use gemini_client::GeminiClient;
 pub use openai_client::OpenAiClient;
-pub use retry::{
-    is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient,
+pub use provider_model::{
+    emit_model_deprecation_warning, find_known_model, resolve_model_from_env,
+    resolve_model_from_env_fn, validate_model_id, KnownModel, ProviderId, ProviderModelError,
+    DEFAULT_MODEL, KNOWN_MODELS,
 };
+pub use raxis_ksb::{
+    assemble_system_prompt, render_ksb, DagRow, KsbError, KsbSnapshot, KSB_DELIMITER_CLOSE,
+    KSB_DELIMITER_OPEN,
+};
+pub use retry::{is_retryable, FallbackModelClient, RetryConfig, RetryingModelClient};
 pub use sidecar_client::{
-    SidecarConstructError, SidecarMessage, SidecarModelClient, SidecarRequest,
-    SidecarResponse, SidecarToolCall, SidecarToolDecl,
+    SidecarConstructError, SidecarMessage, SidecarModelClient, SidecarRequest, SidecarResponse,
+    SidecarToolCall, SidecarToolDecl,
 };
 pub use streaming::{
-    AnthropicStreamAggregator, ContentBlockDeltaPayload, StreamEvent,
-    DEFAULT_STREAM_CHANNEL_CAP, DEFAULT_STREAM_IDLE_TIMEOUT,
+    AnthropicStreamAggregator, ContentBlockDeltaPayload, StreamEvent, DEFAULT_STREAM_CHANNEL_CAP,
+    DEFAULT_STREAM_IDLE_TIMEOUT,
 };
 pub use tools::{
     build_executor_registry, build_orchestrator_registry, build_reviewer_registry, BashTool,
@@ -161,14 +158,14 @@ pub use tools::{
     ToolOutput, ToolRegistry,
 };
 pub use tools_vm_capabilities::VmCapabilitiesTool;
+pub use transport::{
+    connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
+};
 pub use vm_capabilities::{
     build_capability_hint, cached_capabilities, is_kernel_private_env, probe_capabilities,
     project_manifest, BinaryEntry, CapabilityCategory, CapabilityFilter, CapabilityManifest,
     FilesystemSnapshot, GoToolchain, ImageRole, NodePackage, NodeRuntime, PythonPackage,
     PythonRuntime, RustToolchain,
-};
-pub use transport::{
-    connect, KernelTransport, KernelTransportConfig, StreamTransport, TransportError,
 };
 
 /// **The three valid planner-harness roles** — informational mirror
@@ -208,8 +205,8 @@ impl Role {
     /// Pinned by `planner-harness.md §14.1`.
     pub const fn binary_path(self) -> &'static str {
         match self {
-            Self::Executor     => "/usr/local/bin/raxis-executor",
-            Self::Reviewer     => "/usr/local/bin/raxis-reviewer",
+            Self::Executor => "/usr/local/bin/raxis-executor",
+            Self::Reviewer => "/usr/local/bin/raxis-reviewer",
             Self::Orchestrator => "/usr/local/bin/raxis-orchestrator",
         }
     }
@@ -219,8 +216,8 @@ impl Role {
     /// (`SessionVmSpawned { role: "executor", … }`).
     pub const fn shortname(self) -> &'static str {
         match self {
-            Self::Executor     => "executor",
-            Self::Reviewer     => "reviewer",
+            Self::Executor => "executor",
+            Self::Reviewer => "reviewer",
             Self::Orchestrator => "orchestrator",
         }
     }
@@ -271,10 +268,11 @@ impl BootArgs {
         let mut iter = argv.into_iter().map(Into::into);
         let _argv0 = iter.next();
         let mut initiative_id: Option<String> = None;
-        let mut task_id:       Option<String> = None;
+        let mut task_id: Option<String> = None;
 
         while let Some(raw) = iter.next() {
-            let s = raw.to_str()
+            let s = raw
+                .to_str()
                 .ok_or(PlannerError::BadArg("non-UTF-8 argument"))?
                 .to_owned();
             match s.as_str() {
@@ -282,9 +280,11 @@ impl BootArgs {
                     if initiative_id.is_some() {
                         return Err(PlannerError::DuplicateFlag("--initiative-id"));
                     }
-                    let v = iter.next()
+                    let v = iter
+                        .next()
                         .ok_or(PlannerError::MissingValue("--initiative-id"))?;
-                    let v = v.into_string()
+                    let v = v
+                        .into_string()
                         .map_err(|_| PlannerError::BadArg("non-UTF-8 --initiative-id value"))?;
                     if v.is_empty() {
                         return Err(PlannerError::EmptyValue("--initiative-id"));
@@ -295,9 +295,9 @@ impl BootArgs {
                     if task_id.is_some() {
                         return Err(PlannerError::DuplicateFlag("--task-id"));
                     }
-                    let v = iter.next()
-                        .ok_or(PlannerError::MissingValue("--task-id"))?;
-                    let v = v.into_string()
+                    let v = iter.next().ok_or(PlannerError::MissingValue("--task-id"))?;
+                    let v = v
+                        .into_string()
                         .map_err(|_| PlannerError::BadArg("non-UTF-8 --task-id value"))?;
                     if v.is_empty() {
                         return Err(PlannerError::EmptyValue("--task-id"));
@@ -310,14 +310,15 @@ impl BootArgs {
             }
         }
 
-        let initiative_id = initiative_id
-            .ok_or(PlannerError::MissingValue("--initiative-id"))?;
+        let initiative_id = initiative_id.ok_or(PlannerError::MissingValue("--initiative-id"))?;
 
         match role {
             Role::Executor | Role::Reviewer => {
-                let task_id = task_id
-                    .ok_or(PlannerError::MissingValue("--task-id"))?;
-                Ok(Self { initiative_id, task_id: Some(task_id) })
+                let task_id = task_id.ok_or(PlannerError::MissingValue("--task-id"))?;
+                Ok(Self {
+                    initiative_id,
+                    task_id: Some(task_id),
+                })
             }
             Role::Orchestrator => {
                 if let Some(_t) = task_id {
@@ -327,7 +328,10 @@ impl BootArgs {
                         "--task-id (orchestrator does not accept a task id)",
                     ));
                 }
-                Ok(Self { initiative_id, task_id: None })
+                Ok(Self {
+                    initiative_id,
+                    task_id: None,
+                })
             }
         }
     }
@@ -364,8 +368,8 @@ impl BootEnv {
     where
         F: Fn(&str) -> Option<String>,
     {
-        let session_token = f("RAXIS_SESSION_TOKEN")
-            .ok_or(PlannerError::MissingEnv("RAXIS_SESSION_TOKEN"))?;
+        let session_token =
+            f("RAXIS_SESSION_TOKEN").ok_or(PlannerError::MissingEnv("RAXIS_SESSION_TOKEN"))?;
         if session_token.is_empty() {
             return Err(PlannerError::EmptyEnv("RAXIS_SESSION_TOKEN"));
         }
@@ -383,7 +387,7 @@ pub struct BootContext {
     /// Parsed argv.
     pub args: BootArgs,
     /// Parsed env.
-    pub env:  BootEnv,
+    pub env: BootEnv,
 }
 
 impl BootContext {
@@ -391,7 +395,7 @@ impl BootContext {
     /// planner role binaries' `main` functions.
     pub fn from_process(role: Role) -> Result<Self, PlannerError> {
         let args = BootArgs::parse_argv(role, env::args_os())?;
-        let env  = BootEnv::from_process_env()?;
+        let env = BootEnv::from_process_env()?;
         Ok(Self { role, args, env })
     }
 }
@@ -447,9 +451,18 @@ mod tests {
         // A divergence means the kernel will spawn a binary that
         // does not exist on disk and the guest's exec(2) will fail
         // before our `main` runs.
-        assert_eq!(Role::Executor.binary_path(),     "/usr/local/bin/raxis-executor");
-        assert_eq!(Role::Reviewer.binary_path(),     "/usr/local/bin/raxis-reviewer");
-        assert_eq!(Role::Orchestrator.binary_path(), "/usr/local/bin/raxis-orchestrator");
+        assert_eq!(
+            Role::Executor.binary_path(),
+            "/usr/local/bin/raxis-executor"
+        );
+        assert_eq!(
+            Role::Reviewer.binary_path(),
+            "/usr/local/bin/raxis-reviewer"
+        );
+        assert_eq!(
+            Role::Orchestrator.binary_path(),
+            "/usr/local/bin/raxis-orchestrator"
+        );
     }
 
     #[test]
@@ -466,8 +479,8 @@ mod tests {
 
     #[test]
     fn role_display_matches_shortname() {
-        assert_eq!(format!("{}", Role::Executor),     "executor");
-        assert_eq!(format!("{}", Role::Reviewer),     "reviewer");
+        assert_eq!(format!("{}", Role::Executor), "executor");
+        assert_eq!(format!("{}", Role::Reviewer), "reviewer");
         assert_eq!(format!("{}", Role::Orchestrator), "orchestrator");
     }
 
@@ -475,8 +488,10 @@ mod tests {
     fn parse_argv_executor_happy_path() {
         let argv = vec![
             "raxis-executor",
-            "--task-id", "task-42",
-            "--initiative-id", "init-7",
+            "--task-id",
+            "task-42",
+            "--initiative-id",
+            "init-7",
         ];
         let parsed = BootArgs::parse_argv(Role::Executor, argv).unwrap();
         assert_eq!(parsed.initiative_id, "init-7");
@@ -487,8 +502,10 @@ mod tests {
     fn parse_argv_reviewer_happy_path() {
         let argv = vec![
             "raxis-reviewer",
-            "--initiative-id", "init-7",
-            "--task-id", "task-42",
+            "--initiative-id",
+            "init-7",
+            "--task-id",
+            "task-42",
         ];
         let parsed = BootArgs::parse_argv(Role::Reviewer, argv).unwrap();
         assert_eq!(parsed.initiative_id, "init-7");
@@ -507,8 +524,10 @@ mod tests {
     fn parse_argv_orchestrator_rejects_unexpected_task_id() {
         let argv = vec![
             "raxis-orchestrator",
-            "--initiative-id", "init-7",
-            "--task-id", "task-42",
+            "--initiative-id",
+            "init-7",
+            "--task-id",
+            "task-42",
         ];
         let err = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
         assert!(matches!(err, PlannerError::UnexpectedFlag(_)));
@@ -517,14 +536,14 @@ mod tests {
     #[test]
     fn parse_argv_executor_requires_task_id() {
         let argv = vec!["raxis-executor", "--initiative-id", "init-7"];
-        let err  = BootArgs::parse_argv(Role::Executor, argv).unwrap_err();
+        let err = BootArgs::parse_argv(Role::Executor, argv).unwrap_err();
         assert!(matches!(err, PlannerError::MissingValue("--task-id")));
     }
 
     #[test]
     fn parse_argv_requires_initiative_id() {
         let argv = vec!["raxis-orchestrator"];
-        let err  = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
+        let err = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
         assert!(matches!(err, PlannerError::MissingValue("--initiative-id")));
     }
 
@@ -532,20 +551,28 @@ mod tests {
     fn parse_argv_rejects_duplicate_initiative_id() {
         let argv = vec![
             "raxis-orchestrator",
-            "--initiative-id", "init-A",
-            "--initiative-id", "init-B",
+            "--initiative-id",
+            "init-A",
+            "--initiative-id",
+            "init-B",
         ];
         let err = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
-        assert!(matches!(err, PlannerError::DuplicateFlag("--initiative-id")));
+        assert!(matches!(
+            err,
+            PlannerError::DuplicateFlag("--initiative-id")
+        ));
     }
 
     #[test]
     fn parse_argv_rejects_duplicate_task_id() {
         let argv = vec![
             "raxis-executor",
-            "--task-id", "task-A",
-            "--task-id", "task-B",
-            "--initiative-id", "init-7",
+            "--task-id",
+            "task-A",
+            "--task-id",
+            "task-B",
+            "--initiative-id",
+            "init-7",
         ];
         let err = BootArgs::parse_argv(Role::Executor, argv).unwrap_err();
         assert!(matches!(err, PlannerError::DuplicateFlag("--task-id")));
@@ -555,27 +582,29 @@ mod tests {
     fn parse_argv_rejects_unknown_flag() {
         let argv = vec![
             "raxis-orchestrator",
-            "--initiative-id", "init-7",
-            "--mystery", "value",
+            "--initiative-id",
+            "init-7",
+            "--mystery",
+            "value",
         ];
         let err = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
         match err {
             PlannerError::UnknownFlag(s) => assert_eq!(s, "--mystery"),
-            other                        => panic!("unexpected error: {other:?}"),
+            other => panic!("unexpected error: {other:?}"),
         }
     }
 
     #[test]
     fn parse_argv_rejects_missing_value_for_initiative_id() {
         let argv = vec!["raxis-executor", "--task-id", "t-1", "--initiative-id"];
-        let err  = BootArgs::parse_argv(Role::Executor, argv).unwrap_err();
+        let err = BootArgs::parse_argv(Role::Executor, argv).unwrap_err();
         assert!(matches!(err, PlannerError::MissingValue("--initiative-id")));
     }
 
     #[test]
     fn parse_argv_rejects_empty_value() {
         let argv = vec!["raxis-orchestrator", "--initiative-id", ""];
-        let err  = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
+        let err = BootArgs::parse_argv(Role::Orchestrator, argv).unwrap_err();
         assert!(matches!(err, PlannerError::EmptyValue("--initiative-id")));
     }
 
@@ -583,23 +612,28 @@ mod tests {
     fn boot_env_reads_session_token() {
         let env = BootEnv::from_env_fn(|k| match k {
             "RAXIS_SESSION_TOKEN" => Some("opaque-1234".to_owned()),
-            _                     => None,
-        }).unwrap();
+            _ => None,
+        })
+        .unwrap();
         assert_eq!(env.session_token, "opaque-1234");
     }
 
     #[test]
     fn boot_env_rejects_missing_session_token() {
         let err = BootEnv::from_env_fn(|_| None).unwrap_err();
-        assert!(matches!(err, PlannerError::MissingEnv("RAXIS_SESSION_TOKEN")));
+        assert!(matches!(
+            err,
+            PlannerError::MissingEnv("RAXIS_SESSION_TOKEN")
+        ));
     }
 
     #[test]
     fn boot_env_rejects_empty_session_token() {
         let err = BootEnv::from_env_fn(|k| match k {
             "RAXIS_SESSION_TOKEN" => Some(String::new()),
-            _                     => None,
-        }).unwrap_err();
+            _ => None,
+        })
+        .unwrap_err();
         assert!(matches!(err, PlannerError::EmptyEnv("RAXIS_SESSION_TOKEN")));
     }
 
@@ -609,9 +643,11 @@ mod tests {
             role: Role::Executor,
             args: BootArgs {
                 initiative_id: "init-7".to_owned(),
-                task_id:       Some("task-42".to_owned()),
+                task_id: Some("task-42".to_owned()),
             },
-            env:  BootEnv { session_token: "S3CRET-TOKEN".to_owned() },
+            env: BootEnv {
+                session_token: "S3CRET-TOKEN".to_owned(),
+            },
         };
         let line = render_boot_log(&ctx);
         assert!(line.contains("\"role\":\"executor\""));
@@ -619,8 +655,10 @@ mod tests {
         assert!(line.contains("\"task_id\":\"task-42\""));
         assert!(line.contains("\"session_token\":\"<redacted>\""));
         // Must NOT leak the actual token bytes:
-        assert!(!line.contains("S3CRET-TOKEN"),
-            "session_token was leaked into the boot log: {line}");
+        assert!(
+            !line.contains("S3CRET-TOKEN"),
+            "session_token was leaked into the boot log: {line}"
+        );
     }
 
     #[test]
@@ -629,12 +667,16 @@ mod tests {
             role: Role::Orchestrator,
             args: BootArgs {
                 initiative_id: "init-7".to_owned(),
-                task_id:       None,
+                task_id: None,
             },
-            env:  BootEnv { session_token: "tok".to_owned() },
+            env: BootEnv {
+                session_token: "tok".to_owned(),
+            },
         };
         let line = render_boot_log(&ctx);
-        assert!(line.contains("\"task_id\":null"),
-            "orchestrator must emit task_id:null, got: {line}");
+        assert!(
+            line.contains("\"task_id\":null"),
+            "orchestrator must emit task_id:null, got: {line}"
+        );
     }
 }

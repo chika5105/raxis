@@ -28,7 +28,7 @@ use crate::GlobalFlags;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Options {
-    pub check:  bool,
+    pub check: bool,
     pub stdout: bool,
 }
 
@@ -38,7 +38,7 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
     for arg in args {
         match arg.as_str() {
-            "--check"  => opts.check  = true,
+            "--check" => opts.check = true,
             "--stdout" => opts.stdout = true,
             "--help" | "-h" => {
                 print_help();
@@ -73,12 +73,12 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     })?;
 
     let original = std::fs::read_to_string(&path).map_err(|e| CliError::Io {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         source: e,
     })?;
 
-    let canonical = canonicalize(&original)
-        .map_err(|e| CliError::Usage(format!("plan fmt: {e}")))?;
+    let canonical =
+        canonicalize(&original).map_err(|e| CliError::Usage(format!("plan fmt: {e}")))?;
 
     if opts.stdout {
         print!("{canonical}");
@@ -96,12 +96,15 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
 
     if original == canonical {
-        println!("plan fmt: {} already canonical (no changes).", path.display());
+        println!(
+            "plan fmt: {} already canonical (no changes).",
+            path.display()
+        );
         return Ok(());
     }
 
     std::fs::write(&path, &canonical).map_err(|e| CliError::Io {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         source: e,
     })?;
     println!("plan fmt: {} reformatted.", path.display());
@@ -191,7 +194,7 @@ mod tests {
     #[test]
     fn idempotent_on_canonical_input() {
         let input = "[workspace]\nlane_id = \"default\"\n\n[[tasks]]\ntask_id = \"a\"\n";
-        let once  = canonicalize(input).unwrap();
+        let once = canonicalize(input).unwrap();
         let twice = canonicalize(&once).unwrap();
         assert_eq!(once, twice, "fmt must be idempotent");
         assert_eq!(once, input, "input is already canonical");
@@ -199,7 +202,7 @@ mod tests {
 
     #[test]
     fn strips_trailing_whitespace() {
-        let input  = "[workspace]   \nlane_id = \"x\"  \n";
+        let input = "[workspace]   \nlane_id = \"x\"  \n";
         let output = canonicalize(input).unwrap();
         assert!(!output.contains("  \n"), "output: {output:?}");
     }
@@ -213,7 +216,7 @@ mod tests {
 
     #[test]
     fn ensures_trailing_newline() {
-        let input  = "[workspace]\nlane_id = \"x\"";
+        let input = "[workspace]\nlane_id = \"x\"";
         let output = canonicalize(input).unwrap();
         assert!(output.ends_with('\n'));
         assert!(!output.ends_with("\n\n"));

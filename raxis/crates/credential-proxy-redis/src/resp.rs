@@ -24,7 +24,9 @@
 /// ```
 /// Returns `Some("PING")`.
 pub fn frame_verb_uppercased(frame: &[u8]) -> Option<String> {
-    if frame.is_empty() { return None; }
+    if frame.is_empty() {
+        return None;
+    }
 
     if frame[0] == b'*' {
         // Array form. Find the first bulk-string body.
@@ -56,19 +58,30 @@ pub fn frame_verb_uppercased(frame: &[u8]) -> Option<String> {
         .split(|b| *b == b' ' || *b == b'\t')
         .next()
         .unwrap_or_default();
-    if first_token.is_empty() { return None; }
+    if first_token.is_empty() {
+        return None;
+    }
     Some(String::from_utf8_lossy(first_token).to_ascii_uppercase())
 }
 
 fn find_crlf(b: &[u8], start: usize) -> Option<usize> {
-    if start >= b.len() { return None; }
-    b[start..].windows(2).position(|w| w == b"\r\n").map(|i| start + i)
+    if start >= b.len() {
+        return None;
+    }
+    b[start..]
+        .windows(2)
+        .position(|w| w == b"\r\n")
+        .map(|i| start + i)
 }
 
 fn trim_crlf(b: &[u8]) -> &[u8] {
-    if b.ends_with(b"\r\n") { &b[..b.len()-2] }
-    else if b.ends_with(b"\n") { &b[..b.len()-1] }
-    else { b }
+    if b.ends_with(b"\r\n") {
+        &b[..b.len() - 2]
+    } else if b.ends_with(b"\n") {
+        &b[..b.len() - 1]
+    } else {
+        b
+    }
 }
 
 #[cfg(test)]

@@ -29,19 +29,16 @@ const EXPECTED_SPDX: &str = "SSPL-1.0";
 #[derive(Debug)]
 pub struct LicenseFinding {
     pub toml_path: PathBuf,
-    pub detail:    String,
+    pub detail: String,
 }
 
 /// Entry point called from `main.rs`.
 pub fn run(strict: bool) -> anyhow::Result<()> {
     let workspace_root = workspace_root()?;
-    let findings       = check_workspace(&workspace_root)?;
+    let findings = check_workspace(&workspace_root)?;
 
     let toml_count = count_cargo_tomls(&workspace_root);
-    println!(
-        "license-check: scanned {} Cargo.toml files",
-        toml_count,
-    );
+    println!("license-check: scanned {} Cargo.toml files", toml_count,);
 
     if findings.is_empty() {
         println!("license-check: ok — all crates declare {EXPECTED_SPDX}");
@@ -82,9 +79,7 @@ fn check_workspace(root: &Path) -> anyhow::Result<Vec<LicenseFinding>> {
         Some(lic) if lic == EXPECTED_SPDX => {}
         Some(other) => findings.push(LicenseFinding {
             toml_path: root_toml_path.clone(),
-            detail: format!(
-                "[workspace.package] license = {other:?}; expected {EXPECTED_SPDX:?}",
-            ),
+            detail: format!("[workspace.package] license = {other:?}; expected {EXPECTED_SPDX:?}",),
         }),
         None => findings.push(LicenseFinding {
             toml_path: root_toml_path.clone(),
@@ -106,12 +101,12 @@ fn check_workspace(root: &Path) -> anyhow::Result<Vec<LicenseFinding>> {
         .filter(|e| e.path() != root_toml_path)
     {
         let path = entry.path();
-        let doc  = match read_toml(path) {
-            Ok(d)  => d,
+        let doc = match read_toml(path) {
+            Ok(d) => d,
             Err(e) => {
                 findings.push(LicenseFinding {
                     toml_path: path.to_path_buf(),
-                    detail:    format!("could not parse Cargo.toml: {e}"),
+                    detail: format!("could not parse Cargo.toml: {e}"),
                 });
                 continue;
             }
@@ -151,8 +146,8 @@ fn check_workspace(root: &Path) -> anyhow::Result<Vec<LicenseFinding>> {
 // ---------------------------------------------------------------------------
 
 fn read_toml(path: &Path) -> anyhow::Result<toml::Table> {
-    let text = std::fs::read_to_string(path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let text =
+        std::fs::read_to_string(path).with_context(|| format!("reading {}", path.display()))?;
     text.parse::<toml::Table>()
         .with_context(|| format!("parsing {}", path.display()))
 }
@@ -205,12 +200,11 @@ fn crate_license(doc: &toml::Table) -> CrateLicense {
 fn workspace_root() -> anyhow::Result<PathBuf> {
     // cargo sets CARGO_MANIFEST_DIR to the xtask crate's dir at build time.
     // At runtime we want the *workspace* root (two levels up from xtask/).
-    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR")
-        .unwrap_or_else(|_| ".".to_owned());
+    let manifest_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_else(|_| ".".to_owned());
     let xtask_dir = PathBuf::from(manifest_dir);
     // xtask lives at <workspace>/raxis/xtask — so go up two dirs.
     let root = xtask_dir
-        .parent()           // raxis/
+        .parent() // raxis/
         .and_then(|p| p.parent()) // workspace root (raxis/)
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
@@ -276,14 +270,20 @@ license = "MIT OR Apache-2.0"
     fn crate_license_workspace_dotted() {
         // license.workspace = true  (dotted key form)
         let doc = table("[package]\nlicense.workspace = true\n");
-        assert!(matches!(crate_license(&doc), CrateLicense::WorkspaceInherited));
+        assert!(matches!(
+            crate_license(&doc),
+            CrateLicense::WorkspaceInherited
+        ));
     }
 
     #[test]
     fn crate_license_workspace_table() {
         // license = { workspace = true }  (inline table form)
         let doc = table("[package]\nlicense = { workspace = true }\n");
-        assert!(matches!(crate_license(&doc), CrateLicense::WorkspaceInherited));
+        assert!(matches!(
+            crate_license(&doc),
+            CrateLicense::WorkspaceInherited
+        ));
     }
 
     #[test]

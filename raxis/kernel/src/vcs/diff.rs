@@ -177,7 +177,13 @@ pub fn touched_paths(
 ) -> Result<Vec<PathBuf>, VcsError> {
     let timeout = vcs_timeout();
     let (stdout, stderr, code) = run_git(
-        &["diff", base_sha.as_str(), head_sha.as_str(), "--name-only", "--no-renames"],
+        &[
+            "diff",
+            base_sha.as_str(),
+            head_sha.as_str(),
+            "--name-only",
+            "--no-renames",
+        ],
         worktree_root,
         timeout,
     )?;
@@ -303,26 +309,23 @@ fn parse_name_status_z(stdout: &str) -> Result<Vec<String>, VcsError> {
 
         match classify_status(status) {
             DiffStatus::SinglePath => {
-                let path = next_nonempty_field(&mut iter).ok_or_else(|| {
-                    VcsError::InvalidDiffOutput {
+                let path =
+                    next_nonempty_field(&mut iter).ok_or_else(|| VcsError::InvalidDiffOutput {
                         line: format!("{status} (missing path field)"),
-                    }
-                })?;
+                    })?;
                 out.push(path);
             }
             DiffStatus::CopyRow => {
                 // C<score> rows: source in next field, destination in the one
                 // after. We must include BOTH (§2.5.8 conservative rule).
-                let src = next_nonempty_field(&mut iter).ok_or_else(|| {
-                    VcsError::InvalidDiffOutput {
+                let src =
+                    next_nonempty_field(&mut iter).ok_or_else(|| VcsError::InvalidDiffOutput {
                         line: format!("{status} (missing source path)"),
-                    }
-                })?;
-                let dst = next_nonempty_field(&mut iter).ok_or_else(|| {
-                    VcsError::InvalidDiffOutput {
+                    })?;
+                let dst =
+                    next_nonempty_field(&mut iter).ok_or_else(|| VcsError::InvalidDiffOutput {
                         line: format!("{status} (missing destination path)"),
-                    }
-                })?;
+                    })?;
                 out.push(src);
                 out.push(dst);
             }
@@ -371,12 +374,19 @@ fn post_process_path(raw: &str) -> Result<PathBuf, VcsError> {
     let trimmed = raw.strip_prefix("./").unwrap_or(raw);
 
     if trimmed.starts_with('/') {
-        return Err(VcsError::PathTraversalDetected { path: raw.to_owned() });
+        return Err(VcsError::PathTraversalDetected {
+            path: raw.to_owned(),
+        });
     }
     // Reject `..` as a path component (not a substring — `foo..bar` is fine).
     let pb = PathBuf::from(trimmed);
-    if pb.components().any(|c| matches!(c, std::path::Component::ParentDir)) {
-        return Err(VcsError::PathTraversalDetected { path: raw.to_owned() });
+    if pb
+        .components()
+        .any(|c| matches!(c, std::path::Component::ParentDir))
+    {
+        return Err(VcsError::PathTraversalDetected {
+            path: raw.to_owned(),
+        });
     }
     Ok(pb)
 }
@@ -426,7 +436,12 @@ pub fn is_ancestor(
 ) -> Result<bool, VcsError> {
     let timeout = vcs_timeout();
     let (_, stderr, code) = run_git(
-        &["merge-base", "--is-ancestor", base_sha.as_str(), head_sha.as_str()],
+        &[
+            "merge-base",
+            "--is-ancestor",
+            base_sha.as_str(),
+            head_sha.as_str(),
+        ],
         worktree_root,
         timeout,
     )?;
@@ -448,17 +463,11 @@ pub fn is_ancestor(
 
 /// Returns the first parent SHA of `head_sha`.
 /// Maps specific failure modes to typed VcsError variants.
-pub fn rev_parse_parent(
-    head_sha: &CommitSha,
-    worktree_root: &Path,
-) -> Result<CommitSha, VcsError> {
+pub fn rev_parse_parent(head_sha: &CommitSha, worktree_root: &Path) -> Result<CommitSha, VcsError> {
     let timeout = vcs_timeout();
     let ref_arg = format!("{}^1", head_sha.as_str());
-    let (stdout, stderr, code) = run_git(
-        &["rev-parse", "--verify", &ref_arg],
-        worktree_root,
-        timeout,
-    )?;
+    let (stdout, stderr, code) =
+        run_git(&["rev-parse", "--verify", &ref_arg], worktree_root, timeout)?;
 
     if code == 0 {
         let sha = stdout.trim();
@@ -472,7 +481,9 @@ pub fn rev_parse_parent(
     if stderr_lower.contains("unknown revision") || stderr_lower.contains("ambiguous argument") {
         return Err(VcsError::HeadIsRootCommit);
     }
-    if stderr_lower.contains("needed a single revision") || stderr_lower.contains("not a valid object name") {
+    if stderr_lower.contains("needed a single revision")
+        || stderr_lower.contains("not a valid object name")
+    {
         return Err(VcsError::ShaNotFound {
             sha: head_sha.as_str().to_owned(),
         });
@@ -558,7 +569,10 @@ mod tests {
     #[test]
     fn uppercase_normalised_to_lower() {
         let sha = CommitSha::new(&"A".repeat(40)).unwrap();
-        assert!(sha.as_str().chars().all(|c| c.is_lowercase() || c.is_ascii_digit()));
+        assert!(sha
+            .as_str()
+            .chars()
+            .all(|c| c.is_lowercase() || c.is_ascii_digit()));
     }
 
     // ── classify_status ──────────────────────────────────────────────────
@@ -630,7 +644,8 @@ mod tests {
     /// `compute` dropped them, which was a bug).
     #[test]
     fn parse_z_canonical_single_path_rows() {
-        let stdout = "A\0src/added.rs\0M\0src/modified.rs\0D\0src/deleted.rs\0T\0src/type_change.rs\0";
+        let stdout =
+            "A\0src/added.rs\0M\0src/modified.rs\0D\0src/deleted.rs\0T\0src/type_change.rs\0";
         let paths = parse_name_status_z(stdout).unwrap();
         assert_eq!(
             paths,
@@ -810,7 +825,9 @@ mod git_integration {
 
     #[test]
     fn touched_paths_returns_added_modified_and_deleted() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let base_hex = repo.commit_files(
             &[("a.txt", "1"), ("b.txt", "2"), ("doomed.txt", "3")],
@@ -838,16 +855,23 @@ mod git_integration {
 
     #[test]
     fn touched_paths_empty_for_identical_shas() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let only = repo.commit_file("x.txt", "x", "init");
         let paths = touched_paths(&sha(&only), &sha(&only), repo.path()).unwrap();
-        assert!(paths.is_empty(), "diff of a SHA against itself must be empty");
+        assert!(
+            paths.is_empty(),
+            "diff of a SHA against itself must be empty"
+        );
     }
 
     #[test]
     fn touched_paths_rejects_unknown_sha() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let real = repo.commit_file("a.txt", "x", "init");
         let bogus = sha(&"f".repeat(40));
@@ -862,15 +886,13 @@ mod git_integration {
 
     #[test]
     fn compute_returns_post_processed_sorted_unique_paths() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
-        let base = repo.commit_files(
-            &[("z.txt", "z"), ("dir/y.txt", "y")],
-            "base",
-        );
+        let base = repo.commit_files(&[("z.txt", "z"), ("dir/y.txt", "y")], "base");
         // Mix: add new file, modify existing in subdir, delete top-level.
-        std::fs::write(repo.path().join("dir/y.txt"), "modified")
-            .expect("write modify");
+        std::fs::write(repo.path().join("dir/y.txt"), "modified").expect("write modify");
         std::fs::create_dir_all(repo.path().join("dir/sub")).unwrap();
         std::fs::write(repo.path().join("dir/sub/new.txt"), "n").unwrap();
         let _ = repo.commit_files(
@@ -879,8 +901,7 @@ mod git_integration {
         );
         let head = repo.delete_file_commit("z.txt", "delete z");
 
-        let paths = compute(&sha(&base), &sha(&head), repo.path())
-            .expect("compute must succeed");
+        let paths = compute(&sha(&base), &sha(&head), repo.path()).expect("compute must succeed");
 
         // Sorted lexicographically, unique. dir/sub/new (A), dir/y (M),
         // z (D). Subdirectory paths must NOT have leading `./` after
@@ -897,7 +918,9 @@ mod git_integration {
 
     #[test]
     fn compute_empty_diff_returns_empty_vec() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let only = repo.commit_file("a.txt", "x", "init");
         let paths = compute(&sha(&only), &sha(&only), repo.path()).unwrap();
@@ -909,21 +932,28 @@ mod git_integration {
         // Regression guard: an earlier `compute` implementation dropped D
         // rows entirely, which would silently widen `effective_allow`
         // checks (a deleted file outside the allowlist would not flag).
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let base = repo.commit_files(&[("keep.txt", "k"), ("gone.txt", "g")], "base");
         let head = repo.delete_file_commit("gone.txt", "delete gone");
 
         let paths = compute(&sha(&base), &sha(&head), repo.path()).unwrap();
-        assert_eq!(paths, vec![PathBuf::from("gone.txt")],
-            "D rows MUST be included — deletions are subject to path scope");
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("gone.txt")],
+            "D rows MUST be included — deletions are subject to path scope"
+        );
     }
 
     // ── is_ancestor ──────────────────────────────────────────────────────
 
     #[test]
     fn is_ancestor_true_for_strict_ancestor() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let a = repo.commit_file("1.txt", "1", "first");
         let b = repo.commit_file("2.txt", "2", "second");
@@ -933,16 +963,22 @@ mod git_integration {
     #[test]
     fn is_ancestor_true_for_same_commit() {
         // git treats a commit as an ancestor of itself (exit 0).
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let a = repo.commit_file("1.txt", "1", "first");
-        assert!(is_ancestor(&sha(&a), &sha(&a), repo.path()).unwrap(),
-            "a commit MUST be its own ancestor (git contract)");
+        assert!(
+            is_ancestor(&sha(&a), &sha(&a), repo.path()).unwrap(),
+            "a commit MUST be its own ancestor (git contract)"
+        );
     }
 
     #[test]
     fn is_ancestor_false_for_unrelated_branch_tips() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let _ = repo.commit_file("base.txt", "0", "base");
         repo.create_branch("feature");
@@ -952,29 +988,36 @@ mod git_integration {
 
         // feature_tip is not an ancestor of main_tip (diverged).
         assert!(!is_ancestor(&sha(&feature_tip), &sha(&main_tip), repo.path()).unwrap());
-        assert!(!is_ancestor(&sha(&main_tip),    &sha(&feature_tip), repo.path()).unwrap());
+        assert!(!is_ancestor(&sha(&main_tip), &sha(&feature_tip), repo.path()).unwrap());
     }
 
     // ── rev_parse_parent ─────────────────────────────────────────────────
 
     #[test]
     fn rev_parse_parent_returns_first_parent() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let parent_hex = repo.commit_file("a.txt", "1", "first");
-        let child_hex  = repo.commit_file("b.txt", "2", "second");
+        let child_hex = repo.commit_file("b.txt", "2", "second");
         let parent_resolved = rev_parse_parent(&sha(&child_hex), repo.path()).unwrap();
         assert_eq!(parent_resolved.as_str(), parent_hex);
     }
 
     #[test]
     fn rev_parse_parent_on_root_commit_returns_head_is_root_commit() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let root = repo.commit_file("a.txt", "1", "root");
         let err = rev_parse_parent(&sha(&root), repo.path()).unwrap_err();
         assert!(
-            matches!(err, VcsError::HeadIsRootCommit | VcsError::ShaNotFound { .. }),
+            matches!(
+                err,
+                VcsError::HeadIsRootCommit | VcsError::ShaNotFound { .. }
+            ),
             "root commit MUST surface as HeadIsRootCommit (preferred) or ShaNotFound \
              depending on git version, got {err:?}"
         );
@@ -982,13 +1025,20 @@ mod git_integration {
 
     #[test]
     fn rev_parse_parent_unknown_sha_surfaces_typed_error() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let _ = repo.commit_file("a.txt", "x", "init");
         let bogus = sha(&"e".repeat(40));
         let err = rev_parse_parent(&bogus, repo.path()).unwrap_err();
         assert!(
-            matches!(err, VcsError::ShaNotFound { .. } | VcsError::HeadIsRootCommit | VcsError::GitError { .. }),
+            matches!(
+                err,
+                VcsError::ShaNotFound { .. }
+                    | VcsError::HeadIsRootCommit
+                    | VcsError::GitError { .. }
+            ),
             "unknown SHA MUST surface a typed error, got {err:?}"
         );
     }
@@ -997,7 +1047,9 @@ mod git_integration {
 
     #[test]
     fn topology_check_passes_on_linear_history() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let base = repo.commit_file("a.txt", "1", "first");
         let head = repo.commit_file("b.txt", "2", "second");
@@ -1007,7 +1059,9 @@ mod git_integration {
 
     #[test]
     fn topology_check_passes_on_empty_range() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let only = repo.commit_file("a.txt", "1", "init");
         topology_check(&sha(&only), &sha(&only), repo.path())
@@ -1016,7 +1070,9 @@ mod git_integration {
 
     #[test]
     fn topology_check_rejects_merge_commit_in_range() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let base = repo.commit_file("base.txt", "0", "base");
         repo.create_branch("feature");
@@ -1028,8 +1084,10 @@ mod git_integration {
         let err = topology_check(&sha(&base), &sha(&merge), repo.path()).unwrap_err();
         match err {
             VcsError::MergeCommitInRange { merge_count } => {
-                assert_eq!(merge_count, 1,
-                    "exactly one merge commit (--no-ff) was created");
+                assert_eq!(
+                    merge_count, 1,
+                    "exactly one merge commit (--no-ff) was created"
+                );
             }
             other => panic!("expected MergeCommitInRange, got {other:?}"),
         }
@@ -1043,7 +1101,9 @@ mod git_integration {
 
     #[test]
     fn end_to_end_compute_then_check_paths_against_glob_allowlist() {
-        if skip_if_no_git() { return; }
+        if skip_if_no_git() {
+            return;
+        }
         let repo = GitRepo::init();
         let base = repo.commit_file("src/lib.rs", "fn main(){}", "init src/lib.rs");
 
@@ -1051,10 +1111,8 @@ mod git_integration {
         // `src/**` allowlist.
         std::fs::create_dir_all(repo.path().join("src")).unwrap();
         std::fs::write(repo.path().join("src/util.rs"), "// util").unwrap();
-        let head_in_scope = repo.commit_files(
-            &[("src/util.rs", "// util")],
-            "add src/util.rs (in scope)",
-        );
+        let head_in_scope =
+            repo.commit_files(&[("src/util.rs", "// util")], "add src/util.rs (in scope)");
 
         let in_scope_paths = compute(&sha(&base), &sha(&head_in_scope), repo.path())
             .expect("compute on in-scope diff must succeed");
@@ -1065,8 +1123,10 @@ mod git_integration {
         // this test pins the same matching semantics path-scope enforces.
         let pat = glob::Pattern::new("src/**").expect("glob compile");
         for p in &in_scope_paths {
-            assert!(pat.matches_path(p),
-                "in-scope path {p:?} MUST match the glob {pat:?}");
+            assert!(
+                pat.matches_path(p),
+                "in-scope path {p:?} MUST match the glob {pat:?}"
+            );
         }
 
         // Now make a change OUTSIDE src/ — should NOT match the allowlist.
@@ -1083,7 +1143,9 @@ mod git_integration {
         // enforcement, when fed real diff output, sees the violator.
         assert!(out_of_scope_paths.contains(&PathBuf::from("README.md")));
         let any_violation = out_of_scope_paths.iter().any(|p| !pat.matches_path(p));
-        assert!(any_violation,
-            "real-diff path-scope smoke MUST find at least one path outside `src/**`");
+        assert!(
+            any_violation,
+            "real-diff path-scope smoke MUST find at least one path outside `src/**`"
+        );
     }
 }

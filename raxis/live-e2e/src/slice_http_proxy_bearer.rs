@@ -20,17 +20,16 @@
 //! resolve a real credential through `CredentialBackend`; the
 //! injection plumbing is what this slice exercises end-to-end.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_http::{
-    AuthMode, HttpProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig,
-    restriction::Restrictions,
+    restriction::Restrictions, AuthMode, HttpProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -39,7 +38,7 @@ use crate::env_file::EnvMap;
 const TEST_BEARER: &str = "raxis-live-e2e-bearer-NOT-A-REAL-SECRET";
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -56,33 +55,43 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+        &self,
+        name: &CredentialName,
+        _v: CredentialValue,
+        _a: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub(crate) async fn run(_env: &EnvMap) -> Result<()> {
     tracing::info!("slice http-proxy-bearer: starting");
     let backend = Arc::new(LiveBackend {
-        value:    TEST_BEARER.as_bytes().to_vec(),
+        value: TEST_BEARER.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
-        upstream_url:    "https://httpbin.org/".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
+        upstream_url: "https://httpbin.org/".to_owned(),
         credential_name: CredentialName::new("live-e2e"),
-        auth_mode:       AuthMode::Bearer,
-        consumer:        OwnedConsumer::new("credential_proxy", "live-e2e:http:0"),
-        restrictions:    Restrictions::default(),
+        auth_mode: AuthMode::Bearer,
+        consumer: OwnedConsumer::new("credential_proxy", "live-e2e:http:0"),
+        restrictions: Restrictions::default(),
     };
-    let proxy = HttpProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
+    let proxy = HttpProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel))
+        .await
         .map_err(|e| anyhow!("HttpProxy::bind: {e}"))?;
     let addr = proxy.local_addr()?;
     tokio::spawn(proxy.serve());
@@ -100,7 +109,9 @@ pub(crate) async fn run(_env: &EnvMap) -> Result<()> {
     s.read_to_end(&mut buf).await?;
 
     // Find the header/body boundary.
-    let header_end = buf.windows(4).position(|w| w == b"\r\n\r\n")
+    let header_end = buf
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
         .ok_or_else(|| anyhow!("no end-of-headers in response"))?;
     let head = std::str::from_utf8(&buf[..header_end]).unwrap_or("");
     let body = &buf[header_end + 4..];
@@ -110,19 +121,25 @@ pub(crate) async fn run(_env: &EnvMap) -> Result<()> {
     if !status_line.starts_with("HTTP/1.1 200") {
         return Err(anyhow!(
             "expected 200 from httpbin via proxy; got {status_line:?}; \
-             body={:?}", String::from_utf8_lossy(body),
+             body={:?}",
+            String::from_utf8_lossy(body),
         ));
     }
 
     // httpbin returns JSON with the request headers it observed in
     // `headers`. Validate the proxy's behaviour from there.
-    let json: serde_json::Value = serde_json::from_slice(body)
-        .map_err(|e| anyhow!("body is not JSON: {e}; body={:?}",
-            String::from_utf8_lossy(body)))?;
-    let headers = json.get("headers")
+    let json: serde_json::Value = serde_json::from_slice(body).map_err(|e| {
+        anyhow!(
+            "body is not JSON: {e}; body={:?}",
+            String::from_utf8_lossy(body)
+        )
+    })?;
+    let headers = json
+        .get("headers")
         .and_then(|h| h.as_object())
         .ok_or_else(|| anyhow!("no .headers in {json}"))?;
-    let auth = headers.get("Authorization")
+    let auth = headers
+        .get("Authorization")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("upstream did not see Authorization; saw {:?}", headers))?;
     if auth != format!("Bearer {TEST_BEARER}") {
@@ -130,7 +147,8 @@ pub(crate) async fn run(_env: &EnvMap) -> Result<()> {
             "Authorization header was not injected/correct; got {auth:?}",
         ));
     }
-    let host = headers.get("Host")
+    let host = headers
+        .get("Host")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow!("upstream saw no Host header"))?;
     if host != "httpbin.org" {

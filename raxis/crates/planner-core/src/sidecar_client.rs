@@ -128,9 +128,7 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
-use crate::model::{
-    ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError, Usage,
-};
+use crate::model::{ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError, Usage};
 use crate::streaming::{
     ContentBlockDeltaPayload, SseParser, StreamEvent, DEFAULT_STREAM_CHANNEL_CAP,
     DEFAULT_STREAM_IDLE_TIMEOUT,
@@ -148,7 +146,7 @@ pub struct SidecarMessage {
     /// `"user"` or `"assistant"`. The sidecar protocol treats these
     /// as opaque strings; the sidecar adapter is responsible for
     /// translating them into the upstream provider's role taxonomy.
-    pub role:    String,
+    pub role: String,
     /// Flattened text content. Tool-result blocks are rendered as a
     /// JSON-encoded string so the sidecar protocol stays
     /// schema-stable across providers with diverse tool-result wire
@@ -162,10 +160,10 @@ pub struct SidecarMessage {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SidecarToolDecl {
     /// Tool short name (e.g. `"edit_file"`).
-    pub name:         String,
+    pub name: String,
     /// Operator-supplied description; truncated to 800 characters by
     /// the planner before dispatch.
-    pub description:  String,
+    pub description: String,
     /// JSON Schema describing the tool input shape. Pass-through —
     /// the sidecar renders this into the provider's wire format.
     pub input_schema: serde_json::Value,
@@ -176,25 +174,25 @@ pub struct SidecarToolDecl {
 pub struct SidecarRequest {
     /// UUIDv4 mirroring the `X-Raxis-Request-Id` header. Bound into
     /// the per-request HMAC signing input.
-    pub request_id:    String,
+    pub request_id: String,
     /// Operator-declared provider id (matches the `[providers]`
     /// entry's `provider_id` field).
-    pub provider_id:   String,
+    pub provider_id: String,
     /// Model id resolved from `RAXIS_MODEL_ID`.
-    pub model_id:      String,
+    pub model_id: String,
     /// System prompt assembled by the dispatch loop. Empty string if
     /// the planner does not configure a system prompt for this turn.
     pub system_prompt: String,
     /// Conversation history (oldest first).
-    pub messages:      Vec<SidecarMessage>,
+    pub messages: Vec<SidecarMessage>,
     /// Tool catalogue available for this turn.
-    pub tools:         Vec<SidecarToolDecl>,
+    pub tools: Vec<SidecarToolDecl>,
     /// Per-turn output ceiling. The sidecar SHOULD honour this; the
     /// kernel still enforces the cumulative ceiling via C1.
-    pub max_tokens:    u32,
+    pub max_tokens: u32,
     /// Optional temperature. Sidecars MAY ignore.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub temperature:   Option<f32>,
+    pub temperature: Option<f32>,
 }
 
 /// Tool-use block produced by the upstream provider, deserialised
@@ -204,10 +202,10 @@ pub struct SidecarToolCall {
     /// Provider-assigned tool-call identifier. Must round-trip back
     /// in the planner's next turn as `tool_use_id` so the provider
     /// can correlate the outcome.
-    pub id:    String,
+    pub id: String,
     /// Tool short name. MUST match a registered tool — unknown names
     /// surface as `DispatchError::UnknownTool` in the dispatch loop.
-    pub name:  String,
+    pub name: String,
     /// Tool input parsed by the sidecar. Pass-through to the
     /// in-VM tool implementation.
     pub input: serde_json::Value,
@@ -236,7 +234,7 @@ pub struct SidecarToolCall {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SidecarStreamMessageStart {
     /// Upstream-minted message id (mirrors `MessageResponse::id`).
-    pub id:    String,
+    pub id: String,
     /// Resolved model id (mirrors `MessageResponse::model`).
     pub model: String,
 }
@@ -245,7 +243,7 @@ pub struct SidecarStreamMessageStart {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SidecarStreamBlockStart {
     /// Index of the block within the assistant turn.
-    pub index:      u32,
+    pub index: u32,
     /// Block discriminator (e.g. `"text"` or `"tool_use"`).
     pub block_kind: String,
 }
@@ -309,13 +307,13 @@ pub struct SidecarStreamStop {
 #[derive(Debug, Clone, Deserialize)]
 pub struct SidecarStreamComplete {
     /// Original request id from the planner. Echoed for binding.
-    pub request_id:    String,
+    pub request_id: String,
     /// Original request timestamp from the planner. Echoed for
     /// binding.
-    pub timestamp_ms:  u64,
+    pub timestamp_ms: u64,
     /// The full SidecarResponse payload — same wire shape as
     /// `POST /v1/complete` returns.
-    pub response:      SidecarResponse,
+    pub response: SidecarResponse,
     /// Lowercase-hex HMAC over the canonicalised triple.
     pub signature_hex: String,
 }
@@ -325,24 +323,24 @@ pub struct SidecarStreamComplete {
 pub struct SidecarResponse {
     /// Free-form assistant text. `None` when the response is a pure
     /// tool-use turn (matches Anthropic's `stop_reason = "tool_use"`).
-    pub response_text:        Option<String>,
+    pub response_text: Option<String>,
     /// Tool-use blocks emitted by the model.
     #[serde(default)]
-    pub tool_calls:           Vec<SidecarToolCall>,
+    pub tool_calls: Vec<SidecarToolCall>,
     /// Input tokens reported by the upstream provider. Folded into
     /// the dispatch loop's cumulative budget tracker (C1).
-    pub tokens_in:            u32,
+    pub tokens_in: u32,
     /// Output tokens reported by the upstream provider.
-    pub tokens_out:           u32,
+    pub tokens_out: u32,
     /// Model id the upstream actually served. Useful when the sidecar
     /// silently routes between fast/slow tiers.
-    pub model_id_actual:      String,
+    pub model_id_actual: String,
     /// Sidecar-provided correlation id (e.g. Slack `ts`, Cohere
     /// `request_id`). Stored in the audit event by the dispatch loop.
-    pub provider_request_id:  Option<String>,
+    pub provider_request_id: Option<String>,
     /// Stable mapping per `extensibility-traits.md §9A.5`:
     /// `"end_turn"` / `"tool_use"` / `"max_tokens"` / `"stop"`.
-    pub stop_reason:          String,
+    pub stop_reason: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -361,19 +359,19 @@ pub struct SidecarResponse {
 /// [`crate::ModelClient::create_message_stream`] body that wraps
 /// the buffered call.
 pub struct SidecarModelClient {
-    http_fetch:     std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     /// Embedded `reqwest::Client` retained for the streaming path.
     streaming_http: reqwest::Client,
     /// Base URL (no trailing slash). The client appends `/v1/complete`
     /// on every dispatch.
-    endpoint:    String,
+    endpoint: String,
     /// Operator-declared provider id stamped into the request body.
     provider_id: String,
     /// 32-byte hex secret. Decoded once at construction time. **NEVER
     /// surfaced through the manual `Debug` impl** so a planner-side
     /// log assertion cannot inadvertently print operator-signed key
     /// material to disk.
-    secret:      Vec<u8>,
+    secret: Vec<u8>,
     /// Per-request total deadline (connect + transfer + read).
     request_timeout: Duration,
 }
@@ -381,9 +379,9 @@ pub struct SidecarModelClient {
 impl std::fmt::Debug for SidecarModelClient {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("SidecarModelClient")
-            .field("endpoint",        &self.endpoint)
-            .field("provider_id",     &self.provider_id)
-            .field("secret_len",      &self.secret.len())
+            .field("endpoint", &self.endpoint)
+            .field("provider_id", &self.provider_id)
+            .field("secret_len", &self.secret.len())
             .field("request_timeout", &self.request_timeout)
             .finish()
     }
@@ -432,9 +430,9 @@ impl SidecarModelClient {
     /// failures surface immediately at construction so a misformed
     /// secret cannot reach the dispatch loop.
     pub fn new(
-        endpoint:    impl Into<String>,
+        endpoint: impl Into<String>,
         provider_id: impl Into<String>,
-        secret_hex:  &str,
+        secret_hex: &str,
     ) -> Result<Self, SidecarConstructError> {
         Self::with_http_fetch(
             endpoint,
@@ -452,13 +450,13 @@ impl SidecarModelClient {
     /// identical — credentials inside the body bytes do not see
     /// the kernel-mediated boundary as a special case.
     pub fn with_http_fetch(
-        endpoint:    impl Into<String>,
+        endpoint: impl Into<String>,
         provider_id: impl Into<String>,
-        secret_hex:  &str,
-        http_fetch:  std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+        secret_hex: &str,
+        http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     ) -> Result<Self, SidecarConstructError> {
-        let secret = hex::decode(secret_hex)
-            .map_err(|e| SidecarConstructError::SecretHex(e.to_string()))?;
+        let secret =
+            hex::decode(secret_hex).map_err(|e| SidecarConstructError::SecretHex(e.to_string()))?;
         // 32 bytes is the operator-grade default. Anything shorter
         // weakens HMAC security; anything longer is fine but should
         // be flagged so the operator can audit their key-mint
@@ -466,7 +464,7 @@ impl SidecarModelClient {
         if secret.len() < 16 {
             return Err(SidecarConstructError::SecretTooShort {
                 actual: secret.len(),
-                min:    16,
+                min: 16,
             });
         }
 
@@ -505,20 +503,24 @@ impl SidecarModelClient {
     pub async fn health_check(&self) -> Result<(), ModelError> {
         let url = format!("{}/health", self.endpoint);
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "GET",
+            url: &url,
+            method: "GET",
             headers: vec![],
-            body:    Vec::new(),
+            body: Vec::new(),
             timeout: Duration::from_secs(5),
         };
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
         if !(200..300).contains(&resp.status) {
             return Err(ModelError::Upstream {
                 status: resp.status,
-                body:   String::new(),
+                body: String::new(),
             });
         }
         Ok(())
@@ -547,14 +549,11 @@ impl SidecarModelClient {
     fn verify_response_hmac_kv(
         &self,
         expected_request_id: &str,
-        local_ts_ms:         u64,
-        headers:             &[(String, String)],
-        body:                &[u8],
+        local_ts_ms: u64,
+        headers: &[(String, String)],
+        body: &[u8],
     ) -> Result<(), SidecarHmacError> {
-        fn header_get<'a>(
-            hs: &'a [(String, String)],
-            name: &str,
-        ) -> Option<&'a str> {
+        fn header_get<'a>(hs: &'a [(String, String)], name: &str) -> Option<&'a str> {
             hs.iter()
                 .find(|(k, _)| k.eq_ignore_ascii_case(name))
                 .map(|(_, v)| v.as_str())
@@ -565,21 +564,25 @@ impl SidecarModelClient {
         if req_id != expected_request_id {
             return Err(SidecarHmacError::RequestIdMismatch {
                 expected: expected_request_id.to_owned(),
-                got:      req_id.to_owned(),
+                got: req_id.to_owned(),
             });
         }
 
         let ts = header_get(headers, "x-raxis-timestamp")
             .ok_or(SidecarHmacError::MissingResponseTimestamp)?;
-        let server_ts_ms: u64 = ts.parse()
+        let server_ts_ms: u64 = ts
+            .parse()
             .map_err(|e: std::num::ParseIntError| SidecarHmacError::BadTimestamp(e.to_string()))?;
         let drift = local_ts_ms.abs_diff(server_ts_ms);
         if drift > Self::REPLAY_WINDOW_MS {
-            return Err(SidecarHmacError::TimestampOutOfWindow { local_ts_ms, server_ts_ms });
+            return Err(SidecarHmacError::TimestampOutOfWindow {
+                local_ts_ms,
+                server_ts_ms,
+            });
         }
 
-        let supplied_hmac = header_get(headers, "x-raxis-hmac")
-            .ok_or(SidecarHmacError::MissingResponseHmac)?;
+        let supplied_hmac =
+            header_get(headers, "x-raxis-hmac").ok_or(SidecarHmacError::MissingResponseHmac)?;
         let supplied = hex::decode(supplied_hmac)
             .map_err(|e| SidecarHmacError::HmacHexDecode(e.to_string()))?;
 
@@ -605,13 +608,18 @@ impl SidecarModelClient {
     fn verify_response_hmac(
         &self,
         expected_request_id: &str,
-        local_ts_ms:         u64,
-        headers:             &reqwest::header::HeaderMap,
-        body:                &[u8],
+        local_ts_ms: u64,
+        headers: &reqwest::header::HeaderMap,
+        body: &[u8],
     ) -> Result<(), SidecarHmacError> {
         let kv: Vec<(String, String)> = headers
             .iter()
-            .map(|(k, v)| (k.as_str().to_owned(), v.to_str().unwrap_or_default().to_owned()))
+            .map(|(k, v)| {
+                (
+                    k.as_str().to_owned(),
+                    v.to_str().unwrap_or_default().to_owned(),
+                )
+            })
             .collect();
         self.verify_response_hmac_kv(expected_request_id, local_ts_ms, &kv, body)
     }
@@ -631,20 +639,16 @@ pub enum SidecarConstructError {
         /// Number of bytes the operator-supplied secret decoded to.
         actual: usize,
         /// Minimum acceptable HMAC-secret length, in bytes.
-        min:    usize,
+        min: usize,
     },
 }
 
 #[async_trait]
 impl ModelClient for SidecarModelClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
-        let request_id  = uuid::Uuid::new_v4().to_string();
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
+        let request_id = uuid::Uuid::new_v4().to_string();
         let body_struct = build_sidecar_request(&request_id, &self.provider_id, req);
-        let body = serde_json::to_vec(&body_struct)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let body = serde_json::to_vec(&body_struct).map_err(|e| ModelError::Json(e.to_string()))?;
 
         // HMAC stamping. Use millisecond resolution so a sidecar
         // running on the same host with sub-second clock skew still
@@ -658,22 +662,26 @@ impl ModelClient for SidecarModelClient {
         let url = format!("{}/v1/complete", self.endpoint);
         let timestamp_str = timestamp_ms.to_string();
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "POST",
+            url: &url,
+            method: "POST",
             headers: vec![
-                ("content-type",         "application/json".to_owned()),
-                ("x-raxis-request-id",   request_id.clone()),
-                ("x-raxis-timestamp",    timestamp_str),
-                ("x-raxis-hmac",         hmac_hex),
+                ("content-type", "application/json".to_owned()),
+                ("x-raxis-request-id", request_id.clone()),
+                ("x-raxis-timestamp", timestamp_str),
+                ("x-raxis-hmac", hmac_hex),
             ],
             body,
             timeout: self.request_timeout,
         };
 
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             let snippet = if resp.body.len() <= 4096 {
@@ -687,7 +695,7 @@ impl ModelClient for SidecarModelClient {
             };
             return Err(ModelError::Upstream {
                 status: resp.status,
-                body:   snippet,
+                body: snippet,
             });
         }
 
@@ -696,17 +704,14 @@ impl ModelClient for SidecarModelClient {
         // — the dispatch loop will retry against the same sidecar
         // (a transient handshake glitch may recover) and the
         // circuit breaker will open after the configured threshold.
-        if let Err(e) = self.verify_response_hmac_kv(
-            &request_id,
-            timestamp_ms,
-            &resp.headers,
-            &resp.body,
-        ) {
+        if let Err(e) =
+            self.verify_response_hmac_kv(&request_id, timestamp_ms, &resp.headers, &resp.body)
+        {
             return Err(ModelError::Transport(format!("sidecar HMAC: {e}")));
         }
 
-        let parsed: SidecarResponse = serde_json::from_slice(&resp.body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let parsed: SidecarResponse =
+            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
 
         Ok(sidecar_response_to_message_response(parsed, &request_id))
     }
@@ -747,10 +752,9 @@ impl ModelClient for SidecarModelClient {
         &self,
         req: &MessageRequest,
     ) -> Result<tokio::sync::mpsc::Receiver<StreamEvent>, ModelError> {
-        let request_id   = uuid::Uuid::new_v4().to_string();
-        let body_struct  = build_sidecar_request(&request_id, &self.provider_id, req);
-        let body         = serde_json::to_vec(&body_struct)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let request_id = uuid::Uuid::new_v4().to_string();
+        let body_struct = build_sidecar_request(&request_id, &self.provider_id, req);
+        let body = serde_json::to_vec(&body_struct).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let timestamp_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -759,25 +763,31 @@ impl ModelClient for SidecarModelClient {
         let hmac_hex = self.compute_hmac(&request_id, timestamp_ms, &body);
 
         let url = format!("{}/v1/stream", self.endpoint);
-        let mut resp = self.streaming_http
+        let mut resp = self
+            .streaming_http
             .post(&url)
             .timeout(self.request_timeout)
             .header("content-type", "application/json")
-            .header("accept",       "text/event-stream")
+            .header("accept", "text/event-stream")
             .header("x-raxis-request-id", &request_id)
-            .header("x-raxis-timestamp",  timestamp_ms.to_string())
-            .header("x-raxis-hmac",       hmac_hex)
+            .header("x-raxis-timestamp", timestamp_ms.to_string())
+            .header("x-raxis-hmac", hmac_hex)
             .body(body)
             .send()
             .await
             .map_err(|e| {
-                if e.is_timeout() { ModelError::Timeout(self.request_timeout) }
-                else              { ModelError::Transport(e.to_string()) }
+                if e.is_timeout() {
+                    ModelError::Timeout(self.request_timeout)
+                } else {
+                    ModelError::Transport(e.to_string())
+                }
             })?;
 
         let status = resp.status();
         if !status.is_success() {
-            let bytes = resp.bytes().await
+            let bytes = resp
+                .bytes()
+                .await
                 .map_err(|e| ModelError::Transport(e.to_string()))?;
             let snippet = if bytes.len() <= 4096 {
                 String::from_utf8_lossy(&bytes).into_owned()
@@ -790,38 +800,42 @@ impl ModelClient for SidecarModelClient {
             };
             return Err(ModelError::Upstream {
                 status: status.as_u16(),
-                body:   snippet,
+                body: snippet,
             });
         }
 
         let (tx, rx) = tokio::sync::mpsc::channel(DEFAULT_STREAM_CHANNEL_CAP);
-        let idle     = DEFAULT_STREAM_IDLE_TIMEOUT;
-        let secret   = self.secret.clone();
-        let req_id_for_task   = request_id.clone();
-        let req_id_for_synth  = request_id.clone();
-        let request_ts        = timestamp_ms;
+        let idle = DEFAULT_STREAM_IDLE_TIMEOUT;
+        let secret = self.secret.clone();
+        let req_id_for_task = request_id.clone();
+        let req_id_for_synth = request_id.clone();
+        let request_ts = timestamp_ms;
 
         tokio::spawn(async move {
             let mut parser = SseParser::new();
-            let mut agg    = SidecarStreamAggregator::new();
+            let mut agg = SidecarStreamAggregator::new();
             let mut saw_stop = false;
 
             loop {
                 let chunk = tokio::time::timeout(idle, resp.chunk()).await;
                 match chunk {
                     Err(_) => {
-                        let _ = tx.send(StreamEvent::Stop {
-                            stop_reason: Some(format!(
-                                "stream_idle_timeout_after_{}_s",
-                                idle.as_secs(),
-                            )),
-                        }).await;
+                        let _ = tx
+                            .send(StreamEvent::Stop {
+                                stop_reason: Some(format!(
+                                    "stream_idle_timeout_after_{}_s",
+                                    idle.as_secs(),
+                                )),
+                            })
+                            .await;
                         return;
                     }
                     Ok(Err(e)) => {
-                        let _ = tx.send(StreamEvent::Stop {
-                            stop_reason: Some(format!("stream_transport_error: {e}")),
-                        }).await;
+                        let _ = tx
+                            .send(StreamEvent::Stop {
+                                stop_reason: Some(format!("stream_transport_error: {e}")),
+                            })
+                            .await;
                         return;
                     }
                     Ok(Ok(None)) => break, // graceful EOF
@@ -839,10 +853,7 @@ impl ModelClient for SidecarModelClient {
                                         if matches!(ev, StreamEvent::Stop { .. }) {
                                             saw_stop = true;
                                         }
-                                        let is_complete = matches!(
-                                            ev,
-                                            StreamEvent::Complete(_),
-                                        );
+                                        let is_complete = matches!(ev, StreamEvent::Complete(_),);
                                         if tx.send(ev).await.is_err() {
                                             return;
                                         }
@@ -852,11 +863,13 @@ impl ModelClient for SidecarModelClient {
                                     }
                                 }
                                 Err(e) => {
-                                    let _ = tx.send(StreamEvent::Stop {
-                                        stop_reason: Some(format!(
-                                            "stream_aggregator_error: {e}"
-                                        )),
-                                    }).await;
+                                    let _ = tx
+                                        .send(StreamEvent::Stop {
+                                            stop_reason: Some(format!(
+                                                "stream_aggregator_error: {e}"
+                                            )),
+                                        })
+                                        .await;
                                     return;
                                 }
                             }
@@ -868,9 +881,11 @@ impl ModelClient for SidecarModelClient {
             // EOF reached without a `complete` event. Surface a
             // terminal Stop so the dispatch loop sees a clean close.
             if !saw_stop {
-                let _ = tx.send(StreamEvent::Stop {
-                    stop_reason: Some("stream_eof_before_complete".to_owned()),
-                }).await;
+                let _ = tx
+                    .send(StreamEvent::Stop {
+                        stop_reason: Some("stream_eof_before_complete".to_owned()),
+                    })
+                    .await;
             }
         });
 
@@ -883,9 +898,9 @@ impl ModelClient for SidecarModelClient {
 /// (`stream_via_sidecar`) paths share the same request translation
 /// without diverging.
 fn build_sidecar_request(
-    request_id:  &str,
+    request_id: &str,
     provider_id: &str,
-    req:         &MessageRequest,
+    req: &MessageRequest,
 ) -> SidecarRequest {
     let mut messages: Vec<SidecarMessage> = Vec::with_capacity(req.messages.len());
     for m in &req.messages {
@@ -902,7 +917,11 @@ fn build_sidecar_request(
                     });
                     text_parts.push(env.to_string());
                 }
-                ContentBlock::ToolResult { tool_use_id, content, is_error } => {
+                ContentBlock::ToolResult {
+                    tool_use_id,
+                    content,
+                    is_error,
+                } => {
                     let env = serde_json::json!({
                         "type":         "tool_result",
                         "tool_use_id":  tool_use_id,
@@ -915,26 +934,30 @@ fn build_sidecar_request(
             }
         }
         messages.push(SidecarMessage {
-            role:    m.role.clone(),
+            role: m.role.clone(),
             content: text_parts.join("\n"),
         });
     }
 
-    let tools: Vec<SidecarToolDecl> = req.tools.iter().map(|t| SidecarToolDecl {
-        name:         t.name.clone(),
-        description:  t.description.clone(),
-        input_schema: t.input_schema.clone(),
-    }).collect();
+    let tools: Vec<SidecarToolDecl> = req
+        .tools
+        .iter()
+        .map(|t| SidecarToolDecl {
+            name: t.name.clone(),
+            description: t.description.clone(),
+            input_schema: t.input_schema.clone(),
+        })
+        .collect();
 
     SidecarRequest {
-        request_id:    request_id.to_owned(),
-        provider_id:   provider_id.to_owned(),
-        model_id:      req.model.clone(),
+        request_id: request_id.to_owned(),
+        provider_id: provider_id.to_owned(),
+        model_id: req.model.clone(),
         system_prompt: req.system.clone().unwrap_or_default(),
         messages,
         tools,
-        max_tokens:    req.max_tokens,
-        temperature:   req.temperature,
+        max_tokens: req.max_tokens,
+        temperature: req.temperature,
     }
 }
 
@@ -945,7 +968,7 @@ fn build_sidecar_request(
 /// payload — which is the planner-side leg of `INV-PROVIDER-04`
 /// (atomic per-turn delivery).
 fn sidecar_response_to_message_response(
-    parsed:     SidecarResponse,
+    parsed: SidecarResponse,
     request_id: &str,
 ) -> MessageResponse {
     let mut content: Vec<ContentBlock> = Vec::new();
@@ -956,27 +979,31 @@ fn sidecar_response_to_message_response(
     }
     for tc in &parsed.tool_calls {
         content.push(ContentBlock::ToolUse {
-            id:    tc.id.clone(),
-            name:  tc.name.clone(),
+            id: tc.id.clone(),
+            name: tc.name.clone(),
             input: tc.input.clone(),
         });
     }
     if content.is_empty() {
-        content.push(ContentBlock::Text { text: String::new() });
+        content.push(ContentBlock::Text {
+            text: String::new(),
+        });
     }
-    let synthetic_id = parsed.provider_request_id.clone()
+    let synthetic_id = parsed
+        .provider_request_id
+        .clone()
         .unwrap_or_else(|| format!("sidecar-{request_id}"));
     MessageResponse {
-        id:    synthetic_id,
-        kind:  "message".to_owned(),
-        role:  "assistant".to_owned(),
+        id: synthetic_id,
+        kind: "message".to_owned(),
+        role: "assistant".to_owned(),
         content,
         stop_reason: Some(parsed.stop_reason),
         usage: Usage {
-            input_tokens:                parsed.tokens_in,
-            output_tokens:               parsed.tokens_out,
+            input_tokens: parsed.tokens_in,
+            output_tokens: parsed.tokens_out,
             cache_creation_input_tokens: 0,
-            cache_read_input_tokens:     0,
+            cache_read_input_tokens: 0,
         },
         model: parsed.model_id_actual,
     }
@@ -1005,32 +1032,32 @@ fn hmac_sha256_hex(secret: &[u8], request_id: &str, timestamp_ms: u64, body: &[u
 /// shape.
 struct SidecarStreamAggregator {
     pending: std::collections::HashMap<u32, PendingSidecarBlock>,
-    content:     Vec<ContentBlock>,
-    id:          Option<String>,
-    model:       Option<String>,
+    content: Vec<ContentBlock>,
+    id: Option<String>,
+    model: Option<String>,
     stop_reason: Option<String>,
-    usage:       Usage,
+    usage: Usage,
 }
 
 #[derive(Default)]
 struct PendingSidecarBlock {
-    kind:        String,
-    text:        String,
-    json_buf:    String,
+    kind: String,
+    text: String,
+    json_buf: String,
     /// Tool-use id (only present when `kind == "tool_use"`).
-    tool_id:     Option<String>,
-    tool_name:   Option<String>,
+    tool_id: Option<String>,
+    tool_name: Option<String>,
 }
 
 impl SidecarStreamAggregator {
     fn new() -> Self {
         Self {
             pending: std::collections::HashMap::new(),
-            content:     Vec::new(),
-            id:          None,
-            model:       None,
+            content: Vec::new(),
+            id: None,
+            model: None,
             stop_reason: None,
-            usage:       Usage::default(),
+            usage: Usage::default(),
         }
     }
 
@@ -1041,33 +1068,36 @@ impl SidecarStreamAggregator {
     /// through on every call to keep the call site simple.
     fn ingest(
         &mut self,
-        frame:           &crate::streaming::SseFrame,
-        request_id:      &str,
-        request_ts_ms:   u64,
-        secret:          &[u8],
-        synth_id_base:   &str,
+        frame: &crate::streaming::SseFrame,
+        request_id: &str,
+        request_ts_ms: u64,
+        secret: &[u8],
+        synth_id_base: &str,
     ) -> Result<Vec<StreamEvent>, ModelError> {
         let mut out = Vec::new();
         match frame.event.as_str() {
             "message_start" => {
                 let parsed: SidecarStreamMessageStart = serde_json::from_str(&frame.data)
                     .map_err(|e| ModelError::Json(e.to_string()))?;
-                self.id    = Some(parsed.id.clone());
+                self.id = Some(parsed.id.clone());
                 self.model = Some(parsed.model.clone());
                 out.push(StreamEvent::MessageStart {
-                    id:    parsed.id,
+                    id: parsed.id,
                     model: parsed.model,
                 });
             }
             "content_block_start" => {
                 let parsed: SidecarStreamBlockStart = serde_json::from_str(&frame.data)
                     .map_err(|e| ModelError::Json(e.to_string()))?;
-                self.pending.insert(parsed.index, PendingSidecarBlock {
-                    kind: parsed.block_kind.clone(),
-                    ..PendingSidecarBlock::default()
-                });
+                self.pending.insert(
+                    parsed.index,
+                    PendingSidecarBlock {
+                        kind: parsed.block_kind.clone(),
+                        ..PendingSidecarBlock::default()
+                    },
+                );
                 out.push(StreamEvent::ContentBlockStart {
-                    index:      parsed.index,
+                    index: parsed.index,
                     block_kind: parsed.block_kind,
                 });
             }
@@ -1087,9 +1117,7 @@ impl SidecarStreamAggregator {
                         entry.json_buf.push_str(&partial_json);
                         out.push(StreamEvent::ContentBlockDelta {
                             index: parsed.index,
-                            delta: ContentBlockDeltaPayload::InputJsonDelta {
-                                partial_json,
-                            },
+                            delta: ContentBlockDeltaPayload::InputJsonDelta { partial_json },
                         });
                     }
                 }
@@ -1108,8 +1136,8 @@ impl SidecarStreamAggregator {
                                     .map_err(|e| ModelError::Json(e.to_string()))?
                             };
                             ContentBlock::ToolUse {
-                                id:    p.tool_id.unwrap_or_default(),
-                                name:  p.tool_name.unwrap_or_default(),
+                                id: p.tool_id.unwrap_or_default(),
+                                name: p.tool_name.unwrap_or_default(),
                                 input,
                             }
                         }
@@ -1117,7 +1145,9 @@ impl SidecarStreamAggregator {
                     };
                     self.content.push(block);
                 }
-                out.push(StreamEvent::ContentBlockStop { index: parsed.index });
+                out.push(StreamEvent::ContentBlockStop {
+                    index: parsed.index,
+                });
             }
             "usage" => {
                 let parsed: Usage = serde_json::from_str(&frame.data)
@@ -1129,7 +1159,9 @@ impl SidecarStreamAggregator {
                 let parsed: SidecarStreamStop = serde_json::from_str(&frame.data)
                     .map_err(|e| ModelError::Json(e.to_string()))?;
                 self.stop_reason = parsed.stop_reason.clone();
-                out.push(StreamEvent::Stop { stop_reason: parsed.stop_reason });
+                out.push(StreamEvent::Stop {
+                    stop_reason: parsed.stop_reason,
+                });
             }
             "complete" => {
                 let parsed: SidecarStreamComplete = serde_json::from_str(&frame.data)
@@ -1142,7 +1174,8 @@ impl SidecarStreamAggregator {
                 if parsed.request_id != request_id {
                     return Err(ModelError::Transport(format!(
                         "sidecar stream complete request_id mismatch: expected `{request_id}`, \
-                         got `{}`", parsed.request_id,
+                         got `{}`",
+                        parsed.request_id,
                     )));
                 }
                 if parsed.timestamp_ms != request_ts_ms {
@@ -1160,9 +1193,8 @@ impl SidecarStreamAggregator {
                 // signatures to match.
                 let canonical = serde_json::to_vec(&parsed.response)
                     .map_err(|e| ModelError::Json(e.to_string()))?;
-                let expected = hmac_sha256_hex(
-                    secret, &parsed.request_id, parsed.timestamp_ms, &canonical,
-                );
+                let expected =
+                    hmac_sha256_hex(secret, &parsed.request_id, parsed.timestamp_ms, &canonical);
                 if !constant_time_eq(expected.as_bytes(), parsed.signature_hex.as_bytes()) {
                     return Err(ModelError::Transport(
                         "sidecar stream complete signature mismatch".to_owned(),
@@ -1214,17 +1246,17 @@ mod tests {
 
     fn fixture_request() -> MessageRequest {
         MessageRequest {
-            model:       "kombai-v1".to_owned(),
-            max_tokens:  1024,
-            system:      Some("You are a tester.".to_owned()),
+            model: "kombai-v1".to_owned(),
+            max_tokens: 1024,
+            system: Some("You are a tester.".to_owned()),
             messages: vec![Message {
-                role:    "user".to_owned(),
+                role: "user".to_owned(),
                 content: vec![ContentBlock::Text {
                     text: "say hi".to_owned(),
                 }],
             }],
             tools: vec![ToolSpec {
-                name:        "echo".to_owned(),
+                name: "echo".to_owned(),
                 description: "echoes a string".to_owned(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
@@ -1235,41 +1267,26 @@ mod tests {
 
     #[test]
     fn construct_rejects_non_hex_secret() {
-        let err = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            "not-a-hex-string",
-        ).unwrap_err();
+        let err = SidecarModelClient::new("http://localhost:9100", "test", "not-a-hex-string")
+            .unwrap_err();
         assert!(matches!(err, SidecarConstructError::SecretHex(_)));
     }
 
     #[test]
     fn construct_rejects_short_secret() {
-        let err = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            "00",
-        ).unwrap_err();
+        let err = SidecarModelClient::new("http://localhost:9100", "test", "00").unwrap_err();
         assert!(matches!(err, SidecarConstructError::SecretTooShort { .. }));
     }
 
     #[test]
     fn construct_strips_trailing_slash() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100/",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100/", "test", TEST_SECRET_HEX).unwrap();
         assert_eq!(c.endpoint, "http://localhost:9100");
     }
 
     #[test]
     fn compute_hmac_is_deterministic() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let h1 = c.compute_hmac("rid", 1234567890, b"body");
         let h2 = c.compute_hmac("rid", 1234567890, b"body");
         assert_eq!(h1, h2);
@@ -1281,11 +1298,7 @@ mod tests {
 
     #[test]
     fn compute_hmac_diverges_on_request_id_change() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let h1 = c.compute_hmac("rid-a", 1, b"body");
         let h2 = c.compute_hmac("rid-b", 1, b"body");
         assert_ne!(h1, h2);
@@ -1293,11 +1306,7 @@ mod tests {
 
     #[test]
     fn compute_hmac_diverges_on_timestamp_change() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let h1 = c.compute_hmac("rid", 1, b"body");
         let h2 = c.compute_hmac("rid", 2, b"body");
         assert_ne!(h1, h2);
@@ -1305,11 +1314,7 @@ mod tests {
 
     #[test]
     fn verify_response_hmac_round_trips() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let body = b"resp-body";
         let ts: u64 = 5_000_000;
         let req_id = "test-req-id";
@@ -1318,18 +1323,14 @@ mod tests {
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-raxis-request-id", req_id.parse().unwrap());
         headers.insert("x-raxis-timestamp", ts.to_string().parse().unwrap());
-        headers.insert("x-raxis-hmac",      h.parse().unwrap());
+        headers.insert("x-raxis-hmac", h.parse().unwrap());
 
         c.verify_response_hmac(req_id, ts, &headers, body).unwrap();
     }
 
     #[test]
     fn verify_response_hmac_rejects_outside_window() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let body = b"resp-body";
         let local_ts: u64 = 5_000_000;
         // Server clock 60s behind local — outside the 30s window.
@@ -1339,48 +1340,46 @@ mod tests {
 
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-raxis-request-id", req_id.parse().unwrap());
-        headers.insert("x-raxis-timestamp",  server_ts.to_string().parse().unwrap());
-        headers.insert("x-raxis-hmac",       h.parse().unwrap());
+        headers.insert("x-raxis-timestamp", server_ts.to_string().parse().unwrap());
+        headers.insert("x-raxis-hmac", h.parse().unwrap());
 
-        let err = c.verify_response_hmac(req_id, local_ts, &headers, body).unwrap_err();
+        let err = c
+            .verify_response_hmac(req_id, local_ts, &headers, body)
+            .unwrap_err();
         assert!(matches!(err, SidecarHmacError::TimestampOutOfWindow { .. }));
     }
 
     #[test]
     fn verify_response_hmac_rejects_request_id_mismatch() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let body = b"b";
         let ts: u64 = 1;
         let h = c.compute_hmac("expected", ts, body);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-raxis-request-id", "different".parse().unwrap());
-        headers.insert("x-raxis-timestamp",  ts.to_string().parse().unwrap());
-        headers.insert("x-raxis-hmac",       h.parse().unwrap());
-        let err = c.verify_response_hmac("expected", ts, &headers, body).unwrap_err();
+        headers.insert("x-raxis-timestamp", ts.to_string().parse().unwrap());
+        headers.insert("x-raxis-hmac", h.parse().unwrap());
+        let err = c
+            .verify_response_hmac("expected", ts, &headers, body)
+            .unwrap_err();
         assert!(matches!(err, SidecarHmacError::RequestIdMismatch { .. }));
     }
 
     #[test]
     fn verify_response_hmac_rejects_tampered_body() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let original = b"original";
         let ts: u64 = 1;
         let req_id = "rid";
         let h = c.compute_hmac(req_id, ts, original);
         let mut headers = reqwest::header::HeaderMap::new();
         headers.insert("x-raxis-request-id", req_id.parse().unwrap());
-        headers.insert("x-raxis-timestamp",  ts.to_string().parse().unwrap());
-        headers.insert("x-raxis-hmac",       h.parse().unwrap());
+        headers.insert("x-raxis-timestamp", ts.to_string().parse().unwrap());
+        headers.insert("x-raxis-hmac", h.parse().unwrap());
         // Verify a different body — must fail.
-        let err = c.verify_response_hmac(req_id, ts, &headers, b"tampered").unwrap_err();
+        let err = c
+            .verify_response_hmac(req_id, ts, &headers, b"tampered")
+            .unwrap_err();
         assert!(matches!(err, SidecarHmacError::HmacMismatch));
     }
 
@@ -1391,27 +1390,27 @@ mod tests {
         // against a future refactor of `MessageRequest`.
         let req = fixture_request();
         let translated = SidecarRequest {
-            request_id:    "rid".into(),
-            provider_id:   "kombai".into(),
-            model_id:      req.model.clone(),
+            request_id: "rid".into(),
+            provider_id: "kombai".into(),
+            model_id: req.model.clone(),
             system_prompt: req.system.clone().unwrap(),
-            messages:      vec![SidecarMessage {
-                role:    "user".into(),
+            messages: vec![SidecarMessage {
+                role: "user".into(),
                 content: "say hi".into(),
             }],
-            tools:         vec![SidecarToolDecl {
-                name:         "echo".into(),
-                description:  "echoes a string".into(),
+            tools: vec![SidecarToolDecl {
+                name: "echo".into(),
+                description: "echoes a string".into(),
                 input_schema: serde_json::json!({ "type": "object" }),
             }],
-            max_tokens:    req.max_tokens,
-            temperature:   req.temperature,
+            max_tokens: req.max_tokens,
+            temperature: req.temperature,
         };
         let bytes = serde_json::to_vec(&translated).unwrap();
         let parsed: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(parsed["provider_id"], "kombai");
-        assert_eq!(parsed["model_id"],    "kombai-v1");
-        assert_eq!(parsed["max_tokens"],  1024);
+        assert_eq!(parsed["model_id"], "kombai-v1");
+        assert_eq!(parsed["max_tokens"], 1024);
         assert_eq!(parsed["temperature"], 0.7);
         assert_eq!(parsed["messages"][0]["content"], "say hi");
         assert_eq!(parsed["tools"][0]["name"], "echo");
@@ -1461,16 +1460,16 @@ mod tests {
 
     #[test]
     fn debug_impl_does_not_leak_secret() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let s = format!("{c:?}");
-        assert!(!s.contains(TEST_SECRET_HEX),
-            "Debug output must not contain the raw HMAC secret; got: {s}");
-        assert!(s.contains("secret_len"),
-            "Debug output should expose secret_len for ops sanity-check");
+        assert!(
+            !s.contains(TEST_SECRET_HEX),
+            "Debug output must not contain the raw HMAC secret; got: {s}"
+        );
+        assert!(
+            s.contains("secret_len"),
+            "Debug output should expose secret_len for ops sanity-check"
+        );
     }
 
     /// End-to-end happy-path test against a local TCP server that
@@ -1498,7 +1497,9 @@ mod tests {
             let mut content_length: Option<usize> = None;
             loop {
                 let n = sock.read(&mut tmp).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 buf.extend_from_slice(&tmp[..n]);
                 if header_end.is_none() {
                     if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -1507,14 +1508,18 @@ mod tests {
                         let head = &buf[..end];
                         for line in head.split(|b| *b == b'\n') {
                             let line = std::str::from_utf8(line).unwrap_or("");
-                            if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                            if let Some(rest) =
+                                line.to_ascii_lowercase().strip_prefix("content-length:")
+                            {
                                 content_length = rest.trim().parse().ok();
                             }
                         }
                     }
                 }
                 if let (Some(he), Some(cl)) = (header_end, content_length) {
-                    if buf.len() >= he + cl { break; }
+                    if buf.len() >= he + cl {
+                        break;
+                    }
                 }
             }
 
@@ -1545,7 +1550,8 @@ mod tests {
             mac.update(b":");
             mac.update(body);
             let supplied = hex::decode(&hmac_hex).unwrap();
-            mac.verify_slice(&supplied).expect("client-stamped HMAC must verify");
+            mac.verify_slice(&supplied)
+                .expect("client-stamped HMAC must verify");
 
             // Stamp a response: SidecarResponse with one text block.
             let resp_body_struct = serde_json::json!({
@@ -1588,7 +1594,8 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let resp = client.create_message(&req).await.unwrap();
         // Synthetic id: provider_request_id was supplied → that's the id.
@@ -1620,7 +1627,9 @@ mod tests {
             let mut header_end: Option<usize> = None;
             loop {
                 let n = sock.read(&mut buf[total..]).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 total += n;
                 if header_end.is_none() {
                     if let Some(end) = buf[..total].windows(4).position(|w| w == b"\r\n\r\n") {
@@ -1628,7 +1637,9 @@ mod tests {
                     }
                 }
                 // Wait until at least 200 body bytes to have arrived
-                if total > 400 { break; }
+                if total > 400 {
+                    break;
+                }
             }
             // Sign with a *different* secret so the response HMAC fails.
             let bad_secret = b"a-completely-different-key-here";
@@ -1672,13 +1683,16 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let err = client.create_message(&req).await.unwrap_err();
         match err {
             ModelError::Transport(msg) => {
-                assert!(msg.contains("HMAC") || msg.contains("hmac"),
-                    "transport error must mention HMAC; got: {msg}");
+                assert!(
+                    msg.contains("HMAC") || msg.contains("hmac"),
+                    "transport error must mention HMAC; got: {msg}"
+                );
             }
             other => panic!("expected Transport, got {other:?}"),
         }
@@ -1693,9 +1707,7 @@ mod tests {
     /// `(request_id, timestamp_ms, body_bytes)` parsed from the
     /// HMAC headers + Content-Length body. Shared by every streaming
     /// test so the SSE-mock server-side bookkeeping stays uniform.
-    async fn read_sidecar_request(
-        sock: &mut tokio::net::TcpStream,
-    ) -> (String, u64, Vec<u8>) {
+    async fn read_sidecar_request(sock: &mut tokio::net::TcpStream) -> (String, u64, Vec<u8>) {
         use tokio::io::AsyncReadExt;
         let mut buf: Vec<u8> = Vec::with_capacity(4096);
         let mut tmp = [0u8; 1024];
@@ -1703,7 +1715,9 @@ mod tests {
         let mut content_length: Option<usize> = None;
         loop {
             let n = sock.read(&mut tmp).await.unwrap();
-            if n == 0 { break; }
+            if n == 0 {
+                break;
+            }
             buf.extend_from_slice(&tmp[..n]);
             if header_end.is_none() {
                 if let Some(end) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
@@ -1711,8 +1725,8 @@ mod tests {
                     let head = &buf[..end];
                     for line in head.split(|b| *b == b'\n') {
                         let line = std::str::from_utf8(line).unwrap_or("");
-                        if let Some(rest) = line.to_ascii_lowercase()
-                            .strip_prefix("content-length:")
+                        if let Some(rest) =
+                            line.to_ascii_lowercase().strip_prefix("content-length:")
                         {
                             content_length = rest.trim().parse().ok();
                         }
@@ -1720,7 +1734,9 @@ mod tests {
                 }
             }
             if let (Some(he), Some(cl)) = (header_end, content_length) {
-                if buf.len() >= he + cl { break; }
+                if buf.len() >= he + cl {
+                    break;
+                }
             }
         }
         let header_end = header_end.unwrap();
@@ -1744,10 +1760,10 @@ mod tests {
     /// secret, matching the canonical signing input the planner-side
     /// aggregator verifies.
     fn make_complete_event_data(
-        secret:        &[u8],
-        request_id:    &str,
-        timestamp_ms:  u64,
-        response:      &SidecarResponse,
+        secret: &[u8],
+        request_id: &str,
+        timestamp_ms: u64,
+        response: &SidecarResponse,
     ) -> String {
         let canonical = serde_json::to_vec(response).unwrap();
         let sig = hmac_sha256_hex(secret, request_id, timestamp_ms, &canonical);
@@ -1762,13 +1778,13 @@ mod tests {
 
     fn fixture_response(text: &str) -> SidecarResponse {
         SidecarResponse {
-            response_text:        Some(text.to_owned()),
-            tool_calls:           Vec::new(),
-            tokens_in:            12,
-            tokens_out:           4,
-            model_id_actual:      "kombai-v1".to_owned(),
-            provider_request_id:  Some("ksr_stream".to_owned()),
-            stop_reason:          "end_turn".to_owned(),
+            response_text: Some(text.to_owned()),
+            tool_calls: Vec::new(),
+            tokens_in: 12,
+            tokens_out: 4,
+            model_id_actual: "kombai-v1".to_owned(),
+            provider_request_id: Some("ksr_stream".to_owned()),
+            stop_reason: "end_turn".to_owned(),
         }
     }
 
@@ -1794,9 +1810,7 @@ mod tests {
             let (req_id, ts, _body) = read_sidecar_request(&mut sock).await;
 
             let response = fixture_response("hi from the streaming sidecar");
-            let complete_data = make_complete_event_data(
-                &secret, &req_id, ts, &response,
-            );
+            let complete_data = make_complete_event_data(&secret, &req_id, ts, &response);
 
             let head = b"HTTP/1.1 200 OK\r\n\
                          Content-Type: text/event-stream\r\n\
@@ -1807,24 +1821,28 @@ mod tests {
             sock.flush().await.unwrap();
 
             // Helper: write one SSE chunk through the chunked-encoding wrapper.
-            async fn write_chunk(
-                sock: &mut tokio::net::TcpStream, payload: &str,
-            ) {
+            async fn write_chunk(sock: &mut tokio::net::TcpStream, payload: &str) {
                 let bytes = payload.as_bytes();
-                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes()).await.unwrap();
+                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
                 sock.write_all(bytes).await.unwrap();
                 sock.write_all(b"\r\n").await.unwrap();
                 sock.flush().await.unwrap();
             }
 
-            write_chunk(&mut sock,
+            write_chunk(
+                &mut sock,
                 "event: message_start\n\
                  data: {\"id\":\"msg_stream_1\",\"model\":\"kombai-v1\"}\n\n",
-            ).await;
-            write_chunk(&mut sock,
+            )
+            .await;
+            write_chunk(
+                &mut sock,
                 "event: content_block_start\n\
                  data: {\"index\":0,\"block_kind\":\"text\"}\n\n",
-            ).await;
+            )
+            .await;
             write_chunk(&mut sock,
                 "event: content_block_delta\n\
                  data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi from the\"}}\n\n",
@@ -1833,21 +1851,27 @@ mod tests {
                 "event: content_block_delta\n\
                  data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\" streaming sidecar\"}}\n\n",
             ).await;
-            write_chunk(&mut sock,
+            write_chunk(
+                &mut sock,
                 "event: content_block_stop\n\
                  data: {\"index\":0}\n\n",
-            ).await;
+            )
+            .await;
             write_chunk(&mut sock,
                 "event: usage\n\
                  data: {\"input_tokens\":12,\"output_tokens\":4,\"cache_creation_input_tokens\":0,\"cache_read_input_tokens\":0}\n\n",
             ).await;
-            write_chunk(&mut sock,
+            write_chunk(
+                &mut sock,
                 "event: stop\n\
                  data: {\"stop_reason\":\"end_turn\"}\n\n",
-            ).await;
-            write_chunk(&mut sock,
+            )
+            .await;
+            write_chunk(
+                &mut sock,
                 &format!("event: complete\ndata: {complete_data}\n\n"),
-            ).await;
+            )
+            .await;
             // Terminate chunked transfer.
             sock.write_all(b"0\r\n\r\n").await.unwrap();
             sock.flush().await.unwrap();
@@ -1857,27 +1881,28 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let mut rx = client.create_message_stream(&req).await.unwrap();
 
         let mut saw_message_start = false;
-        let mut saw_block_start   = false;
-        let mut saw_deltas        = 0;
-        let mut saw_block_stop    = false;
-        let mut saw_usage         = false;
-        let mut saw_stop          = false;
+        let mut saw_block_start = false;
+        let mut saw_deltas = 0;
+        let mut saw_block_stop = false;
+        let mut saw_usage = false;
+        let mut saw_stop = false;
         let mut complete_response: Option<MessageResponse> = None;
 
         while let Some(ev) = rx.recv().await {
             match ev {
-                StreamEvent::MessageStart { .. }      => saw_message_start = true,
-                StreamEvent::ContentBlockStart { .. } => saw_block_start   = true,
-                StreamEvent::ContentBlockDelta { .. } => saw_deltas       += 1,
-                StreamEvent::ContentBlockStop { .. }  => saw_block_stop    = true,
-                StreamEvent::Usage(_)                 => saw_usage         = true,
-                StreamEvent::Stop { .. }              => saw_stop          = true,
-                StreamEvent::Complete(r)              => complete_response = Some(r),
+                StreamEvent::MessageStart { .. } => saw_message_start = true,
+                StreamEvent::ContentBlockStart { .. } => saw_block_start = true,
+                StreamEvent::ContentBlockDelta { .. } => saw_deltas += 1,
+                StreamEvent::ContentBlockStop { .. } => saw_block_stop = true,
+                StreamEvent::Usage(_) => saw_usage = true,
+                StreamEvent::Stop { .. } => saw_stop = true,
+                StreamEvent::Complete(r) => complete_response = Some(r),
             }
         }
 
@@ -1888,8 +1913,10 @@ mod tests {
         assert!(saw_usage);
         assert!(saw_stop);
         let resp = complete_response.expect("must emit Complete");
-        assert_eq!(resp.id, "ksr_stream",
-            "Complete should reuse the sidecar-supplied provider_request_id");
+        assert_eq!(
+            resp.id, "ksr_stream",
+            "Complete should reuse the sidecar-supplied provider_request_id"
+        );
         assert_eq!(resp.usage.input_tokens, 12);
         assert_eq!(resp.usage.output_tokens, 4);
         assert_eq!(resp.stop_reason.as_deref(), Some("end_turn"));
@@ -1917,9 +1944,7 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let (req_id, ts, _body) = read_sidecar_request(&mut sock).await;
             let response = fixture_response("after the heartbeat");
-            let complete_data = make_complete_event_data(
-                &secret, &req_id, ts, &response,
-            );
+            let complete_data = make_complete_event_data(&secret, &req_id, ts, &response);
 
             let head = b"HTTP/1.1 200 OK\r\n\
                          Content-Type: text/event-stream\r\n\
@@ -1927,11 +1952,11 @@ mod tests {
                          Transfer-Encoding: chunked\r\n\r\n";
             sock.write_all(head).await.unwrap();
 
-            async fn write_chunk(
-                sock: &mut tokio::net::TcpStream, payload: &str,
-            ) {
+            async fn write_chunk(sock: &mut tokio::net::TcpStream, payload: &str) {
                 let bytes = payload.as_bytes();
-                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes()).await.unwrap();
+                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
                 sock.write_all(bytes).await.unwrap();
                 sock.write_all(b"\r\n").await.unwrap();
                 sock.flush().await.unwrap();
@@ -1942,13 +1967,17 @@ mod tests {
             tokio::time::sleep(Duration::from_millis(50)).await;
             write_chunk(&mut sock, ": heartbeat\n\n").await;
             tokio::time::sleep(Duration::from_millis(50)).await;
-            write_chunk(&mut sock,
+            write_chunk(
+                &mut sock,
                 "event: message_start\n\
                  data: {\"id\":\"msg_hb\",\"model\":\"kombai-v1\"}\n\n",
-            ).await;
-            write_chunk(&mut sock,
+            )
+            .await;
+            write_chunk(
+                &mut sock,
                 &format!("event: complete\ndata: {complete_data}\n\n"),
-            ).await;
+            )
+            .await;
             sock.write_all(b"0\r\n\r\n").await.unwrap();
         });
 
@@ -1956,7 +1985,8 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let mut rx = client.create_message_stream(&req).await.unwrap();
 
@@ -1967,8 +1997,11 @@ mod tests {
         // Heartbeats must NOT appear as StreamEvents. We expect
         // exactly: MessageStart + Complete (the rest of the protocol
         // shape is exercised by the happy-path test).
-        assert_eq!(events.len(), 2,
-            "heartbeats must be skipped; got events = {events:?}");
+        assert_eq!(
+            events.len(),
+            2,
+            "heartbeats must be skipped; got events = {events:?}"
+        );
         assert!(matches!(events[0], StreamEvent::MessageStart { .. }));
         assert!(matches!(events[1], StreamEvent::Complete(_)));
 
@@ -1994,32 +2027,34 @@ mod tests {
 
             // Sign with a *different* secret.
             let bad_secret = b"a-completely-different-key-here-for-test";
-            let response   = fixture_response("won't matter");
-            let complete_data = make_complete_event_data(
-                bad_secret, &req_id, ts, &response,
-            );
+            let response = fixture_response("won't matter");
+            let complete_data = make_complete_event_data(bad_secret, &req_id, ts, &response);
 
             let head = b"HTTP/1.1 200 OK\r\n\
                          Content-Type: text/event-stream\r\n\
                          Connection: close\r\n\
                          Transfer-Encoding: chunked\r\n\r\n";
             sock.write_all(head).await.unwrap();
-            async fn write_chunk(
-                sock: &mut tokio::net::TcpStream, payload: &str,
-            ) {
+            async fn write_chunk(sock: &mut tokio::net::TcpStream, payload: &str) {
                 let bytes = payload.as_bytes();
-                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes()).await.unwrap();
+                sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                    .await
+                    .unwrap();
                 sock.write_all(bytes).await.unwrap();
                 sock.write_all(b"\r\n").await.unwrap();
                 sock.flush().await.unwrap();
             }
-            write_chunk(&mut sock,
+            write_chunk(
+                &mut sock,
                 "event: message_start\n\
                  data: {\"id\":\"msg_bad_sig\",\"model\":\"kombai-v1\"}\n\n",
-            ).await;
-            write_chunk(&mut sock,
+            )
+            .await;
+            write_chunk(
+                &mut sock,
                 &format!("event: complete\ndata: {complete_data}\n\n"),
-            ).await;
+            )
+            .await;
             sock.write_all(b"0\r\n\r\n").await.unwrap();
         });
 
@@ -2027,29 +2062,36 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let mut rx = client.create_message_stream(&req).await.unwrap();
 
         let mut saw_terminal_stop = false;
-        let mut saw_complete      = false;
+        let mut saw_complete = false;
         while let Some(ev) = rx.recv().await {
             match ev {
                 StreamEvent::Stop { stop_reason } => {
                     saw_terminal_stop = true;
                     let msg = stop_reason.unwrap_or_default();
-                    assert!(msg.contains("aggregator_error") || msg.contains("signature"),
+                    assert!(
+                        msg.contains("aggregator_error") || msg.contains("signature"),
                         "stop_reason should reference the aggregator/signature failure; \
-                         got `{msg}`");
+                         got `{msg}`"
+                    );
                 }
                 StreamEvent::Complete(_) => saw_complete = true,
                 _ => {}
             }
         }
-        assert!(saw_terminal_stop,
-            "bad signature must surface as a terminal Stop event");
-        assert!(!saw_complete,
-            "Complete must NOT be emitted when signature verification fails");
+        assert!(
+            saw_terminal_stop,
+            "bad signature must surface as a terminal Stop event"
+        );
+        assert!(
+            !saw_complete,
+            "Complete must NOT be emitted when signature verification fails"
+        );
 
         server.await.unwrap();
     }
@@ -2098,7 +2140,9 @@ mod tests {
             let frame = "event: message_start\n\
                          data: {\"id\":\"msg_eof\",\"model\":\"kombai-v1\"}\n\n";
             let bytes = frame.as_bytes();
-            sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes()).await.unwrap();
+            sock.write_all(format!("{:x}\r\n", bytes.len()).as_bytes())
+                .await
+                .unwrap();
             sock.write_all(bytes).await.unwrap();
             sock.write_all(b"\r\n").await.unwrap();
             // Terminate chunked transfer immediately.
@@ -2111,7 +2155,8 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let mut rx = client.create_message_stream(&req).await.unwrap();
 
@@ -2129,10 +2174,14 @@ mod tests {
                 _ => {}
             }
         }
-        assert!(saw_eof_stop,
-            "EOF before `complete` event must surface a terminal Stop");
-        assert!(!saw_complete,
-            "Complete MUST NOT be emitted when the sidecar closes early");
+        assert!(
+            saw_eof_stop,
+            "EOF before `complete` event must surface a terminal Stop"
+        );
+        assert!(
+            !saw_complete,
+            "Complete MUST NOT be emitted when the sidecar closes early"
+        );
 
         server.await.unwrap();
     }
@@ -2168,7 +2217,8 @@ mod tests {
             format!("http://127.0.0.1:{port}"),
             "kombai",
             TEST_SECRET_HEX,
-        ).unwrap();
+        )
+        .unwrap();
         let req = fixture_request();
         let err = client.create_message_stream(&req).await.unwrap_err();
         match err {
@@ -2189,11 +2239,7 @@ mod tests {
     /// independently of the streaming path.
     #[test]
     fn hmac_sha256_helper_round_trips_against_compute_hmac() {
-        let c = SidecarModelClient::new(
-            "http://localhost:9100",
-            "test",
-            TEST_SECRET_HEX,
-        ).unwrap();
+        let c = SidecarModelClient::new("http://localhost:9100", "test", TEST_SECRET_HEX).unwrap();
         let h_helper = hmac_sha256_hex(&c.secret, "rid", 1234, b"body-bytes");
         let h_method = c.compute_hmac("rid", 1234, b"body-bytes");
         assert_eq!(h_helper, h_method);

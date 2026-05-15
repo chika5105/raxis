@@ -50,16 +50,17 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
             }
             "--worktree-root" => {
                 i += 1;
-                worktree_root = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or_else(|| CliError::Usage("--worktree-root requires a path".to_owned()))?,
-                ));
+                worktree_root = Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                    CliError::Usage("--worktree-root requires a path".to_owned())
+                })?));
             }
             "--base-tracking-ref" => {
                 i += 1;
                 base_tracking_ref = Some(
                     args.get(i)
-                        .ok_or_else(|| CliError::Usage("--base-tracking-ref requires a value".to_owned()))?
+                        .ok_or_else(|| {
+                            CliError::Usage("--base-tracking-ref requires a value".to_owned())
+                        })?
                         .clone(),
                 );
             }
@@ -82,7 +83,11 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
             "--reveal-token" => {
                 reveal_token = true;
             }
-            other => return Err(CliError::Usage(format!("unknown session create flag: {other:?}"))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown session create flag: {other:?}"
+                )))
+            }
         }
         i += 1;
     }
@@ -92,8 +97,9 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
             "FAIL_ROLE_NOT_OPERATOR_CREATABLE: only --role planner is supported in v1".to_owned(),
         ));
     }
-    let worktree_root = worktree_root
-        .ok_or_else(|| CliError::Usage("session create requires --worktree-root <path>".to_owned()))?;
+    let worktree_root = worktree_root.ok_or_else(|| {
+        CliError::Usage("session create requires --worktree-root <path>".to_owned())
+    })?;
 
     // Generate lineage_id if not provided. `uuid::Uuid::new_v4()` routes to
     // `getrandom` and panics on RNG failure (acceptable here — the rest of the
@@ -107,16 +113,15 @@ pub fn run_create(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     // `created_by_operator` here (the field doesn't exist in the
     // kernel-side OperatorRequest enum).
     let req = OperatorRequest::CreateSession {
-        role:              role.clone(),
-        worktree_root:     Some(worktree_root.display().to_string()),
-        base_sha:          None,
+        role: role.clone(),
+        worktree_root: Some(worktree_root.display().to_string()),
+        base_sha: None,
         base_tracking_ref: base_tracking_ref.clone(),
-        lineage_id:        lineage_id.clone(),
-        task_id:           task_id.clone(),
+        lineage_id: lineage_id.clone(),
+        task_id: task_id.clone(),
     };
-    let req_json = serde_json::to_value(&req).map_err(|e| {
-        CliError::Usage(format!("could not serialise CreateSession request: {e}"))
-    })?;
+    let req_json = serde_json::to_value(&req)
+        .map_err(|e| CliError::Usage(format!("could not serialise CreateSession request: {e}")))?;
 
     let resp = conn.send_request(&req_json)?;
     handle_response(resp, |ok| {
@@ -181,10 +186,11 @@ pub fn run_revoke(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         .ok_or_else(|| CliError::Usage("session revoke requires <session_id>".to_owned()))?;
 
     let (mut conn, _) = open_conn(flags)?;
-    let req = OperatorRequest::RevokeSession { session_id: session_id.clone() };
-    let req_json = serde_json::to_value(&req).map_err(|e| {
-        CliError::Usage(format!("could not serialise RevokeSession request: {e}"))
-    })?;
+    let req = OperatorRequest::RevokeSession {
+        session_id: session_id.clone(),
+    };
+    let req_json = serde_json::to_value(&req)
+        .map_err(|e| CliError::Usage(format!("could not serialise RevokeSession request: {e}")))?;
     let resp = conn.send_request(&req_json)?;
     handle_response(resp, |ok| {
         let revoked_at = ok["revoked_at"].as_i64().unwrap_or(0);
@@ -209,8 +215,7 @@ mod reveal_token_tests {
     use super::build_session_token_line;
 
     /// Distinctive token so any leak is unmissable in test output.
-    const SECRET_TOKEN: &str =
-        "SECRET_SESSION_TOKEN_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const SECRET_TOKEN: &str = "SECRET_SESSION_TOKEN_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 
     #[test]
     fn default_redacted_line_does_not_contain_raw_token() {
@@ -230,16 +235,21 @@ mod reveal_token_tests {
         let line = build_session_token_line(SECRET_TOKEN, false);
         assert!(line.contains("sha256_fp="),
             "redacted line must explain WHY the token is hidden via the fingerprint marker; got: {line}");
-        assert!(line.contains("--reveal-token"),
-            "redacted line must point operators to the explicit opt-in flag; got: {line}");
+        assert!(
+            line.contains("--reveal-token"),
+            "redacted line must point operators to the explicit opt-in flag; got: {line}"
+        );
     }
 
     #[test]
     fn reveal_flag_emits_raw_token_in_env_var_format() {
         let line = build_session_token_line(SECRET_TOKEN, true);
-        assert_eq!(line, format!("RAXIS_SESSION_TOKEN={SECRET_TOKEN}"),
+        assert_eq!(
+            line,
+            format!("RAXIS_SESSION_TOKEN={SECRET_TOKEN}"),
             "explicit --reveal-token must produce the canonical env-var line so \
-             `2>session.env` capture continues to work");
+             `2>session.env` capture continues to work"
+        );
     }
 
     /// Cross-check: the redacted fingerprint must match what the
@@ -251,13 +261,18 @@ mod reveal_token_tests {
     fn redacted_fingerprint_matches_kernel_side_helper() {
         let line = build_session_token_line(SECRET_TOKEN, false);
         let cli_fp = line
-            .split("sha256_fp=").nth(1).expect("redacted line must contain sha256_fp= marker")
-            .split('>').next().expect("marker must be terminated by '>'")
+            .split("sha256_fp=")
+            .nth(1)
+            .expect("redacted line must contain sha256_fp= marker")
+            .split('>')
+            .next()
+            .expect("marker must be terminated by '>'")
             .to_owned();
-        let kernel_fp =
-            raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
-        assert_eq!(cli_fp, kernel_fp,
+        let kernel_fp = raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
+        assert_eq!(
+            cli_fp, kernel_fp,
             "CLI redacted fingerprint must equal the kernel-side log fingerprint \
-             so an operator can correlate the two without guesswork");
+             so an operator can correlate the two without guesswork"
+        );
     }
 }

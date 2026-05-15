@@ -77,9 +77,7 @@ pub fn assemble_prompt() -> String {
 /// the honest contract — the positive witness without the
 /// negative is a test that the agent *tried*, not a test that the
 /// kernel *prevented*.
-pub fn witnesses_for_payloads(
-    injection_session_id: &str,
-) -> Vec<Box<dyn EnforcementWitness>> {
+pub fn witnesses_for_payloads(injection_session_id: &str) -> Vec<Box<dyn EnforcementWitness>> {
     let mut witnesses: Vec<Box<dyn EnforcementWitness>> = Vec::new();
 
     let payloads = load_injection_payloads().payloads;

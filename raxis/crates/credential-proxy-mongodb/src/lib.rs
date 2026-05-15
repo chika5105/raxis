@@ -75,11 +75,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -89,12 +89,11 @@ pub mod upstream;
 pub mod wire;
 
 pub use restriction::{
-    CommandTarget, RestrictionDecision, RestrictionReason, Restrictions,
-    walk_command,
+    walk_command, CommandTarget, RestrictionDecision, RestrictionReason, Restrictions,
 };
 pub use upstream::{
-    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
-    redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
+    redact_for_audit, resolve_upstream_url, ForwardOutcome, ParsedUpstreamUrl, UpstreamError,
+    UpstreamSession, DEFAULT_CONNECT_TIMEOUT,
 };
 
 /// Owned form of `ConsumerIdentity`.
@@ -103,13 +102,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -121,15 +123,15 @@ impl OwnedConsumer {
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     /// Address the inbound listener binds to.
-    pub listen_addr:     String,
+    pub listen_addr: String,
     /// Credential to resolve once at proxy bind. Bytes are NEVER
     /// surfaced beyond the proxy boundary.
     pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:        OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:    Restrictions,
+    pub restrictions: Restrictions,
 }
 
 /// Counters surfaced for `CredentialProxyStopped`.
@@ -138,28 +140,28 @@ pub struct ProxyStats {
     /// Number of accepted inbound TCP connections.
     pub connections_served: AtomicU32,
     /// Number of commands observed (allowed + blocked).
-    pub commands_audited:   AtomicU32,
+    pub commands_audited: AtomicU32,
     /// Number of commands rejected by `Restrictions`.
-    pub commands_blocked:   AtomicU32,
+    pub commands_blocked: AtomicU32,
     /// V2: subset of `commands_blocked` rejected by the
     /// `allowed_collections` / `forbidden_collections` walker.
     pub commands_blocked_by_collection_allowlist: AtomicU32,
     /// V2: subset of `commands_blocked` rejected because the
     /// walker could not prove the collection list (fail-closed
     /// under the V2 ambiguity policy).
-    pub commands_blocked_by_ambiguous_bson:       AtomicU32,
+    pub commands_blocked_by_ambiguous_bson: AtomicU32,
     /// V2: number of reply cursors truncated by `max_documents`.
-    pub commands_capped_by_max_documents:         AtomicU32,
+    pub commands_capped_by_max_documents: AtomicU32,
     /// Bytes seen in inbound OP_MSG bodies.
-    pub bytes_observed:     AtomicU64,
+    pub bytes_observed: AtomicU64,
     /// V2.1: number of upstream TCP+auth handshakes started.
     pub upstream_connects_attempted: AtomicU32,
     /// V2.1: subset that reached a usable upstream session.
     pub upstream_connects_succeeded: AtomicU32,
     /// V2.1: subset that failed.
-    pub upstream_connects_failed:    AtomicU32,
+    pub upstream_connects_failed: AtomicU32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
-    pub upstream_bytes_forwarded:    AtomicU64,
+    pub upstream_bytes_forwarded: AtomicU64,
 }
 
 impl ProxyStats {
@@ -167,19 +169,22 @@ impl ProxyStats {
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
-            commands_audited:   self.commands_audited  .load(Ordering::Relaxed),
-            commands_blocked:   self.commands_blocked  .load(Ordering::Relaxed),
-            commands_blocked_by_collection_allowlist:
-                self.commands_blocked_by_collection_allowlist.load(Ordering::Relaxed),
-            commands_blocked_by_ambiguous_bson:
-                self.commands_blocked_by_ambiguous_bson      .load(Ordering::Relaxed),
-            commands_capped_by_max_documents:
-                self.commands_capped_by_max_documents        .load(Ordering::Relaxed),
-            bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
+            commands_audited: self.commands_audited.load(Ordering::Relaxed),
+            commands_blocked: self.commands_blocked.load(Ordering::Relaxed),
+            commands_blocked_by_collection_allowlist: self
+                .commands_blocked_by_collection_allowlist
+                .load(Ordering::Relaxed),
+            commands_blocked_by_ambiguous_bson: self
+                .commands_blocked_by_ambiguous_bson
+                .load(Ordering::Relaxed),
+            commands_capped_by_max_documents: self
+                .commands_capped_by_max_documents
+                .load(Ordering::Relaxed),
+            bytes_observed: self.bytes_observed.load(Ordering::Relaxed),
             upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
-            upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
-            upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
+            upstream_connects_failed: self.upstream_connects_failed.load(Ordering::Relaxed),
+            upstream_bytes_forwarded: self.upstream_bytes_forwarded.load(Ordering::Relaxed),
         }
     }
 }
@@ -190,27 +195,27 @@ pub struct ProxyStatsSnapshot {
     /// Number of accepted inbound TCP connections.
     pub connections_served: u32,
     /// Number of commands observed.
-    pub commands_audited:   u32,
+    pub commands_audited: u32,
     /// Number of commands rejected by `Restrictions`.
-    pub commands_blocked:   u32,
+    pub commands_blocked: u32,
     /// V2: subset of `commands_blocked` rejected by the
     /// `allowed_collections` / `forbidden_collections` walker.
     pub commands_blocked_by_collection_allowlist: u32,
     /// V2: subset of `commands_blocked` rejected because the
     /// walker could not prove the collection list.
-    pub commands_blocked_by_ambiguous_bson:       u32,
+    pub commands_blocked_by_ambiguous_bson: u32,
     /// V2: number of reply cursors truncated by `max_documents`.
-    pub commands_capped_by_max_documents:         u32,
+    pub commands_capped_by_max_documents: u32,
     /// Bytes seen in inbound OP_MSG bodies.
-    pub bytes_observed:     u64,
+    pub bytes_observed: u64,
     /// V2.1: number of upstream TCP+auth handshakes started.
     pub upstream_connects_attempted: u32,
     /// V2.1: subset that reached a usable upstream session.
     pub upstream_connects_succeeded: u32,
     /// V2.1: subset that failed.
-    pub upstream_connects_failed:    u32,
+    pub upstream_connects_failed: u32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
-    pub upstream_bytes_forwarded:    u64,
+    pub upstream_bytes_forwarded: u64,
 }
 
 /// Audit channel.
@@ -237,19 +242,19 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Command name (e.g. `"find"`, `"insert"`).
-        command:     String,
+        command: String,
         /// SHA-256 of the OP_MSG body bytes.
         body_sha256: String,
         /// True if the proxy refused the command under
         /// restrictions.
-        blocked:     bool,
+        blocked: bool,
         /// V2: walker-resolved `<db>.<coll>`; `None` for server-
         /// introspection commands like `hello` / `ping`.
-        collection:         Option<String>,
+        collection: Option<String>,
         /// V2: closed-enum reason key, present iff the command
         /// was blocked OR audited-only by V2 restrictions.
         restriction_reason: Option<&'static str>,
@@ -262,9 +267,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// SHA-256 of the OP_MSG body bytes — matches the prior
         /// `MongoCommandExecuted.body_sha256`.
         body_sha256: String,
@@ -289,9 +294,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream hostname from the credential URL.
         upstream_host: String,
         /// Upstream port from the credential URL after default-port
@@ -311,9 +316,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream hostname from the credential URL.
         upstream_host: String,
         /// Upstream port from the credential URL.
@@ -332,7 +337,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error.
         source: std::io::Error,
     },
@@ -341,22 +346,23 @@ pub enum ProxyError {
 /// MongoDB OP_MSG credential proxy.
 pub struct MongodbProxy {
     listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 }
 
 impl MongodbProxy {
     /// Bind a listener and return an owned proxy.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -374,21 +380,27 @@ impl MongodbProxy {
     }
 
     /// Counters snapshot.
-    pub fn stats(&self) -> ProxyStatsSnapshot { self.stats.snapshot() }
+    pub fn stats(&self) -> ProxyStatsSnapshot {
+        self.stats.snapshot()
+    }
 
     /// Borrow the underlying counters Arc.
-    pub fn stats_handle(&self) -> Arc<ProxyStats> { Arc::clone(&self.stats) }
+    pub fn stats_handle(&self) -> Arc<ProxyStats> {
+        Arc::clone(&self.stats)
+    }
 
     /// Run the accept loop until dropped.
     pub async fn serve(self) {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
                     let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
                             tracing::warn!(error = %e, "mongodb proxy connection ended with error");
@@ -406,29 +418,26 @@ impl MongodbProxy {
 
 async fn serve_one(
     mut stream: TcpStream,
-    backend:    Arc<dyn CredentialBackend>,
-    config:     ProxyConfig,
-    stats:      Arc<ProxyStats>,
-    audit:      Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
     // Resolve+parse the upstream URL on accept. Failures are
     // tolerated and surfaced lazily on the first allowed agent
     // command (mirrors the postgres + mysql proxies).
-    let upstream_url: Option<ParsedUpstreamUrl> = match upstream::resolve_upstream_url(
-        &backend,
-        &config.credential_name,
-        &config.consumer,
-    ) {
-        Ok(u) => Some(u),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                credential = %config.credential_name.as_str(),
-                "mongodb proxy upstream URL resolution failed; first allowed command will fail",
-            );
-            None
-        }
-    };
+    let upstream_url: Option<ParsedUpstreamUrl> =
+        match upstream::resolve_upstream_url(&backend, &config.credential_name, &config.consumer) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    credential = %config.credential_name.as_str(),
+                    "mongodb proxy upstream URL resolution failed; first allowed command will fail",
+                );
+                None
+            }
+        };
 
     let mut upstream_session: Option<UpstreamSession> = None;
     // V2 cursor-cap tracking. Per `proxy-table-allowlists.md §7.5`
@@ -462,7 +471,9 @@ async fn serve_one(
         let body_len = total - wire::HEADER_LEN;
         let mut body = vec![0u8; body_len];
         stream.read_exact(&mut body).await?;
-        stats.bytes_observed.fetch_add(body_len as u64, Ordering::Relaxed);
+        stats
+            .bytes_observed
+            .fetch_add(body_len as u64, Ordering::Relaxed);
 
         // ─── Legacy `OP_QUERY` initial-handshake handler ───
         //
@@ -536,7 +547,10 @@ async fn serve_one(
         // else gets a clean close so a confused client backs off
         // rather than hanging.
         if header.op_code != wire::OP_MSG {
-            tracing::debug!(op_code = header.op_code, "mongodb proxy received non-OP_MSG, closing");
+            tracing::debug!(
+                op_code = header.op_code,
+                "mongodb proxy received non-OP_MSG, closing"
+            );
             break;
         }
 
@@ -548,26 +562,28 @@ async fn serve_one(
         let command = match &target {
             CommandTarget::Resolved { command, .. } => command.clone(),
             CommandTarget::SecondaryCollectionDetected { command, .. } => command.clone(),
-            CommandTarget::Ambiguous => wire::first_command_name(&body)
-                .unwrap_or_else(|| "<unknown>".to_owned()),
+            CommandTarget::Ambiguous => {
+                wire::first_command_name(&body).unwrap_or_else(|| "<unknown>".to_owned())
+            }
         };
         let cursor_id_for_getmore = if command == "getMore" {
             extract_getmore_cursor_id(&body)
-        } else { None };
+        } else {
+            None
+        };
         stats.commands_audited.fetch_add(1, Ordering::Relaxed);
 
         let body_sha256 = sha256_hex(&body);
-        let decision    = config.restrictions.check(&target);
+        let decision = config.restrictions.check(&target);
 
-        let (collection, restriction_reason, is_block) =
-            decision_to_audit_fields(&decision);
+        let (collection, restriction_reason, is_block) = decision_to_audit_fields(&decision);
         audit.emit(AuditEvent::MongoCommandExecuted {
             timestamp_unix_seconds: now_secs(),
-            consumer:    config.consumer.clone(),
-            credential:  config.credential_name.clone(),
-            command:     command.clone(),
+            consumer: config.consumer.clone(),
+            credential: config.credential_name.clone(),
+            command: command.clone(),
             body_sha256: body_sha256.clone(),
-            blocked:     is_block,
+            blocked: is_block,
             collection,
             restriction_reason,
         });
@@ -591,7 +607,10 @@ async fn serve_one(
         // the upstream. This matches the V2.0 MVP behaviour and
         // also lets the V2.1 relay path stay focused on data
         // commands.
-        if matches!(command.as_str(), "hello" | "isMaster" | "ismaster" | "ping" | "buildInfo" | "buildinfo") {
+        if matches!(
+            command.as_str(),
+            "hello" | "isMaster" | "ismaster" | "ping" | "buildInfo" | "buildinfo"
+        ) {
             let reply_doc = build_reply_for(&command);
             let reply_msg = wire::build_op_msg_reply(
                 header.request_id.wrapping_add(0x4000_0000),
@@ -624,31 +643,37 @@ async fn serve_one(
             };
             let host = url.host.clone();
             let port = url.port;
-            stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+            stats
+                .upstream_connects_attempted
+                .fetch_add(1, Ordering::Relaxed);
             match UpstreamSession::connect(url, upstream::DEFAULT_CONNECT_TIMEOUT).await {
                 Ok(sess) => {
-                    stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .upstream_connects_succeeded
+                        .fetch_add(1, Ordering::Relaxed);
                     audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
                         timestamp_unix_seconds: now_secs(),
-                        consumer:      config.consumer.clone(),
-                        credential:    config.credential_name.clone(),
+                        consumer: config.consumer.clone(),
+                        credential: config.credential_name.clone(),
                         upstream_host: sess.host.clone(),
                         upstream_port: sess.port,
-                        tls:           sess.tls,
-                        handshake_ms:  sess.handshake_ms,
+                        tls: sess.tls,
+                        handshake_ms: sess.handshake_ms,
                     });
                     upstream_session = Some(sess);
                 }
                 Err(e) => {
-                    stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .upstream_connects_failed
+                        .fetch_add(1, Ordering::Relaxed);
                     audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
                         timestamp_unix_seconds: now_secs(),
-                        consumer:      config.consumer.clone(),
-                        credential:    config.credential_name.clone(),
+                        consumer: config.consumer.clone(),
+                        credential: config.credential_name.clone(),
                         upstream_host: host,
                         upstream_port: port,
-                        reason:        e.audit_reason().to_owned(),
-                        detail:        e.audit_detail(),
+                        reason: e.audit_reason().to_owned(),
+                        detail: e.audit_detail(),
                     });
                     let reply_doc = build_proxy_error_doc(&format!(
                         "RAXIS proxy: upstream connect failed ({}): {}",
@@ -686,27 +711,28 @@ async fn serve_one(
                 // batch against the per-cursor budget and rewrite
                 // the reply on overshoot.
                 let max_docs = config.restrictions.max_documents;
-                let (frame_to_send, rows_returned, capped_reason) =
-                    if max_docs > 0 {
-                        apply_cursor_cap_to_outcome(
-                            &outcome.frame,
-                            max_docs,
-                            &command,
-                            cursor_id_for_getmore,
-                            &mut emitted_by_cursor,
-                        )
-                    } else {
-                        (outcome.frame.clone(), 1u64, None)
-                    };
+                let (frame_to_send, rows_returned, capped_reason) = if max_docs > 0 {
+                    apply_cursor_cap_to_outcome(
+                        &outcome.frame,
+                        max_docs,
+                        &command,
+                        cursor_id_for_getmore,
+                        &mut emitted_by_cursor,
+                    )
+                } else {
+                    (outcome.frame.clone(), 1u64, None)
+                };
                 let was_capped = capped_reason.is_some();
                 if was_capped {
-                    stats.commands_capped_by_max_documents.fetch_add(1, Ordering::Relaxed);
+                    stats
+                        .commands_capped_by_max_documents
+                        .fetch_add(1, Ordering::Relaxed);
                 }
                 stream.write_all(&frame_to_send).await?;
                 stream.flush().await?;
-                stats.upstream_bytes_forwarded.fetch_add(
-                    frame_to_send.len() as u64, Ordering::Relaxed,
-                );
+                stats
+                    .upstream_bytes_forwarded
+                    .fetch_add(frame_to_send.len() as u64, Ordering::Relaxed);
                 let upstream_error = if was_capped {
                     capped_reason.map(|s| s.to_owned())
                 } else if outcome.upstream_error_marker {
@@ -716,21 +742,20 @@ async fn serve_one(
                 };
                 audit.emit(AuditEvent::DatabaseQueryCompleted {
                     timestamp_unix_seconds: now_secs(),
-                    consumer:       config.consumer.clone(),
-                    credential:     config.credential_name.clone(),
+                    consumer: config.consumer.clone(),
+                    credential: config.credential_name.clone(),
                     body_sha256,
                     rows_returned,
                     bytes_returned: frame_to_send.len() as u64,
-                    duration_ms:    outcome.duration_ms,
+                    duration_ms: outcome.duration_ms,
                     upstream_error,
                 });
             }
             Err(e) => {
                 let detail = redact_for_audit(&e.to_string());
                 upstream_session = None;
-                let reply_doc = build_proxy_error_doc(&format!(
-                    "RAXIS proxy: upstream relay failed: {detail}"
-                ));
+                let reply_doc =
+                    build_proxy_error_doc(&format!("RAXIS proxy: upstream relay failed: {detail}"));
                 let reply_msg = wire::build_op_msg_reply(
                     header.request_id.wrapping_add(0x4000_0000),
                     header.request_id,
@@ -740,12 +765,12 @@ async fn serve_one(
                 stream.flush().await?;
                 audit.emit(AuditEvent::DatabaseQueryCompleted {
                     timestamp_unix_seconds: now_secs(),
-                    consumer:       config.consumer.clone(),
-                    credential:     config.credential_name.clone(),
+                    consumer: config.consumer.clone(),
+                    credential: config.credential_name.clone(),
                     body_sha256,
-                    rows_returned:  0,
+                    rows_returned: 0,
                     bytes_returned: 0,
-                    duration_ms:    0,
+                    duration_ms: 0,
                     upstream_error: Some("relay_failed".to_owned()),
                 });
             }
@@ -761,12 +786,13 @@ fn decision_to_audit_fields(
     decision: &RestrictionDecision,
 ) -> (Option<String>, Option<&'static str>, bool) {
     match decision {
-        RestrictionDecision::Admit { collection } =>
-            (collection.clone(), None, false),
-        RestrictionDecision::Block { reason, collection } =>
-            (collection.clone(), Some(reason.as_str()), true),
-        RestrictionDecision::AuditOnly { reason, collection } =>
-            (collection.clone(), Some(reason.as_str()), false),
+        RestrictionDecision::Admit { collection } => (collection.clone(), None, false),
+        RestrictionDecision::Block { reason, collection } => {
+            (collection.clone(), Some(reason.as_str()), true)
+        }
+        RestrictionDecision::AuditOnly { reason, collection } => {
+            (collection.clone(), Some(reason.as_str()), false)
+        }
     }
 }
 
@@ -781,13 +807,16 @@ fn bump_blocked_counters(stats: &ProxyStats, decision: &RestrictionDecision) {
         RestrictionReason::CollectionNotInAllowedList
         | RestrictionReason::CollectionInForbiddenList
         | RestrictionReason::SecondaryCollectionInPipeline => {
-            stats.commands_blocked_by_collection_allowlist.fetch_add(1, Ordering::Relaxed);
+            stats
+                .commands_blocked_by_collection_allowlist
+                .fetch_add(1, Ordering::Relaxed);
         }
         RestrictionReason::AmbiguousBson => {
-            stats.commands_blocked_by_ambiguous_bson.fetch_add(1, Ordering::Relaxed);
+            stats
+                .commands_blocked_by_ambiguous_bson
+                .fetch_add(1, Ordering::Relaxed);
         }
-        RestrictionReason::AllowReadOnly
-        | RestrictionReason::MaxDocumentsExceeded => {}
+        RestrictionReason::AllowReadOnly | RestrictionReason::MaxDocumentsExceeded => {}
     }
 }
 
@@ -799,14 +828,12 @@ fn build_blocked_doc(command: &str, decision: &RestrictionDecision) -> Vec<u8> {
         RestrictionDecision::Block { reason, .. } => reason.as_str(),
         _ => "policy_block",
     };
-    let errmsg = format!(
-        "command `{command}` blocked by RAXIS policy: {reason}",
-    );
+    let errmsg = format!("command `{command}` blocked by RAXIS policy: {reason}",);
     B::new()
-        .double("ok",       0.0)
-        .int32 ("code",     13)
+        .double("ok", 0.0)
+        .int32("code", 13)
         .string("codeName", "Unauthorized")
-        .string("errmsg",   &errmsg)
+        .string("errmsg", &errmsg)
         .finish()
 }
 
@@ -815,45 +842,55 @@ fn build_blocked_doc(command: &str, decision: &RestrictionDecision) -> Vec<u8> {
 /// value, only the command name and (string-valued) collection;
 /// we re-parse the first element here.
 fn extract_getmore_cursor_id(body: &[u8]) -> Option<i64> {
-    if body.len() < 5 { return None; }
+    if body.len() < 5 {
+        return None;
+    }
     let mut i = 4; // flag_bits
     while i < body.len() {
         let kind = body[i];
         i += 1;
         if kind == 0 {
             let doc = &body[i..];
-            if doc.len() < 5 { return None; }
+            if doc.len() < 5 {
+                return None;
+            }
             let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
-            if total < 5 || total > doc.len() { return None; }
+            if total < 5 || total > doc.len() {
+                return None;
+            }
             let elems = &doc[4..total - 1];
-            if elems.is_empty() { return None; }
+            if elems.is_empty() {
+                return None;
+            }
             // First element: type byte + cstring(name) + value.
             let type_byte = elems[0];
             let nul = elems[1..].iter().position(|&b| b == 0)?;
             let value_off = 1 + nul + 1;
-            if elems.len() < value_off + 8 { return None; }
+            if elems.len() < value_off + 8 {
+                return None;
+            }
             match type_byte {
                 0x12 => {
-                    let v = i64::from_le_bytes(
-                        elems[value_off..value_off + 8].try_into().ok()?,
-                    );
+                    let v = i64::from_le_bytes(elems[value_off..value_off + 8].try_into().ok()?);
                     return Some(v);
                 }
                 0x10 => {
-                    if elems.len() < value_off + 4 { return None; }
-                    let v = i32::from_le_bytes(
-                        elems[value_off..value_off + 4].try_into().ok()?,
-                    );
+                    if elems.len() < value_off + 4 {
+                        return None;
+                    }
+                    let v = i32::from_le_bytes(elems[value_off..value_off + 4].try_into().ok()?);
                     return Some(v as i64);
                 }
                 _ => return None,
             }
         } else if kind == 1 {
-            if i + 4 > body.len() { return None; }
-            let section_size = i32::from_le_bytes(
-                body[i..i + 4].try_into().ok()?,
-            ) as usize;
-            if section_size < 4 || i + section_size > body.len() { return None; }
+            if i + 4 > body.len() {
+                return None;
+            }
+            let section_size = i32::from_le_bytes(body[i..i + 4].try_into().ok()?) as usize;
+            if section_size < 4 || i + section_size > body.len() {
+                return None;
+            }
             i += section_size;
         } else {
             return None;
@@ -868,14 +905,14 @@ fn extract_getmore_cursor_id(body: &[u8]) -> Option<i64> {
 /// frame is returned unchanged and `cap_reason` is `None`.
 fn apply_cursor_cap_to_outcome(
     upstream_frame: &[u8],
-    max_documents:  u64,
-    command:        &str,
+    max_documents: u64,
+    command: &str,
     getmore_cursor: Option<i64>,
     emitted_by_cursor: &mut std::collections::HashMap<i64, u64>,
 ) -> (Vec<u8>, u64, Option<&'static str>) {
     let reply_doc = match cursor::extract_reply_doc(upstream_frame) {
         Some(d) => d,
-        None    => return (upstream_frame.to_vec(), 1, None),
+        None => return (upstream_frame.to_vec(), 1, None),
     };
     let cursor_id = reply_cursor_id(reply_doc).unwrap_or(0);
     // Cursor key — for the FIRST batch of a query, use the
@@ -884,17 +921,23 @@ fn apply_cursor_cap_to_outcome(
     // id 0) there's no continuation to track.
     let cursor_key = match command {
         "getMore" => getmore_cursor,
-        "find" | "aggregate" | "listCollections" | "listIndexes" =>
-            if cursor_id != 0 { Some(cursor_id) } else { None },
+        "find" | "aggregate" | "listCollections" | "listIndexes" => {
+            if cursor_id != 0 {
+                Some(cursor_id)
+            } else {
+                None
+            }
+        }
         _ => None,
     };
-    let prior = cursor_key.and_then(|k| emitted_by_cursor.get(&k).copied())
+    let prior = cursor_key
+        .and_then(|k| emitted_by_cursor.get(&k).copied())
         .unwrap_or(0);
     let outcome = cursor::apply_cap(reply_doc, max_documents, prior);
     let frame = if outcome.was_capped || !outcome.bson_doc.is_empty() {
         match cursor::rebuild_op_msg_frame(upstream_frame, &outcome.bson_doc) {
             Some(f) => f,
-            None    => upstream_frame.to_vec(),
+            None => upstream_frame.to_vec(),
         }
     } else {
         upstream_frame.to_vec()
@@ -912,15 +955,21 @@ fn apply_cursor_cap_to_outcome(
     let rows_returned = outcome.emitted_docs as u64;
     let cap_reason = if outcome.was_capped {
         Some("max_documents_exceeded")
-    } else { None };
+    } else {
+        None
+    };
     (frame, rows_returned, cap_reason)
 }
 
 /// Read `cursor.id` from a reply BSON doc.
 fn reply_cursor_id(doc: &[u8]) -> Option<i64> {
-    if doc.len() < 5 { return None; }
+    if doc.len() < 5 {
+        return None;
+    }
     let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
-    if total < 5 || total > doc.len() { return None; }
+    if total < 5 || total > doc.len() {
+        return None;
+    }
     let body = &doc[4..total - 1];
     let mut p = 0;
     while p < body.len() {
@@ -931,7 +980,9 @@ fn reply_cursor_id(doc: &[u8]) -> Option<i64> {
         p += nul + 1;
         if name == "cursor" && t == 0x03 {
             let inner_total = i32::from_le_bytes(body[p..p + 4].try_into().ok()?) as usize;
-            if p + inner_total > body.len() { return None; }
+            if p + inner_total > body.len() {
+                return None;
+            }
             let inner = &body[p + 4..p + inner_total - 1];
             let mut q = 0;
             while q < inner.len() {
@@ -959,16 +1010,22 @@ fn bson_value_len(t: u8, data: &[u8]) -> Option<usize> {
     Some(match t {
         0x01 => 8,
         0x02 => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
             4 + len
         }
         0x03 | 0x04 => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             i32::from_le_bytes(data[..4].try_into().ok()?) as usize
         }
         0x05 => {
-            if data.len() < 5 { return None; }
+            if data.len() < 5 {
+                return None;
+            }
             5 + i32::from_le_bytes(data[..4].try_into().ok()?) as usize
         }
         0x06 => 0,
@@ -983,16 +1040,22 @@ fn bson_value_len(t: u8, data: &[u8]) -> Option<usize> {
             n1 + 1 + n2 + 1
         }
         0x0C => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
             4 + len + 12
         }
         0x0D | 0x0E => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             4 + i32::from_le_bytes(data[..4].try_into().ok()?) as usize
         }
         0x0F => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             i32::from_le_bytes(data[..4].try_into().ok()?) as usize
         }
         0x10 => 4,
@@ -1017,10 +1080,10 @@ fn now_secs() -> u64 {
 fn build_proxy_error_doc(message: &str) -> Vec<u8> {
     use wire::BsonBuilder as B;
     B::new()
-        .double("ok",       0.0)
-        .int32 ("code",     8000)
+        .double("ok", 0.0)
+        .int32("code", 8000)
         .string("codeName", "RaxisProxyError")
-        .string("errmsg",   message)
+        .string("errmsg", message)
         .finish()
 }
 
@@ -1056,32 +1119,27 @@ fn build_reply_for(command: &str) -> Vec<u8> {
             // exposed via `buildInfo.version` for operator
             // inspection.
             B::new()
-                .double("ok",                  1.0)
-                .bool  ("isWritablePrimary",   true)
-                .bool  ("ismaster",            true)
-                .int32 ("maxBsonObjectSize",   16_777_216)
-                .int32 ("maxMessageSizeBytes", 48_000_000)
-                .int32 ("maxWriteBatchSize",   100_000)
-                .int32 ("maxWireVersion",      17)
-                .int32 ("minWireVersion",      0)
-                .bool  ("readOnly",            false)
-                .finish()
-        }
-        "ping" => {
-            B::new().double("ok", 1.0).finish()
-        }
-        "buildInfo" | "buildinfo" => {
-            B::new()
                 .double("ok", 1.0)
-                .string("version", "raxis-mongo-proxy-v2")
-                .int32 ("maxBsonObjectSize", 16_777_216)
+                .bool("isWritablePrimary", true)
+                .bool("ismaster", true)
+                .int32("maxBsonObjectSize", 16_777_216)
+                .int32("maxMessageSizeBytes", 48_000_000)
+                .int32("maxWriteBatchSize", 100_000)
+                .int32("maxWireVersion", 17)
+                .int32("minWireVersion", 0)
+                .bool("readOnly", false)
                 .finish()
         }
+        "ping" => B::new().double("ok", 1.0).finish(),
+        "buildInfo" | "buildinfo" => B::new()
+            .double("ok", 1.0)
+            .string("version", "raxis-mongo-proxy-v2")
+            .int32("maxBsonObjectSize", 16_777_216)
+            .finish(),
         // Generic OK for everything else the restriction set allows.
         _ => B::new().double("ok", 1.0).finish(),
     }
 }
-
 
 fn sha256_hex(b: &[u8]) -> String {
     use sha2::{Digest, Sha256};
@@ -1097,14 +1155,11 @@ mod tests {
     #[test]
     fn blocked_doc_pins_code_13() {
         let decision = RestrictionDecision::Block {
-            reason:     RestrictionReason::AllowReadOnly,
+            reason: RestrictionReason::AllowReadOnly,
             collection: None,
         };
         let doc = build_blocked_doc("insert", &decision);
-        let needle = [
-            0x10, b'c', b'o', b'd', b'e', 0x00,
-            13, 0, 0, 0,
-        ];
+        let needle = [0x10, b'c', b'o', b'd', b'e', 0x00, 13, 0, 0, 0];
         assert!(
             doc.windows(needle.len()).any(|w| w == needle),
             "code:13 not found in bson body: {doc:?}",
@@ -1115,9 +1170,8 @@ mod tests {
     fn reply_for_hello_advertises_max_wire_version_17() {
         let doc = build_reply_for("hello");
         let needle = [
-            0x10, b'm', b'a', b'x', b'W', b'i', b'r', b'e',
-            b'V', b'e', b'r', b's', b'i', b'o', b'n', 0x00,
-            17, 0, 0, 0,
+            0x10, b'm', b'a', b'x', b'W', b'i', b'r', b'e', b'V', b'e', b'r', b's', b'i', b'o',
+            b'n', 0x00, 17, 0, 0, 0,
         ];
         assert!(
             doc.windows(needle.len()).any(|w| w == needle),
@@ -1153,8 +1207,8 @@ mod tests {
         // `02` = BSON string type, followed by C-string key
         // `topologyVersion\0`.
         let string_typed_topology_key = [
-            0x02, b't', b'o', b'p', b'o', b'l', b'o', b'g', b'y',
-                  b'V', b'e', b'r', b's', b'i', b'o', b'n', 0x00,
+            0x02, b't', b'o', b'p', b'o', b'l', b'o', b'g', b'y', b'V', b'e', b'r', b's', b'i',
+            b'o', b'n', 0x00,
         ];
         assert!(
             !doc.windows(string_typed_topology_key.len())

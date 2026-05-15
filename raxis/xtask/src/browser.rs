@@ -198,9 +198,7 @@ pub fn open_in_best_browser(url: &str) -> OpenOutcome {
             );
             try_system(url).unwrap_or_else(|| print_url(url))
         }
-        HostEnvironment::SystemDefault => {
-            try_system(url).unwrap_or_else(|| print_url(url))
-        }
+        HostEnvironment::SystemDefault => try_system(url).unwrap_or_else(|| print_url(url)),
     }
 }
 
@@ -216,9 +214,7 @@ pub fn cursor_cli_path() -> Option<PathBuf> {
     // `/usr/local/bin/cursor` → this path; users who never ran
     // that action still have the binary at the bundled path.
     if cfg!(target_os = "macos") {
-        let bundled = PathBuf::from(
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-        );
+        let bundled = PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/bin/cursor");
         if bundled.exists() {
             return Some(bundled);
         }
@@ -322,9 +318,7 @@ fn try_windows(_url: &str) -> Option<OpenOutcome> {
 }
 
 fn print_url(url: &str) -> OpenOutcome {
-    eprintln!(
-        "    (no URL opener available — paste manually) {url}"
-    );
+    eprintln!("    (no URL opener available — paste manually) {url}");
     OpenOutcome::Printed
 }
 
@@ -372,7 +366,9 @@ mod tests {
     fn env_guard() -> std::sync::MutexGuard<'static, ()> {
         use std::sync::{Mutex, OnceLock};
         static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(())).lock().unwrap_or_else(|p| p.into_inner())
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     fn snapshot_and_clear() -> Vec<(String, Option<String>)> {

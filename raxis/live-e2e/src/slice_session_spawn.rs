@@ -65,10 +65,14 @@ pub async fn run() -> Result<()> {
 
     // ── Real credential backend with a real .env file. ────────────
     let creds_dir = TempDir::new().context("creds tempdir")?;
-    write_cred(creds_dir.path(), "db-live", b"postgresql://raxis@127.0.0.1:5432/test")?;
-    let backend = Arc::new(
-        FileCredentialBackend::open_without_uid_check(creds_dir.path()),
-    );
+    write_cred(
+        creds_dir.path(),
+        "db-live",
+        b"postgresql://raxis@127.0.0.1:5432/test",
+    )?;
+    let backend = Arc::new(FileCredentialBackend::open_without_uid_check(
+        creds_dir.path(),
+    ));
 
     // ── Real audit sink. ──────────────────────────────────────────
     let audit = Arc::new(FakeAuditSink::new());
@@ -91,9 +95,9 @@ pub async fn run() -> Result<()> {
     );
 
     let credentials = vec![TaskCredentialDecl {
-        name:     CredentialName::new("db-live".to_owned()),
+        name: CredentialName::new("db-live".to_owned()),
         mount_as: "DATABASE_URL".to_owned(),
-        proxy:    ProxyDecl::Postgres {
+        proxy: ProxyDecl::Postgres {
             restrictions: PostgresRestrictions {
                 allow_only_select: true,
                 ..Default::default()
@@ -107,32 +111,32 @@ pub async fn run() -> Result<()> {
     };
 
     let req = SpawnRequest {
-        session_id:        "live-spawn-1".into(),
-        task_id:           Some("live-task-1".into()),
-        initiative_id:     "live-init-1".into(),
+        session_id: "live-spawn-1".into(),
+        task_id: Some("live-task-1".into()),
+        initiative_id: "live-init-1".into(),
         image: VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(std::path::PathBuf::from("/dev/null")),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path(std::path::PathBuf::from("/dev/null")),
             signature: ImageSignature(b"unsigned-test-image".to_vec()),
-            image_id:  "raxis-live-e2e-substrate-image".into(),
+            image_id: "raxis-live-e2e-substrate-image".into(),
         },
-        workspace_mounts:  Vec::new(),
+        workspace_mounts: Vec::new(),
         vm_spec: VmSpec {
-            vcpu_count:        1,
-            mem_mib:           64,
-            egress_tier:       EgressTier::Tier2CredProxy,
-            cgroup_quota:      None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken("live-session-token".into()),
-            vsock_cid:         Some(0xC1D_E2E),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 64,
+            egress_tier: EgressTier::Tier2CredProxy,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken("live-session-token".into()),
+            vsock_cid: Some(0xC1D_E2E),
+            virtio_fs_mounts: Vec::new(),
             // SubprocessIsolation ignores the kernel path. The
             // platform-default microVM substrates (AVF / Firecracker)
             // live in the docker-gated full-lifecycle test, not in
             // this slice.
             linux_kernel_path: std::path::PathBuf::new(),
-            env:               BTreeMap::new(),
+            env: BTreeMap::new(),
             guest_console_log: None,
         },
         credentials,
@@ -155,9 +159,7 @@ pub async fn run() -> Result<()> {
         .get("DATABASE_URL")
         .ok_or_else(|| anyhow!("DATABASE_URL was not stamped into loopback env"))?;
     if !pg_url.starts_with("postgresql://raxis@127.0.0.1:") {
-        return Err(anyhow!(
-            "expected postgres loopback URL; got `{pg_url}`",
-        ));
+        return Err(anyhow!("expected postgres loopback URL; got `{pg_url}`",));
     }
     tracing::info!(database_url = %pg_url, "credential-proxy URL bound");
 
@@ -165,11 +167,11 @@ pub async fn run() -> Result<()> {
     drive_admission(
         handle.admission_loopback,
         tp::ProxyAdmissionRequest {
-            connection_id:     1,
-            original_dst_ip:   "203.0.113.10".into(),
+            connection_id: 1,
+            original_dst_ip: "203.0.113.10".into(),
             original_dst_port: 443,
-            host_or_sni:       Some("api.anthropic.com".into()),
-            protocol:          tp::AdmissionProtocol::Https,
+            host_or_sni: Some("api.anthropic.com".into()),
+            protocol: tp::AdmissionProtocol::Https,
         },
         ExpectedVerdict::Admit,
     )
@@ -180,11 +182,11 @@ pub async fn run() -> Result<()> {
     drive_admission(
         handle.admission_loopback,
         tp::ProxyAdmissionRequest {
-            connection_id:     2,
-            original_dst_ip:   "198.51.100.20".into(),
+            connection_id: 2,
+            original_dst_ip: "198.51.100.20".into(),
             original_dst_port: 443,
-            host_or_sni:       Some("evil.example.com".into()),
-            protocol:          tp::AdmissionProtocol::Https,
+            host_or_sni: Some("evil.example.com".into()),
+            protocol: tp::AdmissionProtocol::Https,
         },
         ExpectedVerdict::Deny,
     )
@@ -213,13 +215,21 @@ pub async fn run() -> Result<()> {
     let events = audit.events();
     let kinds: Vec<&'static str> = events.iter().map(|e| e.kind.as_str()).collect();
 
-    let proxy_started_idx = kinds.iter().position(|k| *k == "CredentialProxyStarted")
+    let proxy_started_idx = kinds
+        .iter()
+        .position(|k| *k == "CredentialProxyStarted")
         .ok_or_else(|| anyhow!("missing CredentialProxyStarted in audit chain"))?;
-    let spawned_idx = kinds.iter().position(|k| *k == "SessionVmSpawned")
+    let spawned_idx = kinds
+        .iter()
+        .position(|k| *k == "SessionVmSpawned")
         .ok_or_else(|| anyhow!("missing SessionVmSpawned in audit chain"))?;
-    let exited_idx = kinds.iter().position(|k| *k == "SessionVmExited")
+    let exited_idx = kinds
+        .iter()
+        .position(|k| *k == "SessionVmExited")
         .ok_or_else(|| anyhow!("missing SessionVmExited in audit chain"))?;
-    let proxy_stopped_idx = kinds.iter().position(|k| *k == "CredentialProxyStopped")
+    let proxy_stopped_idx = kinds
+        .iter()
+        .position(|k| *k == "CredentialProxyStopped")
         .ok_or_else(|| anyhow!("missing CredentialProxyStopped in audit chain"))?;
 
     if proxy_started_idx >= spawned_idx {
@@ -275,8 +285,8 @@ enum ExpectedVerdict {
 }
 
 async fn drive_admission(
-    addr:     std::net::SocketAddr,
-    req:      tp::ProxyAdmissionRequest,
+    addr: std::net::SocketAddr,
+    req: tp::ProxyAdmissionRequest,
     expected: ExpectedVerdict,
 ) -> Result<()> {
     let mut sock = tokio::net::TcpStream::connect(addr)

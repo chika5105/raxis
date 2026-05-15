@@ -13,8 +13,8 @@
 
 use raxis_store::Store;
 
-use crate::witness_index::{self, WitnessRecord};
 use super::GateError;
+use crate::witness_index::{self, WitnessRecord};
 
 /// Look up a witness record for (evaluation_sha, task_id, gate_type).
 ///
@@ -24,11 +24,11 @@ use super::GateError;
 ///
 /// Does NOT interpret result_class. The sole interpreter is gates/mod.rs.
 pub fn lookup(
-    evaluation_sha:  &str,
-    task_id:         &str,
-    gate_type:       &str,
+    evaluation_sha: &str,
+    task_id: &str,
+    gate_type: &str,
     verifier_run_id: Option<&str>,
-    store:           &Store,
+    store: &Store,
 ) -> Result<Option<WitnessRecord>, GateError> {
     witness_index::lookup(evaluation_sha, task_id, gate_type, verifier_run_id, store)
         .map_err(|e| GateError::WitnessError(e.to_string()))

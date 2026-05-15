@@ -18,8 +18,7 @@ use std::process::Command;
 use raxis_audit_tools::{AuditEvent, AuditEventKind};
 
 use super::seeds::{
-    expected_mongo_by_doc_id, expected_pg_by_id,
-    mongo_output_dir, pg_output_dir,
+    expected_mongo_by_doc_id, expected_pg_by_id, mongo_output_dir, pg_output_dir,
     EXPECTED_MONGO_DOCS, EXPECTED_PG_ROWS,
 };
 
@@ -35,18 +34,11 @@ pub trait EnforcementWitness: Send + Sync {
 
 /// Run every witness; if any fails, panic with the union of every
 /// failure's diagnostic, so a single panic carries the full list.
-pub fn assert_all_satisfied(
-    witnesses: &[Box<dyn EnforcementWitness>],
-    chain: &[AuditEvent],
-) {
+pub fn assert_all_satisfied(witnesses: &[Box<dyn EnforcementWitness>], chain: &[AuditEvent]) {
     let mut failures: Vec<String> = Vec::new();
     for w in witnesses {
         if !w.satisfied_by(chain) {
-            failures.push(format!(
-                "── {} ──\n{}\n",
-                w.name(),
-                w.diagnostic(chain),
-            ));
+            failures.push(format!("── {} ──\n{}\n", w.name(), w.diagnostic(chain),));
         }
     }
     if !failures.is_empty() {
@@ -74,13 +66,8 @@ pub fn typed(ev: &AuditEvent) -> Option<AuditEventKind> {
 
 /// Walk the chain and return every event whose `event_kind`
 /// matches `kind_str`. Borrowed; cheap, no clone.
-pub fn events_by_kind<'a>(
-    chain: &'a [AuditEvent],
-    kind_str: &str,
-) -> Vec<&'a AuditEvent> {
-    chain.iter()
-        .filter(|e| e.event_kind == kind_str)
-        .collect()
+pub fn events_by_kind<'a>(chain: &'a [AuditEvent], kind_str: &str) -> Vec<&'a AuditEvent> {
+    chain.iter().filter(|e| e.event_kind == kind_str).collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -108,22 +95,18 @@ pub struct EgressBlockedWitness {
 }
 
 impl EnforcementWitness for EgressBlockedWitness {
-    fn name(&self) -> &'static str { "egress-blocked" }
+    fn name(&self) -> &'static str {
+        "egress-blocked"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
-        chain.iter().any(|ev| {
-            match typed(ev) {
-                Some(AuditEventKind::TransparentProxyDenied {
-                    host_or_sni, ..
-                }) => host_or_sni
-                    .as_deref()
-                    .map(|h| h.contains(self.host_substring))
-                    .unwrap_or(false),
-                Some(AuditEventKind::HttpProxyRequestExecuted {
-                    blocked: true, ..
-                }) => true,
-                _ => false,
-            }
+        chain.iter().any(|ev| match typed(ev) {
+            Some(AuditEventKind::TransparentProxyDenied { host_or_sni, .. }) => host_or_sni
+                .as_deref()
+                .map(|h| h.contains(self.host_substring))
+                .unwrap_or(false),
+            Some(AuditEventKind::HttpProxyRequestExecuted { blocked: true, .. }) => true,
+            _ => false,
         })
     }
 
@@ -131,10 +114,12 @@ impl EnforcementWitness for EgressBlockedWitness {
         let denies = events_by_kind(chain, "TransparentProxyDenied").len();
         let proxy_blocks = chain
             .iter()
-            .filter(|ev| matches!(
-                typed(ev),
-                Some(AuditEventKind::HttpProxyRequestExecuted { blocked: true, .. })
-            ))
+            .filter(|ev| {
+                matches!(
+                    typed(ev),
+                    Some(AuditEventKind::HttpProxyRequestExecuted { blocked: true, .. })
+                )
+            })
             .count();
         format!(
             "expected at least one TransparentProxyDenied with host_or_sni \
@@ -160,14 +145,18 @@ pub struct EscalationSubmittedWitness {
 }
 
 impl EnforcementWitness for EscalationSubmittedWitness {
-    fn name(&self) -> &'static str { "escalation-submitted" }
+    fn name(&self) -> &'static str {
+        "escalation-submitted"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
-        chain.iter().any(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::EscalationSubmitted { class, .. })
-                if class == self.class
-        ))
+        chain.iter().any(|ev| {
+            matches!(
+                typed(ev),
+                Some(AuditEventKind::EscalationSubmitted { class, .. })
+                    if class == self.class
+            )
+        })
     }
 
     fn diagnostic(&self, _chain: &[AuditEvent]) -> String {
@@ -195,23 +184,31 @@ pub struct EscalationApprovalFlowWitness {
 }
 
 impl EnforcementWitness for EscalationApprovalFlowWitness {
-    fn name(&self) -> &'static str { "escalation-approval-flow" }
+    fn name(&self) -> &'static str {
+        "escalation-approval-flow"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
         let approved_id = chain.iter().find_map(|ev| match typed(ev) {
             Some(AuditEventKind::EscalationApproved {
-                escalation_id, approved_by, ..
-            }) if approved_by.eq_ignore_ascii_case(
-                &self.expected_approver_pubkey_hex,
-            ) => Some(escalation_id),
+                escalation_id,
+                approved_by,
+                ..
+            }) if approved_by.eq_ignore_ascii_case(&self.expected_approver_pubkey_hex) => {
+                Some(escalation_id)
+            }
             _ => None,
         });
-        let Some(id) = approved_id else { return false; };
-        chain.iter().any(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::EscalationConsumed { escalation_id, .. })
-                if escalation_id == id
-        ))
+        let Some(id) = approved_id else {
+            return false;
+        };
+        chain.iter().any(|ev| {
+            matches!(
+                typed(ev),
+                Some(AuditEventKind::EscalationConsumed { escalation_id, .. })
+                    if escalation_id == id
+            )
+        })
     }
 
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
@@ -236,16 +233,20 @@ pub struct PathAllowlistRejectedWitness {
 }
 
 impl EnforcementWitness for PathAllowlistRejectedWitness {
-    fn name(&self) -> &'static str { "path-allowlist-rejected" }
+    fn name(&self) -> &'static str {
+        "path-allowlist-rejected"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
-        chain.iter().any(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::IntentRejected {
-                session_id, error_code, ..
-            }) if session_id == self.session_id
-                && error_code == "FAIL_TASK_PATH_NOT_ALLOWED"
-        ))
+        chain.iter().any(|ev| {
+            matches!(
+                typed(ev),
+                Some(AuditEventKind::IntentRejected {
+                    session_id, error_code, ..
+                }) if session_id == self.session_id
+                    && error_code == "FAIL_TASK_PATH_NOT_ALLOWED"
+            )
+        })
     }
 
     fn diagnostic(&self, _chain: &[AuditEvent]) -> String {
@@ -272,19 +273,23 @@ impl EnforcementWitness for PathAllowlistRejectedWitness {
 pub struct NoSecurityViolationWitness;
 
 impl EnforcementWitness for NoSecurityViolationWitness {
-    fn name(&self) -> &'static str { "no-security-violation" }
+    fn name(&self) -> &'static str {
+        "no-security-violation"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
-        chain.iter().all(|ev| ev.event_kind != "SecurityViolationDetected")
+        chain
+            .iter()
+            .all(|ev| ev.event_kind != "SecurityViolationDetected")
     }
 
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
         let kinds: Vec<String> = chain
             .iter()
             .filter_map(|ev| match typed(ev) {
-                Some(AuditEventKind::SecurityViolationDetected {
-                    violation_kind, ..
-                }) => Some(violation_kind),
+                Some(AuditEventKind::SecurityViolationDetected { violation_kind, .. }) => {
+                    Some(violation_kind)
+                }
                 _ => None,
             })
             .collect();
@@ -321,7 +326,9 @@ pub struct ReviewerDisagreementWitness {
 }
 
 impl EnforcementWitness for ReviewerDisagreementWitness {
-    fn name(&self) -> &'static str { "reviewer-disagreement-and-rereview" }
+    fn name(&self) -> &'static str {
+        "reviewer-disagreement-and-rereview"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
         let mut saw_reviewer_a = false;
@@ -332,7 +339,9 @@ impl EnforcementWitness for ReviewerDisagreementWitness {
         for ev in chain {
             match typed(ev) {
                 Some(AuditEventKind::IntentAccepted {
-                    task_id, intent_kind, ..
+                    task_id,
+                    intent_kind,
+                    ..
                 }) if intent_kind == "SubmitReview" => {
                     if task_id == self.reviewer_a_task_id {
                         saw_reviewer_a = true;
@@ -347,10 +356,10 @@ impl EnforcementWitness for ReviewerDisagreementWitness {
                     saw_executor_respawn = true;
                 }
                 Some(AuditEventKind::ReviewAggregationCompleted {
-                    executor_task_id, verdict, ..
-                }) if executor_task_id == self.executor_task_id
-                    && verdict == "AllPassed" =>
-                {
+                    executor_task_id,
+                    verdict,
+                    ..
+                }) if executor_task_id == self.executor_task_id && verdict == "AllPassed" => {
                     saw_aggregation_pass = true;
                 }
                 _ => {}
@@ -361,17 +370,27 @@ impl EnforcementWitness for ReviewerDisagreementWitness {
     }
 
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
-        let n_reviews = chain.iter().filter(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::IntentAccepted { intent_kind, .. })
-                if intent_kind == "SubmitReview"
-        )).count();
-        let n_aggregations = chain.iter().filter(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::ReviewAggregationCompleted {
-                executor_task_id, ..
-            }) if executor_task_id == self.executor_task_id
-        )).count();
+        let n_reviews = chain
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    typed(ev),
+                    Some(AuditEventKind::IntentAccepted { intent_kind, .. })
+                        if intent_kind == "SubmitReview"
+                )
+            })
+            .count();
+        let n_aggregations = chain
+            .iter()
+            .filter(|ev| {
+                matches!(
+                    typed(ev),
+                    Some(AuditEventKind::ReviewAggregationCompleted {
+                        executor_task_id, ..
+                    }) if executor_task_id == self.executor_task_id
+                )
+            })
+            .count();
         format!(
             "expected sequence (reviewer-A submit → executor re-spawn → \
              reviewer-B submit → aggregation:AllPassed) for executor task \
@@ -393,13 +412,13 @@ impl EnforcementWitness for ReviewerDisagreementWitness {
 
 #[derive(Debug, Default)]
 pub struct MaterializationReport {
-    pub pg_extra_ids:    BTreeSet<String>,
-    pub pg_missing_ids:  BTreeSet<String>,
-    pub pg_diffs:        Vec<String>,
+    pub pg_extra_ids: BTreeSet<String>,
+    pub pg_missing_ids: BTreeSet<String>,
+    pub pg_diffs: Vec<String>,
     pub mongo_extra_ids: BTreeSet<String>,
     pub mongo_missing_ids: BTreeSet<String>,
-    pub mongo_diffs:     Vec<String>,
-    pub git_commit_msg:  Option<String>,
+    pub mongo_diffs: Vec<String>,
+    pub git_commit_msg: Option<String>,
     pub git_added_files: Vec<String>,
 }
 
@@ -443,18 +462,18 @@ impl MaterializationWitness {
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => {
-                    report.pg_diffs.push(format!(
-                        "{}: read failed: {e}", path.display(),
-                    ));
+                    report
+                        .pg_diffs
+                        .push(format!("{}: read failed: {e}", path.display(),));
                     continue;
                 }
             };
             let actual: serde_json::Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    report.pg_diffs.push(format!(
-                        "{}: not valid JSON: {e}", path.display(),
-                    ));
+                    report
+                        .pg_diffs
+                        .push(format!("{}: not valid JSON: {e}", path.display(),));
                     continue;
                 }
             };
@@ -468,7 +487,8 @@ impl MaterializationWitness {
                 report.pg_diffs.push(format!(
                     "{}: content drift\n   want: {}\n   got:  {}",
                     path.display(),
-                    want, actual,
+                    want,
+                    actual,
                 ));
             }
         }
@@ -495,18 +515,18 @@ impl MaterializationWitness {
             let bytes = match std::fs::read(&path) {
                 Ok(b) => b,
                 Err(e) => {
-                    report.mongo_diffs.push(format!(
-                        "{}: read failed: {e}", path.display(),
-                    ));
+                    report
+                        .mongo_diffs
+                        .push(format!("{}: read failed: {e}", path.display(),));
                     continue;
                 }
             };
             let mut actual: serde_json::Value = match serde_json::from_slice(&bytes) {
                 Ok(v) => v,
                 Err(e) => {
-                    report.mongo_diffs.push(format!(
-                        "{}: not valid JSON: {e}", path.display(),
-                    ));
+                    report
+                        .mongo_diffs
+                        .push(format!("{}: not valid JSON: {e}", path.display(),));
                     continue;
                 }
             };
@@ -539,7 +559,8 @@ impl MaterializationWitness {
                 report.mongo_diffs.push(format!(
                     "{}: content drift\n   want: {}\n   got:  {}",
                     path.display(),
-                    want, actual,
+                    want,
+                    actual,
                 ));
             }
         }
@@ -554,18 +575,18 @@ impl MaterializationWitness {
 
     fn evaluate_git(&self, report: &mut MaterializationReport) {
         let log = Command::new("git")
-            .args(["-C"]).arg(&self.workdir)
+            .args(["-C"])
+            .arg(&self.workdir)
             .args(["log", "-1", "--pretty=%s"])
             .output();
         if let Ok(o) = log {
             if o.status.success() {
-                report.git_commit_msg = Some(
-                    String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-                );
+                report.git_commit_msg = Some(String::from_utf8_lossy(&o.stdout).trim().to_owned());
             }
         }
         let stat = Command::new("git")
-            .args(["-C"]).arg(&self.workdir)
+            .args(["-C"])
+            .arg(&self.workdir)
             .args(["show", "--name-only", "--pretty=", "HEAD"])
             .output();
         if let Ok(o) = stat {
@@ -580,8 +601,7 @@ impl MaterializationWitness {
         if report.git_commit_msg.as_deref() != Some(self.expected_commit_message) {
             report.pg_diffs.push(format!(
                 "git HEAD commit message: want '{}', got {:?}",
-                self.expected_commit_message,
-                report.git_commit_msg,
+                self.expected_commit_message, report.git_commit_msg,
             ));
         }
     }

@@ -25,7 +25,7 @@ fn supervisor_binary() -> PathBuf {
 fn fake_child(name: &str) -> PathBuf {
     let path = match name {
         "exit70" => env!("CARGO_BIN_EXE_supervisor-fake-child-exit70"),
-        "exit0"  => env!("CARGO_BIN_EXE_supervisor-fake-child-exit0"),
+        "exit0" => env!("CARGO_BIN_EXE_supervisor-fake-child-exit0"),
         other => panic!("unknown fake-child binary: {other}"),
     };
     PathBuf::from(path)

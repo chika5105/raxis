@@ -57,7 +57,10 @@ pub enum Outcome {
     /// Restart-eligible.
     ///
     /// `prev_run_exit_code` is `128 + signal` (shell convention).
-    SignalCrash { prev_run_exit_code: i32, signal: i32 },
+    SignalCrash {
+        prev_run_exit_code: i32,
+        signal: i32,
+    },
 
     /// Killed by SIGKILL the supervisor did NOT send. Almost
     /// certainly the OOM-killer (kernel.audit subsystem on Linux
@@ -78,7 +81,10 @@ pub enum Outcome {
     /// NOT restart.
     ///
     /// `prev_run_exit_code` is `128 + signal`.
-    OperatorSignalExit { prev_run_exit_code: i32, signal: i32 },
+    OperatorSignalExit {
+        prev_run_exit_code: i32,
+        signal: i32,
+    },
 }
 
 impl Outcome {
@@ -146,10 +152,7 @@ impl Outcome {
 /// | SIGKILL          | no                      | `OomKilled`          |
 /// | SIGSEGV/BUS/ABRT | n/a                     | `SignalCrash`        |
 #[cfg(unix)]
-pub fn classify_exit_status(
-    status:                 ExitStatus,
-    supervisor_sent_signal: bool,
-) -> Outcome {
+pub fn classify_exit_status(status: ExitStatus, supervisor_sent_signal: bool) -> Outcome {
     if let Some(code) = status.code() {
         return classify_exit_code(code);
     }
@@ -162,9 +165,13 @@ pub fn classify_exit_status(
 /// `signal()` populate (treated as `PanicAbort{-1}`).
 pub fn classify_exit_code(code: i32) -> Outcome {
     match code {
-        0 => Outcome::CleanExit { prev_run_exit_code: 0 },
+        0 => Outcome::CleanExit {
+            prev_run_exit_code: 0,
+        },
         70 => Outcome::DeadlockDetected,
-        n => Outcome::PanicAbort { prev_run_exit_code: n },
+        n => Outcome::PanicAbort {
+            prev_run_exit_code: n,
+        },
     }
 }
 
@@ -223,7 +230,12 @@ mod tests {
     #[test]
     fn clean_exit_is_not_restart_eligible() {
         let o = classify_exit_code(0);
-        assert_eq!(o, Outcome::CleanExit { prev_run_exit_code: 0 });
+        assert_eq!(
+            o,
+            Outcome::CleanExit {
+                prev_run_exit_code: 0
+            }
+        );
         assert!(!o.restart_eligible());
         assert_eq!(o.reason_str(), "CleanExit");
         assert_eq!(o.prev_run_exit_code(), 0);
@@ -242,7 +254,12 @@ mod tests {
     fn nonzero_exit_is_panic_abort_and_restart_eligible() {
         for code in [1, 2, 42, 137] {
             let o = classify_exit_code(code);
-            assert_eq!(o, Outcome::PanicAbort { prev_run_exit_code: code });
+            assert_eq!(
+                o,
+                Outcome::PanicAbort {
+                    prev_run_exit_code: code
+                }
+            );
             assert!(o.restart_eligible());
             assert_eq!(o.reason_str(), "PanicAbort");
             assert_eq!(o.prev_run_exit_code(), code);
@@ -293,14 +310,24 @@ mod tests {
     #[test]
     fn supervisor_initiated_sigkill_is_clean_exit() {
         let o = classify_signal(9, true);
-        assert_eq!(o, Outcome::CleanExit { prev_run_exit_code: 137 });
+        assert_eq!(
+            o,
+            Outcome::CleanExit {
+                prev_run_exit_code: 137
+            }
+        );
         assert!(!o.restart_eligible());
     }
 
     #[test]
     fn external_sigkill_is_oom_killed_and_restart_eligible() {
         let o = classify_signal(9, false);
-        assert_eq!(o, Outcome::OomKilled { prev_run_exit_code: 137 });
+        assert_eq!(
+            o,
+            Outcome::OomKilled {
+                prev_run_exit_code: 137
+            }
+        );
         assert!(o.restart_eligible());
         assert_eq!(o.reason_str(), "OomKilled");
     }

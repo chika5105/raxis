@@ -41,19 +41,19 @@ use crate::prompt::epoch_binding::EpochBinding;
 /// on-disk paths.
 pub struct KernelPolicyAdvancer {
     /// Kernel state shared with the IPC handlers.
-    pub registry:       Arc<KeyRegistry>,
-    pub store:          Arc<Store>,
-    pub audit:          Arc<dyn AuditSink>,
-    pub policy:         Arc<ArcSwap<PolicyBundle>>,
-    pub epoch_binding:  Arc<EpochBinding>,
+    pub registry: Arc<KeyRegistry>,
+    pub store: Arc<Store>,
+    pub audit: Arc<dyn AuditSink>,
+    pub policy: Arc<ArcSwap<PolicyBundle>>,
+    pub epoch_binding: Arc<EpochBinding>,
     pub artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
     /// Canonical on-disk policy.toml path. Writes go via temp +
     /// rename so a partial write never leaves the canonical
     /// path inconsistent with the in-memory bundle.
-    pub policy_path:    PathBuf,
+    pub policy_path: PathBuf,
     /// Canonical detached-signature path
     /// (`<policy_path>.sig` by convention).
-    pub sig_path:       PathBuf,
+    pub sig_path: PathBuf,
 }
 
 impl KernelPolicyAdvancer {
@@ -61,13 +61,13 @@ impl KernelPolicyAdvancer {
     /// once at boot and threads the resulting `Arc<dyn
     /// PolicyAdvancer>` into `KernelDashboardData`.
     pub fn new(
-        registry:       Arc<KeyRegistry>,
-        store:          Arc<Store>,
-        audit:          Arc<dyn AuditSink>,
-        policy:         Arc<ArcSwap<PolicyBundle>>,
-        epoch_binding:  Arc<EpochBinding>,
+        registry: Arc<KeyRegistry>,
+        store: Arc<Store>,
+        audit: Arc<dyn AuditSink>,
+        policy: Arc<ArcSwap<PolicyBundle>>,
+        epoch_binding: Arc<EpochBinding>,
         artifact_store: Option<Arc<raxis_artifact_store::ArtifactStore>>,
-        policy_path:    PathBuf,
+        policy_path: PathBuf,
     ) -> Self {
         let sig_path = sig_path_for(&policy_path);
         Self {
@@ -87,7 +87,7 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
     fn advance(
         &self,
         toml_bytes: &[u8],
-        sig_bytes:  &[u8],
+        sig_bytes: &[u8],
         operator_fingerprint: &str,
     ) -> Result<AdvanceResult, AdvanceError> {
         // Phase A — read the previous on-disk content so we can
@@ -96,13 +96,11 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
         // missing side as "no previous content" and roll back
         // by deleting the staged bytes.
         let prev_toml = read_existing(&self.policy_path);
-        let prev_sig  = read_existing(&self.sig_path);
+        let prev_sig = read_existing(&self.sig_path);
         // Phase B — stage the new bytes onto the canonical
         // paths atomically (write to .tmp, then rename).
         atomic_write(&self.policy_path, toml_bytes).map_err(|e| {
-            AdvanceError::Internal(format!(
-                "stage policy.toml at {:?}: {e}", self.policy_path
-            ))
+            AdvanceError::Internal(format!("stage policy.toml at {:?}: {e}", self.policy_path))
         })?;
         if let Err(e) = atomic_write(&self.sig_path, sig_bytes) {
             // The .toml landed but the .sig did not — restore
@@ -110,7 +108,8 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
             // half-written artifact.
             restore(&self.policy_path, prev_toml.as_deref());
             return Err(AdvanceError::Internal(format!(
-                "stage policy.toml.sig at {:?}: {e}", self.sig_path
+                "stage policy.toml.sig at {:?}: {e}",
+                self.sig_path
             )));
         }
         // Phase C — capture the previous epoch BEFORE the swap
@@ -133,7 +132,7 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
             Ok(o) => o,
             Err(e) => {
                 restore(&self.policy_path, prev_toml.as_deref());
-                restore(&self.sig_path,    prev_sig.as_deref());
+                restore(&self.sig_path, prev_sig.as_deref());
                 // Operator-safe error mapping. The Validation
                 // bucket carries the validator's short message;
                 // the Internal bucket hides IO trouble that
@@ -152,7 +151,9 @@ impl PolicyAdvancer for KernelPolicyAdvancer {
                 new_epoch: outcome.new_epoch_id,
                 policy_sha256: outcome.policy_sha256.clone(),
             },
-            None, None, None,
+            None,
+            None,
+            None,
         ) {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"PolicyUpdatedViaDashboardEmitFailed\",\
@@ -189,12 +190,12 @@ fn read_existing(path: &std::path::Path) -> Option<Vec<u8>> {
 /// then rename. The temp file is in the same directory so the
 /// rename stays on the same filesystem (atomic per POSIX).
 fn atomic_write(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = path
-        .parent()
-        .ok_or_else(|| std::io::Error::new(
+    let parent = path.parent().ok_or_else(|| {
+        std::io::Error::new(
             std::io::ErrorKind::InvalidInput,
             format!("policy path {path:?} has no parent"),
-        ))?;
+        )
+    })?;
     std::fs::create_dir_all(parent)?;
     let mut tmp = path.as_os_str().to_owned();
     tmp.push(".dashboard.tmp");
@@ -391,7 +392,11 @@ mod tests {
         let store = StdArc::new(raxis_store::Store::open_in_memory().expect("open mem store"));
         let empty = raxis_policy::PolicyBundle::for_tests_with_operators(vec![]);
         crate::policy_manager::install_genesis_policy_epoch(
-            &store, "genesis-sha", "genesis-fp", 1, &empty,
+            &store,
+            "genesis-sha",
+            "genesis-fp",
+            1,
+            &empty,
         )
         .unwrap();
         let policy: StdArc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>> =
@@ -421,8 +426,7 @@ mod tests {
         // failure (the happy path here doesn't restore).
         std::fs::write(&policy_path, b"# previous\n").unwrap();
         std::fs::write(sig_path_for(&policy_path), [0u8; 64]).unwrap();
-        let (advancer, sink, swap, _store, authority_sk) =
-            boot_advancer(policy_path.clone());
+        let (advancer, sink, swap, _store, authority_sk) = boot_advancer(policy_path.clone());
         let toml_bytes = write_signed_policy(tmp.path(), 2, &authority_sk);
         let sig_bytes = authority_sk.sign(&toml_bytes).to_bytes().to_vec();
 
@@ -470,8 +474,7 @@ mod tests {
         let prev_sig = [0u8; 64];
         std::fs::write(&policy_path, prev_toml).unwrap();
         std::fs::write(sig_path_for(&policy_path), prev_sig).unwrap();
-        let (advancer, sink, swap, _store, authority_sk) =
-            boot_advancer(policy_path.clone());
+        let (advancer, sink, swap, _store, authority_sk) = boot_advancer(policy_path.clone());
         let toml_bytes = write_signed_policy(tmp.path(), 2, &authority_sk);
         // Sign with a DIFFERENT key so verify fails.
         let bad_sk = SigningKey::from_bytes(&[0x99u8; 32]);
@@ -481,7 +484,7 @@ mod tests {
         assert!(matches!(result, Err(AdvanceError::Validation(_))));
         // Epoch unchanged.
         assert_eq!(swap.load().epoch(), 0); // Not 1, because the swap was seeded with for_tests epoch=0
-        // No PolicyUpdatedViaDashboard event.
+                                            // No PolicyUpdatedViaDashboard event.
         let kinds = sink.event_kinds();
         assert!(!kinds.iter().any(|k| *k == "PolicyUpdatedViaDashboard"));
         // On-disk files restored to their previous content.
@@ -500,8 +503,7 @@ mod tests {
         let prev_sig = [0u8; 64];
         std::fs::write(&policy_path, prev_toml).unwrap();
         std::fs::write(sig_path_for(&policy_path), prev_sig).unwrap();
-        let (advancer, sink, _swap, _store, authority_sk) =
-            boot_advancer(policy_path.clone());
+        let (advancer, sink, _swap, _store, authority_sk) = boot_advancer(policy_path.clone());
         // Sign a policy at epoch 1 — replay protection should reject
         // because the genesis row already pinned epoch 1.
         let toml_bytes = write_signed_policy(tmp.path(), 1, &authority_sk);

@@ -21,7 +21,7 @@
 use std::path::PathBuf;
 
 use raxis_audit_tools::{
-    verify_chain_from, verify_chain_full, ChainReader, ChainReadError, AUDIT_DIR_NAME,
+    verify_chain_from, verify_chain_full, ChainReadError, ChainReader, AUDIT_DIR_NAME,
 };
 
 use crate::errors::CliError;
@@ -57,10 +57,11 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         // quick_chain_check` (the same fast check `raxis status` uses).
         // We emit a one-line OK + exit 0 OR a one-line BROKEN + exit 3.
         match raxis_audit_tools::quick_chain_check(&audit_dir) {
-            raxis_audit_tools::ChainQuickCheck::Ok { last_seq, segment_count } => {
-                println!(
-                    "Audit chain: OK (quick) — segments={segment_count}, last_seq={last_seq}"
-                );
+            raxis_audit_tools::ChainQuickCheck::Ok {
+                last_seq,
+                segment_count,
+            } => {
+                println!("Audit chain: OK (quick) — segments={segment_count}, last_seq={last_seq}");
                 std::process::exit(0);
             }
             raxis_audit_tools::ChainQuickCheck::NoSegments => {
@@ -81,7 +82,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // to records with `seq >= N`; the WHOLE chain is still walked so
     // a corruption before the slice still fails the verdict (see
     // `verify_chain_from` doc-comment in raxis-audit-tools).
-    let from_seq    = opts.from_seq.unwrap_or(0);
+    let from_seq = opts.from_seq.unwrap_or(0);
     let walk_result = if from_seq == 0 {
         verify_chain_full(&audit_dir)
     } else {
@@ -157,9 +158,9 @@ fn parse_args(args: &[String]) -> Result<VerifyChainOpts, CliError> {
             }
             "--audit-dir" => {
                 i += 1;
-                let v = args.get(i).ok_or_else(|| {
-                    CliError::Usage("--audit-dir requires a path".to_owned())
-                })?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--audit-dir requires a path".to_owned()))?;
                 opts.audit_dir = Some(PathBuf::from(v));
             }
             "-h" | "--help" => {
@@ -235,20 +236,20 @@ mod tests {
         // needs to accept the combo to reach `run` — this test
         // covers `parse_args`. The combo rejection is covered by
         // the `run`-level integration test below.
-        let opts = parse_args(&["--quick".to_owned(), "--from".to_owned(), "1".to_owned()])
-            .unwrap();
+        let opts =
+            parse_args(&["--quick".to_owned(), "--from".to_owned(), "1".to_owned()]).unwrap();
         assert!(opts.quick);
         assert_eq!(opts.from_seq, Some(1));
     }
 
     #[test]
     fn parse_args_accepts_audit_dir_override() {
-        let opts = parse_args(&[
-            "--audit-dir".to_owned(),
-            "/var/log/raxis/audit".to_owned(),
-        ])
-        .unwrap();
-        assert_eq!(opts.audit_dir.as_deref(), Some(std::path::Path::new("/var/log/raxis/audit")));
+        let opts =
+            parse_args(&["--audit-dir".to_owned(), "/var/log/raxis/audit".to_owned()]).unwrap();
+        assert_eq!(
+            opts.audit_dir.as_deref(),
+            Some(std::path::Path::new("/var/log/raxis/audit"))
+        );
     }
 
     #[test]

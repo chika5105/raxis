@@ -136,8 +136,8 @@ mod tests {
     // Mirror the production module's typed-table-name discipline in the
     // test fixtures so a future column-rename in `migration_*` only has
     // to touch the `Table` enum, not every hand-rolled test SQL string.
-    const POLICY_EPOCH_HISTORY:    &str = Table::PolicyEpochHistory.as_str();
-    const OPERATOR_CERTIFICATES:   &str = Table::OperatorCertificates.as_str();
+    const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
+    const OPERATOR_CERTIFICATES: &str = Table::OperatorCertificates.as_str();
 
     fn fresh_store() -> (TempDir, Store) {
         let tmp = TempDir::new().expect("tempdir");
@@ -151,8 +151,12 @@ mod tests {
     use raxis_types::operator_cert::{CertKind, OperatorCert};
     use sha2::{Digest, Sha256};
 
-    fn signing_key() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
-    fn pk_hex() -> String { hex::encode(signing_key().verifying_key().to_bytes()) }
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
+    fn pk_hex() -> String {
+        hex::encode(signing_key().verifying_key().to_bytes())
+    }
     fn fp() -> String {
         let mut h = Sha256::new();
         h.update(hex::decode(pk_hex()).unwrap());
@@ -161,16 +165,16 @@ mod tests {
 
     fn signed_cert() -> OperatorCert {
         let mut c = OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            "genesis-op".to_owned(),
-            pubkey_hex:              pk_hex(),
-            not_before:              1_700_000_000,
-            not_after:               1_731_536_000,
+            kind: CertKind::Standard,
+            display_name: "genesis-op".to_owned(),
+            pubkey_hex: pk_hex(),
+            not_before: 1_700_000_000,
+            not_after: 1_731_536_000,
             warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
+            grace_period_days: 7,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: None,
+            self_sig_hex: String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &signing_key());
         c
@@ -178,11 +182,11 @@ mod tests {
 
     fn bundle_with_cert() -> PolicyBundle {
         PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
-            pubkey_fingerprint:     fp(),
-            display_name:           "genesis-op".to_owned(),
-            pubkey_hex:             pk_hex(),
-            permitted_ops:          vec!["RotateEpoch".to_owned()],
-            cert:                   signed_cert(),
+            pubkey_fingerprint: fp(),
+            display_name: "genesis-op".to_owned(),
+            pubkey_hex: pk_hex(),
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            cert: signed_cert(),
             force_misconfig_bypass: false,
         }])
     }
@@ -191,14 +195,8 @@ mod tests {
     fn writes_epoch_one_row_with_genesis_marker() {
         let (tmp, store) = fresh_store();
         let bundle = bundle_with_cert();
-        install_genesis_policy_epoch_row(
-            &store,
-            "deadbeef",
-            "ffeeddcc",
-            1_700_000_000,
-            &bundle,
-        )
-        .expect("install");
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 1_700_000_000, &bundle)
+            .expect("install");
         // Drop the writer handle before opening RO so RO does not race the WAL.
         drop(store);
 
@@ -239,13 +237,14 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1, "INSERT OR IGNORE must not duplicate the genesis row");
+        assert_eq!(
+            count, 1,
+            "INSERT OR IGNORE must not duplicate the genesis row"
+        );
         // The second timestamp (200) is ignored — the original row stands.
         let ts: i64 = conn
             .query_row(
-                &format!(
-                    "SELECT advanced_at FROM {POLICY_EPOCH_HISTORY} WHERE epoch_id = 1"
-                ),
+                &format!("SELECT advanced_at FROM {POLICY_EPOCH_HISTORY} WHERE epoch_id = 1"),
                 [],
                 |r| r.get(0),
             )
@@ -263,14 +262,8 @@ mod tests {
     fn genesis_installs_certs_atomically_with_policy_row() {
         let (tmp, store) = fresh_store();
         let bundle = bundle_with_cert();
-        install_genesis_policy_epoch_row(
-            &store,
-            "deadbeef",
-            "ffeeddcc",
-            1_700_000_000,
-            &bundle,
-        )
-        .expect("install");
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 1_700_000_000, &bundle)
+            .expect("install");
         drop(store);
 
         let conn = open_ro(tmp.path()).expect("open_ro");
@@ -279,7 +272,8 @@ mod tests {
         let n_epoch: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
         assert_eq!(n_epoch, 1);
@@ -308,39 +302,41 @@ mod tests {
     fn second_call_does_not_re_repopulate_certs() {
         let (tmp, store) = fresh_store();
         let bundle = bundle_with_cert();
-        install_genesis_policy_epoch_row(
-            &store, "deadbeef", "ffeeddcc", 100,
-            &bundle,
-        ).expect("first install");
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 100, &bundle)
+            .expect("first install");
         // Same call again — even with a DIFFERENT (empty) bundle — must
         // be a no-op because n_inserted = 0 ⇒ skip repopulate. (In
         // production the bundle bytes are identical because the
         // policy.toml on disk hasn't changed; this test exercises the
         // weaker "second-call repopulate is a no-op" property.)
         let empty = PolicyBundle::for_tests_with_operators(vec![]);
-        install_genesis_policy_epoch_row(
-            &store, "deadbeef", "ffeeddcc", 200,
-            &empty,
-        ).expect("idempotent re-install must succeed");
+        install_genesis_policy_epoch_row(&store, "deadbeef", "ffeeddcc", 200, &empty)
+            .expect("idempotent re-install must succeed");
         drop(store);
         let conn = open_ro(tmp.path()).expect("open_ro");
         let n: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {OPERATOR_CERTIFICATES}"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, 1,
-            "second call's empty bundle must not erase first call's certs");
+        assert_eq!(
+            n, 1,
+            "second call's empty bundle must not erase first call's certs"
+        );
         // installed_at on the cert MUST still be 100 (the first-call
         // timestamp), not 200.
         let installed_at: i64 = conn
             .query_row(
                 &format!("SELECT installed_at FROM {OPERATOR_CERTIFICATES}"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(installed_at, 100,
-            "first-call installed_at wins (matches the policy_epoch_history.advanced_at contract)");
+        assert_eq!(
+            installed_at, 100,
+            "first-call installed_at wins (matches the policy_epoch_history.advanced_at contract)"
+        );
     }
 }

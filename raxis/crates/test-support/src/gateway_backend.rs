@@ -29,9 +29,7 @@
 
 use std::time::Duration;
 
-use raxis_gateway_substrate::{
-    Backend, BackendError, BackendRequest, BackendResponse,
-};
+use raxis_gateway_substrate::{Backend, BackendError, BackendRequest, BackendResponse};
 
 /// In-process `Backend` that returns a single canned `BackendResponse`
 /// for every request. Used by integration tests AND by the gateway
@@ -42,24 +40,24 @@ use raxis_gateway_substrate::{
 /// rather than sharing a global instance.
 #[derive(Debug, Clone)]
 pub struct MockBackend {
-    pub canned_status:  u16,
-    pub canned_body:    Vec<u8>,
+    pub canned_status: u16,
+    pub canned_body: Vec<u8>,
     pub canned_headers: Vec<(String, String)>,
     pub canned_latency: Duration,
     /// If true, `call` returns `Err(BackendError::Timeout)` regardless
     /// of the canned response — used to exercise the gateway's
     /// timeout-mapping path.
-    pub force_timeout:  bool,
+    pub force_timeout: bool,
 }
 
 impl Default for MockBackend {
     fn default() -> Self {
         Self {
-            canned_status:  200,
-            canned_body:    b"{\"mock\":true,\"completion\":\"hello world\"}".to_vec(),
+            canned_status: 200,
+            canned_body: b"{\"mock\":true,\"completion\":\"hello world\"}".to_vec(),
             canned_headers: vec![("content-type".to_owned(), "application/json".to_owned())],
             canned_latency: Duration::from_millis(1),
-            force_timeout:  false,
+            force_timeout: false,
         }
     }
 }
@@ -80,11 +78,11 @@ impl MockBackend {
     /// by dispatch tests that pin specific status-code passthrough.
     pub fn with_response(status: u16, body: Vec<u8>, headers: Vec<(String, String)>) -> Self {
         Self {
-            canned_status:  status,
-            canned_body:    body,
+            canned_status: status,
+            canned_body: body,
             canned_headers: headers,
             canned_latency: Duration::from_millis(1),
-            force_timeout:  false,
+            force_timeout: false,
         }
     }
 }
@@ -93,8 +91,9 @@ impl Backend for MockBackend {
     fn call<'a>(
         &'a self,
         req: BackendRequest<'a>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>,
+    > {
         // Capture the relevant inputs by-move (cheap clones / Copy)
         // and then return the boxed future. This pattern is what
         // `async-trait` would expand to under the hood — keeping it
@@ -124,16 +123,16 @@ impl Backend for MockBackend {
             // an HTTP server.
             if canned_body_len > provider_max {
                 return Err(BackendError::TooLarge {
-                    got:   canned_body_len,
+                    got: canned_body_len,
                     limit: provider_max,
                 });
             }
 
             Ok(BackendResponse {
                 status_code: canned_status,
-                headers:     canned_headers,
-                body:        canned_body,
-                latency_ms:  canned_latency.as_millis().min(u64::MAX as u128) as u64,
+                headers: canned_headers,
+                body: canned_body,
+                latency_ms: canned_latency.as_millis().min(u64::MAX as u128) as u64,
             })
         })
     }
@@ -157,7 +156,7 @@ mod tests {
             max_response_bytes: max_bytes,
             stream_idle_timeout_ms: None,
             credentials: ProviderCredentials {
-                api_key:     "sk-test".to_owned(),
+                api_key: "sk-test".to_owned(),
                 auth_header: "Authorization".to_owned(),
                 auth_prefix: "Bearer ".to_owned(),
             },

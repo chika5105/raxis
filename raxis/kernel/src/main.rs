@@ -23,13 +23,13 @@
 // stays stable for the V3 patches that will wire each in turn.
 #![allow(dead_code)]
 
-mod errors;
+mod authority;
 mod banner;
 mod bootstrap;
-mod authority;
 mod canonical_images_preflight;
 mod capacity;
 mod dashboard_glue;
+mod errors;
 // `concurrency-and-locking.md §INV-LOCK-07` /
 // `self-healing-supervisor.md §3.1` — forensic-dump writer the
 // deadlock watcher invokes before exiting non-zero. Lives in its
@@ -42,30 +42,30 @@ mod deadlock_dump;
 // its own module so the helper is testable in isolation (the
 // witness for `INV-SUPERVISOR-RESTART-AUDIT-01` lives in the
 // module's own `#[cfg(test)] mod tests`).
-mod restart_lifecycle;
+mod breakglass;
 mod elastic;
-mod ipc;
-mod recovery;
-mod initiatives;
-mod orch_respawn_ceiling;
-mod scheduler;
-mod vcs;
-mod witness_index;
 mod gates;
 mod gateway;
 mod handlers;
+mod initiatives;
+mod ipc;
 mod isolation_select;
 mod notifications;
 mod observability;
 mod observability_boot;
-mod breakglass;
+mod orch_respawn_ceiling;
 mod path_scope;
 mod policy_manager;
 mod prompt;
 mod push;
+mod recovery;
+mod restart_lifecycle;
 mod runtime;
+mod scheduler;
 mod session_activity;
 mod session_spawn_orchestrator;
+mod vcs;
+mod witness_index;
 mod worktree_gc;
 // V2 §Step 24 / §Step 24b — host-side worktree provisioning seam.
 // Composes `raxis-worktree-provision` + `raxis-domain-git` into the
@@ -76,9 +76,7 @@ mod worktree_provisioning;
 use std::sync::Arc;
 
 use errors::{exit_with_code, KernelError};
-use raxis_audit_tools::{
-    last_chain_state, AuditEventKind, AuditSink, AuditWriter, FileAuditSink,
-};
+use raxis_audit_tools::{last_chain_state, AuditEventKind, AuditSink, AuditWriter, FileAuditSink};
 use raxis_policy::load_policy;
 use raxis_store::Store;
 
@@ -159,10 +157,8 @@ fn spawn_deadlock_watcher(data_dir: std::path::PathBuf) {
                          \"thread_id\":{thread_id:?},\
                          \"backtrace\":{backtrace}}}",
                         thread_id = t.thread_id(),
-                        backtrace = serde_json::to_string(
-                            &format!("{:?}", t.backtrace())
-                        )
-                        .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                        backtrace = serde_json::to_string(&format!("{:?}", t.backtrace()))
+                            .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
                     );
                     threads_out.push(deadlock_dump::DeadlockThread {
                         thread_id: format!("{:?}", t.thread_id()),
@@ -181,7 +177,7 @@ fn spawn_deadlock_watcher(data_dir: std::path::PathBuf) {
                 }
                 cycles_out.push(deadlock_dump::DeadlockCycle {
                     cycle_index: cycle_idx as u32,
-                    threads:     threads_out,
+                    threads: threads_out,
                 });
             }
             let dump = deadlock_dump::DeadlockDump {
@@ -288,8 +284,7 @@ async fn main() {
             operator_cert_path: std::env::var("RAXIS_OPERATOR_CERT").ok().map(Into::into),
             force: std::env::var("RAXIS_FORCE").is_ok(),
         };
-        let join_outcome =
-            tokio::task::spawn_blocking(move || bootstrap::run(&config)).await;
+        let join_outcome = tokio::task::spawn_blocking(move || bootstrap::run(&config)).await;
         match join_outcome {
             Ok(Ok(())) => unreachable!("bootstrap::run must exit the process"),
             Ok(Err(e)) => exit_with_code(e),
@@ -321,13 +316,19 @@ async fn main() {
     {
         let cap = policy.host_capacity();
         match capacity::check_fd_limit_at_boot(cap.required_min_fd_limit) {
-            capacity::FdLimitOutcome::Ok { current_soft, required } => {
+            capacity::FdLimitOutcome::Ok {
+                current_soft,
+                required,
+            } => {
                 eprintln!(
                     "{{\"level\":\"info\",\"event\":\"FdLimitCheckOk\",\
                      \"current_soft\":{current_soft},\"required\":{required}}}",
                 );
             }
-            capacity::FdLimitOutcome::Insufficient { current_soft, required } => {
+            capacity::FdLimitOutcome::Insufficient {
+                current_soft,
+                required,
+            } => {
                 exit_with_code(KernelError::HostCapacity {
                     reason: format!(
                         "FAIL_INSUFFICIENT_FD_LIMIT: RLIMIT_NOFILE soft \
@@ -371,11 +372,9 @@ async fn main() {
             eprintln!("{{\"level\":\"info\",\"message\":\"store opened\"}}");
             Arc::new(s)
         }
-        Err(e) => {
-            exit_with_code(KernelError::StoreSchema {
-                reason: e.to_string(),
-            })
-        }
+        Err(e) => exit_with_code(KernelError::StoreSchema {
+            reason: e.to_string(),
+        }),
     };
 
     // Step 6: Run recovery::reconcile — verify audit chain, sweep in-flight
@@ -556,11 +555,7 @@ async fn main() {
     // down) so other call sites that already use it don't have to
     // move; we re-derive the literal here from the same `env!` macro.
     let observability_hub: Arc<raxis_observability::ObservabilityHub> =
-        observability_boot::build_obs_hub(
-            &policy,
-            &data_dir,
-            env!("CARGO_PKG_VERSION"),
-        );
+        observability_boot::build_obs_hub(&policy, &data_dir, env!("CARGO_PKG_VERSION"));
 
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:
@@ -606,7 +601,9 @@ async fn main() {
             policy_epoch: policy.load().epoch(),
             schema_version: 1,
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"KernelStarted\",\"audit_emit_failed\":\"{e}\"}}"
@@ -622,10 +619,7 @@ async fn main() {
     // dispatch to inboxes nobody has subscribed to yet.
     {
         let bundle_at_boot = policy.load();
-        policy_manager::emit_default_provider_egress_applied(
-            inner_audit.as_ref(),
-            &bundle_at_boot,
-        );
+        policy_manager::emit_default_provider_egress_applied(inner_audit.as_ref(), &bundle_at_boot);
     }
 
     // Step 8a (V2.5 `integration-merge.md §11.3`): git_apply_pending
@@ -713,9 +707,7 @@ async fn main() {
         // precision isn't required for the audit row; a future
         // PR can hoist an `Instant` if a tighter reading is
         // needed.
-        let recovery_sweep_ms = unix_now
-            .saturating_sub(started_at)
-            .saturating_mul(1000) as u64;
+        let recovery_sweep_ms = unix_now.saturating_sub(started_at).saturating_mul(1000) as u64;
         let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
         let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
         let supervisor_restart_id = sentinel.as_ref().map(|s| {
@@ -726,9 +718,7 @@ async fn main() {
             // back to "supervisor-restart-unknown-N" if either
             // sentinel field is absent (forward-compat — older
             // supervisor revisions may omit one or both fields).
-            let ts = s.attempt_n
-                .map(|n| n as i64)
-                .unwrap_or(0);
+            let ts = s.attempt_n.map(|n| n as i64).unwrap_or(0);
             // The sentinel does not currently surface a
             // last_restart_unix_ts on its `SentinelView` — use
             // `unix_now` as a reasonable proxy bounded to this
@@ -793,9 +783,9 @@ async fn main() {
                         s.prev_run_exit_code,
                     );
                     let unix_now_i64 = unix_now as i64;
-                    let duration_ms = s.last_restart_unix_ts.map(|ts| {
-                        unix_now_i64.saturating_sub(ts).saturating_mul(1000)
-                    });
+                    let duration_ms = s
+                        .last_restart_unix_ts
+                        .map(|ts| unix_now_i64.saturating_sub(ts).saturating_mul(1000));
                     observability::record_kernel_respawn(
                         observability_hub.as_ref(),
                         trigger,
@@ -804,9 +794,7 @@ async fn main() {
                     );
                 }
                 "Halted" => {
-                    let reason = observability::supervisor_refused_reason(
-                        s.sub_state.as_deref(),
-                    );
+                    let reason = observability::supervisor_refused_reason(s.sub_state.as_deref());
                     observability::record_supervisor_refused_restart(
                         observability_hub.as_ref(),
                         reason,
@@ -894,9 +882,8 @@ async fn main() {
                     "supervisor_restart_id":      &resume_report.supervisor_restart_id,
                     "recorded_at_unix_secs":      raxis_runtime::unix_now_secs(),
                 });
-                let summary_path = data_dir.join(
-                    raxis_dashboard::routes::health::AUTO_RESUME_STATUS_FILENAME,
-                );
+                let summary_path =
+                    data_dir.join(raxis_dashboard::routes::health::AUTO_RESUME_STATUS_FILENAME);
                 if let Err(e) = std::fs::write(
                     &summary_path,
                     serde_json::to_vec_pretty(&summary).unwrap_or_default(),
@@ -922,14 +909,13 @@ async fn main() {
     // disk capacity explicitly; the watchdog does not GC.)
     let disk_watchdog = {
         let cap = policy.load().host_capacity().clone();
-        let root = cap.disk_root.clone()
+        let root = cap
+            .disk_root
+            .clone()
             .map(std::path::PathBuf::from)
             .unwrap_or_else(|| data_dir.clone());
-        let w = capacity::DiskWatchdog::new(
-            root,
-            cap.min_free_disk_mb,
-            cap.disk_full_behavior.clone(),
-        );
+        let w =
+            capacity::DiskWatchdog::new(root, cap.min_free_disk_mb, cap.disk_full_behavior.clone());
         w.spawn(Arc::clone(&audit));
         Arc::new(w)
     };
@@ -979,12 +965,11 @@ async fn main() {
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| data_dir.clone());
     let kernel_version = env!("CARGO_PKG_VERSION");
-    let canonical_image_outcomes =
-        canonical_images_preflight::verify_canonical_images_at_boot(
-            &install_dir,
-            kernel_version,
-            &*inner_audit,
-        );
+    let canonical_image_outcomes = canonical_images_preflight::verify_canonical_images_at_boot(
+        &install_dir,
+        kernel_version,
+        &*inner_audit,
+    );
     for (kind, outcome) in &canonical_image_outcomes {
         match outcome {
             canonical_images_preflight::PreflightOutcome::Ok { path } => {
@@ -1006,7 +991,8 @@ async fn main() {
                 );
             }
             canonical_images_preflight::PreflightOutcome::ManifestMissing {
-                image_path, manifest_path,
+                image_path,
+                manifest_path,
             } => {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"canonical_image_manifest_missing\",\
@@ -1033,7 +1019,9 @@ async fn main() {
                 );
             }
             canonical_images_preflight::PreflightOutcome::Tampered {
-                path, expected, actual,
+                path,
+                expected,
+                actual,
             } => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"BOOT_ERR_CANONICAL_IMAGE_TAMPERED\",\
@@ -1047,7 +1035,9 @@ async fn main() {
                 );
             }
             canonical_images_preflight::PreflightOutcome::ManifestRejected {
-                image_path, manifest_path, reason,
+                image_path,
+                manifest_path,
+                reason,
             } => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"BOOT_ERR_CANONICAL_IMAGE_MANIFEST_REJECTED\",\
@@ -1120,88 +1110,93 @@ async fn main() {
     let runtime_subdir = data_dir.join("runtime");
     let _ = std::fs::create_dir_all(&runtime_subdir);
     let allow_fallback = std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION").is_ok();
-    let allow_wasm     = false;
-    let isolation_backend: Arc<dyn raxis_isolation::Backend> = match
-        isolation_select::select_isolation_backend(&isolation_select::SelectorInputs {
-            runtime_dir:        runtime_subdir,
+    let allow_wasm = false;
+    let isolation_backend: Arc<dyn raxis_isolation::Backend> =
+        match isolation_select::select_isolation_backend(&isolation_select::SelectorInputs {
+            runtime_dir: runtime_subdir,
             allow_fallback,
             allow_wasm_sandbox: allow_wasm,
-        })
-    {
-        Ok(selected) => {
-            if let Err(e) = inner_audit.emit(
-                AuditEventKind::IsolationSubstrateSelected {
-                    backend_id:      selected.backend.backend_id().to_owned(),
-                    tier:            serde_json::to_value(&selected.tier)
-                        .ok()
-                        .and_then(|v| v.as_str().map(str::to_owned))
-                        .unwrap_or_else(|| "Unknown".to_owned()),
-                    fallback_bypass: selected.fallback_bypass_required,
-                },
-                None, None, None,
-            ) {
-                eprintln!(
-                    "{{\"level\":\"error\",\"event\":\"IsolationSubstrateSelected\",\
-                     \"audit_emit_failed\":\"{e}\"}}",
-                );
-            }
-            if selected.fallback_bypass_required {
-                let reason = std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION_REASON")
-                    .unwrap_or_default();
+        }) {
+            Ok(selected) => {
                 if let Err(e) = inner_audit.emit(
-                    AuditEventKind::IsolationFallbackBypass {
-                        reason,
+                    AuditEventKind::IsolationSubstrateSelected {
                         backend_id: selected.backend.backend_id().to_owned(),
+                        tier: serde_json::to_value(&selected.tier)
+                            .ok()
+                            .and_then(|v| v.as_str().map(str::to_owned))
+                            .unwrap_or_else(|| "Unknown".to_owned()),
+                        fallback_bypass: selected.fallback_bypass_required,
                     },
-                    None, None, None,
+                    None,
+                    None,
+                    None,
                 ) {
                     eprintln!(
-                        "{{\"level\":\"error\",\"event\":\"IsolationFallbackBypass\",\
-                         \"audit_emit_failed\":\"{e}\"}}",
+                        "{{\"level\":\"error\",\"event\":\"IsolationSubstrateSelected\",\
+                     \"audit_emit_failed\":\"{e}\"}}",
                     );
                 }
-            }
-            eprintln!(
-                "{{\"level\":\"info\",\"message\":\"isolation substrate admitted\",\
+                if selected.fallback_bypass_required {
+                    let reason =
+                        std::env::var("RAXIS_UNSAFE_FALLBACK_ISOLATION_REASON").unwrap_or_default();
+                    if let Err(e) = inner_audit.emit(
+                        AuditEventKind::IsolationFallbackBypass {
+                            reason,
+                            backend_id: selected.backend.backend_id().to_owned(),
+                        },
+                        None,
+                        None,
+                        None,
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"IsolationFallbackBypass\",\
+                         \"audit_emit_failed\":\"{e}\"}}",
+                        );
+                    }
+                }
+                eprintln!(
+                    "{{\"level\":\"info\",\"message\":\"isolation substrate admitted\",\
                  \"backend_id\":\"{}\",\"tier\":{}}}",
-                selected.backend.backend_id(),
-                serde_json::to_string(&selected.tier).unwrap_or_else(|_| "\"?\"".to_owned()),
-            );
-            selected.backend
-        }
-        Err(e) => {
-            // V2 fail-closed boot. The previous degraded-mode path
-            // ("kernel boots with isolation = None and rejects every
-            // spawn at session-creation time") is removed: a kernel
-            // without an admissible substrate cannot honour
-            // `[[tasks]]` admission, and the V2 architecture relies
-            // on `ctx.isolation` being a non-Optional
-            // `Arc<dyn IsolationBackend>` so the dispatch sites do
-            // not have to re-prove substrate availability at every
-            // call site.
-            //
-            // Operators who need to run RAXIS on a substrate with
-            // `IsolationLevel::FallbackOnly` set
-            // `RAXIS_UNSAFE_FALLBACK_ISOLATION=1` (handled by
-            // `select_isolation_backend` above). Hosts with no
-            // admissible substrate at all surface the same error
-            // here as a hard exit.
-            let _ = inner_audit.emit(
-                AuditEventKind::IsolationSubstrateRefused {
-                    reason: e.to_string(),
-                },
-                None, None, None,
-            );
-            eprintln!(
-                "{{\"level\":\"error\",\"event\":\"BOOT_ERR_ISOLATION_UNAVAILABLE\",\
+                    selected.backend.backend_id(),
+                    serde_json::to_string(&selected.tier).unwrap_or_else(|_| "\"?\"".to_owned()),
+                );
+                selected.backend
+            }
+            Err(e) => {
+                // V2 fail-closed boot. The previous degraded-mode path
+                // ("kernel boots with isolation = None and rejects every
+                // spawn at session-creation time") is removed: a kernel
+                // without an admissible substrate cannot honour
+                // `[[tasks]]` admission, and the V2 architecture relies
+                // on `ctx.isolation` being a non-Optional
+                // `Arc<dyn IsolationBackend>` so the dispatch sites do
+                // not have to re-prove substrate availability at every
+                // call site.
+                //
+                // Operators who need to run RAXIS on a substrate with
+                // `IsolationLevel::FallbackOnly` set
+                // `RAXIS_UNSAFE_FALLBACK_ISOLATION=1` (handled by
+                // `select_isolation_backend` above). Hosts with no
+                // admissible substrate at all surface the same error
+                // here as a hard exit.
+                let _ = inner_audit.emit(
+                    AuditEventKind::IsolationSubstrateRefused {
+                        reason: e.to_string(),
+                    },
+                    None,
+                    None,
+                    None,
+                );
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"BOOT_ERR_ISOLATION_UNAVAILABLE\",\
                  \"reason\":\"{e}\",\"hint\":\"V2 requires an admissible isolation \
                  substrate (Linux+KVM Firecracker or macOS Virtualization.framework). \
                  Set RAXIS_UNSAFE_FALLBACK_ISOLATION=1 + RAXIS_UNSAFE_FALLBACK_ISOLATION_REASON \
                  to admit FallbackOnly substrates on hosts without R-1 hardware.\"}}",
-            );
-            std::process::exit(64);
-        }
-    };
+                );
+                std::process::exit(64);
+            }
+        };
 
     // Step 8a: Spawn the heartbeat loop. cli-readonly.md §5.2.1 contract:
     //   - one initial write IMMEDIATELY (handled inside `run_loop`),
@@ -1224,8 +1219,8 @@ async fn main() {
     let heartbeat_handle = {
         let data_dir_for_hb = data_dir.clone();
         let policy_for_hb = Arc::clone(&policy);
-        let store_for_hb  = Arc::clone(&store);
-        let hub_for_hb    = Arc::clone(&observability_hub);
+        let store_for_hb = Arc::clone(&store);
+        let hub_for_hb = Arc::clone(&observability_hub);
         let pid = std::process::id();
         tokio::spawn(async move {
             runtime::heartbeat_loop(
@@ -1256,18 +1251,13 @@ async fn main() {
     // any future re-submission of its bundle would be rejected by
     // admission step 10a (`FAIL_PLAN_BUNDLE_EXPIRED`) before step 10b
     // even queries the table.
-    let (nonce_sweep_shutdown_tx, nonce_sweep_shutdown_rx) =
-        tokio::sync::oneshot::channel::<()>();
+    let (nonce_sweep_shutdown_tx, nonce_sweep_shutdown_rx) = tokio::sync::oneshot::channel::<()>();
     let nonce_sweep_handle = {
-        let store_for_sweep  = Arc::clone(&store);
+        let store_for_sweep = Arc::clone(&store);
         let policy_for_sweep = Arc::clone(&policy);
         tokio::spawn(async move {
-            runtime::nonce_sweeper_loop(
-                store_for_sweep,
-                policy_for_sweep,
-                nonce_sweep_shutdown_rx,
-            )
-            .await;
+            runtime::nonce_sweeper_loop(store_for_sweep, policy_for_sweep, nonce_sweep_shutdown_rx)
+                .await;
         })
     };
 
@@ -1293,7 +1283,7 @@ async fn main() {
         // stamp it back into `OrchestratorPlanFields::target_ref`.
         let snapshot = policy.load();
         let policy_default_target_ref = snapshot.git_default_target_ref().to_owned();
-        let policy_target_ref_locked  = snapshot.git_target_ref_locked();
+        let policy_target_ref_locked = snapshot.git_target_ref_locked();
         let repopulate_outcome = tokio::task::spawn_blocking(move || {
             initiatives::lifecycle::repopulate_plan_registry(
                 &store_for_repopulate,
@@ -1353,13 +1343,13 @@ async fn main() {
     impl gateway::client::LlmTurnObserver for GatewayLlmTurnObserver {
         fn observe(
             &self,
-            task_id:     &str,
-            session_id:  Option<&str>,
-            fetch_id:    uuid::Uuid,
+            task_id: &str,
+            session_id: Option<&str>,
+            fetch_id: uuid::Uuid,
             status_code: Option<u16>,
-            latency_ms:  u32,
-            body_bytes:  Option<&[u8]>,
-            error:       Option<&str>,
+            latency_ms: u32,
+            body_bytes: Option<&[u8]>,
+            error: Option<&str>,
         ) {
             let body = body_bytes
                 .map(|b| String::from_utf8_lossy(b).into_owned())
@@ -1454,11 +1444,11 @@ async fn main() {
     // actual content laid down inside them.
     let domain: Arc<
         dyn raxis_domain::DomainAdapter<
-            IntentKind       = raxis_domain_git::SeIntentKind,
+            IntentKind = raxis_domain_git::SeIntentKind,
             TerminalArtefact = raxis_domain_git::SeTerminalArtefact,
         >,
     > = {
-        let main_root     = data_dir.join("repositories").join("main");
+        let main_root = data_dir.join("repositories").join("main");
         let sessions_root = data_dir.join("worktrees");
         let transfer_root = data_dir.join("transfer");
         // Lay down the three roots if they are missing — the
@@ -1509,10 +1499,8 @@ async fn main() {
     // operator may be in a degraded `0700` state and we don't want
     // to refuse boot for an artifact-store hiccup).
     if let Ok(policy_bytes) = std::fs::read(&policy_path) {
-        if let Err(e) = artifact_store.write(
-            raxis_artifact_store::Category::Policy,
-            &policy_bytes,
-        ) {
+        if let Err(e) = artifact_store.write(raxis_artifact_store::Category::Policy, &policy_bytes)
+        {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"ArtifactStoreBackfillFailed\",\
                  \"category\":\"policy\",\"reason\":\"{e}\"}}",
@@ -1542,9 +1530,7 @@ async fn main() {
     // avoids any cross-context lock contention on the spawn hot
     // path; sharing would only matter if a future signal
     // observer reaches across role families.
-    let elastic_rate_limiter = Arc::new(
-        crate::elastic::ScalingRateLimiter::new(),
-    );
+    let elastic_rate_limiter = Arc::new(crate::elastic::ScalingRateLimiter::new());
 
     // V3 `specs/v3/observability-prometheus.md` — observability hub
     // was built earlier (above the audit-sink wiring) so the
@@ -1596,12 +1582,11 @@ async fn main() {
         // a single SessionSpawnService instance shared across
         // orchestrator + executor spawn paths.
         {
-            let proxy_manager_for_orch = Arc::new(
-                raxis_credential_proxy_manager::CredentialProxyManager::new(
+            let proxy_manager_for_orch =
+                Arc::new(raxis_credential_proxy_manager::CredentialProxyManager::new(
                     Arc::clone(&credentials),
                     Arc::clone(&audit),
-                ),
-            );
+                ));
             let session_spawn_for_orch = Arc::new(
                 raxis_session_spawn::SessionSpawnService::new(
                     Arc::clone(&isolation_backend),
@@ -1630,9 +1615,7 @@ async fn main() {
             // `Arc` for both contexts (hoisted to
             // `elastic_rate_limiter` above) so the budget remains
             // a single global cap per INV-ELASTIC-04.
-            let scale_down_history = Arc::new(
-                crate::elastic::ScaleDownHistory::new(),
-            );
+            let scale_down_history = Arc::new(crate::elastic::ScaleDownHistory::new());
             Arc::new(
                 crate::session_spawn_orchestrator::LiveOrchestratorSpawn::new(
                     crate::session_spawn_orchestrator::OrchestratorSpawnContext::new(
@@ -1689,9 +1672,7 @@ async fn main() {
             // operator declared in
             // `policy.[elastic].max_concurrent_scaling_events_per_minute`
             // (INV-ELASTIC-04).
-            .with_scale_down_history(Arc::new(
-                crate::elastic::ScaleDownHistory::new(),
-            ))
+            .with_scale_down_history(Arc::new(crate::elastic::ScaleDownHistory::new()))
             .with_rate_limiter(Arc::clone(&elastic_rate_limiter)),
         ),
         Arc::clone(&domain),
@@ -1736,7 +1717,7 @@ async fn main() {
     let breakglass_state: Arc<breakglass::BreakglassState> = {
         let record_path = breakglass::default_record_path(&data_dir);
         match breakglass::BreakglassState::open(record_path) {
-            Ok(s)  => Arc::new(s),
+            Ok(s) => Arc::new(s),
             Err(e) => {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"BreakglassOpenFailed\",\
@@ -1914,10 +1895,13 @@ async fn main() {
                     .await
                     {
                         Ok(h) => {
-                            let addr   = h.local_addr();
-                            let scheme = if !cfg.tls_cert_path.is_empty()
-                                && !cfg.tls_key_path.is_empty()
-                            { "https" } else { "http" };
+                            let addr = h.local_addr();
+                            let scheme =
+                                if !cfg.tls_cert_path.is_empty() && !cfg.tls_key_path.is_empty() {
+                                    "https"
+                                } else {
+                                    "http"
+                                };
                             // Human-readable line: most modern terminals
                             // (Cursor, VS Code, iTerm2, Terminal.app,
                             // Ghostty, Kitty, Alacritty, tmux) auto-detect
@@ -2005,9 +1989,7 @@ async fn main() {
     let _ = nonce_sweep_shutdown_tx.send(());
     if let Some(h) = dashboard_handle {
         match h.shutdown().await {
-            Ok(()) => eprintln!(
-                "{{\"level\":\"info\",\"event\":\"dashboard_shutdown\"}}"
-            ),
+            Ok(()) => eprintln!("{{\"level\":\"info\",\"event\":\"dashboard_shutdown\"}}"),
             Err(e) => eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"dashboard_shutdown_failed\",\
                  \"reason\":\"{e}\"}}"
@@ -2026,9 +2008,7 @@ async fn main() {
         ),
     }
     match heartbeat_handle.await {
-        Ok(Ok(())) => eprintln!(
-            "{{\"level\":\"info\",\"event\":\"heartbeat_loop_done\"}}"
-        ),
+        Ok(Ok(())) => eprintln!("{{\"level\":\"info\",\"event\":\"heartbeat_loop_done\"}}"),
         Ok(Err(e)) => eprintln!(
             "{{\"level\":\"warn\",\"event\":\"heartbeat_loop_failed\",\
              \"reason\":\"{e}\"}}"
@@ -2039,9 +2019,9 @@ async fn main() {
         ),
     }
     match nonce_sweep_handle.await {
-        Ok(()) => eprintln!(
-            "{{\"level\":\"info\",\"event\":\"plan_bundle_nonce_sweep_loop_done\"}}"
-        ),
+        Ok(()) => {
+            eprintln!("{{\"level\":\"info\",\"event\":\"plan_bundle_nonce_sweep_loop_done\"}}")
+        }
         Err(join_err) => eprintln!(
             "{{\"level\":\"warn\",\
              \"event\":\"plan_bundle_nonce_sweep_loop_join_failed\",\
@@ -2065,7 +2045,9 @@ async fn main() {
         AuditEventKind::KernelStopped {
             reason: shutdown.audit_reason(),
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         // Same dual-write fallback rationale as KernelStarted: if the chain
         // refuses our final record, log loudly so the operator can spot the
@@ -2088,9 +2070,15 @@ async fn main() {
     if shutdown.is_clean() {
         std::process::exit(0);
     } else {
-        std::process::exit(KernelError::SocketBind {
-            reason: format!("dispatch loop exited unexpectedly: {}", shutdown.audit_reason()),
-        }.exit_code());
+        std::process::exit(
+            KernelError::SocketBind {
+                reason: format!(
+                    "dispatch loop exited unexpectedly: {}",
+                    shutdown.audit_reason()
+                ),
+            }
+            .exit_code(),
+        );
     }
 }
 
@@ -2136,8 +2124,7 @@ mod deadlock_watcher_self_test {
         // contender threads' lock acquisitions. We pass a tempdir
         // so the dump-write side-effect lands in scratch rather
         // than the developer's `~/.raxis/`.
-        let data_dir = tempfile::tempdir()
-            .expect("tempdir for watcher dump file");
+        let data_dir = tempfile::tempdir().expect("tempdir for watcher dump file");
         spawn_deadlock_watcher(data_dir.path().to_path_buf());
 
         let a: Arc<parking_lot::Mutex<()>> = Arc::new(parking_lot::Mutex::new(()));

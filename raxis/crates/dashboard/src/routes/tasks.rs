@@ -59,7 +59,9 @@ pub struct LlmTurnsQuery {
     pub limit: u32,
 }
 
-fn default_llm_turns_limit() -> u32 { 50 }
+fn default_llm_turns_limit() -> u32 {
+    50
+}
 
 /// `GET /api/tasks/:id/llm-turns?limit=N`.
 ///
@@ -94,7 +96,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

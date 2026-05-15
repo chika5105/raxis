@@ -54,50 +54,45 @@ pub enum InitiativeEvent {
     /// First frame of every successful subscribe stream. Echoes
     /// the subscribed initiative_id back to the operator so the
     /// CLI can confirm it spelled the id correctly.
-    Subscribed {
-        initiative_id: String,
-    },
+    Subscribed { initiative_id: String },
 
     /// A task transitioned to a new FSM state. Mirrors the
     /// kernel's `AuditEventKind::TaskStateChanged` — we do NOT
     /// re-derive the state machine on the CLI; we just surface
     /// the kernel's authoritative transitions.
     TaskStateChanged {
-        task_id:        String,
-        from_state:     Option<String>,
-        to_state:       String,
+        task_id: String,
+        from_state: Option<String>,
+        to_state: String,
         transitioned_at: i64,
     },
 
     /// The owning initiative's FSM state changed (e.g.
     /// `Executing → Completed`).
     InitiativeStateChanged {
-        from_state:     Option<String>,
-        to_state:       String,
+        from_state: Option<String>,
+        to_state: String,
         transitioned_at: i64,
     },
 
     /// A reviewer aggregation crossed `all_passed = true`. Used by
     /// dashboards to celebrate "all reviewers approved" without
     /// polling.
-    ReviewAggregationCompleted {
-        task_id:    String,
-        all_passed: bool,
-    },
+    ReviewAggregationCompleted { task_id: String, all_passed: bool },
 
     /// An escalation was raised (transitioned to Pending) on this
     /// initiative.
     EscalationRaised {
         escalation_id: String,
-        task_id:       Option<String>,
-        capability:    String,
+        task_id: Option<String>,
+        capability: String,
     },
 
     /// An escalation was resolved (`Approved`, `Denied`, or
     /// `Expired`).
     EscalationResolved {
         escalation_id: String,
-        outcome:       String,
+        outcome: String,
     },
 
     /// An integration merge attempt completed (`Succeeded` or
@@ -113,17 +108,15 @@ pub enum InitiativeEvent {
     /// discriminator + optional severity so the operator can
     /// react to `diagnostic_flag/critical` without poll.
     StructuredOutputEmitted {
-        task_id:     String,
+        task_id: String,
         output_kind: String,
-        severity:    Option<String>,
+        severity: Option<String>,
     },
 
     /// Final frame: the kernel is closing the stream because the
     /// initiative reached a terminal state, the operator
     /// disconnected, or the kernel is shutting down.
-    Closed {
-        reason: ClosedReason,
-    },
+    Closed { reason: ClosedReason },
 }
 
 /// Why a `SubscribeInitiative` stream closed. Drives the CLI
@@ -149,15 +142,15 @@ impl InitiativeEvent {
     /// JSON wire shape uses the exact same names (serde tag).
     pub fn kind_str(&self) -> &'static str {
         match self {
-            Self::Subscribed { .. }                 => "Subscribed",
-            Self::TaskStateChanged { .. }           => "TaskStateChanged",
-            Self::InitiativeStateChanged { .. }     => "InitiativeStateChanged",
+            Self::Subscribed { .. } => "Subscribed",
+            Self::TaskStateChanged { .. } => "TaskStateChanged",
+            Self::InitiativeStateChanged { .. } => "InitiativeStateChanged",
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
-            Self::EscalationRaised { .. }           => "EscalationRaised",
-            Self::EscalationResolved { .. }         => "EscalationResolved",
-            Self::IntegrationMergeCompleted { .. }  => "IntegrationMergeCompleted",
-            Self::StructuredOutputEmitted { .. }    => "StructuredOutputEmitted",
-            Self::Closed { .. }                     => "Closed",
+            Self::EscalationRaised { .. } => "EscalationRaised",
+            Self::EscalationResolved { .. } => "EscalationResolved",
+            Self::IntegrationMergeCompleted { .. } => "IntegrationMergeCompleted",
+            Self::StructuredOutputEmitted { .. } => "StructuredOutputEmitted",
+            Self::Closed { .. } => "Closed",
         }
     }
 }
@@ -182,7 +175,9 @@ mod tests {
         // every match arm. If a variant is added without a test,
         // this fails to compile.
         let all = [
-            InitiativeEvent::Subscribed { initiative_id: "i-1".into() },
+            InitiativeEvent::Subscribed {
+                initiative_id: "i-1".into(),
+            },
             InitiativeEvent::TaskStateChanged {
                 task_id: "t-1".into(),
                 from_state: None,
@@ -232,7 +227,9 @@ mod tests {
     #[test]
     fn subscribed_wire_shape() {
         round_trip(
-            InitiativeEvent::Subscribed { initiative_id: "i-1".into() },
+            InitiativeEvent::Subscribed {
+                initiative_id: "i-1".into(),
+            },
             json!({ "kind": "Subscribed", "payload": { "initiative_id": "i-1" } }),
         );
     }
@@ -365,17 +362,23 @@ mod tests {
     #[test]
     fn closed_wire_shape() {
         round_trip(
-            InitiativeEvent::Closed { reason: ClosedReason::InitiativeTerminal },
+            InitiativeEvent::Closed {
+                reason: ClosedReason::InitiativeTerminal,
+            },
             json!({ "kind": "Closed", "payload": { "reason": "InitiativeTerminal" } }),
         );
 
         round_trip(
-            InitiativeEvent::Closed { reason: ClosedReason::KernelShutdown },
+            InitiativeEvent::Closed {
+                reason: ClosedReason::KernelShutdown,
+            },
             json!({ "kind": "Closed", "payload": { "reason": "KernelShutdown" } }),
         );
 
         round_trip(
-            InitiativeEvent::Closed { reason: ClosedReason::InitiativeNotFound },
+            InitiativeEvent::Closed {
+                reason: ClosedReason::InitiativeNotFound,
+            },
             json!({ "kind": "Closed", "payload": { "reason": "InitiativeNotFound" } }),
         );
     }

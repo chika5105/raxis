@@ -50,8 +50,8 @@ pub mod handler;
 pub mod sink;
 pub mod summary;
 
-pub use sink::NotifyingAuditSink;
 pub use handler::sidecar::SidecarRegistry;
+pub use sink::NotifyingAuditSink;
 
 // ---------------------------------------------------------------------------
 // Public dispatch
@@ -76,12 +76,12 @@ pub use handler::sidecar::SidecarRegistry;
 /// { reason: "no_sidecar_registry" }`. Production wires the
 /// `HandlerContext.sidecar_registry`.
 pub fn dispatch(
-    event:            AuditEvent,
-    bundle:           Arc<PolicyBundle>,
-    data_dir:         PathBuf,
-    audit:            Arc<dyn AuditSink>,
+    event: AuditEvent,
+    bundle: Arc<PolicyBundle>,
+    data_dir: PathBuf,
+    audit: Arc<dyn AuditSink>,
     sidecar_registry: Option<Arc<SidecarRegistry>>,
-    store:            Option<Arc<Store>>,
+    store: Option<Arc<Store>>,
 ) {
     // ── INV-NOTIF-SCOPE-01: defense-in-depth filter ─────────────────────
     // The primary gate is `NotifyingAuditSink::emit` (which has the
@@ -151,13 +151,13 @@ pub fn dispatch(
     // with all other kernel writes to kernel.db.
     if let Some(ref store) = store {
         let store_for_insert = Arc::clone(store);
-        let nid  = notification_id.clone();
-        let ek   = event.event_kind.clone();
-        let iid  = event.initiative_id.clone();
-        let tid  = event.task_id.clone();
-        let sid  = event.session_id.clone();
+        let nid = notification_id.clone();
+        let ek = event.event_kind.clone();
+        let iid = event.initiative_id.clone();
+        let tid = event.task_id.clone();
+        let sid = event.session_id.clone();
         let summ = human_summary.clone();
-        let pj   = payload_json.clone();
+        let pj = payload_json.clone();
         let seid = event.event_id.to_string();
         // Spawn a blocking task because Store::lock_sync blocks the
         // current thread on the underlying tokio Mutex (it is not async).
@@ -208,10 +208,10 @@ pub fn dispatch(
     }
 
     for channel_id in channel_ids {
-        let event_for_spawn    = event.clone();
-        let bundle_for_spawn   = Arc::clone(&bundle);
+        let event_for_spawn = event.clone();
+        let bundle_for_spawn = Arc::clone(&bundle);
         let data_dir_for_spawn = data_dir.clone();
-        let audit_for_spawn    = Arc::clone(&audit);
+        let audit_for_spawn = Arc::clone(&audit);
         let registry_for_spawn = sidecar_registry.clone();
 
         tokio::spawn(async move {
@@ -234,10 +234,10 @@ pub fn dispatch(
 /// commit path.
 #[cfg(any(debug_assertions, test))]
 pub async fn dispatch_blocking_for_tests(
-    event:    AuditEvent,
-    bundle:   &PolicyBundle,
+    event: AuditEvent,
+    bundle: &PolicyBundle,
     data_dir: &std::path::Path,
-    audit:    Arc<dyn AuditSink>,
+    audit: Arc<dyn AuditSink>,
 ) {
     dispatch_blocking_for_tests_with_registry(event, bundle, data_dir, audit, None, None).await
 }
@@ -250,12 +250,12 @@ pub async fn dispatch_blocking_for_tests(
 /// duplicating insert plumbing.
 #[cfg(any(debug_assertions, test))]
 pub async fn dispatch_blocking_for_tests_with_registry(
-    event:            AuditEvent,
-    bundle:           &PolicyBundle,
-    data_dir:         &std::path::Path,
-    audit:            Arc<dyn AuditSink>,
+    event: AuditEvent,
+    bundle: &PolicyBundle,
+    data_dir: &std::path::Path,
+    audit: Arc<dyn AuditSink>,
     sidecar_registry: Option<&SidecarRegistry>,
-    store:            Option<&Store>,
+    store: Option<&Store>,
 ) {
     // INV-NOTIF-SCOPE-01: mirror the production filter so test
     // paths assert the same drop behaviour as the kernel.
@@ -265,7 +265,7 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     // Mirror the production kernel-owned writes (inbox.jsonl + SQLite
     // `notifications` row) so test paths exercise the same ground truth.
     let human_summary = summary::render(&event);
-    let payload_json  = serde_json::to_string(&event.payload).unwrap_or_default();
+    let payload_json = serde_json::to_string(&event.payload).unwrap_or_default();
     let notification_id = uuid::Uuid::new_v4().to_string();
     let created_at = event.emitted_at;
 
@@ -345,15 +345,14 @@ pub async fn dispatch_blocking_for_tests_with_registry(
 /// a `NotificationDelivered` audit event carrying the upstream
 /// trace id (Slack `ts`, PagerDuty `dedup_key`, etc.) — V2_GAPS §C4.
 async fn dispatch_one(
-    channel_id:       &str,
-    event:            AuditEvent,
-    bundle:           &PolicyBundle,
-    data_dir:         &std::path::Path,
-    audit:            Arc<dyn AuditSink>,
+    channel_id: &str,
+    event: AuditEvent,
+    bundle: &PolicyBundle,
+    data_dir: &std::path::Path,
+    audit: Arc<dyn AuditSink>,
     sidecar_registry: Option<&SidecarRegistry>,
 ) {
-    let Some(channel): Option<&NotificationChannel> =
-        bundle.notification_channel(channel_id)
+    let Some(channel): Option<&NotificationChannel> = bundle.notification_channel(channel_id)
     else {
         // Should never happen — validate guarantees every routed id
         // resolves. Still, fail-loud rather than panic.
@@ -363,7 +362,10 @@ async fn dispatch_one(
             channel_id, event.event_kind,
         );
         emit_delivery_failed(
-            audit.as_ref(), channel_id, &event.event_kind, "channel_missing",
+            audit.as_ref(),
+            channel_id,
+            &event.event_kind,
+            "channel_missing",
         );
         return;
     };
@@ -374,24 +376,12 @@ async fn dispatch_one(
             // target path.
             let started_at = std::time::Instant::now();
             let outcome = handler::file::deliver(channel, &event).await;
-            handle_simple_outcome(
-                audit.as_ref(),
-                channel,
-                &event,
-                outcome,
-                started_at,
-            );
+            handle_simple_outcome(audit.as_ref(), channel, &event, outcome, started_at);
         }
         NotificationChannelKind::Email => {
             let started_at = std::time::Instant::now();
             let outcome = handler::email::deliver(channel, &event, data_dir).await;
-            handle_simple_outcome(
-                audit.as_ref(),
-                channel,
-                &event,
-                outcome,
-                started_at,
-            );
+            handle_simple_outcome(audit.as_ref(), channel, &event, outcome, started_at);
         }
         NotificationChannelKind::Sidecar => {
             // V2_GAPS §C4 — Sidecar handler with concurrency cap +
@@ -406,7 +396,9 @@ async fn dispatch_one(
                     channel.id, event.event_kind,
                 );
                 emit_delivery_failed(
-                    audit.as_ref(), &channel.id, &event.event_kind,
+                    audit.as_ref(),
+                    &channel.id,
+                    &event.event_kind,
                     "no_sidecar_registry",
                 );
                 return;
@@ -415,7 +407,9 @@ async fn dispatch_one(
             let outcome = handler::sidecar::deliver(&state, channel, &event).await;
             match outcome {
                 handler::sidecar::SidecarOutcome::Delivered {
-                    upstream_trace_id, attempts, delivery_ms,
+                    upstream_trace_id,
+                    attempts,
+                    delivery_ms,
                 } => {
                     emit_delivered(
                         audit.as_ref(),
@@ -434,7 +428,10 @@ async fn dispatch_one(
                         channel.id, event.event_kind,
                     );
                     emit_delivery_failed(
-                        audit.as_ref(), &channel.id, &event.event_kind, "backpressure",
+                        audit.as_ref(),
+                        &channel.id,
+                        &event.event_kind,
+                        "backpressure",
                     );
                 }
                 handler::sidecar::SidecarOutcome::CircuitOpen => {
@@ -444,17 +441,25 @@ async fn dispatch_one(
                         channel.id, event.event_kind,
                     );
                     emit_delivery_failed(
-                        audit.as_ref(), &channel.id, &event.event_kind, "circuit_open",
+                        audit.as_ref(),
+                        &channel.id,
+                        &event.event_kind,
+                        "circuit_open",
                     );
                 }
                 handler::sidecar::SidecarOutcome::Failed(e, _attempts) => {
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"notification_handler_failed\",\
                          \"channel_id\":\"{}\",\"event_kind\":\"{}\",\"reason\":\"{}\"}}",
-                        channel.id, event.event_kind, e.category(),
+                        channel.id,
+                        event.event_kind,
+                        e.category(),
                     );
                     emit_delivery_failed(
-                        audit.as_ref(), &channel.id, &event.event_kind, e.category(),
+                        audit.as_ref(),
+                        &channel.id,
+                        &event.event_kind,
+                        e.category(),
                     );
                 }
             }
@@ -467,33 +472,31 @@ async fn dispatch_one(
 /// `Err`. Sidecar has its own outcome type so it does not flow through
 /// here.
 fn handle_simple_outcome(
-    audit:      &dyn AuditSink,
-    channel:    &NotificationChannel,
-    event:      &AuditEvent,
-    outcome:    Result<(), DeliveryError>,
+    audit: &dyn AuditSink,
+    channel: &NotificationChannel,
+    event: &AuditEvent,
+    outcome: Result<(), DeliveryError>,
     started_at: std::time::Instant,
 ) {
     let kind_str = match channel.kind {
-        NotificationChannelKind::File    => "File",
-        NotificationChannelKind::Email   => "Email",
+        NotificationChannelKind::File => "File",
+        NotificationChannelKind::Email => "Email",
         NotificationChannelKind::Sidecar => "Sidecar",
     };
     match outcome {
         Ok(()) => {
             let delivery_ms = started_at.elapsed().as_millis() as u64;
-            emit_delivered(
-                audit, &channel.id, kind_str, event, None, delivery_ms, 1,
-            );
+            emit_delivered(audit, &channel.id, kind_str, event, None, delivery_ms, 1);
         }
         Err(e) => {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"notification_handler_failed\",\
                  \"channel_id\":\"{}\",\"event_kind\":\"{}\",\"reason\":\"{}\"}}",
-                channel.id, event.event_kind, e.category(),
+                channel.id,
+                event.event_kind,
+                e.category(),
             );
-            emit_delivery_failed(
-                audit, &channel.id, &event.event_kind, e.category(),
-            );
+            emit_delivery_failed(audit, &channel.id, &event.event_kind, e.category());
         }
     }
 }
@@ -541,10 +544,10 @@ impl DeliveryError {
     /// Stable wire short-string for `NotificationDeliveryFailed.reason`.
     pub fn category(&self) -> &'static str {
         match self {
-            DeliveryError::Io(_)                   => "io",
-            DeliveryError::TargetInvalid           => "target_invalid",
-            DeliveryError::Network(_)              => "network",
-            DeliveryError::UpstreamRejected(_)     => "upstream_rejected",
+            DeliveryError::Io(_) => "io",
+            DeliveryError::TargetInvalid => "target_invalid",
+            DeliveryError::Network(_) => "network",
+            DeliveryError::UpstreamRejected(_) => "upstream_rejected",
             DeliveryError::CredentialUnavailable(_) => "credential_unavailable",
         }
     }
@@ -554,19 +557,16 @@ impl DeliveryError {
 // Audit emission helper
 // ---------------------------------------------------------------------------
 
-fn emit_delivery_failed(
-    audit:      &dyn AuditSink,
-    channel_id: &str,
-    event_kind: &str,
-    reason:     &str,
-) {
+fn emit_delivery_failed(audit: &dyn AuditSink, channel_id: &str, event_kind: &str, reason: &str) {
     if let Err(e) = audit.emit(
         AuditEventKind::NotificationDeliveryFailed {
             channel_id: channel_id.to_owned(),
             event_kind: event_kind.to_owned(),
-            reason:     reason.to_owned(),
+            reason: reason.to_owned(),
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         // Audit-emit failure during a notification-failure path is the
         // worst-case telemetry leak, but we cannot recover here — the
@@ -581,20 +581,20 @@ fn emit_delivery_failed(
 }
 
 fn emit_delivered(
-    audit:             &dyn AuditSink,
-    channel_id:        &str,
-    channel_kind:      &str,
-    event:             &AuditEvent,
+    audit: &dyn AuditSink,
+    channel_id: &str,
+    channel_kind: &str,
+    event: &AuditEvent,
     upstream_trace_id: Option<String>,
-    delivery_ms:       u64,
-    attempts:          u32,
+    delivery_ms: u64,
+    attempts: u32,
 ) {
     if let Err(e) = audit.emit(
         AuditEventKind::NotificationDelivered {
-            channel_id:        channel_id.to_owned(),
-            channel_kind:      channel_kind.to_owned(),
-            event_kind:        event.event_kind.clone(),
-            source_event_id:   event.event_id.to_string(),
+            channel_id: channel_id.to_owned(),
+            channel_kind: channel_kind.to_owned(),
+            event_kind: event.event_kind.clone(),
+            source_event_id: event.event_id.to_string(),
             upstream_trace_id,
             delivery_ms,
             attempts,
@@ -625,24 +625,24 @@ fn emit_delivered(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use raxis_audit_tools::AuditEvent;
-    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{NotificationChannel, OperatorEntry, PolicyBundle};
+    use raxis_test_support::FakeAuditSink;
     use serde_json::json;
+    use std::path::Path;
     use uuid::Uuid;
 
     fn make_event(kind: &str, payload: serde_json::Value) -> AuditEvent {
         AuditEvent {
-            seq:           1,
-            event_id:      Uuid::new_v4(),
-            event_kind:    kind.to_owned(),
-            session_id:    None,
-            task_id:       None,
+            seq: 1,
+            event_id: Uuid::new_v4(),
+            event_kind: kind.to_owned(),
+            session_id: None,
+            task_id: None,
             initiative_id: None,
             payload,
-            emitted_at:    1_700_000_000,
-            prev_sha256:   "0".repeat(64),
+            emitted_at: 1_700_000_000,
+            prev_sha256: "0".repeat(64),
         }
     }
 
@@ -662,7 +662,7 @@ mod tests {
     /// extended with `extra_channels` and `extra_routes`.
     fn bundle_with_routes(
         extra_channels: Vec<NotificationChannel>,
-        extra_routes:   Vec<(String, Vec<String>)>,
+        extra_routes: Vec<(String, Vec<String>)>,
     ) -> PolicyBundle {
         // See the explanation on `notifications::sink::tests::bundle`
         // for why the stub cert is the right helper here: this fixture
@@ -671,10 +671,10 @@ mod tests {
         let pubkey = "0".repeat(64);
         let b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: "fp".into(),
-            display_name:       "fp".into(),
-            pubkey_hex:         pubkey.clone(),
-            permitted_ops:      vec![],
-            cert:                  raxis_test_support::stub_cert_for_pubkey(pubkey),
+            display_name: "fp".into(),
+            pubkey_hex: pubkey.clone(),
+            permitted_ops: vec![],
+            cert: raxis_test_support::stub_cert_for_pubkey(pubkey),
             force_misconfig_bypass: false,
         }]);
         // Mutate the test bundle in-place via a private setter by
@@ -705,15 +705,18 @@ mod tests {
         // dispatcher falls back to default_channels (which defaults to
         // ["shell"] in the test bundle). The implicit Shell channel
         // writes to <data_dir>/notifications/inbox.jsonl.
-        let tmp    = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let bundle = bundle_with_routes(vec![], vec![]);
-        let sink   = Arc::new(FakeAuditSink::new());
+        let sink = Arc::new(FakeAuditSink::new());
         let audit: Arc<dyn AuditSink> = sink.clone();
 
-        let event = make_event("EscalationApproved", json!({
-            "escalation_id": "esc-A",
-            "approved_by":   "op",
-        }));
+        let event = make_event(
+            "EscalationApproved",
+            json!({
+                "escalation_id": "esc-A",
+                "approved_by":   "op",
+            }),
+        );
         dispatch_blocking_for_tests(event, &bundle, tmp.path(), audit).await;
 
         let records = read_inbox(tmp.path());
@@ -721,8 +724,12 @@ mod tests {
         assert_eq!(records[0]["event_kind"], "EscalationApproved");
 
         // No NotificationDeliveryFailed audit was emitted.
-        assert!(sink.event_kinds().iter().all(|k| *k != "NotificationDeliveryFailed"),
-            "happy path must not emit NotificationDeliveryFailed");
+        assert!(
+            sink.event_kinds()
+                .iter()
+                .all(|k| *k != "NotificationDeliveryFailed"),
+            "happy path must not emit NotificationDeliveryFailed"
+        );
     }
 
     // ── Empty default_channels with no route ──────────────────────────
@@ -733,10 +740,10 @@ mod tests {
         // and no explicit route MUST silently drop (no panic, no
         // audit). Production validate guarantees default_channels is
         // non-empty, but we don't want to crash on a misuse.
-        let tmp    = tempfile::tempdir().unwrap();
-        let sink   = Arc::new(FakeAuditSink::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let sink = Arc::new(FakeAuditSink::new());
         let audit: Arc<dyn AuditSink> = sink.clone();
-        let event  = make_event("EscalationApproved", json!({}));
+        let event = make_event("EscalationApproved", json!({}));
         // We can't easily build a bundle with empty default_channels
         // from outside the crate, so skip the construction and
         // exercise the same "no destination" path via a silenced
@@ -752,24 +759,32 @@ mod tests {
         // returns synchronously, then await a short window for the
         // spawned handlers to complete. This guards against an
         // accidental future where dispatch becomes blocking.
-        let tmp    = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let bundle = Arc::new(bundle_with_routes(vec![], vec![]));
-        let sink   = Arc::new(FakeAuditSink::new());
+        let sink = Arc::new(FakeAuditSink::new());
         let audit: Arc<dyn AuditSink> = sink.clone();
-        let event  = make_event("EscalationApproved", json!({
-            "escalation_id": "esc-A",
-            "approved_by":   "op",
-        }));
+        let event = make_event(
+            "EscalationApproved",
+            json!({
+                "escalation_id": "esc-A",
+                "approved_by":   "op",
+            }),
+        );
 
         let start = std::time::Instant::now();
         dispatch(event, bundle, tmp.path().to_path_buf(), audit, None, None);
         let elapsed = start.elapsed();
-        assert!(elapsed.as_millis() < 50,
-            "dispatch must be near-instant; took {:?}", elapsed);
+        assert!(
+            elapsed.as_millis() < 50,
+            "dispatch must be near-instant; took {:?}",
+            elapsed
+        );
 
         // Wait briefly for the spawned handler to land.
         for _ in 0..50 {
-            if !read_inbox(tmp.path()).is_empty() { break; }
+            if !read_inbox(tmp.path()).is_empty() {
+                break;
+            }
             tokio::time::sleep(std::time::Duration::from_millis(10)).await;
         }
         let records = read_inbox(tmp.path());

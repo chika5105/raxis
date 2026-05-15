@@ -96,7 +96,7 @@ pub const SEED_SUBDIR: &str = "live-e2e/seed/byoi-executor";
 pub struct BakedByoImage {
     /// `sha256:<64 lower-hex>` form, ready to drop into a
     /// `[[vm_images]] oci_digest` field verbatim.
-    pub oci_digest:       String,
+    pub oci_digest: String,
     /// Absolute path to the staged rootfs bytes (the source the
     /// per-cache copy step reads from). Lives under a
     /// `tempfile::TempDir` the caller owns; the harness keeps the
@@ -106,7 +106,7 @@ pub struct BakedByoImage {
     /// Tier-3 artifact line so post-run triage knows whether the
     /// bake produced a ~50 MiB BYO image (real bake) or a ~1 KiB
     /// synthetic blob (smoke-test mode).
-    pub size_bytes:       u64,
+    pub size_bytes: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -129,9 +129,7 @@ pub struct BakedByoImage {
 /// `rootfs_blob_path`'s on-disk SHA-256. The blob lives under
 /// `staging_dir`; the caller keeps `staging_dir` alive (typically
 /// a `tempfile::TempDir`).
-pub fn bake_byo_executor_image_synthetic(
-    staging_dir: &Path,
-) -> std::io::Result<BakedByoImage> {
+pub fn bake_byo_executor_image_synthetic(staging_dir: &Path) -> std::io::Result<BakedByoImage> {
     fs::create_dir_all(staging_dir)?;
     let path = staging_dir.join("rootfs.img");
 
@@ -155,11 +153,11 @@ pub fn bake_byo_executor_image_synthetic(
     fs::write(&path, body.as_bytes())?;
 
     let digest = sha256_of_file(&path)?;
-    let size   = fs::metadata(&path)?.len();
+    let size = fs::metadata(&path)?.len();
     Ok(BakedByoImage {
-        oci_digest:       format!("sha256:{digest}"),
+        oci_digest: format!("sha256:{digest}"),
         rootfs_blob_path: path,
-        size_bytes:       size,
+        size_bytes: size,
     })
 }
 
@@ -188,14 +186,14 @@ pub fn bake_byo_executor_image_synthetic(
 /// path.
 pub fn bake_byo_executor_image_full(
     workspace_root: &Path,
-    staging_dir:    &Path,
-    target_arch:    Option<&str>,
+    staging_dir: &Path,
+    target_arch: Option<&str>,
 ) -> std::io::Result<BakedByoImage> {
     fs::create_dir_all(staging_dir)?;
     require_docker_on_path();
 
-    let context     = workspace_root.join(SEED_SUBDIR);
-    let dockerfile  = context.join("Containerfile");
+    let context = workspace_root.join(SEED_SUBDIR);
+    let dockerfile = context.join("Containerfile");
     if !dockerfile.exists() {
         panic!(
             "BYO Containerfile missing at {} — checkout corruption?",
@@ -204,7 +202,7 @@ pub fn bake_byo_executor_image_full(
     }
     let arch: String = match target_arch {
         Some(a) => a.to_owned(),
-        None    => default_target_arch_for_oci().to_owned(),
+        None => default_target_arch_for_oci().to_owned(),
     };
     let platform = format!("linux/{arch}");
     // Stable tag (no time-stamp) so re-bakes within a single test
@@ -220,15 +218,20 @@ pub fn bake_byo_executor_image_full(
     );
     let status = Command::new("docker")
         .arg("build")
-        .arg("--platform").arg(&platform)
-        .arg("-t").arg(&tag)
-        .arg("-f").arg(&dockerfile)
+        .arg("--platform")
+        .arg(&platform)
+        .arg("-t")
+        .arg(&tag)
+        .arg("-f")
+        .arg(&dockerfile)
         .arg(&context)
         .status()
-        .map_err(|e| std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("spawn `docker build` for BYO image: {e}"),
-        ))?;
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn `docker build` for BYO image: {e}"),
+            )
+        })?;
     if !status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -237,7 +240,8 @@ pub fn bake_byo_executor_image_full(
                  re-run manually for richer diagnostics:\n  \
                  docker build --platform {platform} -t {tag} \
                  -f {} {}",
-                dockerfile.display(), context.display(),
+                dockerfile.display(),
+                context.display(),
             ),
         ));
     }
@@ -247,12 +251,16 @@ pub fn bake_byo_executor_image_full(
     // are only interested in the filesystem the next `docker export`
     // step extracts.
     let create = Command::new("docker")
-        .args(["create", "--platform"]).arg(&platform).arg(&tag)
+        .args(["create", "--platform"])
+        .arg(&platform)
+        .arg(&tag)
         .output()
-        .map_err(|e| std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("spawn `docker create`: {e}"),
-        ))?;
+        .map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::Other,
+                format!("spawn `docker create`: {e}"),
+            )
+        })?;
     if !create.status.success() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -263,9 +271,7 @@ pub fn bake_byo_executor_image_full(
             ),
         ));
     }
-    let container_id = String::from_utf8_lossy(&create.stdout)
-        .trim()
-        .to_owned();
+    let container_id = String::from_utf8_lossy(&create.stdout).trim().to_owned();
     if container_id.is_empty() {
         return Err(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -287,10 +293,12 @@ pub fn bake_byo_executor_image_full(
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .spawn()?;
-        let mut stdout = child.stdout.take().ok_or_else(|| std::io::Error::new(
-            std::io::ErrorKind::BrokenPipe,
-            "docker export had no stdout pipe",
-        ))?;
+        let mut stdout = child.stdout.take().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::BrokenPipe,
+                "docker export had no stdout pipe",
+            )
+        })?;
         let mut file = fs::File::create(&path)?;
         std::io::copy(&mut stdout, &mut file)?;
         let status = child.wait()?;
@@ -313,16 +321,17 @@ pub fn bake_byo_executor_image_full(
 
     result?;
     let digest = sha256_of_file(&path)?;
-    let size   = fs::metadata(&path)?.len();
+    let size = fs::metadata(&path)?.len();
     eprintln!(
         "[live-e2e byo-image] baked rootfs at {} ({} bytes), \
          oci_digest=sha256:{digest}",
-        path.display(), size,
+        path.display(),
+        size,
     );
     Ok(BakedByoImage {
-        oci_digest:       format!("sha256:{digest}"),
+        oci_digest: format!("sha256:{digest}"),
         rootfs_blob_path: path,
-        size_bytes:       size,
+        size_bytes: size,
     })
 }
 
@@ -355,13 +364,15 @@ pub fn bake_byo_executor_image_full(
 /// the operator's policy said "this digest is fine".
 pub fn stage_byo_image_in_oci_cache(
     data_dir: &Path,
-    image:    &BakedByoImage,
-    tamper:   bool,
+    image: &BakedByoImage,
+    tamper: bool,
 ) -> std::io::Result<PathBuf> {
-    let hex = image.oci_digest.strip_prefix("sha256:").unwrap_or_else(|| panic!(
-        "BakedByoImage carries malformed oci_digest {:?} (expected `sha256:` prefix)",
-        image.oci_digest,
-    ));
+    let hex = image.oci_digest.strip_prefix("sha256:").unwrap_or_else(|| {
+        panic!(
+            "BakedByoImage carries malformed oci_digest {:?} (expected `sha256:` prefix)",
+            image.oci_digest,
+        )
+    });
     let shard = &hex[0..2];
     let dest_dir = data_dir
         .join("oci-cache")
@@ -398,7 +409,8 @@ pub fn stage_byo_image_in_oci_cache(
                         \"digest\":\"{0}\",\"size\":{1}}},\
            \"layers\":[{{\"mediaType\":\"application/vnd.raxis.image.rootfs.v1+erofs\",\
                          \"digest\":\"{0}\",\"size\":{1}}}]}}",
-        image.oci_digest, bytes.len(),
+        image.oci_digest,
+        bytes.len(),
     );
     fs::write(dest_dir.join("manifest.json"), manifest_json)?;
 
@@ -415,7 +427,8 @@ pub fn stage_byo_image_in_oci_cache(
 
     eprintln!(
         "[live-e2e byo-image] staged rootfs.img at {} ({} bytes, tampered={tamper})",
-        dest_rootfs.display(), bytes.len(),
+        dest_rootfs.display(),
+        bytes.len(),
     );
     Ok(dest_rootfs)
 }
@@ -439,10 +452,7 @@ pub fn stage_byo_image_in_oci_cache(
 /// per test against a fresh `data_dir` (the bootstrap creates a
 /// new one per test), and a duplicate-alias signal usually means
 /// a test ordering bug.
-pub fn inject_byo_executor_image_in_policy(
-    data_dir:   &Path,
-    oci_digest: &str,
-) {
+pub fn inject_byo_executor_image_in_policy(data_dir: &Path, oci_digest: &str) {
     let policy_path = data_dir.join("policy").join("policy.toml");
     let mut body = fs::read_to_string(&policy_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", policy_path.display()));
@@ -499,11 +509,12 @@ pub fn sha256_of_file(path: &Path) -> std::io::Result<String> {
 /// straight off a `BakedByoImage::oci_digest` field, so any
 /// shape drift is a harness bug worth surfacing loudly.
 pub fn tampered_digest_one_hex_off(digest: &str) -> String {
-    let body = digest.strip_prefix("sha256:").unwrap_or_else(|| panic!(
-        "tampered_digest_one_hex_off: expected `sha256:` prefix, got {digest:?}",
-    ));
+    let body = digest.strip_prefix("sha256:").unwrap_or_else(|| {
+        panic!("tampered_digest_one_hex_off: expected `sha256:` prefix, got {digest:?}",)
+    });
     assert_eq!(
-        body.len(), 64,
+        body.len(),
+        64,
         "expected 64-char hex body, got {} chars: {digest:?}",
         body.len(),
     );
@@ -513,12 +524,12 @@ pub fn tampered_digest_one_hex_off(digest: &str) -> String {
     // end of the alphabet. Both '0'..='9' and 'a'..='f' are handled.
     let flipped = match last {
         '0'..='8' => char::from_u32(last as u32 + 1).unwrap_or('a'),
-        '9'       => 'a',
+        '9' => 'a',
         'a'..='e' => char::from_u32(last as u32 + 1).unwrap_or('0'),
-        'f'       => '0',
-        other     => panic!(
-            "tampered_digest_one_hex_off: digest body contains non-hex char {other:?}",
-        ),
+        'f' => '0',
+        other => {
+            panic!("tampered_digest_one_hex_off: digest body contains non-hex char {other:?}",)
+        }
     };
     chars[63] = flipped;
     let body: String = chars.into_iter().collect();
@@ -554,7 +565,11 @@ fn require_docker_on_path() {
 /// linux/amd64). Future cross-arch CI workers can override via
 /// the `target_arch` arg on `bake_byo_executor_image_full`.
 fn default_target_arch_for_oci() -> &'static str {
-    if cfg!(target_arch = "aarch64") { "arm64" } else { "amd64" }
+    if cfg!(target_arch = "aarch64") {
+        "arm64"
+    } else {
+        "amd64"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -568,8 +583,7 @@ mod tests {
     #[test]
     fn synthetic_bake_produces_matching_digest() {
         let staging = tempfile::tempdir().expect("tempdir");
-        let baked   = bake_byo_executor_image_synthetic(staging.path())
-            .expect("synthetic bake");
+        let baked = bake_byo_executor_image_synthetic(staging.path()).expect("synthetic bake");
         let recomputed = format!(
             "sha256:{}",
             sha256_of_file(&baked.rootfs_blob_path).expect("rehash"),
@@ -579,21 +593,24 @@ mod tests {
             "synthetic bake must declare a digest matching the on-disk bytes \
              (the audit-emit witness depends on this byte-equality)",
         );
-        assert!(baked.size_bytes > 0,  "bake produced empty rootfs");
-        assert!(baked.size_bytes < 1_024 * 16, "synthetic bake is supposed to be tiny");
+        assert!(baked.size_bytes > 0, "bake produced empty rootfs");
+        assert!(
+            baked.size_bytes < 1_024 * 16,
+            "synthetic bake is supposed to be tiny"
+        );
     }
 
     #[test]
     fn tampered_digest_one_hex_off_changes_last_char_only() {
         let original = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
         let tampered = tampered_digest_one_hex_off(original);
-        assert_eq!(tampered.len(), original.len(),  "shape preserved");
-        assert!(tampered.starts_with("sha256:"),    "prefix preserved");
-        assert_ne!(tampered, original,              "must actually differ");
+        assert_eq!(tampered.len(), original.len(), "shape preserved");
+        assert!(tampered.starts_with("sha256:"), "prefix preserved");
+        assert_ne!(tampered, original, "must actually differ");
         // Only the LAST hex char differs.
         let head_orig = &original[..original.len() - 1];
         let head_tamp = &tampered[..tampered.len() - 1];
-        assert_eq!(head_orig, head_tamp,            "only the last char flips");
+        assert_eq!(head_orig, head_tamp, "only the last char flips");
     }
 
     #[test]
@@ -602,71 +619,91 @@ mod tests {
         //   '0'..='8' → next digit; '9' → 'a';
         //   'a'..='e' → next letter; 'f' → '0'.
         let pairs: &[(&str, &str)] = &[
-            ("sha256:00000000000000000000000000000000000000000000000000000000000000ff",
-             "sha256:00000000000000000000000000000000000000000000000000000000000000f0"),
-            ("sha256:00000000000000000000000000000000000000000000000000000000000000a9",
-             "sha256:00000000000000000000000000000000000000000000000000000000000000aa"),
-            ("sha256:0000000000000000000000000000000000000000000000000000000000000000",
-             "sha256:0000000000000000000000000000000000000000000000000000000000000001"),
-            ("sha256:0000000000000000000000000000000000000000000000000000000000000009",
-             "sha256:000000000000000000000000000000000000000000000000000000000000000a"),
-            ("sha256:000000000000000000000000000000000000000000000000000000000000000e",
-             "sha256:000000000000000000000000000000000000000000000000000000000000000f"),
+            (
+                "sha256:00000000000000000000000000000000000000000000000000000000000000ff",
+                "sha256:00000000000000000000000000000000000000000000000000000000000000f0",
+            ),
+            (
+                "sha256:00000000000000000000000000000000000000000000000000000000000000a9",
+                "sha256:00000000000000000000000000000000000000000000000000000000000000aa",
+            ),
+            (
+                "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "sha256:0000000000000000000000000000000000000000000000000000000000000001",
+            ),
+            (
+                "sha256:0000000000000000000000000000000000000000000000000000000000000009",
+                "sha256:000000000000000000000000000000000000000000000000000000000000000a",
+            ),
+            (
+                "sha256:000000000000000000000000000000000000000000000000000000000000000e",
+                "sha256:000000000000000000000000000000000000000000000000000000000000000f",
+            ),
         ];
         for (input, expected) in pairs {
             let got = tampered_digest_one_hex_off(input);
-            assert_eq!(
-                &got, expected,
-                "endpoint case mis-mapped: input={input:?}",
-            );
+            assert_eq!(&got, expected, "endpoint case mis-mapped: input={input:?}",);
         }
     }
 
     #[test]
     fn stage_writes_rootfs_at_layout_derived_path() {
         let data_dir = tempfile::tempdir().expect("tempdir for data_dir");
-        let staging  = tempfile::tempdir().expect("tempdir for bake staging");
-        let baked    = bake_byo_executor_image_synthetic(staging.path())
-            .expect("synthetic bake");
+        let staging = tempfile::tempdir().expect("tempdir for bake staging");
+        let baked = bake_byo_executor_image_synthetic(staging.path()).expect("synthetic bake");
 
-        let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, false)
-            .expect("stage");
+        let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, false).expect("stage");
 
         let hex = baked.oci_digest.strip_prefix("sha256:").unwrap();
         let shard = &hex[..2];
-        let expected = data_dir.path()
-            .join("oci-cache").join("images").join("sha256")
-            .join(shard).join(hex).join("rootfs.img");
-        assert_eq!(staged, expected,
-            "rootfs.img must land at the image-cache.md §4 layout-derived path");
+        let expected = data_dir
+            .path()
+            .join("oci-cache")
+            .join("images")
+            .join("sha256")
+            .join(shard)
+            .join(hex)
+            .join("rootfs.img");
+        assert_eq!(
+            staged, expected,
+            "rootfs.img must land at the image-cache.md §4 layout-derived path"
+        );
         assert!(expected.exists(), "rootfs.img missing on disk");
-        assert!(expected.with_file_name("manifest.json").exists(),
-            "manifest.json sidecar missing");
-        assert!(expected.with_file_name("config.json").exists(),
-            "config.json sidecar missing");
+        assert!(
+            expected.with_file_name("manifest.json").exists(),
+            "manifest.json sidecar missing"
+        );
+        assert!(
+            expected.with_file_name("config.json").exists(),
+            "config.json sidecar missing"
+        );
 
         let staged_bytes = fs::read(&staged).unwrap();
-        let original     = fs::read(&baked.rootfs_blob_path).unwrap();
-        assert_eq!(staged_bytes, original,
-            "non-tampered stage must preserve the bake's bytes byte-for-byte");
+        let original = fs::read(&baked.rootfs_blob_path).unwrap();
+        assert_eq!(
+            staged_bytes, original,
+            "non-tampered stage must preserve the bake's bytes byte-for-byte"
+        );
     }
 
     #[test]
     fn stage_with_tamper_diverges_by_one_byte() {
         let data_dir = tempfile::tempdir().expect("tempdir for data_dir");
-        let staging  = tempfile::tempdir().expect("tempdir for bake staging");
-        let baked    = bake_byo_executor_image_synthetic(staging.path())
-            .expect("synthetic bake");
-        let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, true)
-            .expect("stage tampered");
+        let staging = tempfile::tempdir().expect("tempdir for bake staging");
+        let baked = bake_byo_executor_image_synthetic(staging.path()).expect("synthetic bake");
+        let staged =
+            stage_byo_image_in_oci_cache(data_dir.path(), &baked, true).expect("stage tampered");
         let staged_bytes = fs::read(&staged).unwrap();
-        let original     = fs::read(&baked.rootfs_blob_path).unwrap();
-        assert_eq!(staged_bytes.len(), original.len(),  "length preserved");
-        let differing: usize = staged_bytes.iter()
+        let original = fs::read(&baked.rootfs_blob_path).unwrap();
+        assert_eq!(staged_bytes.len(), original.len(), "length preserved");
+        let differing: usize = staged_bytes
+            .iter()
             .zip(original.iter())
             .filter(|(a, b)| a != b)
             .count();
-        assert_eq!(differing, 1,
-            "tampered stage must differ by exactly one byte (last-byte XOR)");
+        assert_eq!(
+            differing, 1,
+            "tampered stage must differ by exactly one byte (last-byte XOR)"
+        );
     }
 }

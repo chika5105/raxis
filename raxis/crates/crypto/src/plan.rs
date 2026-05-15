@@ -17,7 +17,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::{CryptoError, verify_ed25519};
+use crate::{verify_ed25519, CryptoError};
 
 /// Compute the 32-byte `signing_input` for a plan artifact.
 ///
@@ -63,7 +63,7 @@ pub fn plan_artifact_sha256(plan_bytes: &[u8]) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn test_keypair() -> (SigningKey, [u8; 32]) {
         let seed = [0x11u8; 32];
@@ -91,9 +91,7 @@ mod tests {
         let sig = sk.sign(&signing_input);
 
         // Tamper with plan_bytes after signing.
-        assert!(
-            verify_plan_signature(&pk_bytes, b"tampered bytes", &sig.to_bytes()).is_err()
-        );
+        assert!(verify_plan_signature(&pk_bytes, b"tampered bytes", &sig.to_bytes()).is_err());
     }
 
     #[test]

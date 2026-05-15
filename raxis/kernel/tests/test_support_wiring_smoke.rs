@@ -50,23 +50,31 @@ fn fake_clock_drives_a_ttl_check_through_dyn_clock() {
     let dyn_clock: Arc<dyn Clock> = Arc::new(clock.clone());
 
     // Before the deadline → not expired.
-    assert!(!ttl_expired(&*dyn_clock, deadline),
-        "ttl must not be expired at t=1_000_000 with deadline=1_000_500");
+    assert!(
+        !ttl_expired(&*dyn_clock, deadline),
+        "ttl must not be expired at t=1_000_000 with deadline=1_000_500"
+    );
 
     // Advance exactly 499s → still not expired.
     clock.advance_secs(499);
-    assert!(!ttl_expired(&*dyn_clock, deadline),
-        "ttl must not be expired at t=1_000_499 with deadline=1_000_500");
+    assert!(
+        !ttl_expired(&*dyn_clock, deadline),
+        "ttl must not be expired at t=1_000_499 with deadline=1_000_500"
+    );
 
     // Advance one more second → now at the deadline → expired.
     clock.advance_secs(1);
-    assert!(ttl_expired(&*dyn_clock, deadline),
-        "ttl MUST be expired at t=1_000_500 with deadline=1_000_500");
+    assert!(
+        ttl_expired(&*dyn_clock, deadline),
+        "ttl MUST be expired at t=1_000_500 with deadline=1_000_500"
+    );
 
     // Set time backward (clock skew simulation) → not expired again.
     clock.set_now(0);
-    assert!(!ttl_expired(&*dyn_clock, deadline),
-        "set_now MUST be observable through the Arc<dyn Clock> handle");
+    assert!(
+        !ttl_expired(&*dyn_clock, deadline),
+        "set_now MUST be observable through the Arc<dyn Clock> handle"
+    );
 }
 
 #[test]
@@ -100,7 +108,10 @@ fn fake_audit_sink_captures_a_real_audit_event_variant() {
     let captured = sink.events();
     assert_eq!(captured.len(), 1, "sink must capture exactly one event");
     assert_eq!(captured[0].session_id.as_deref(), Some("sess-test"));
-    assert!(matches!(captured[0].kind, AuditEventKind::SessionRevoked { .. }));
+    assert!(matches!(
+        captured[0].kind,
+        AuditEventKind::SessionRevoked { .. }
+    ));
 }
 
 #[test]
@@ -129,5 +140,8 @@ fn fake_clock_clones_share_state_across_threads() {
 
     driver.set_now(42);
     let observed = h.join().expect("worker panicked");
-    assert!(observed, "kernel-side Arc<dyn Clock> failed to observe driver-side set_now(42)");
+    assert!(
+        observed,
+        "kernel-side Arc<dyn Clock> failed to observe driver-side set_now(42)"
+    );
 }

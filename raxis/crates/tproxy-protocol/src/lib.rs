@@ -87,8 +87,8 @@ impl AdmissionProtocol {
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::Https => "https",
-            Self::Http  => "http",
-            Self::Tcp   => "tcp",
+            Self::Http => "http",
+            Self::Tcp => "tcp",
         }
     }
 }
@@ -112,7 +112,7 @@ pub struct ProxyAdmissionRequest {
     /// `SO_ORIGINAL_DST` (after iptables REDIRECT). On HTTPS this
     /// is the address the agent actually dialed; on HTTP it
     /// agrees with `host_or_sni` modulo case.
-    pub original_dst_ip:   String,
+    pub original_dst_ip: String,
     /// Original destination port (e.g. 443 for HTTPS, 80 for
     /// HTTP, 5432 for Postgres bypass detection).
     pub original_dst_port: u16,
@@ -197,11 +197,11 @@ impl DenyReason {
     /// Stable short string for audit payloads.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::HostNotInAllowlist  => "host_not_in_allowlist",
-            Self::ProxyTargetBypass   => "proxy_target_bypass",
+            Self::HostNotInAllowlist => "host_not_in_allowlist",
+            Self::ProxyTargetBypass => "proxy_target_bypass",
             Self::ProtocolNotPermitted => "protocol_not_permitted",
-            Self::PortNotRedirected   => "port_not_redirected",
-            Self::Unknown             => "unknown",
+            Self::PortNotRedirected => "port_not_redirected",
+            Self::Unknown => "unknown",
         }
     }
 }
@@ -254,7 +254,10 @@ fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, FrameError> {
     let body = bincode::serde::encode_to_vec(value, bincode::config::standard())
         .map_err(|e| FrameError::Encode(e.to_string()))?;
     if body.len() > MAX_FRAME_BYTES {
-        return Err(FrameError::TooLarge { len: body.len() as u64, max: MAX_FRAME_BYTES });
+        return Err(FrameError::TooLarge {
+            len: body.len() as u64,
+            max: MAX_FRAME_BYTES,
+        });
     }
     let mut out = Vec::with_capacity(4 + body.len());
     out.extend_from_slice(&(body.len() as u32).to_be_bytes());
@@ -264,11 +267,16 @@ fn encode_frame<T: Serialize>(value: &T) -> Result<Vec<u8>, FrameError> {
 
 fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize), FrameError> {
     if bytes.len() < 4 {
-        return Err(FrameError::Decode("frame shorter than 4-byte length prefix".into()));
+        return Err(FrameError::Decode(
+            "frame shorter than 4-byte length prefix".into(),
+        ));
     }
     let len = u32::from_be_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]) as usize;
     if len > MAX_FRAME_BYTES {
-        return Err(FrameError::TooLarge { len: len as u64, max: MAX_FRAME_BYTES });
+        return Err(FrameError::TooLarge {
+            len: len as u64,
+            max: MAX_FRAME_BYTES,
+        });
     }
     if bytes.len() < 4 + len {
         return Err(FrameError::Decode(format!(
@@ -277,11 +285,9 @@ fn decode_frame<T: for<'de> Deserialize<'de>>(bytes: &[u8]) -> Result<(T, usize)
             len,
         )));
     }
-    let (value, consumed) = bincode::serde::decode_from_slice::<T, _>(
-        &bytes[4..4 + len],
-        bincode::config::standard(),
-    )
-    .map_err(|e| FrameError::Decode(e.to_string()))?;
+    let (value, consumed) =
+        bincode::serde::decode_from_slice::<T, _>(&bytes[4..4 + len], bincode::config::standard())
+            .map_err(|e| FrameError::Decode(e.to_string()))?;
     if consumed != len {
         return Err(FrameError::Decode(format!(
             "bincode consumed {consumed} of {len} body bytes",
@@ -434,8 +440,7 @@ pub fn extract_host_header_from_http_request_line_block(
         }
     }
     let header_end = header_end.ok_or(HostParseError::Truncated)?;
-    let s = std::str::from_utf8(&buf[..header_end])
-        .map_err(|_| HostParseError::NotUtf8)?;
+    let s = std::str::from_utf8(&buf[..header_end]).map_err(|_| HostParseError::NotUtf8)?;
     for line in s.split("\r\n").skip(1) {
         // skip(1) drops the request-line ("GET / HTTP/1.1").
         if let Some((name, value)) = line.split_once(':') {
@@ -483,8 +488,12 @@ struct TlsCursor<'a> {
 }
 
 impl<'a> TlsCursor<'a> {
-    fn new(buf: &'a [u8]) -> Self { Self { buf, cursor: 0 } }
-    fn remaining(&self) -> usize { self.buf.len() - self.cursor }
+    fn new(buf: &'a [u8]) -> Self {
+        Self { buf, cursor: 0 }
+    }
+    fn remaining(&self) -> usize {
+        self.buf.len() - self.cursor
+    }
 
     fn u8(&mut self) -> Result<u8, SniParseError> {
         if self.cursor + 1 > self.buf.len() {
@@ -541,10 +550,22 @@ mod tests {
 
     #[test]
     fn deny_reason_strings_pinned() {
-        assert_eq!(DenyReason::HostNotInAllowlist.as_str(), "host_not_in_allowlist");
-        assert_eq!(DenyReason::ProxyTargetBypass.as_str(), "proxy_target_bypass");
-        assert_eq!(DenyReason::ProtocolNotPermitted.as_str(), "protocol_not_permitted");
-        assert_eq!(DenyReason::PortNotRedirected.as_str(), "port_not_redirected");
+        assert_eq!(
+            DenyReason::HostNotInAllowlist.as_str(),
+            "host_not_in_allowlist"
+        );
+        assert_eq!(
+            DenyReason::ProxyTargetBypass.as_str(),
+            "proxy_target_bypass"
+        );
+        assert_eq!(
+            DenyReason::ProtocolNotPermitted.as_str(),
+            "protocol_not_permitted"
+        );
+        assert_eq!(
+            DenyReason::PortNotRedirected.as_str(),
+            "port_not_redirected"
+        );
         assert_eq!(DenyReason::Unknown.as_str(), "unknown");
     }
 
@@ -589,8 +610,14 @@ mod tests {
                     ProxyAdmissionResponse::Admit { connection_id: b },
                 ) => assert_eq!(a, b),
                 (
-                    ProxyAdmissionResponse::Deny { connection_id: a, reason: ra },
-                    ProxyAdmissionResponse::Deny { connection_id: b, reason: rb },
+                    ProxyAdmissionResponse::Deny {
+                        connection_id: a,
+                        reason: ra,
+                    },
+                    ProxyAdmissionResponse::Deny {
+                        connection_id: b,
+                        reason: rb,
+                    },
                 ) => {
                     assert_eq!(a, b);
                     assert_eq!(ra, rb);
@@ -603,7 +630,7 @@ mod tests {
     #[test]
     fn frame_decoder_rejects_a_too_short_buffer() {
         assert!(matches!(
-            decode_request::<>(&[0u8, 0u8]),
+            decode_request(&[0u8, 0u8]),
             Err(FrameError::Decode(_))
         ));
     }
@@ -612,10 +639,7 @@ mod tests {
     fn frame_decoder_rejects_a_truncated_body() {
         let mut bytes = vec![0u8, 0u8, 0u8, 100u8];
         bytes.extend_from_slice(&[0u8; 5]);
-        assert!(matches!(
-            decode_request::<>(&bytes),
-            Err(FrameError::Decode(_))
-        ));
+        assert!(matches!(decode_request(&bytes), Err(FrameError::Decode(_))));
     }
 
     // ── Host header parser ──────────────────────────────────────────────────
@@ -734,7 +758,9 @@ mod tests {
         let record_len: u16 = 4 + body_len;
         buf.extend_from_slice(&record_len.to_be_bytes());
         buf.push(0x01);
-        buf.push(0); buf.push(0); buf.push(body_len as u8);
+        buf.push(0);
+        buf.push(0);
+        buf.push(body_len as u8);
         buf.extend_from_slice(&[0x03, 0x03]);
         buf.extend_from_slice(&[0u8; 32]);
         buf.push(0);

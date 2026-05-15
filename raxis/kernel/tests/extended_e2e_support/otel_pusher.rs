@@ -64,9 +64,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::harness_timeout::{
-    run_command_output_timeout, BoundedWaitError,
-};
+use super::harness_timeout::{run_command_output_timeout, BoundedWaitError};
 
 // ─── Operator-facing env-var contract ─────────────────────────────
 
@@ -86,8 +84,7 @@ pub const ENV_SKIP_OTEL_PUSHER: &str = "RAXIS_E2E_SKIP_OTEL_PUSHER";
 /// Bounded-wait override for `cargo build --release -p raxis-otel-
 /// pusher`. Default [`DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS`].
 /// Non-positive / unparseable values clamp to the default.
-pub const ENV_OTEL_PUSHER_BUILD_TIMEOUT_SECS: &str =
-    "RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS";
+pub const ENV_OTEL_PUSHER_BUILD_TIMEOUT_SECS: &str = "RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS";
 
 /// Default cap on the auto-build wall-clock. 180 s is generous for
 /// a warm cargo cache (the pusher's release build is ~16 s on a
@@ -152,8 +149,7 @@ pub const POST_SPAWN_LIVENESS_DELAY: Duration = Duration::from_secs(3);
 /// Token included verbatim in every panic produced by this module
 /// so a CI log scraper / operator can pin the failure mode by
 /// substring without parsing the whole remediation block.
-pub const OTEL_PUSHER_VIOLATION_TOKEN: &str =
-    "INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED";
+pub const OTEL_PUSHER_VIOLATION_TOKEN: &str = "INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01 VIOLATED";
 
 // ─── Pure-data classifier ─────────────────────────────────────────
 
@@ -246,7 +242,10 @@ pub fn otel_pusher_build_timeout() -> Duration {
         .ok()
         .and_then(|s| s.parse::<u64>().ok());
     match raw {
-        Some(v) if (MIN_OTEL_PUSHER_BUILD_TIMEOUT_SECS..=MAX_OTEL_PUSHER_BUILD_TIMEOUT_SECS).contains(&v) => {
+        Some(v)
+            if (MIN_OTEL_PUSHER_BUILD_TIMEOUT_SECS..=MAX_OTEL_PUSHER_BUILD_TIMEOUT_SECS)
+                .contains(&v) =>
+        {
             Duration::from_secs(v)
         }
         // Out-of-range, zero, garbage, or unset → safe default.
@@ -309,9 +308,7 @@ enum BinaryOrigin {
 /// the absolute path to the freshly-built binary; on any failure
 /// returns an `Err(reason)` carrying the failure mode string
 /// suitable for embedding in the panic body.
-fn run_cargo_build_pusher(
-    workspace_root: &Path,
-) -> Result<PathBuf, String> {
+fn run_cargo_build_pusher(workspace_root: &Path) -> Result<PathBuf, String> {
     let timeout = otel_pusher_build_timeout();
     eprintln!(
         "[realism-e2e] observability: raxis-otel-pusher binary missing — \
@@ -442,7 +439,9 @@ impl Drop for OtelPusherSupervisor {
                 // SAFETY: `pid` was captured from `Child::id()` at
                 // spawn time and refers to a real child of this
                 // process; sending SIGTERM is always defined.
-                unsafe { libc::kill(pid as libc::pid_t, libc::SIGTERM); }
+                unsafe {
+                    libc::kill(pid as libc::pid_t, libc::SIGTERM);
+                }
             }
             let grace_deadline = Instant::now() + Duration::from_millis(500);
             loop {
@@ -532,11 +531,8 @@ pub fn ensure_otel_pusher_or_panic(ctx: PusherSpawnContext<'_>) -> Option<OtelPu
         .iter()
         .any(|p| p.is_file());
 
-    let initial_state = classify_otel_pusher_state(
-        skip_env,
-        envvar_binary_present,
-        conv_paths_present,
-    );
+    let initial_state =
+        classify_otel_pusher_state(skip_env, envvar_binary_present, conv_paths_present);
 
     match initial_state {
         OtelPusherState::OptOutByEnv => {
@@ -711,13 +707,8 @@ pub enum SmokeProbeMode {
 /// on timeout. Optionally takes the supervisor handle so the loop
 /// can short-circuit if the supervised child died mid-probe (the
 /// poll loop would otherwise run out the full budget).
-fn smoke_probe_or_panic(
-    mode: SmokeProbeMode,
-    sup: Option<&mut OtelPusherSupervisor>,
-) {
-    let url = format!(
-        "http://{PROMETHEUS_HOST}:{PROMETHEUS_PORT}/api/v1/query?query=up"
-    );
+fn smoke_probe_or_panic(mode: SmokeProbeMode, sup: Option<&mut OtelPusherSupervisor>) {
+    let url = format!("http://{PROMETHEUS_HOST}:{PROMETHEUS_PORT}/api/v1/query?query=up");
     eprintln!(
         "[realism-e2e] observability: smoke-probing Prometheus at {url} \
          for raxis target up=1 (budget={:?}, poll={:?})",
@@ -736,8 +727,7 @@ fn smoke_probe_or_panic(
         // Short-circuit on supervised child death.
         if let Some(s) = sup.as_deref_mut() {
             if !s.is_alive() {
-                let log_tail = std::fs::read_to_string(s.log_path())
-                    .unwrap_or_default();
+                let log_tail = std::fs::read_to_string(s.log_path()).unwrap_or_default();
                 panic!(
                     "{OTEL_PUSHER_VIOLATION_TOKEN}: raxis-otel-pusher \
                      pid={pid} died during smoke probe ({elapsed:.1}s in). \
@@ -828,7 +818,8 @@ pub fn classify_prometheus_up_response(body: &serde_json::Value) -> ProbeOutcome
     if arr.is_empty() {
         return ProbeOutcome::NoRaxisUpYet {
             observation: "Prometheus returned an empty `up` series array \
-                          (no targets registered yet)".to_owned(),
+                          (no targets registered yet)"
+                .to_owned(),
         };
     }
     let mut raxis_jobs_seen: Vec<String> = Vec::new();
@@ -855,7 +846,11 @@ pub fn classify_prometheus_up_response(body: &serde_json::Value) -> ProbeOutcome
     let observation = if raxis_jobs_seen.is_empty() {
         let job_names: Vec<&str> = arr
             .iter()
-            .filter_map(|i| i.get("metric").and_then(|m| m.get("job")).and_then(|j| j.as_str()))
+            .filter_map(|i| {
+                i.get("metric")
+                    .and_then(|m| m.get("job"))
+                    .and_then(|j| j.as_str())
+            })
             .collect();
         format!(
             "no `raxis*` job in Prometheus `up` response (saw jobs: {:?})",
@@ -1036,13 +1031,17 @@ mod tests {
             fn set(key: &'static str, value: &str) -> Self {
                 let prior = std::env::var(key).ok();
                 // SAFETY: Test-only mutation guarded by Drop.
-                unsafe { std::env::set_var(key, value); }
+                unsafe {
+                    std::env::set_var(key, value);
+                }
                 EnvGuard(key, prior)
             }
             fn unset(key: &'static str) -> Self {
                 let prior = std::env::var(key).ok();
                 // SAFETY: Test-only mutation guarded by Drop.
-                unsafe { std::env::remove_var(key); }
+                unsafe {
+                    std::env::remove_var(key);
+                }
                 EnvGuard(key, prior)
             }
         }
@@ -1050,8 +1049,12 @@ mod tests {
             fn drop(&mut self) {
                 match &self.1 {
                     // SAFETY: Test-only restore.
-                    Some(v) => unsafe { std::env::set_var(self.0, v); },
-                    None => unsafe { std::env::remove_var(self.0); },
+                    Some(v) => unsafe {
+                        std::env::set_var(self.0, v);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(self.0);
+                    },
                 }
             }
         }
@@ -1341,7 +1344,11 @@ mod tests {
         let workspace = PathBuf::from("/tmp/synthetic-workspace");
         let install = PathBuf::from("/tmp/synthetic-install");
         let paths = convention_pusher_paths(&workspace, Some(&install));
-        assert_eq!(paths.len(), 3, "expected 3 paths (release, debug, install/bin)");
+        assert_eq!(
+            paths.len(),
+            3,
+            "expected 3 paths (release, debug, install/bin)"
+        );
         assert!(paths[0].ends_with("target/release/raxis-otel-pusher"));
         assert!(paths[1].ends_with("target/debug/raxis-otel-pusher"));
         assert!(paths[2].ends_with("bin/raxis-otel-pusher"));

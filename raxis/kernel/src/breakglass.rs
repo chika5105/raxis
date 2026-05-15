@@ -94,11 +94,11 @@ pub struct BreakglassActivation {
     pub activated_at: DateTime<Utc>,
     /// Wallclock at TTL expiry (RFC-3339 UTC). MUST satisfy
     /// `expires_at <= activated_at + max_duration`.
-    pub expires_at:   DateTime<Utc>,
+    pub expires_at: DateTime<Utc>,
     /// First operator's Ed25519 signature (64 bytes).
-    pub signature_1:  Vec<u8>,
+    pub signature_1: Vec<u8>,
     /// Second operator's Ed25519 signature (64 bytes).
-    pub signature_2:  Vec<u8>,
+    pub signature_2: Vec<u8>,
 }
 
 /// Output of [`check_active`]. Closed enum so callers exhaustively
@@ -112,7 +112,7 @@ pub enum BreakglassStatus {
         activation_id: Uuid,
         /// Wallclock at TTL expiry; UI surfaces use this to render
         /// a countdown.
-        expires_at:    DateTime<Utc>,
+        expires_at: DateTime<Utc>,
     },
     /// No activation in effect (either never activated, expired
     /// past TTL, or deactivated).
@@ -130,15 +130,16 @@ pub enum BreakglassError {
     #[error("breakglass io error at {path:?}: {source}")]
     Io {
         /// Path attempted.
-        path:   PathBuf,
+        path: PathBuf,
         /// IO source.
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     /// The activation file existed but failed to parse.
     #[error("breakglass file at {path:?} is corrupt: {reason}")]
     Corrupt {
         /// Path attempted.
-        path:   PathBuf,
+        path: PathBuf,
         /// Reason text.
         reason: String,
     },
@@ -220,42 +221,63 @@ fn load_record(path: &Path) -> Result<Option<BreakglassActivation>, BreakglassEr
     if !path.exists() {
         return Ok(None);
     }
-    let body = std::fs::read_to_string(path)
-        .map_err(|e| BreakglassError::Io { path: path.to_owned(), source: e })?;
-    let envelope: OnDisk = toml::from_str(&body)
-        .map_err(|e| BreakglassError::Corrupt {
-            path:   path.to_owned(),
-            reason: e.to_string(),
-        })?;
+    let body = std::fs::read_to_string(path).map_err(|e| BreakglassError::Io {
+        path: path.to_owned(),
+        source: e,
+    })?;
+    let envelope: OnDisk = toml::from_str(&body).map_err(|e| BreakglassError::Corrupt {
+        path: path.to_owned(),
+        reason: e.to_string(),
+    })?;
     Ok(Some(envelope.activation))
 }
 
 fn write_record(path: &Path, rec: &BreakglassActivation) -> Result<(), BreakglassError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| BreakglassError::Io { path: path.to_owned(), source: e })?;
+        std::fs::create_dir_all(parent).map_err(|e| BreakglassError::Io {
+            path: path.to_owned(),
+            source: e,
+        })?;
     }
-    let body = toml::to_string_pretty(&OnDisk { activation: rec.clone() })
-        .map_err(|e| BreakglassError::Corrupt { path: path.to_owned(), reason: e.to_string() })?;
+    let body = toml::to_string_pretty(&OnDisk {
+        activation: rec.clone(),
+    })
+    .map_err(|e| BreakglassError::Corrupt {
+        path: path.to_owned(),
+        reason: e.to_string(),
+    })?;
     let tmp = path.with_extension("toml.tmp");
     {
         use std::io::Write;
-        let mut f = std::fs::File::create(&tmp)
-            .map_err(|e| BreakglassError::Io { path: tmp.clone(), source: e })?;
+        let mut f = std::fs::File::create(&tmp).map_err(|e| BreakglassError::Io {
+            path: tmp.clone(),
+            source: e,
+        })?;
         f.write_all(body.as_bytes())
-            .map_err(|e| BreakglassError::Io { path: tmp.clone(), source: e })?;
-        f.sync_all()
-            .map_err(|e| BreakglassError::Io { path: tmp.clone(), source: e })?;
+            .map_err(|e| BreakglassError::Io {
+                path: tmp.clone(),
+                source: e,
+            })?;
+        f.sync_all().map_err(|e| BreakglassError::Io {
+            path: tmp.clone(),
+            source: e,
+        })?;
     }
-    std::fs::rename(&tmp, path)
-        .map_err(|e| BreakglassError::Io { path: path.to_owned(), source: e })?;
+    std::fs::rename(&tmp, path).map_err(|e| BreakglassError::Io {
+        path: path.to_owned(),
+        source: e,
+    })?;
     Ok(())
 }
 
 fn remove_record(path: &Path) -> Result<(), BreakglassError> {
-    if !path.exists() { return Ok(()); }
-    std::fs::remove_file(path)
-        .map_err(|e| BreakglassError::Io { path: path.to_owned(), source: e })
+    if !path.exists() {
+        return Ok(());
+    }
+    std::fs::remove_file(path).map_err(|e| BreakglassError::Io {
+        path: path.to_owned(),
+        source: e,
+    })
 }
 
 /// Default activation file path under `<data_dir>`.
@@ -273,10 +295,10 @@ pub fn default_record_path(data_dir: &Path) -> PathBuf {
 pub struct BreakglassState {
     /// Cached, hot-path-readable view of the in-effect record.
     /// `None` ⇒ inactive (file absent or TTL passed).
-    inner:        RwLock<Option<BreakglassActivation>>,
+    inner: RwLock<Option<BreakglassActivation>>,
     /// Persisted record path; `<data_dir>/breakglass/active.toml`
     /// in production.
-    record_path:  PathBuf,
+    record_path: PathBuf,
     /// Hard TTL cap; defaults to 4 h.
     max_duration: ChronoDuration,
 }
@@ -288,14 +310,14 @@ impl BreakglassState {
         let initial = load_record(&record_path)?;
         let initial = match initial {
             Some(rec) if rec.expires_at > Utc::now() => Some(rec),
-            Some(_)   => {
+            Some(_) => {
                 let _ = remove_record(&record_path);
                 None
             }
             None => None,
         };
         Ok(Self {
-            inner:        RwLock::new(initial),
+            inner: RwLock::new(initial),
             record_path,
             max_duration: ChronoDuration::seconds(DEFAULT_BREAKGLASS_MAX_DURATION_SECS),
         })
@@ -306,8 +328,8 @@ impl BreakglassState {
     /// `<data_dir>` is wired yet.
     pub fn disabled() -> Self {
         Self {
-            inner:        RwLock::new(None),
-            record_path:  PathBuf::new(),
+            inner: RwLock::new(None),
+            record_path: PathBuf::new(),
             max_duration: ChronoDuration::seconds(DEFAULT_BREAKGLASS_MAX_DURATION_SECS),
         }
     }
@@ -330,7 +352,7 @@ impl BreakglassState {
         match snap {
             Some(rec) if rec.expires_at > Utc::now() => BreakglassStatus::Active {
                 activation_id: rec.activation_id,
-                expires_at:    rec.expires_at,
+                expires_at: rec.expires_at,
             },
             Some(_) => {
                 // Expired — drop the in-memory copy and the on-disk
@@ -355,7 +377,9 @@ impl BreakglassState {
     }
 
     /// Configured hard TTL cap.
-    pub fn max_duration(&self) -> ChronoDuration { self.max_duration }
+    pub fn max_duration(&self) -> ChronoDuration {
+        self.max_duration
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -381,9 +405,9 @@ impl BreakglassState {
 /// 6. Emit `AuditEventKind::BreakglassActivated`.
 pub fn activate(
     mut activation: BreakglassActivation,
-    policy:         &PolicyBundle,
-    state:          &BreakglassState,
-    audit:          &Arc<dyn AuditSink>,
+    policy: &PolicyBundle,
+    state: &BreakglassState,
+    audit: &Arc<dyn AuditSink>,
 ) -> Result<Uuid, BreakglassError> {
     // 1. Length-check.
     let justification = sanitise_justification(&activation.justification);
@@ -409,8 +433,18 @@ pub fn activate(
     }
     // 3. Verify signatures.
     let canonical = canonical_signing_bytes(&activation, &justification);
-    verify_sig(&signer_1.pubkey_hex, &activation.signature_1, &canonical, &signer_1.pubkey_fingerprint)?;
-    verify_sig(&signer_2.pubkey_hex, &activation.signature_2, &canonical, &signer_2.pubkey_fingerprint)?;
+    verify_sig(
+        &signer_1.pubkey_hex,
+        &activation.signature_1,
+        &canonical,
+        &signer_1.pubkey_fingerprint,
+    )?;
+    verify_sig(
+        &signer_2.pubkey_hex,
+        &activation.signature_2,
+        &canonical,
+        &signer_2.pubkey_fingerprint,
+    )?;
     // 4. TTL.
     let now = Utc::now();
     if activation.expires_at <= now {
@@ -435,7 +469,7 @@ pub fn activate(
         }
     }
     activation.activation_id = Uuid::new_v4();
-    activation.activated_at  = now;
+    activation.activated_at = now;
     activation.justification = justification.clone();
     activation.activated_by.sort();
     if !state.record_path.as_os_str().is_empty() {
@@ -449,12 +483,14 @@ pub fn activate(
     audit.emit(
         AuditEventKind::BreakglassActivated {
             activation_id: activation.activation_id.to_string(),
-            activated_by:  activation.activated_by.clone(),
-            activated_at:  activation.activated_at.to_rfc3339(),
-            expires_at:    activation.expires_at.to_rfc3339(),
+            activated_by: activation.activated_by.clone(),
+            activated_at: activation.activated_at.to_rfc3339(),
+            expires_at: activation.expires_at.to_rfc3339(),
             justification: activation.justification.clone(),
         },
-        None, None, None,
+        None,
+        None,
+        None,
     )?;
     Ok(activation.activation_id)
 }
@@ -465,11 +501,11 @@ pub fn activate(
 /// `BreakglassDeactivated`.
 pub fn deactivate(
     operator_fingerprint: &str,
-    operator_signature:   &[u8],
-    activation_id:        Uuid,
-    policy:               &PolicyBundle,
-    state:                &BreakglassState,
-    audit:                &Arc<dyn AuditSink>,
+    operator_signature: &[u8],
+    activation_id: Uuid,
+    policy: &PolicyBundle,
+    state: &BreakglassState,
+    audit: &Arc<dyn AuditSink>,
 ) -> Result<(), BreakglassError> {
     let signer = lookup_operator(operator_fingerprint, policy.operators())?;
     let current = match state.current() {
@@ -493,11 +529,13 @@ pub fn deactivate(
     let now = Utc::now();
     audit.emit(
         AuditEventKind::BreakglassDeactivated {
-            activation_id:  current.activation_id.to_string(),
+            activation_id: current.activation_id.to_string(),
             deactivated_by: signer.pubkey_fingerprint.clone(),
             deactivated_at: now.to_rfc3339(),
         },
-        None, None, None,
+        None,
+        None,
+        None,
     )?;
     Ok(())
 }
@@ -506,21 +544,23 @@ pub fn deactivate(
 /// handler that detects `BreakglassStatus::Active` before
 /// proceeding with a bypassed action.
 pub fn log_action(
-    activation_id:      Uuid,
-    session_id:         Option<&str>,
+    activation_id: Uuid,
+    session_id: Option<&str>,
     action_description: &str,
-    audit:              &Arc<dyn AuditSink>,
+    audit: &Arc<dyn AuditSink>,
 ) -> Result<(), BreakglassError> {
     let now = Utc::now();
     let desc = sanitise_justification(action_description);
     audit.emit(
         AuditEventKind::BreakglassAction {
-            activation_id:      activation_id.to_string(),
-            session_id:         session_id.unwrap_or("-").to_owned(),
+            activation_id: activation_id.to_string(),
+            session_id: session_id.unwrap_or("-").to_owned(),
             action_description: desc,
-            action_at:          now.to_rfc3339(),
+            action_at: now.to_rfc3339(),
         },
-        session_id, None, None,
+        session_id,
+        None,
+        None,
     )?;
     Ok(())
 }
@@ -567,7 +607,7 @@ fn push_lp(buf: &mut Vec<u8>, bytes: &[u8]) {
 }
 
 fn lookup_operator<'a>(
-    fp:        &str,
+    fp: &str,
     operators: &'a [OperatorEntry],
 ) -> Result<&'a OperatorEntry, BreakglassError> {
     operators
@@ -578,9 +618,9 @@ fn lookup_operator<'a>(
 
 fn verify_sig(
     pubkey_hex: &str,
-    signature:  &[u8],
-    payload:    &[u8],
-    fp:         &str,
+    signature: &[u8],
+    payload: &[u8],
+    fp: &str,
 ) -> Result<(), BreakglassError> {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     if signature.len() != 64 {
@@ -607,8 +647,11 @@ fn verify_sig(
 fn sanitise_justification(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if ch == '\r' || ch == '\n' { out.push(' '); }
-        else { out.push(ch); }
+        if ch == '\r' || ch == '\n' {
+            out.push(' ');
+        } else {
+            out.push(ch);
+        }
     }
     out
 }
@@ -637,11 +680,11 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "test".into(),
-            activated_by:  vec!["bbb".into(), "aaa".into()],
-            activated_at:  Utc::now(),
-            expires_at:    Utc::now() + ChronoDuration::seconds(100),
-            signature_1:   vec![],
-            signature_2:   vec![],
+            activated_by: vec!["bbb".into(), "aaa".into()],
+            activated_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::seconds(100),
+            signature_1: vec![],
+            signature_2: vec![],
         };
         let a = canonical_signing_bytes(&act, "test");
         act.activated_by.swap(0, 1);
@@ -680,11 +723,11 @@ mod tests {
         let rec = BreakglassActivation {
             activation_id: Uuid::new_v4(),
             justification: "expired".into(),
-            activated_by:  vec!["aaa".into(), "bbb".into()],
-            activated_at:  now - ChronoDuration::seconds(100),
-            expires_at:    now - ChronoDuration::seconds(10),
-            signature_1:   vec![0u8; 64],
-            signature_2:   vec![0u8; 64],
+            activated_by: vec!["aaa".into(), "bbb".into()],
+            activated_at: now - ChronoDuration::seconds(100),
+            expires_at: now - ChronoDuration::seconds(10),
+            signature_1: vec![0u8; 64],
+            signature_2: vec![0u8; 64],
         };
         write_record(&path, &rec).unwrap();
         assert!(path.exists());
@@ -698,11 +741,11 @@ mod tests {
         let act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "j".into(),
-            activated_by:  vec!["a".into(), "b".into()],
-            activated_at:  Utc::now(),
-            expires_at:    Utc::now() + ChronoDuration::seconds(100),
-            signature_1:   vec![],
-            signature_2:   vec![],
+            activated_by: vec!["a".into(), "b".into()],
+            activated_at: Utc::now(),
+            expires_at: Utc::now() + ChronoDuration::seconds(100),
+            signature_1: vec![],
+            signature_2: vec![],
         };
         let act_bytes = canonical_signing_bytes(&act, "j");
         let dea_bytes = deactivate_signing_bytes(Uuid::new_v4(), "a");
@@ -753,27 +796,27 @@ mod tests {
         h.update(pk_bytes);
         let fp = hex::encode(&h.finalize()[..16]);
         let mut cert = OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            name.to_owned(),
-            pubkey_hex:              pubkey_hex.clone(),
+            kind: CertKind::Standard,
+            display_name: name.to_owned(),
+            pubkey_hex: pubkey_hex.clone(),
             // `not_before` / `not_after` are unrelated to the
             // break-glass TTL; they govern the operator-cert
             // four-zone gate. Use a very wide window so the cert
             // is unambiguously in `Active`.
-            not_before:              1_700_000_000,
-            not_after:               4_000_000_000,
+            not_before: 1_700_000_000,
+            not_after: 4_000_000_000,
             warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
+            grace_period_days: 7,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: None,
+            self_sig_hex: String::new(),
         };
         cert.self_sig_hex = sign_cert(&cert, &sk);
         let entry = OperatorEntry {
-            pubkey_fingerprint:     fp,
-            display_name:           name.to_owned(),
+            pubkey_fingerprint: fp,
+            display_name: name.to_owned(),
             pubkey_hex,
-            permitted_ops:          vec!["RotateEpoch".to_owned()],
+            permitted_ops: vec!["RotateEpoch".to_owned()],
             cert,
             force_misconfig_bypass: false,
         };
@@ -788,8 +831,8 @@ mod tests {
     }
 
     fn sign_activation(
-        sk:            &SigningKey,
-        act:           &BreakglassActivation,
+        sk: &SigningKey,
+        act: &BreakglassActivation,
         justification: &str,
     ) -> Vec<u8> {
         let canonical = canonical_signing_bytes(act, justification);
@@ -834,14 +877,14 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "incident #INC-12345 — pager woke me up".into(),
-            activated_by:  vec![
+            activated_by: vec![
                 op_a.pubkey_fingerprint.clone(),
                 op_b.pubkey_fingerprint.clone(),
             ],
-            activated_at:  now,
-            expires_at:    expires,
-            signature_1:   vec![],
-            signature_2:   vec![],
+            activated_at: now,
+            expires_at: expires,
+            signature_1: vec![],
+            signature_2: vec![],
         };
         // The canonical bytes do NOT include the signatures
         // themselves, so signing each operator independently over
@@ -925,17 +968,16 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "j".into(),
-            activated_by:  vec![
+            activated_by: vec![
                 op_a.pubkey_fingerprint.clone(),
                 op_b.pubkey_fingerprint.clone(),
             ],
-            activated_at:  now,
-            expires_at:    now + ChronoDuration::minutes(10),
-            signature_1:   vec![],
-            signature_2:   vec![64; 64],
+            activated_at: now,
+            expires_at: now + ChronoDuration::minutes(10),
+            signature_1: vec![],
+            signature_2: vec![64; 64],
         };
-        let cross =
-            deactivate_signing_bytes(Uuid::new_v4(), &op_a.pubkey_fingerprint);
+        let cross = deactivate_signing_bytes(Uuid::new_v4(), &op_a.pubkey_fingerprint);
         act.signature_1 = sk_a.sign(&cross).to_bytes().to_vec();
 
         let res = activate(act, &policy, &state, &audit);
@@ -962,14 +1004,14 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "j".into(),
-            activated_by:  vec![
+            activated_by: vec![
                 op_a.pubkey_fingerprint.clone(),
                 op_a.pubkey_fingerprint.clone(),
             ],
-            activated_at:  now,
-            expires_at:    now + ChronoDuration::minutes(10),
-            signature_1:   vec![],
-            signature_2:   vec![],
+            activated_at: now,
+            expires_at: now + ChronoDuration::minutes(10),
+            signature_1: vec![],
+            signature_2: vec![],
         };
         let just_owned = act.justification.clone();
         // Both "signatures" minted by the same operator. We
@@ -996,21 +1038,24 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "j".into(),
-            activated_by:  vec![
+            activated_by: vec![
                 op_a.pubkey_fingerprint.clone(),
                 op_b.pubkey_fingerprint.clone(),
             ],
-            activated_at:  now,
+            activated_at: now,
             // 5 hours — above the 4-h cap.
-            expires_at:    now + ChronoDuration::hours(5),
-            signature_1:   vec![],
-            signature_2:   vec![],
+            expires_at: now + ChronoDuration::hours(5),
+            signature_1: vec![],
+            signature_2: vec![],
         };
         let just_owned = act.justification.clone();
         act.signature_1 = sign_activation(&sk_a, &act, &just_owned);
         act.signature_2 = sign_activation(&sk_b, &act, &just_owned);
         let res = activate(act, &policy, &state, &audit);
-        assert!(matches!(res, Err(BreakglassError::TtlExceedsMaxDuration { .. })));
+        assert!(matches!(
+            res,
+            Err(BreakglassError::TtlExceedsMaxDuration { .. })
+        ));
     }
 
     /// `deactivate` with an `activation_id` that does NOT match
@@ -1029,14 +1074,14 @@ mod tests {
         let mut act = BreakglassActivation {
             activation_id: Uuid::nil(),
             justification: "real".into(),
-            activated_by:  vec![
+            activated_by: vec![
                 op_a.pubkey_fingerprint.clone(),
                 op_b.pubkey_fingerprint.clone(),
             ],
-            activated_at:  now,
-            expires_at:    now + ChronoDuration::minutes(30),
-            signature_1:   vec![],
-            signature_2:   vec![],
+            activated_at: now,
+            expires_at: now + ChronoDuration::minutes(30),
+            signature_1: vec![],
+            signature_2: vec![],
         };
         let just = act.justification.clone();
         act.signature_1 = sign_activation(&sk_a, &act, &just);
@@ -1058,5 +1103,4 @@ mod tests {
         // State unchanged.
         assert!(matches!(state.check(), BreakglassStatus::Active { .. }));
     }
-
 }

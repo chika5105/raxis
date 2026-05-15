@@ -36,8 +36,8 @@
 pub mod stall_tracker;
 
 pub use stall_tracker::{
-    Clock, EgressStallTracker, StallEmission, StallSignal, SystemClock,
-    DEFAULT_THRESHOLD, DEFAULT_WINDOW,
+    Clock, EgressStallTracker, StallEmission, StallSignal, SystemClock, DEFAULT_THRESHOLD,
+    DEFAULT_WINDOW,
 };
 
 use std::collections::HashSet;
@@ -148,7 +148,11 @@ impl EgressAllowlist {
     /// matches one of the glob patterns. Case-insensitive.
     pub fn host_is_allowed(&self, host: &str) -> bool {
         let host_l = host.to_ascii_lowercase();
-        if self.exact_hosts.iter().any(|h| h.eq_ignore_ascii_case(&host_l)) {
+        if self
+            .exact_hosts
+            .iter()
+            .any(|h| h.eq_ignore_ascii_case(&host_l))
+        {
             return true;
         }
         self.patterns.iter().any(|p| glob_match(p, &host_l))
@@ -217,7 +221,9 @@ impl PolicyAdmissionService {
 }
 
 fn default_redirected_ports() -> HashSet<u16> {
-    [80, 443, 5432, 3306, 1433, 27017, 6379].into_iter().collect()
+    [80, 443, 5432, 3306, 1433, 27017, 6379]
+        .into_iter()
+        .collect()
 }
 
 impl AdmissionService for PolicyAdmissionService {
@@ -320,9 +326,7 @@ where
     W: AsyncWriteExt + Unpin + Send,
     S: AdmissionService + ?Sized,
 {
-    run_admission_loop_with_stall_tracker(
-        reader, writer, service, audit, session_id, None,
-    ).await
+    run_admission_loop_with_stall_tracker(reader, writer, service, audit, session_id, None).await
 }
 
 /// V2 reviewer-egress-defaults-decision.md §7 — admission loop
@@ -379,19 +383,19 @@ where
 
         let audit_kind = match &decision.verdict {
             AdmissionVerdict::Admit => AuditEventKind::TransparentProxyAdmitted {
-                session_id:        session_id.clone(),
-                host_or_sni:       req.host_or_sni.clone(),
-                original_dst_ip:   req.original_dst_ip.clone(),
+                session_id: session_id.clone(),
+                host_or_sni: req.host_or_sni.clone(),
+                original_dst_ip: req.original_dst_ip.clone(),
                 original_dst_port: req.original_dst_port,
-                protocol:          req.protocol.as_str().to_owned(),
+                protocol: req.protocol.as_str().to_owned(),
             },
             AdmissionVerdict::Deny(reason) => AuditEventKind::TransparentProxyDenied {
-                session_id:        session_id.clone(),
-                host_or_sni:       req.host_or_sni.clone(),
-                original_dst_ip:   req.original_dst_ip.clone(),
+                session_id: session_id.clone(),
+                host_or_sni: req.host_or_sni.clone(),
+                original_dst_ip: req.original_dst_ip.clone(),
                 original_dst_port: req.original_dst_port,
-                protocol:          req.protocol.as_str().to_owned(),
-                reason:            reason.as_str().to_owned(),
+                protocol: req.protocol.as_str().to_owned(),
+                reason: reason.as_str().to_owned(),
             },
         };
         audit.emit(audit_kind, Some(&session_id), None, None)?;
@@ -403,7 +407,8 @@ where
         // `TransparentProxyDenied` above is the authoritative
         // record; the stall event is a supplemental
         // observability signal).
-        if let (Some(tracker), AdmissionVerdict::Deny(reason)) = (&stall_tracker, &decision.verdict) {
+        if let (Some(tracker), AdmissionVerdict::Deny(reason)) = (&stall_tracker, &decision.verdict)
+        {
             if let StallSignal::Detected(emit) = tracker.record_denial(
                 &session_id,
                 req.host_or_sni.as_deref(),
@@ -412,13 +417,13 @@ where
             ) {
                 if let Err(e) = audit.emit(
                     AuditEventKind::SessionEgressStallDetected {
-                        session_id:            emit.session_id,
-                        host_or_sni:           emit.host_or_sni,
-                        original_dst_port:     emit.original_dst_port,
-                        reason:                emit.reason,
+                        session_id: emit.session_id,
+                        host_or_sni: emit.host_or_sni,
+                        original_dst_port: emit.original_dst_port,
+                        reason: emit.reason,
                         block_count_in_window: emit.block_count_in_window,
-                        window_seconds:        emit.window_seconds,
-                        source:                "tproxy".to_owned(),
+                        window_seconds: emit.window_seconds,
+                        source: "tproxy".to_owned(),
                     },
                     Some(&session_id),
                     None,
@@ -445,11 +450,11 @@ mod tests {
 
     fn req(host: Option<&str>, port: u16, proto: AdmissionProtocol) -> ProxyAdmissionRequest {
         ProxyAdmissionRequest {
-            connection_id:     1,
-            original_dst_ip:   "10.0.0.1".to_owned(),
+            connection_id: 1,
+            original_dst_ip: "10.0.0.1".to_owned(),
             original_dst_port: port,
-            host_or_sni:       host.map(str::to_owned),
-            protocol:          proto,
+            host_or_sni: host.map(str::to_owned),
+            protocol: proto,
         }
     }
 
@@ -459,7 +464,10 @@ mod tests {
             exact_hosts: vec!["api.anthropic.com".into()],
             ..Default::default()
         });
-        let d = svc.admit("sess-1", &req(Some("api.anthropic.com"), 443, AdmissionProtocol::Https));
+        let d = svc.admit(
+            "sess-1",
+            &req(Some("api.anthropic.com"), 443, AdmissionProtocol::Https),
+        );
         assert!(d.is_admit());
     }
 
@@ -469,14 +477,20 @@ mod tests {
             patterns: vec!["*.anthropic.com".into()],
             ..Default::default()
         });
-        let d = svc.admit("sess-1", &req(Some("api.anthropic.com"), 443, AdmissionProtocol::Https));
+        let d = svc.admit(
+            "sess-1",
+            &req(Some("api.anthropic.com"), 443, AdmissionProtocol::Https),
+        );
         assert!(d.is_admit());
     }
 
     #[test]
     fn no_match_denies_with_host_not_in_allowlist() {
         let svc = PolicyAdmissionService::new(EgressAllowlist::default());
-        let d = svc.admit("sess-1", &req(Some("evil.example.com"), 443, AdmissionProtocol::Https));
+        let d = svc.admit(
+            "sess-1",
+            &req(Some("evil.example.com"), 443, AdmissionProtocol::Https),
+        );
         assert!(!d.is_admit());
         match &d.verdict {
             AdmissionVerdict::Deny(r) => assert_eq!(*r, DenyReason::HostNotInAllowlist),
@@ -509,7 +523,10 @@ mod tests {
             exact_hosts: vec!["api.example.com".into()],
             ..Default::default()
         });
-        let d = svc.admit("sess-1", &req(Some("api.example.com"), 999, AdmissionProtocol::Tcp));
+        let d = svc.admit(
+            "sess-1",
+            &req(Some("api.example.com"), 999, AdmissionProtocol::Tcp),
+        );
         assert!(matches!(
             d.verdict,
             AdmissionVerdict::Deny(DenyReason::PortNotRedirected),
@@ -527,7 +544,11 @@ mod tests {
         });
         let d = svc.admit(
             "sess-1",
-            &req(Some("postgres-staging.example.com"), 5432, AdmissionProtocol::Tcp),
+            &req(
+                Some("postgres-staging.example.com"),
+                5432,
+                AdmissionProtocol::Tcp,
+            ),
         );
         assert!(matches!(
             d.verdict,

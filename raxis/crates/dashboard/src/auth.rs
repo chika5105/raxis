@@ -114,8 +114,9 @@ impl ChallengeStore {
     /// challenges age out on their own.
     pub fn mint(&self) -> Result<(ChallengeHex, u64), ApiError> {
         let mut buf = [0u8; 32];
-        getrandom::getrandom(&mut buf)
-            .map_err(|e| ApiError::Internal { log_only: format!("rng: {e}") })?;
+        getrandom::getrandom(&mut buf).map_err(|e| ApiError::Internal {
+            log_only: format!("rng: {e}"),
+        })?;
         let now = now_secs();
         let challenge = hex::encode(buf);
         let expires_at = now.saturating_add(self.ttl_secs);
@@ -142,7 +143,10 @@ impl ChallengeStore {
         }
         g.table.insert(
             challenge.clone(),
-            PendingChallenge { challenge: challenge.clone(), expires_at },
+            PendingChallenge {
+                challenge: challenge.clone(),
+                expires_at,
+            },
         );
         g.order.push_back(challenge.clone());
         Ok((challenge, expires_at))
@@ -355,8 +359,9 @@ impl JwtSigner {
     /// short-lived tokens.
     pub fn new_ephemeral(ttl_secs: u64) -> Result<Self, ApiError> {
         let mut buf = [0u8; 32];
-        getrandom::getrandom(&mut buf)
-            .map_err(|e| ApiError::Internal { log_only: format!("rng: {e}") })?;
+        getrandom::getrandom(&mut buf).map_err(|e| ApiError::Internal {
+            log_only: format!("rng: {e}"),
+        })?;
         Ok(Self {
             secret: Arc::new(buf),
             ttl_secs: ttl_secs.max(60),
@@ -374,9 +379,10 @@ impl JwtSigner {
         data_dir: &Path,
         ttl_secs: u64,
     ) -> Result<(Self, jwt_secret::LoadOutcome), ApiError> {
-        let (file, outcome) = jwt_secret::load_or_mint(data_dir).map_err(|e| {
-            ApiError::Internal { log_only: format!("jwt-secret load: {e}") }
-        })?;
+        let (file, outcome) =
+            jwt_secret::load_or_mint(data_dir).map_err(|e| ApiError::Internal {
+                log_only: format!("jwt-secret load: {e}"),
+            })?;
         let bytes = file.secret_bytes().map_err(|e| ApiError::Internal {
             log_only: format!("jwt-secret decode: {e}"),
         })?;
@@ -391,11 +397,15 @@ impl JwtSigner {
     }
 
     /// JWT TTL in seconds.
-    pub fn ttl_secs(&self) -> u64 { self.ttl_secs }
+    pub fn ttl_secs(&self) -> u64 {
+        self.ttl_secs
+    }
 
     /// Current secret-generation counter. Bound into every
     /// minted JWT's `gen` claim; verify rejects mismatches.
-    pub fn generation(&self) -> u32 { self.generation }
+    pub fn generation(&self) -> u32 {
+        self.generation
+    }
 
     /// Mint a JWT for the given operator. Returns
     /// `(jwt_string, expires_at_unix_secs, jti_for_revocation)`.
@@ -406,8 +416,9 @@ impl JwtSigner {
         roles: Vec<String>,
     ) -> Result<MintedJwt, ApiError> {
         let mut jti_buf = [0u8; 16];
-        getrandom::getrandom(&mut jti_buf)
-            .map_err(|e| ApiError::Internal { log_only: format!("rng: {e}") })?;
+        getrandom::getrandom(&mut jti_buf).map_err(|e| ApiError::Internal {
+            log_only: format!("rng: {e}"),
+        })?;
         let jti = hex::encode(jti_buf);
         let now = now_secs();
         let claims = OperatorClaims {
@@ -421,8 +432,9 @@ impl JwtSigner {
         };
         let header = b"{\"alg\":\"HS256\",\"typ\":\"JWT\"}";
         let header_b64 = b64url_encode(header);
-        let payload_bytes = serde_json::to_vec(&claims)
-            .map_err(|e| ApiError::Internal { log_only: format!("jwt-claims: {e}") })?;
+        let payload_bytes = serde_json::to_vec(&claims).map_err(|e| ApiError::Internal {
+            log_only: format!("jwt-claims: {e}"),
+        })?;
         let payload_b64 = b64url_encode(&payload_bytes);
         let signing_input = format!("{header_b64}.{payload_b64}");
         let sig = self.hmac(signing_input.as_bytes());
@@ -457,8 +469,8 @@ impl JwtSigner {
             return Err(ApiError::InvalidJwt);
         }
         let payload_bytes = b64url_decode(payload_b64).map_err(|_| ApiError::InvalidJwt)?;
-        let claims: OperatorClaims = serde_json::from_slice(&payload_bytes)
-            .map_err(|_| ApiError::InvalidJwt)?;
+        let claims: OperatorClaims =
+            serde_json::from_slice(&payload_bytes).map_err(|_| ApiError::InvalidJwt)?;
         if claims.exp <= now_secs() {
             return Err(ApiError::InvalidJwt);
         }
@@ -519,7 +531,9 @@ fn b64url_decode(s: &str) -> Result<Vec<u8>, base64::DecodeError> {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;
@@ -611,8 +625,13 @@ mod tests {
     #[test]
     fn jwt_round_trip_verifies() {
         let signer = JwtSigner::new_ephemeral(3600).unwrap();
-        let m = signer.mint("ABCDEF1234567890", "alice",
-            vec!["read".into(), "write_policy".into()]).unwrap();
+        let m = signer
+            .mint(
+                "ABCDEF1234567890",
+                "alice",
+                vec!["read".into(), "write_policy".into()],
+            )
+            .unwrap();
         let claims = signer.verify(&m.token).unwrap();
         assert_eq!(claims.fingerprint, "ABCDEF1234567890");
         assert_eq!(claims.display_name, "alice");
@@ -652,18 +671,13 @@ mod tests {
     #[test]
     fn jwt_minted_pre_restart_verifies_post_restart_via_persisted_secret() {
         let dir = tempfile::tempdir().unwrap();
-        let (s1, outcome1) =
-            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        let (s1, outcome1) = JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
         assert_eq!(outcome1, jwt_secret::LoadOutcome::Minted);
-        let m = s1.mint(
-            "ABCDEF1234567890",
-            "alice",
-            vec!["read".into()],
-        )
-        .unwrap();
+        let m = s1
+            .mint("ABCDEF1234567890", "alice", vec!["read".into()])
+            .unwrap();
         drop(s1);
-        let (s2, outcome2) =
-            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        let (s2, outcome2) = JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
         assert_eq!(outcome2, jwt_secret::LoadOutcome::Reloaded);
         assert_eq!(s2.generation(), 1);
         let claims = s2.verify(&m.token).expect(
@@ -684,15 +698,12 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let (s1, _) = JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
         assert_eq!(s1.generation(), 1);
-        let pre = s1
-            .mint("F", "alice", vec!["read".into()])
-            .unwrap();
+        let pre = s1.mint("F", "alice", vec!["read".into()]).unwrap();
         // Operator runs `raxis dashboard rotate-jwt-secret`.
         let rotated = jwt_secret::rotate(dir.path()).unwrap();
         assert_eq!(rotated.generation, 2);
         // The next kernel boot loads the rotated secret.
-        let (s2, outcome) =
-            JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
+        let (s2, outcome) = JwtSigner::load_or_mint(dir.path(), 3600).unwrap();
         assert_eq!(outcome, jwt_secret::LoadOutcome::Reloaded);
         assert_eq!(s2.generation(), 2);
         // Pre-rotation token fails — both because the HMAC no
@@ -702,9 +713,7 @@ mod tests {
             "pre-rotation token MUST fail verify post-rotation",
         );
         // Post-rotation token mints + verifies fine.
-        let post = s2
-            .mint("F", "alice", vec!["read".into()])
-            .unwrap();
+        let post = s2.mint("F", "alice", vec!["read".into()]).unwrap();
         let claims = s2.verify(&post.token).unwrap();
         assert_eq!(claims.gen, 2);
     }
@@ -722,9 +731,7 @@ mod tests {
             ttl_secs: 3600,
             generation: 1,
         };
-        let m = signer_g1
-            .mint("F", "alice", vec!["read".into()])
-            .unwrap();
+        let m = signer_g1.mint("F", "alice", vec!["read".into()]).unwrap();
         let signer_g2 = JwtSigner {
             secret: Arc::new([42u8; 32]),
             ttl_secs: 3600,

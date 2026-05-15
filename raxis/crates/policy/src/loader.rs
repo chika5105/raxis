@@ -39,7 +39,9 @@ use crate::{
 ///
 /// Does NOT verify the Ed25519 signature — that is done by the kernel's
 /// bootstrap.rs using raxis-crypto after this call returns.
-pub fn load_policy(policy_toml_path: &Path) -> Result<(PolicyBundle, Vec<u8>, String), PolicyError> {
+pub fn load_policy(
+    policy_toml_path: &Path,
+) -> Result<(PolicyBundle, Vec<u8>, String), PolicyError> {
     let raw_bytes = std::fs::read(policy_toml_path)?;
 
     let actual_sha256 = {
@@ -48,9 +50,8 @@ pub fn load_policy(policy_toml_path: &Path) -> Result<(PolicyBundle, Vec<u8>, St
         hex::encode(h.finalize())
     };
 
-    let toml_str = std::str::from_utf8(&raw_bytes).map_err(|_| {
-        PolicyError::MalformedArtifact("policy.toml is not valid UTF-8".to_owned())
-    })?;
+    let toml_str = std::str::from_utf8(&raw_bytes)
+        .map_err(|_| PolicyError::MalformedArtifact("policy.toml is not valid UTF-8".to_owned()))?;
 
     let raw: RawPolicy = toml::from_str(toml_str)?;
     let bundle = PolicyBundle::validate(raw)?.with_sha256(actual_sha256.clone());

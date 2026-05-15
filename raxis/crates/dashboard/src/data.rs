@@ -147,11 +147,7 @@ impl FailureInfo {
     }
 
     /// Builder: attach a structured field row.
-    pub fn with_field(
-        mut self,
-        label: impl Into<String>,
-        value: impl Into<String>,
-    ) -> Self {
+    pub fn with_field(mut self, label: impl Into<String>, value: impl Into<String>) -> Self {
         self.fields.push(FailureField {
             label: label.into(),
             value: value.into(),
@@ -160,11 +156,7 @@ impl FailureInfo {
     }
 
     /// Builder: attach an operator-actionable artifact link.
-    pub fn with_artifact(
-        mut self,
-        label: impl Into<String>,
-        href: impl Into<String>,
-    ) -> Self {
+    pub fn with_artifact(mut self, label: impl Into<String>, href: impl Into<String>) -> Self {
         self.artifacts.push(FailureArtifact {
             label: label.into(),
             href: href.into(),
@@ -173,11 +165,7 @@ impl FailureInfo {
     }
 
     /// Builder: pin this failure to a specific audit-chain row.
-    pub fn with_audit(
-        mut self,
-        event_id: impl Into<String>,
-        seq: u64,
-    ) -> Self {
+    pub fn with_audit(mut self, event_id: impl Into<String>, seq: u64) -> Self {
         self.event_id = Some(event_id.into());
         self.seq = Some(seq);
         self
@@ -407,7 +395,9 @@ pub struct TaskLlmTurnView {
 }
 
 #[allow(dead_code)]
-fn is_false(b: &bool) -> bool { !*b }
+fn is_false(b: &bool) -> bool {
+    !*b
+}
 
 /// Reviewer verdict surface for the dashboard.
 #[derive(Debug, Clone, Serialize)]
@@ -883,15 +873,15 @@ pub struct SubsystemDetailRow {
 /// renders the grid in. Append-only — new subsystems land at
 /// the bottom so the FE's per-tile DOM keys stay stable.
 pub const SUBSYSTEM_CATALOG: &[(&str, &str)] = &[
-    ("kernel_main_loop",     "Kernel main loop"),
-    ("audit_writer",         "Audit writer"),
-    ("credential_proxies",   "Credential proxies"),
-    ("egress_admission",     "Egress admission"),
-    ("session_spawn_pool",   "Session-spawn pool"),
-    ("planner_registry",     "Planner registry"),
+    ("kernel_main_loop", "Kernel main loop"),
+    ("audit_writer", "Audit writer"),
+    ("credential_proxies", "Credential proxies"),
+    ("egress_admission", "Egress admission"),
+    ("session_spawn_pool", "Session-spawn pool"),
+    ("planner_registry", "Planner registry"),
     ("observability_pusher", "Observability pusher"),
-    ("git_worktree_pool",    "Git worktree pool"),
-    ("dashboard_sse_pump",   "Dashboard SSE pump"),
+    ("git_worktree_pool", "Git worktree pool"),
+    ("dashboard_sse_pump", "Dashboard SSE pump"),
 ];
 
 /// Response envelope returned by `GET /api/health/subsystems`.
@@ -1119,10 +1109,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// by the dashboard auth layer to fold the cert's
     /// permitted-ops into a [`OperatorRole`] list before the
     /// JWT is minted. `None` ⇒ unknown operator (HTTP 401).
-    fn lookup_operator_roles(
-        &self,
-        fingerprint: &str,
-    ) -> Option<OperatorAuthResolution>;
+    fn lookup_operator_roles(&self, fingerprint: &str) -> Option<OperatorAuthResolution>;
 
     /// Health snapshot for `GET /api/health`.
     fn health(&self) -> HealthSnapshot;
@@ -1242,10 +1229,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Returns `(fresh, view)` — `fresh` is `true` iff the
     /// implementation actually walked the chain for this call
     /// (vs returning a cached verdict); `view` is the verdict.
-    fn audit_chain_status(
-        &self,
-        reverify: bool,
-    ) -> Result<(bool, ChainStatusView), ApiError>;
+    fn audit_chain_status(&self, reverify: bool) -> Result<(bool, ChainStatusView), ApiError>;
 
     /// List notifications from the kernel's `notifications` table.
     /// `unread_only = true` filters to unread only.
@@ -1285,19 +1269,12 @@ pub trait DashboardData: Send + Sync + 'static {
 
     /// `git log -n <limit>` for the worktree, newest first.
     /// `limit` is clamped to `[1, 200]` by the route layer.
-    fn worktree_log(
-        &self,
-        name: &str,
-        limit: u32,
-    ) -> Result<Vec<WorktreeLogEntry>, ApiError>;
+    fn worktree_log(&self, name: &str, limit: u32) -> Result<Vec<WorktreeLogEntry>, ApiError>;
 
     /// Diff between the worktree's `HEAD` and its recorded
     /// base SHA. `Err(NotFound)` ⇒ no base recorded for the
     /// worktree (e.g. main worktrees with no upstream pin).
-    fn worktree_diff_default(
-        &self,
-        name: &str,
-    ) -> Result<WorktreeDiff, ApiError>;
+    fn worktree_diff_default(&self, name: &str) -> Result<WorktreeDiff, ApiError>;
 
     /// Diff between two arbitrary commit SHAs in the worktree.
     /// Both SHAs must be 40-char lowercase hex; the route layer
@@ -1326,11 +1303,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// for malformed input. When the entry count is capped, the
     /// result's `truncated` flag is `true` and the caller is
     /// expected to refine the path.
-    fn worktree_tree(
-        &self,
-        name: &str,
-        sub_path: Option<&str>,
-    ) -> Result<WorktreeTree, ApiError>;
+    fn worktree_tree(&self, name: &str, sub_path: Option<&str>) -> Result<WorktreeTree, ApiError>;
 
     /// File content from the worktree.
     ///
@@ -1345,21 +1318,13 @@ pub trait DashboardData: Send + Sync + 'static {
     ///
     /// `encoding` is `"utf8"` if the bytes parse as UTF-8 and
     /// `"base64"` otherwise.
-    fn worktree_file(
-        &self,
-        name: &str,
-        file_path: &str,
-    ) -> Result<WorktreeFile, ApiError>;
+    fn worktree_file(&self, name: &str, file_path: &str) -> Result<WorktreeFile, ApiError>;
 
     /// Replay the last `n` events captured for the session's
     /// stream from the on-disk file ring. Used by the SSE
     /// handler before it attaches the live subscription so
     /// freshly-connected clients see recent context.
-    fn stream_tail(
-        &self,
-        session_id: &str,
-        n: usize,
-    ) -> Result<Vec<StreamEvent>, ApiError>;
+    fn stream_tail(&self, session_id: &str, n: usize) -> Result<Vec<StreamEvent>, ApiError>;
 
     /// Subscribe to a session's live event stream. The returned
     /// [`StreamSubscription`] yields events emitted AFTER the
@@ -1370,10 +1335,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// (no broadcast channel exists yet). The SSE handler
     /// surfaces this as a 404; the frontend can fall back to
     /// the `stream_tail` snapshot and poll.
-    fn stream_subscribe(
-        &self,
-        session_id: &str,
-    ) -> Result<StreamSubscription, ApiError>;
+    fn stream_subscribe(&self, session_id: &str) -> Result<StreamSubscription, ApiError>;
 
     /// Apply a new policy artifact + detached signature.
     ///
@@ -1457,10 +1419,8 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Auto-hide deadline is 15s (vs 30s for per-initiative
     /// credentials) per
     /// `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01`.
-    fn reveal_system_credential(
-        &self,
-        credential_name: &str,
-    ) -> Result<CredentialReveal, ApiError>;
+    fn reveal_system_credential(&self, credential_name: &str)
+        -> Result<CredentialReveal, ApiError>;
 
     /// Enforce the per-operator rate limit on the credential
     /// reveal endpoints. Returns `Err(TooManyRequests)` when the
@@ -1473,10 +1433,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// Default impl returns `Ok(())` so test fixtures can opt
     /// out without standing up a clock; production
     /// `KernelDashboardData` overrides with the real throttle.
-    fn enforce_reveal_rate_limit(
-        &self,
-        _operator_fingerprint: &str,
-    ) -> Result<(), ApiError> {
+    fn enforce_reveal_rate_limit(&self, _operator_fingerprint: &str) -> Result<(), ApiError> {
         Ok(())
     }
 
@@ -1501,10 +1458,8 @@ pub trait DashboardData: Send + Sync + 'static {
     /// `InMemoryDashboardData` records emissions on an internal
     /// vector so tests can assert handlers actually fired the
     /// expected event.
-    fn emit_operator_audit(
-        &self,
-        event: raxis_audit_tools::AuditEventKind,
-    ) -> Result<(), ApiError>;
+    fn emit_operator_audit(&self, event: raxis_audit_tools::AuditEventKind)
+        -> Result<(), ApiError>;
 }
 
 /// Output of [`DashboardData::lookup_operator_roles`].
@@ -1639,7 +1594,10 @@ impl InMemoryDashboardData {
     ) -> &Arc<Self> {
         self.inner.write().operators.insert(
             fingerprint.into(),
-            OperatorAuthResolution { display_name: display_name.into(), roles },
+            OperatorAuthResolution {
+                display_name: display_name.into(),
+                roles,
+            },
         );
         self
     }
@@ -1656,10 +1614,7 @@ impl InMemoryDashboardData {
     /// happy path of `GET /api/initiatives/:id/plan` MUST seed
     /// here, while tests that exercise the 410-on-purge branch
     /// MUST leave the entry absent.
-    pub fn push_initiative_plan(
-        self: &Arc<Self>,
-        view: InitiativePlanView,
-    ) -> &Arc<Self> {
+    pub fn push_initiative_plan(self: &Arc<Self>, view: InitiativePlanView) -> &Arc<Self> {
         let id = view.initiative_id.clone();
         self.inner.write().initiative_plans.insert(id, view);
         self
@@ -1725,9 +1680,7 @@ impl InMemoryDashboardData {
     /// by integration tests that assert
     /// `INV-AUDIT-OPERATOR-ACTION-01` — every operator-initiated
     /// route emits an audit row with the right outcome.
-    pub fn recorded_operator_audits(
-        self: &Arc<Self>,
-    ) -> Vec<raxis_audit_tools::AuditEventKind> {
+    pub fn recorded_operator_audits(self: &Arc<Self>) -> Vec<raxis_audit_tools::AuditEventKind> {
         self.inner.read().recorded_operator_audits.clone()
     }
 
@@ -1756,7 +1709,11 @@ impl InMemoryDashboardData {
         evt: StreamEvent,
     ) -> &Arc<Self> {
         let mut g = self.inner.write();
-        g.streams.entry(session_id.into()).or_default().tail.push(evt);
+        g.streams
+            .entry(session_id.into())
+            .or_default()
+            .tail
+            .push(evt);
         self
     }
 
@@ -1778,10 +1735,7 @@ impl InMemoryDashboardData {
     }
 
     /// Seed a system-wide credential fixture (provider key, etc.).
-    pub fn push_system_credential(
-        self: &Arc<Self>,
-        fix: CredentialFixture,
-    ) -> &Arc<Self> {
+    pub fn push_system_credential(self: &Arc<Self>, fix: CredentialFixture) -> &Arc<Self> {
         self.inner.write().system_credentials.push(fix);
         self
     }
@@ -1791,11 +1745,7 @@ impl InMemoryDashboardData {
     /// default). Tests that exercise the throttle pass
     /// `(5, Duration::from_secs(60))` to mirror the production
     /// default.
-    pub fn with_reveal_rate_limit(
-        self: &Arc<Self>,
-        max: u32,
-        window: Duration,
-    ) -> &Arc<Self> {
+    pub fn with_reveal_rate_limit(self: &Arc<Self>, max: u32, window: Duration) -> &Arc<Self> {
         let mut g = self.inner.write();
         g.reveal_rate_limit_max = max;
         g.reveal_rate_limit_window = window;
@@ -1804,10 +1754,7 @@ impl InMemoryDashboardData {
 }
 
 impl DashboardData for InMemoryDashboardData {
-    fn lookup_operator_roles(
-        &self,
-        fingerprint: &str,
-    ) -> Option<OperatorAuthResolution> {
+    fn lookup_operator_roles(&self, fingerprint: &str) -> Option<OperatorAuthResolution> {
         self.inner.read().operators.get(fingerprint).cloned()
     }
 
@@ -1830,20 +1777,20 @@ impl DashboardData for InMemoryDashboardData {
         let cards = SUBSYSTEM_CATALOG
             .iter()
             .map(|(id, label)| SubsystemHealthCard {
-                id:               (*id).to_owned(),
-                label:            (*label).to_owned(),
-                status:           "ok".into(),
-                summary:          "no kernel signal — in-memory fixture".into(),
-                details:          vec![],
-                grafana_url:      None,
+                id: (*id).to_owned(),
+                label: (*label).to_owned(),
+                status: "ok".into(),
+                summary: "no kernel signal — in-memory fixture".into(),
+                details: vec![],
+                grafana_url: None,
                 last_observed_at: 0,
-                last_error:       None,
+                last_error: None,
             })
             .collect();
         Ok(SubsystemHealthResponse {
             aggregate_status: "ok".into(),
             cards,
-            generated_at_ms:  0,
+            generated_at_ms: 0,
         })
     }
 
@@ -1853,7 +1800,8 @@ impl DashboardData for InMemoryDashboardData {
         state_filter: Option<&str>,
     ) -> Result<Vec<InitiativeListEntry>, ApiError> {
         let g = self.inner.read();
-        let mut out: Vec<InitiativeListEntry> = g.initiatives
+        let mut out: Vec<InitiativeListEntry> = g
+            .initiatives
             .iter()
             .filter(|i| match state_filter {
                 Some(s) => i.summary.state.eq_ignore_ascii_case(s),
@@ -1867,10 +1815,15 @@ impl DashboardData for InMemoryDashboardData {
     }
 
     fn get_initiative(&self, id: &str) -> Result<InitiativeView, ApiError> {
-        self.inner.read().initiatives.iter()
+        self.inner
+            .read()
+            .initiatives
+            .iter()
             .find(|i| i.summary.initiative_id == id)
             .cloned()
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })
     }
 
     fn get_initiative_plan(&self, id: &str) -> Result<InitiativePlanView, ApiError> {
@@ -1880,19 +1833,24 @@ impl DashboardData for InMemoryDashboardData {
         // artifact was archived/purged.
         let known = g.initiatives.iter().any(|i| i.summary.initiative_id == id);
         if !known {
-            return Err(ApiError::NotFound { kind: "initiative".into() });
+            return Err(ApiError::NotFound {
+                kind: "initiative".into(),
+            });
         }
-        g.initiative_plans
-            .get(id)
-            .cloned()
-            .ok_or(ApiError::Gone { kind: "plan".into() })
+        g.initiative_plans.get(id).cloned().ok_or(ApiError::Gone {
+            kind: "plan".into(),
+        })
     }
 
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
         let g = self.inner.read();
-        let init = g.initiatives.iter()
+        let init = g
+            .initiatives
+            .iter()
             .find(|i| i.summary.initiative_id == initiative_id)
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
         Ok(init.tasks.clone())
     }
 
@@ -1903,7 +1861,9 @@ impl DashboardData for InMemoryDashboardData {
                 return Ok(t.clone());
             }
         }
-        Err(ApiError::NotFound { kind: "task".into() })
+        Err(ApiError::NotFound {
+            kind: "task".into(),
+        })
     }
 
     fn list_sessions(
@@ -1928,10 +1888,15 @@ impl DashboardData for InMemoryDashboardData {
     }
 
     fn get_session(&self, session_id: &str) -> Result<SessionView, ApiError> {
-        self.inner.read().sessions.iter()
+        self.inner
+            .read()
+            .sessions
+            .iter()
             .find(|s| s.session_id == session_id)
             .cloned()
-            .ok_or(ApiError::NotFound { kind: "session".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "session".into(),
+            })
     }
 
     fn list_escalations(&self) -> Result<Vec<EscalationView>, ApiError> {
@@ -1939,10 +1904,15 @@ impl DashboardData for InMemoryDashboardData {
     }
 
     fn get_escalation(&self, id: &str) -> Result<EscalationView, ApiError> {
-        self.inner.read().escalations.iter()
+        self.inner
+            .read()
+            .escalations
+            .iter()
             .find(|e| e.escalation_id == id)
             .cloned()
-            .ok_or(ApiError::NotFound { kind: "escalation".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "escalation".into(),
+            })
     }
 
     fn list_audit(
@@ -1952,7 +1922,9 @@ impl DashboardData for InMemoryDashboardData {
         initiative_id: Option<&str>,
     ) -> Result<Vec<AuditEntryView>, ApiError> {
         let g = self.inner.read();
-        let mut out: Vec<AuditEntryView> = g.audit.iter()
+        let mut out: Vec<AuditEntryView> = g
+            .audit
+            .iter()
             .filter(|e| match cursor_seq {
                 Some(c) => e.seq < c,
                 None => true,
@@ -1972,10 +1944,7 @@ impl DashboardData for InMemoryDashboardData {
         Ok(self.inner.read().inbox.clone())
     }
 
-    fn audit_chain_status(
-        &self,
-        _reverify: bool,
-    ) -> Result<(bool, ChainStatusView), ApiError> {
+    fn audit_chain_status(&self, _reverify: bool) -> Result<(bool, ChainStatusView), ApiError> {
         // In-memory fixture: derive a trivial verdict from the
         // seeded audit rows so the route-layer tests can assert
         // both shape and the verdict string without standing up
@@ -1986,12 +1955,12 @@ impl DashboardData for InMemoryDashboardData {
         Ok((
             true,
             ChainStatusView {
-                status:            "ok".into(),
+                status: "ok".into(),
                 last_verified_seq: last,
-                total_records:     total,
-                segment_count:     if total > 0 { 1 } else { 0 },
-                verified_at_ms:    g.audit.iter().map(|e| e.at).max().unwrap_or(0) * 1_000,
-                last_error:        None,
+                total_records: total,
+                segment_count: if total > 0 { 1 } else { 0 },
+                verified_at_ms: g.audit.iter().map(|e| e.at).max().unwrap_or(0) * 1_000,
+                last_error: None,
             },
         ))
     }
@@ -2003,11 +1972,17 @@ impl DashboardData for InMemoryDashboardData {
         initiative_id: Option<&str>,
     ) -> Result<Vec<NotificationView>, ApiError> {
         let g = self.inner.read();
-        let mut out: Vec<NotificationView> = g.notifications.iter()
+        let mut out: Vec<NotificationView> = g
+            .notifications
+            .iter()
             .filter(|n| {
-                if unread_only && n.read { return false; }
+                if unread_only && n.read {
+                    return false;
+                }
                 if let Some(iid) = initiative_id {
-                    if n.initiative_id.as_deref() != Some(iid) { return false; }
+                    if n.initiative_id.as_deref() != Some(iid) {
+                        return false;
+                    }
                 }
                 true
             })
@@ -2025,7 +2000,11 @@ impl DashboardData for InMemoryDashboardData {
 
     fn mark_notification_read(&self, notification_id: &str) -> Result<bool, ApiError> {
         let mut g = self.inner.write();
-        if let Some(n) = g.notifications.iter_mut().find(|n| n.notification_id == notification_id) {
+        if let Some(n) = g
+            .notifications
+            .iter_mut()
+            .find(|n| n.notification_id == notification_id)
+        {
             if !n.read {
                 n.read = true;
                 return Ok(true);
@@ -2047,14 +2026,17 @@ impl DashboardData for InMemoryDashboardData {
     }
 
     fn policy_snapshot(&self) -> Result<PolicySnapshotView, ApiError> {
-        self.inner.read().policy.clone()
-            .ok_or(ApiError::Internal { log_only: "policy snapshot not set in fixture".into() })
+        self.inner.read().policy.clone().ok_or(ApiError::Internal {
+            log_only: "policy snapshot not set in fixture".into(),
+        })
     }
 
     fn policy_toml_bytes(&self) -> Result<String, ApiError> {
         let g = self.inner.read();
         if g.policy_toml.is_empty() {
-            return Err(ApiError::Internal { log_only: "policy.toml not set in fixture".into() });
+            return Err(ApiError::Internal {
+                log_only: "policy.toml not set in fixture".into(),
+            });
         }
         Ok(g.policy_toml.clone())
     }
@@ -2076,39 +2058,38 @@ impl DashboardData for InMemoryDashboardData {
             .iter()
             .find(|w| w.detail.summary.name == name)
             .map(|w| w.detail.clone())
-            .ok_or(ApiError::NotFound { kind: "worktree".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "worktree".into(),
+            })
     }
 
-    fn worktree_log(
-        &self,
-        name: &str,
-        limit: u32,
-    ) -> Result<Vec<WorktreeLogEntry>, ApiError> {
+    fn worktree_log(&self, name: &str, limit: u32) -> Result<Vec<WorktreeLogEntry>, ApiError> {
         let g = self.inner.read();
         let w = g
             .worktrees
             .iter()
             .find(|w| w.detail.summary.name == name)
-            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "worktree".into(),
+            })?;
         let cap = limit.clamp(1, 200) as usize;
         let mut out = w.log.clone();
         out.truncate(cap);
         Ok(out)
     }
 
-    fn worktree_diff_default(
-        &self,
-        name: &str,
-    ) -> Result<WorktreeDiff, ApiError> {
+    fn worktree_diff_default(&self, name: &str) -> Result<WorktreeDiff, ApiError> {
         let g = self.inner.read();
         let w = g
             .worktrees
             .iter()
             .find(|w| w.detail.summary.name == name)
-            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
-        w.default_diff
-            .clone()
-            .ok_or(ApiError::NotFound { kind: "default-diff".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "worktree".into(),
+            })?;
+        w.default_diff.clone().ok_or(ApiError::NotFound {
+            kind: "default-diff".into(),
+        })
     }
 
     fn worktree_diff_range(
@@ -2122,24 +2103,26 @@ impl DashboardData for InMemoryDashboardData {
             .worktrees
             .iter()
             .find(|w| w.detail.summary.name == name)
-            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "worktree".into(),
+            })?;
         w.range_diffs
             .get(&(from_sha.to_owned(), to_sha.to_owned()))
             .cloned()
-            .ok_or(ApiError::NotFound { kind: "diff-range".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "diff-range".into(),
+            })
     }
 
-    fn worktree_tree(
-        &self,
-        name: &str,
-        _sub_path: Option<&str>,
-    ) -> Result<WorktreeTree, ApiError> {
+    fn worktree_tree(&self, name: &str, _sub_path: Option<&str>) -> Result<WorktreeTree, ApiError> {
         // The in-memory fixture has no real on-disk worktree; we
         // only validate that the slug exists. Tests that need
         // tree contents go through the kernel impl.
         let g = self.inner.read();
         if !g.worktrees.iter().any(|w| w.detail.summary.name == name) {
-            return Err(ApiError::NotFound { kind: "worktree".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree".into(),
+            });
         }
         Ok(WorktreeTree {
             name: name.to_owned(),
@@ -2149,43 +2132,39 @@ impl DashboardData for InMemoryDashboardData {
         })
     }
 
-    fn worktree_file(
-        &self,
-        name: &str,
-        _file_path: &str,
-    ) -> Result<WorktreeFile, ApiError> {
+    fn worktree_file(&self, name: &str, _file_path: &str) -> Result<WorktreeFile, ApiError> {
         let g = self.inner.read();
         if !g.worktrees.iter().any(|w| w.detail.summary.name == name) {
-            return Err(ApiError::NotFound { kind: "worktree".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree".into(),
+            });
         }
         // Fixture has no real bytes — return NotFound so route
         // tests can still assert the 404 path without seeding
         // file contents into the in-memory store.
-        Err(ApiError::NotFound { kind: "worktree-file".into() })
+        Err(ApiError::NotFound {
+            kind: "worktree-file".into(),
+        })
     }
 
-    fn stream_tail(
-        &self,
-        session_id: &str,
-        n: usize,
-    ) -> Result<Vec<StreamEvent>, ApiError> {
+    fn stream_tail(&self, session_id: &str, n: usize) -> Result<Vec<StreamEvent>, ApiError> {
         let g = self.inner.read();
-        let fix = g.streams.get(session_id)
-            .ok_or(ApiError::NotFound { kind: "stream".into() })?;
+        let fix = g.streams.get(session_id).ok_or(ApiError::NotFound {
+            kind: "stream".into(),
+        })?;
         let cap = n.min(2_000);
         let start = fix.tail.len().saturating_sub(cap);
         Ok(fix.tail[start..].to_vec())
     }
 
-    fn stream_subscribe(
-        &self,
-        session_id: &str,
-    ) -> Result<StreamSubscription, ApiError> {
+    fn stream_subscribe(&self, session_id: &str) -> Result<StreamSubscription, ApiError> {
         let g = self.inner.read();
-        let fix = g.streams.get(session_id)
-            .ok_or(ApiError::NotFound { kind: "stream".into() })?;
-        let src = fix.source.as_ref()
-            .ok_or(ApiError::NotFound { kind: "stream-source".into() })?;
+        let fix = g.streams.get(session_id).ok_or(ApiError::NotFound {
+            kind: "stream".into(),
+        })?;
+        let src = fix.source.as_ref().ok_or(ApiError::NotFound {
+            kind: "stream-source".into(),
+        })?;
         Ok(src.subscribe())
     }
 
@@ -2283,7 +2262,9 @@ impl DashboardData for InMemoryDashboardData {
                 .map(|v| v.iter().map(|f| f.metadata.clone()).collect())
                 .unwrap_or_default())
         } else {
-            Err(ApiError::NotFound { kind: "initiative".into() })
+            Err(ApiError::NotFound {
+                kind: "initiative".into(),
+            })
         }
     }
 
@@ -2296,11 +2277,15 @@ impl DashboardData for InMemoryDashboardData {
         let creds = g
             .initiative_credentials
             .get(initiative_id)
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
         let fix = creds
             .iter()
             .find(|f| f.metadata.name == credential_name)
-            .ok_or(ApiError::NotFound { kind: "credential".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "credential".into(),
+            })?;
         let bytes = fix.plaintext.as_bytes();
         Ok(CredentialReveal {
             name: fix.metadata.name.clone(),
@@ -2332,7 +2317,9 @@ impl DashboardData for InMemoryDashboardData {
             .system_credentials
             .iter()
             .find(|f| f.metadata.name == credential_name)
-            .ok_or(ApiError::NotFound { kind: "system-credential".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "system-credential".into(),
+            })?;
         let bytes = fix.plaintext.as_bytes();
         Ok(CredentialReveal {
             name: fix.metadata.name.clone(),
@@ -2346,10 +2333,7 @@ impl DashboardData for InMemoryDashboardData {
         })
     }
 
-    fn enforce_reveal_rate_limit(
-        &self,
-        operator_fingerprint: &str,
-    ) -> Result<(), ApiError> {
+    fn enforce_reveal_rate_limit(&self, operator_fingerprint: &str) -> Result<(), ApiError> {
         let mut g = self.inner.write();
         let max = g.reveal_rate_limit_max;
         if max == 0 {
@@ -2732,7 +2716,10 @@ mod tests {
                     blocked_downstream: vec![],
                 },
             ],
-            edges: vec![DagEdge { from: format!("{id}-t1"), to: format!("{id}-t2") }],
+            edges: vec![DagEdge {
+                from: format!("{id}-t1"),
+                to: format!("{id}-t2"),
+            }],
             failure: None,
         }
     }
@@ -2872,15 +2859,15 @@ mod tests {
         // Seed → byte-for-byte round-trip.
         let plan_toml = "# original\n[plan.initiative]\ntitle = \"x\"\n";
         d.push_initiative_plan(InitiativePlanView {
-            initiative_id:        "init1".into(),
-            plan_sha256:          Some("deadbeef".into()),
-            bundle_sha256:        Some("a".repeat(64)),
-            submitted_toml:       plan_toml.into(),
+            initiative_id: "init1".into(),
+            plan_sha256: Some("deadbeef".into()),
+            bundle_sha256: Some("a".repeat(64)),
+            submitted_toml: plan_toml.into(),
             submitted_toml_bytes: plan_toml.len() as u64,
-            submitted_at_unix:    1_700_000_000,
-            submitted_by:         Some("op-fingerprint".into()),
-            approval_status:      "approved".into(),
-            approved_at_unix:     Some(1_700_000_001),
+            submitted_at_unix: 1_700_000_000,
+            submitted_by: Some("op-fingerprint".into()),
+            approval_status: "approved".into(),
+            approved_at_unix: Some(1_700_000_001),
         });
         let got = d.get_initiative_plan("init1").unwrap();
         assert_eq!(got.submitted_toml, plan_toml);
@@ -2892,12 +2879,12 @@ mod tests {
     fn list_initiatives_filters_and_paginates() {
         let d = InMemoryDashboardData::new();
         d.push_initiative(sample_initiative("init1"))
-         .push_initiative({
-             let mut i = sample_initiative("init2");
-             i.summary.state = "Closed".into();
-             i.summary.updated_at = 50;
-             i
-         });
+            .push_initiative({
+                let mut i = sample_initiative("init2");
+                i.summary.state = "Closed".into();
+                i.summary.updated_at = 50;
+                i
+            });
         let all = d.list_initiatives(10, None).unwrap();
         assert_eq!(all.len(), 2);
         // Newest-first ordering.
@@ -2911,7 +2898,7 @@ mod tests {
     fn get_task_searches_across_initiatives() {
         let d = InMemoryDashboardData::new();
         d.push_initiative(sample_initiative("init1"))
-         .push_initiative(sample_initiative("init2"));
+            .push_initiative(sample_initiative("init2"));
         let t = d.get_task("init2-t1").unwrap();
         assert_eq!(t.task_id, "init2-t1");
         assert_eq!(t.initiative_id, "init2");
@@ -2922,15 +2909,22 @@ mod tests {
         let d = InMemoryDashboardData::new();
         for seq in 1..=10 {
             d.push_audit(AuditEntryView {
-                seq, event_id: format!("ev{seq}"), event_kind: "X".into(),
-                initiative_id: None, task_id: None, session_id: None,
-                at: seq, payload: serde_json::json!({"seq": seq}),
+                seq,
+                event_id: format!("ev{seq}"),
+                event_kind: "X".into(),
+                initiative_id: None,
+                task_id: None,
+                session_id: None,
+                at: seq,
+                payload: serde_json::json!({"seq": seq}),
             });
         }
         let page1 = d.list_audit(None, 4, None).unwrap();
         assert_eq!(page1.len(), 4);
         assert_eq!(page1[0].seq, 10);
-        let page2 = d.list_audit(Some(page1.last().unwrap().seq), 4, None).unwrap();
+        let page2 = d
+            .list_audit(Some(page1.last().unwrap().seq), 4, None)
+            .unwrap();
         assert_eq!(page2.first().unwrap().seq, 6);
     }
 
@@ -2985,7 +2979,12 @@ mod tests {
                 }],
             },
         );
-        d.push_worktree(WorktreeFixture { detail, log, default_diff: Some(default_diff), range_diffs });
+        d.push_worktree(WorktreeFixture {
+            detail,
+            log,
+            default_diff: Some(default_diff),
+            range_diffs,
+        });
 
         let listed = d.list_worktrees().unwrap();
         assert_eq!(listed.len(), 1);
@@ -3045,8 +3044,8 @@ mod tests {
     fn list_notifications_returns_all_when_no_filter() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "EscalationPending", false, 300))
-         .push_notification(sample_notification("n-2", "PolicyAdvanced",    true,  200))
-         .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
+            .push_notification(sample_notification("n-2", "PolicyAdvanced", true, 200))
+            .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
         let all = d.list_notifications(10, false, None).unwrap();
         assert_eq!(all.len(), 3);
         // Newest first.
@@ -3058,8 +3057,8 @@ mod tests {
     fn list_notifications_filters_unread_only() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "EscalationPending", false, 300))
-         .push_notification(sample_notification("n-2", "PolicyAdvanced",    true,  200))
-         .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
+            .push_notification(sample_notification("n-2", "PolicyAdvanced", true, 200))
+            .push_notification(sample_notification("n-3", "EscalationApproved", false, 100));
         let unread = d.list_notifications(10, true, None).unwrap();
         assert_eq!(unread.len(), 2);
         assert!(unread.iter().all(|n| !n.read));
@@ -3069,11 +3068,11 @@ mod tests {
     fn list_notifications_filters_by_initiative() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "X", false, 300))
-         .push_notification({
-             let mut n = sample_notification("n-2", "Y", false, 200);
-             n.initiative_id = Some("init-other".into());
-             n
-         });
+            .push_notification({
+                let mut n = sample_notification("n-2", "Y", false, 200);
+                n.initiative_id = Some("init-other".into());
+                n
+            });
         let filtered = d.list_notifications(10, false, Some("init-1")).unwrap();
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].notification_id, "n-1");
@@ -3083,9 +3082,7 @@ mod tests {
     fn list_notifications_respects_limit() {
         let d = InMemoryDashboardData::new();
         for i in 0..10 {
-            d.push_notification(sample_notification(
-                &format!("n-{i}"), "X", false, i as u64,
-            ));
+            d.push_notification(sample_notification(&format!("n-{i}"), "X", false, i as u64));
         }
         let page = d.list_notifications(3, false, None).unwrap();
         assert_eq!(page.len(), 3);
@@ -3095,8 +3092,8 @@ mod tests {
     fn notification_count_unread_counts_only_unread() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "X", false, 300))
-         .push_notification(sample_notification("n-2", "Y", true,  200))
-         .push_notification(sample_notification("n-3", "Z", false, 100));
+            .push_notification(sample_notification("n-2", "Y", true, 200))
+            .push_notification(sample_notification("n-3", "Z", false, 100));
         assert_eq!(d.notification_count_unread().unwrap(), 2);
     }
 
@@ -3132,8 +3129,8 @@ mod tests {
     fn mark_all_notifications_read_clears_unread() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "X", false, 300))
-         .push_notification(sample_notification("n-2", "Y", false, 200))
-         .push_notification(sample_notification("n-3", "Z", true,  100));
+            .push_notification(sample_notification("n-2", "Y", false, 200))
+            .push_notification(sample_notification("n-3", "Z", true, 100));
         let count = d.mark_all_notifications_read().unwrap();
         assert_eq!(count, 2);
         assert_eq!(d.notification_count_unread().unwrap(), 0);
@@ -3151,7 +3148,7 @@ mod tests {
     fn push_notification_builder_appends() {
         let d = InMemoryDashboardData::new();
         d.push_notification(sample_notification("n-1", "A", false, 100))
-         .push_notification(sample_notification("n-2", "B", false, 200));
+            .push_notification(sample_notification("n-2", "B", false, 200));
         assert_eq!(d.list_notifications(10, false, None).unwrap().len(), 2);
     }
 }

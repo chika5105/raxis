@@ -91,7 +91,9 @@ impl OperatorConn {
         let ack: Value = read_json(&mut stream)?;
         if ack["status"].as_str() != Some("Ok") {
             let reason = ack["reason"].as_str().unwrap_or("unknown");
-            return Err(CliError::AuthFailed(format!("kernel rejected auth: {reason}")));
+            return Err(CliError::AuthFailed(format!(
+                "kernel rejected auth: {reason}"
+            )));
         }
 
         Ok(OperatorConn {
@@ -124,8 +126,9 @@ impl OperatorConn {
                 .map(Some)
                 .map_err(CliError::Json),
             Err(JsonFrameError::Eof) => Ok(None),
-            Err(JsonFrameError::Io(io))
-                if io.kind() == std::io::ErrorKind::UnexpectedEof => Ok(None),
+            Err(JsonFrameError::Io(io)) if io.kind() == std::io::ErrorKind::UnexpectedEof => {
+                Ok(None)
+            }
             Err(other) => Err(map_frame_err(other)),
         }
     }

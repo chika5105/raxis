@@ -73,7 +73,7 @@ pub struct PlannerFetchRequest {
     /// Per-fetch UUIDv4 the planner mints. The kernel echoes it on
     /// the response so the planner's transport can correlate
     /// in-flight requests when concurrent fetches are added (V2.5+).
-    pub request_id:    Uuid,
+    pub request_id: Uuid,
 
     /// The session token the kernel stamped at spawn time. The
     /// kernel re-validates against `sessions.session_token` for the
@@ -82,17 +82,17 @@ pub struct PlannerFetchRequest {
     pub session_token: String,
 
     /// Inference vs DataFetch — gates timeout + size caps.
-    pub fetch_kind:    PlannerFetchKind,
+    pub fetch_kind: PlannerFetchKind,
 
     /// Full upstream URL including scheme, host, path, query.
     /// Re-validated by the gateway against the policy allowlist
     /// (`peripherals.md §3.2 "Domain allowlist re-validation"`).
-    pub url:           String,
+    pub url: String,
 
     /// HTTP method (`"POST"` for inference, `"GET"` for data
     /// fetch). Validated against the gateway's per-host
     /// `allowed_methods`.
-    pub method:        String,
+    pub method: String,
 
     /// HTTP headers the planner wants forwarded. The gateway:
     ///
@@ -101,17 +101,17 @@ pub struct PlannerFetchRequest {
     /// 2. Injects the credentials the operator declared for this
     ///    provider in `policy.toml`.
     /// 3. Forwards the rest verbatim.
-    pub headers:       Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
 
     /// Raw request body bytes. The planner's model SDK serialises
     /// the JSON body locally; the kernel does not inspect the body
     /// content.
-    pub body_bytes:    Vec<u8>,
+    pub body_bytes: Vec<u8>,
 
     /// Per-attempt timeout in milliseconds. Hard ceiling pinned by
     /// `peripherals.md §3.2` (120_000 ms). The kernel clamps to
     /// `min(planner_supplied, host_max)` before forwarding.
-    pub timeout_ms:    u32,
+    pub timeout_ms: u32,
 }
 
 /// **Kernel → planner.** The kernel's response to a
@@ -123,22 +123,22 @@ pub struct PlannerFetchRequest {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlannerFetchResponse {
     /// Echoes [`PlannerFetchRequest::request_id`].
-    pub request_id:    Uuid,
+    pub request_id: Uuid,
 
     /// HTTP status code returned by the upstream. `None` on failures
     /// before the upstream produced a status line (DNS, TLS, etc.).
-    pub status_code:   Option<u16>,
+    pub status_code: Option<u16>,
 
     /// Response headers (after gateway-side filtering of
     /// `Set-Cookie` / `Authorization` / `WWW-Authenticate`).
-    pub headers:       Vec<(String, String)>,
+    pub headers: Vec<(String, String)>,
 
     /// Response body bytes. `None` on transport failure.
-    pub body_bytes:    Option<Vec<u8>>,
+    pub body_bytes: Option<Vec<u8>>,
 
     /// Observed end-to-end latency in milliseconds. Populated even
     /// on failure (so retry policies can budget against it).
-    pub latency_ms:    u32,
+    pub latency_ms: u32,
 
     /// On error: a stable short reason string. Same vocabulary as
     /// `peripherals.md §3.2`:
@@ -147,7 +147,7 @@ pub struct PlannerFetchResponse {
     /// `"NetworkError"`, plus the kernel-side additions
     /// `"GatewayUnavailable"` (no gateway connected) and
     /// `"FAIL_SESSION_TOKEN_MISMATCH"` (session-auth failure).
-    pub error:         Option<String>,
+    pub error: Option<String>,
 }
 
 #[cfg(test)]
@@ -160,14 +160,14 @@ mod tests {
     #[test]
     fn planner_fetch_request_round_trips_through_serde_json() {
         let req = PlannerFetchRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "session-token-fixture".to_owned(),
-            fetch_kind:    PlannerFetchKind::Inference,
-            url:           "https://api.anthropic.com/v1/messages".to_owned(),
-            method:        "POST".to_owned(),
-            headers:       vec![("anthropic-version".to_owned(), "2023-06-01".to_owned())],
-            body_bytes:    b"{\"model\":\"x\"}".to_vec(),
-            timeout_ms:    60_000,
+            fetch_kind: PlannerFetchKind::Inference,
+            url: "https://api.anthropic.com/v1/messages".to_owned(),
+            method: "POST".to_owned(),
+            headers: vec![("anthropic-version".to_owned(), "2023-06-01".to_owned())],
+            body_bytes: b"{\"model\":\"x\"}".to_vec(),
+            timeout_ms: 60_000,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: PlannerFetchRequest = serde_json::from_str(&s).unwrap();
@@ -179,12 +179,12 @@ mod tests {
     #[test]
     fn planner_fetch_response_round_trips_through_serde_json() {
         let resp = PlannerFetchResponse {
-            request_id:    Uuid::nil(),
-            status_code:   Some(200),
-            headers:       vec![("content-type".to_owned(), "application/json".to_owned())],
-            body_bytes:    Some(b"{\"id\":\"msg_x\"}".to_vec()),
-            latency_ms:    1234,
-            error:         None,
+            request_id: Uuid::nil(),
+            status_code: Some(200),
+            headers: vec![("content-type".to_owned(), "application/json".to_owned())],
+            body_bytes: Some(b"{\"id\":\"msg_x\"}".to_vec()),
+            latency_ms: 1234,
+            error: None,
         };
         let s = serde_json::to_string(&resp).unwrap();
         let back: PlannerFetchResponse = serde_json::from_str(&s).unwrap();

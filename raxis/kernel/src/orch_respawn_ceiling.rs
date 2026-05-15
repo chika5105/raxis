@@ -91,8 +91,7 @@
 use raxis_audit_tools::AuditEventKind;
 use raxis_store::Table;
 use raxis_types::{
-    EscalationClass, EscalationStatus, RequestedEscalationScope,
-    MAX_LOGICAL_DEADLOCK_REASON_LEN,
+    EscalationClass, EscalationStatus, RequestedEscalationScope, MAX_LOGICAL_DEADLOCK_REASON_LEN,
 };
 use rusqlite::{Connection, OptionalExtension};
 
@@ -121,7 +120,7 @@ pub enum CeilingOutcome {
     /// `count_after_increment` is always `> max_attempts`.
     Exceeded {
         count_after_increment: u32,
-        max_attempts:          u32,
+        max_attempts: u32,
     },
 }
 
@@ -147,7 +146,7 @@ pub enum CeilingOutcome {
 /// gate. Defensive — pre-Migration-19 rows always exist for any
 /// `Executing` initiative.
 pub fn increment_no_progress_count_in_tx(
-    tx:            &Connection,
+    tx: &Connection,
     initiative_id: &str,
 ) -> Result<CeilingOutcome, rusqlite::Error> {
     let initiatives = Table::Initiatives.as_str();
@@ -162,7 +161,9 @@ pub fn increment_no_progress_count_in_tx(
         rusqlite::params![initiative_id],
     )?;
     if rows == 0 {
-        return Ok(CeilingOutcome::Permitted { count_after_increment: 0 });
+        return Ok(CeilingOutcome::Permitted {
+            count_after_increment: 0,
+        });
     }
 
     let count_i64: i64 = tx.query_row(
@@ -178,10 +179,12 @@ pub fn increment_no_progress_count_in_tx(
     Ok(if count > MAX_ORCH_NO_PROGRESS_RESPAWNS {
         CeilingOutcome::Exceeded {
             count_after_increment: count,
-            max_attempts:          MAX_ORCH_NO_PROGRESS_RESPAWNS,
+            max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
         }
     } else {
-        CeilingOutcome::Permitted { count_after_increment: count }
+        CeilingOutcome::Permitted {
+            count_after_increment: count,
+        }
     })
 }
 
@@ -203,7 +206,7 @@ pub fn increment_no_progress_count_in_tx(
 /// boot, so the window is bounded to one process start). The
 /// boot-time migration sequence is the structural gate.
 pub fn reset_no_progress_count_in_tx(
-    tx:            &Connection,
+    tx: &Connection,
     initiative_id: &str,
 ) -> Result<(), rusqlite::Error> {
     let initiatives = Table::Initiatives.as_str();
@@ -228,7 +231,7 @@ pub fn reset_no_progress_count_in_tx(
 /// FSM-update query would itself have failed first, so this is a
 /// defensive belt-and-braces guard.
 pub fn lookup_initiative_id_for_task_in_tx(
-    tx:      &Connection,
+    tx: &Connection,
     task_id: &str,
 ) -> Result<Option<String>, rusqlite::Error> {
     let tasks = Table::Tasks.as_str();
@@ -236,7 +239,8 @@ pub fn lookup_initiative_id_for_task_in_tx(
         &format!("SELECT initiative_id FROM {tasks} WHERE task_id = ?1"),
         rusqlite::params![task_id],
         |r| r.get::<_, String>(0),
-    ).optional()
+    )
+    .optional()
 }
 
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — auto-create a
@@ -301,18 +305,18 @@ pub fn lookup_initiative_id_for_task_in_tx(
 /// initiative still transitions to `Failed`).
 #[allow(clippy::too_many_arguments)]
 pub fn insert_logical_deadlock_escalation_in_tx(
-    tx:                    &Connection,
-    initiative_id:         &str,
-    attempts:              u32,
-    window_secs:           u64,
-    last_intent_kind:      &str,
+    tx: &Connection,
+    initiative_id: &str,
+    attempts: u32,
+    window_secs: u64,
+    last_intent_kind: &str,
     last_rejection_reason: &str,
-    timeout_at_unix:       i64,
-    now_unix:              i64,
-    policy_epoch:          i64,
+    timeout_at_unix: i64,
+    now_unix: i64,
+    policy_epoch: i64,
 ) -> Result<Option<String>, rusqlite::Error> {
-    let tasks       = Table::Tasks.as_str();
-    let sessions    = Table::Sessions.as_str();
+    let tasks = Table::Tasks.as_str();
+    let sessions = Table::Sessions.as_str();
     let escalations = Table::Escalations.as_str();
 
     // Resolve a (task_id, session_id, lineage_id) triple from the
@@ -321,23 +325,27 @@ pub fn insert_logical_deadlock_escalation_in_tx(
     // the FK on `escalations.session_id`. If no row matches the
     // initiative carries no live task with a session — defensive
     // path; auto-escalation skipped.
-    let triple: Option<(String, String, String)> = tx.query_row(
-        &format!(
-            "SELECT t.task_id, s.session_id, s.lineage_id
+    let triple: Option<(String, String, String)> = tx
+        .query_row(
+            &format!(
+                "SELECT t.task_id, s.session_id, s.lineage_id
                FROM {tasks} t
                JOIN {sessions} s ON s.session_id = t.session_id
               WHERE t.initiative_id = ?1
                 AND t.session_id IS NOT NULL
               ORDER BY t.transitioned_at DESC
               LIMIT 1"
-        ),
-        rusqlite::params![initiative_id],
-        |r| Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-        )),
-    ).optional()?;
+            ),
+            rusqlite::params![initiative_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                ))
+            },
+        )
+        .optional()?;
 
     let Some((task_id, session_id, lineage_id)) = triple else {
         return Ok(None);
@@ -354,10 +362,10 @@ pub fn insert_logical_deadlock_escalation_in_tx(
     let last_rejection_reason_trunc = truncate_for_scope(last_rejection_reason);
 
     let scope = RequestedEscalationScope::LogicalDeadlock {
-        initiative_id:         initiative_uuid,
+        initiative_id: initiative_uuid,
         attempts,
         window_secs,
-        last_intent_kind:      last_intent_kind_trunc.clone(),
+        last_intent_kind: last_intent_kind_trunc.clone(),
         last_rejection_reason: last_rejection_reason_trunc.clone(),
     };
     let scope_json = serde_json::to_string(&scope)
@@ -441,30 +449,34 @@ pub fn insert_logical_deadlock_escalation_in_tx(
 /// `approval_tokens` table with rows the planner can never
 /// consume.
 pub fn approve_logical_deadlock_escalation_in_tx(
-    tx:            &Connection,
+    tx: &Connection,
     escalation_id: &str,
-    now_unix:      i64,
+    now_unix: i64,
 ) -> Result<Option<String>, rusqlite::Error> {
     let escalations = Table::Escalations.as_str();
     let initiatives = Table::Initiatives.as_str();
 
     let approved_state = EscalationStatus::Approved.as_sql_str();
-    let pending_state  = EscalationStatus::Pending.as_sql_str();
-    let class_str      = EscalationClass::LogicalDeadlock.as_sql_str();
+    let pending_state = EscalationStatus::Pending.as_sql_str();
+    let class_str = EscalationClass::LogicalDeadlock.as_sql_str();
 
-    let row: Option<(String, String, String, String)> = tx.query_row(
-        &format!(
-            "SELECT initiative_id, class, initiator, status
+    let row: Option<(String, String, String, String)> = tx
+        .query_row(
+            &format!(
+                "SELECT initiative_id, class, initiator, status
                FROM {escalations} WHERE escalation_id = ?1"
-        ),
-        rusqlite::params![escalation_id],
-        |r| Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        )),
-    ).optional()?;
+            ),
+            rusqlite::params![escalation_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
 
     let Some((initiative_id, class, initiator, status)) = row else {
         return Ok(None);
@@ -518,30 +530,34 @@ pub fn approve_logical_deadlock_escalation_in_tx(
 /// `Ok(None)` on FSM mismatch (already resolved or not found),
 /// `Err` on SQL failure.
 pub fn deny_logical_deadlock_escalation_in_tx(
-    tx:               &Connection,
-    escalation_id:    &str,
-    now_unix:         i64,
+    tx: &Connection,
+    escalation_id: &str,
+    now_unix: i64,
     deny_reason_note: Option<&str>,
 ) -> Result<Option<String>, rusqlite::Error> {
     let escalations = Table::Escalations.as_str();
 
-    let denied_state  = EscalationStatus::Denied.as_sql_str();
+    let denied_state = EscalationStatus::Denied.as_sql_str();
     let pending_state = EscalationStatus::Pending.as_sql_str();
-    let class_str     = EscalationClass::LogicalDeadlock.as_sql_str();
+    let class_str = EscalationClass::LogicalDeadlock.as_sql_str();
 
-    let row: Option<(String, String, String, String)> = tx.query_row(
-        &format!(
-            "SELECT initiative_id, class, initiator, status
+    let row: Option<(String, String, String, String)> = tx
+        .query_row(
+            &format!(
+                "SELECT initiative_id, class, initiator, status
                FROM {escalations} WHERE escalation_id = ?1"
-        ),
-        rusqlite::params![escalation_id],
-        |r| Ok((
-            r.get::<_, String>(0)?,
-            r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?,
-            r.get::<_, String>(3)?,
-        )),
-    ).optional()?;
+            ),
+            rusqlite::params![escalation_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .optional()?;
 
     let Some((initiative_id, class, initiator, status)) = row else {
         return Ok(None);
@@ -559,7 +575,11 @@ pub fn deny_logical_deadlock_escalation_in_tx(
               WHERE escalation_id = ?4 AND status = ?5"
         ),
         rusqlite::params![
-            denied_state, now_unix, deny_reason_note, escalation_id, pending_state
+            denied_state,
+            now_unix,
+            deny_reason_note,
+            escalation_id,
+            pending_state
         ],
     )?;
     if updated != 1 {
@@ -591,18 +611,16 @@ fn truncate_for_scope(s: &str) -> String {
 ///
 /// Pulled into a tiny constructor here so the
 /// `respawn_orchestrator_for_initiative` call site stays readable.
-pub fn build_ceiling_event(
-    initiative_id: &str,
-    outcome:       CeilingOutcome,
-) -> Option<AuditEventKind> {
+pub fn build_ceiling_event(initiative_id: &str, outcome: CeilingOutcome) -> Option<AuditEventKind> {
     match outcome {
-        CeilingOutcome::Exceeded { count_after_increment, max_attempts } => {
-            Some(AuditEventKind::OrchestratorRespawnCeilingExceeded {
-                initiative_id: initiative_id.to_owned(),
-                attempts:      count_after_increment,
-                max_attempts,
-            })
-        }
+        CeilingOutcome::Exceeded {
+            count_after_increment,
+            max_attempts,
+        } => Some(AuditEventKind::OrchestratorRespawnCeilingExceeded {
+            initiative_id: initiative_id.to_owned(),
+            attempts: count_after_increment,
+            max_attempts,
+        }),
         CeilingOutcome::Permitted { .. } => None,
     }
 }
@@ -632,7 +650,8 @@ mod tests {
                  VALUES (?1, 'Executing', '{{}}', '', strftime('%s','now'))"
             ),
             rusqlite::params![initiative_id],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn
     }
 
@@ -644,8 +663,12 @@ mod tests {
                    FROM {initiatives} WHERE initiative_id = ?1"
             ),
             rusqlite::params![initiative_id],
-            |r| r.get::<_, i64>(0).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
-        ).expect("read count")
+            |r| {
+                r.get::<_, i64>(0)
+                    .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+            },
+        )
+        .expect("read count")
     }
 
     #[test]
@@ -653,7 +676,12 @@ mod tests {
         let mut conn = fresh_conn_with_initiative("init-A");
         let tx = conn.transaction().unwrap();
         let outcome = increment_no_progress_count_in_tx(&tx, "init-A").unwrap();
-        assert_eq!(outcome, CeilingOutcome::Permitted { count_after_increment: 1 });
+        assert_eq!(
+            outcome,
+            CeilingOutcome::Permitted {
+                count_after_increment: 1
+            }
+        );
         tx.commit().unwrap();
         assert_eq!(read_count(&conn, "init-A"), 1);
     }
@@ -666,7 +694,9 @@ mod tests {
             let outcome = increment_no_progress_count_in_tx(&tx, "init-A").unwrap();
             assert_eq!(
                 outcome,
-                CeilingOutcome::Permitted { count_after_increment: expected },
+                CeilingOutcome::Permitted {
+                    count_after_increment: expected
+                },
                 "increment #{expected} should be Permitted",
             );
             tx.commit().unwrap();
@@ -678,7 +708,7 @@ mod tests {
             outcome,
             CeilingOutcome::Exceeded {
                 count_after_increment: MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
-                max_attempts:          MAX_ORCH_NO_PROGRESS_RESPAWNS,
+                max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
             },
             "post-ceiling increment MUST report Exceeded",
         );
@@ -705,9 +735,13 @@ mod tests {
     fn increment_against_missing_initiative_is_permitted_no_op() {
         let mut conn = fresh_conn_with_initiative("init-A");
         let tx = conn.transaction().unwrap();
-        let outcome =
-            increment_no_progress_count_in_tx(&tx, "init-MISSING").unwrap();
-        assert_eq!(outcome, CeilingOutcome::Permitted { count_after_increment: 0 });
+        let outcome = increment_no_progress_count_in_tx(&tx, "init-MISSING").unwrap();
+        assert_eq!(
+            outcome,
+            CeilingOutcome::Permitted {
+                count_after_increment: 0
+            }
+        );
         tx.commit().unwrap();
         // The real initiative's count is unaffected.
         assert_eq!(read_count(&conn, "init-A"), 0);
@@ -735,10 +769,10 @@ mod tests {
                          0, strftime('%s','now'), strftime('%s','now'))"
             ),
             rusqlite::params!["t-1", "init-A"],
-        ).expect("seed task");
+        )
+        .expect("seed task");
         let tx = conn.transaction().unwrap();
-        let resolved =
-            lookup_initiative_id_for_task_in_tx(&tx, "t-1").unwrap();
+        let resolved = lookup_initiative_id_for_task_in_tx(&tx, "t-1").unwrap();
         assert_eq!(resolved.as_deref(), Some("init-A"));
         tx.commit().unwrap();
     }
@@ -747,8 +781,7 @@ mod tests {
     fn lookup_initiative_id_for_missing_task_returns_none() {
         let mut conn = fresh_conn_with_initiative("init-A");
         let tx = conn.transaction().unwrap();
-        let resolved =
-            lookup_initiative_id_for_task_in_tx(&tx, "t-MISSING").unwrap();
+        let resolved = lookup_initiative_id_for_task_in_tx(&tx, "t-MISSING").unwrap();
         assert!(resolved.is_none());
         tx.commit().unwrap();
     }
@@ -757,7 +790,9 @@ mod tests {
     fn build_ceiling_event_returns_none_on_permitted() {
         let event = build_ceiling_event(
             "init-A",
-            CeilingOutcome::Permitted { count_after_increment: 2 },
+            CeilingOutcome::Permitted {
+                count_after_increment: 2,
+            },
         );
         assert!(event.is_none());
     }
@@ -768,20 +803,20 @@ mod tests {
             "init-A",
             CeilingOutcome::Exceeded {
                 count_after_increment: MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
-                max_attempts:          MAX_ORCH_NO_PROGRESS_RESPAWNS,
+                max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
             },
         );
         match event {
             Some(AuditEventKind::OrchestratorRespawnCeilingExceeded {
-                initiative_id, attempts, max_attempts,
+                initiative_id,
+                attempts,
+                max_attempts,
             }) => {
                 assert_eq!(initiative_id, "init-A");
                 assert_eq!(attempts, MAX_ORCH_NO_PROGRESS_RESPAWNS + 1);
                 assert_eq!(max_attempts, MAX_ORCH_NO_PROGRESS_RESPAWNS);
             }
-            other => panic!(
-                "expected OrchestratorRespawnCeilingExceeded, got {other:?}"
-            ),
+            other => panic!("expected OrchestratorRespawnCeilingExceeded, got {other:?}"),
         }
     }
 }

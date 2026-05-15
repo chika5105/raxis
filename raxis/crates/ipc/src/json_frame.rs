@@ -140,11 +140,12 @@ where
     let mut body = vec![0u8; body_len as usize];
     reader.read_exact(&mut body)?;
 
-    String::from_utf8(body)
-        .map_err(|e| JsonFrameError::Decode(serde_json::Error::io(std::io::Error::new(
+    String::from_utf8(body).map_err(|e| {
+        JsonFrameError::Decode(serde_json::Error::io(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("non-UTF-8 frame body: {e}"),
-        ))))
+        )))
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +222,10 @@ mod tests {
     /// Round-trip a typed message through the JSON frame codec.
     #[test]
     fn round_trip_single_frame() {
-        let msg = Ping { id: 7, payload: "hello".to_owned() };
+        let msg = Ping {
+            id: 7,
+            payload: "hello".to_owned(),
+        };
 
         let mut buf = Vec::new();
         write_json_frame(&mut buf, &msg).unwrap();
@@ -234,7 +238,12 @@ mod tests {
     /// Multiple frames in a single buffer all round-trip in order.
     #[test]
     fn round_trip_multiple_frames() {
-        let msgs: Vec<Ping> = (0..3).map(|i| Ping { id: i, payload: format!("m-{i}") }).collect();
+        let msgs: Vec<Ping> = (0..3)
+            .map(|i| Ping {
+                id: i,
+                payload: format!("m-{i}"),
+            })
+            .collect();
 
         let mut buf = Vec::new();
         for m in &msgs {
@@ -277,7 +286,10 @@ mod tests {
     /// canonical helper but the corresponding side will fail at runtime.
     #[test]
     fn length_prefix_is_little_endian() {
-        let msg = Ping { id: 1, payload: "x".to_owned() };
+        let msg = Ping {
+            id: 1,
+            payload: "x".to_owned(),
+        };
         let mut buf = Vec::new();
         write_json_frame(&mut buf, &msg).unwrap();
 
@@ -299,7 +311,10 @@ mod tests {
     /// `serde_json::Value`.
     #[test]
     fn read_raw_returns_unparsed_body() {
-        let msg = Ping { id: 99, payload: "raw".to_owned() };
+        let msg = Ping {
+            id: 99,
+            payload: "raw".to_owned(),
+        };
         let mut buf = Vec::new();
         write_json_frame(&mut buf, &msg).unwrap();
 
@@ -315,7 +330,10 @@ mod tests {
     /// async helper, the CLI runs on the sync helper, and they MUST agree.
     #[tokio::test]
     async fn sync_writer_and_async_reader_agree() {
-        let msg = Ping { id: 0xDEADBEEF, payload: "sync→async".to_owned() };
+        let msg = Ping {
+            id: 0xDEADBEEF,
+            payload: "sync→async".to_owned(),
+        };
 
         let mut buf = Vec::new();
         write_json_frame(&mut buf, &msg).unwrap();
@@ -328,7 +346,10 @@ mod tests {
     /// And the reverse direction.
     #[tokio::test]
     async fn async_writer_and_sync_reader_agree() {
-        let msg = Ping { id: 0xCAFEBABE, payload: "async→sync".to_owned() };
+        let msg = Ping {
+            id: 0xCAFEBABE,
+            payload: "async→sync".to_owned(),
+        };
 
         let mut buf: Vec<u8> = Vec::new();
         write_json_frame_async(&mut buf, &msg).await.unwrap();

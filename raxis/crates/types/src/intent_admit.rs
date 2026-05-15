@@ -93,7 +93,7 @@ pub enum RetryInadmissibleReason {
     NotRetryable {
         /// The actual prior state (verbatim, lowercase per the
         /// activation_state column convention).
-        prior_state:         String,
+        prior_state: String,
         /// The accompanying `review_reject_count` (informational —
         /// the predicate already considered it).
         review_reject_count: u32,
@@ -110,7 +110,7 @@ pub enum RetryInadmissibleReason {
     /// Wire counterpart: `eprintln "RetrySubTaskRejectedReviewCeiling"`.
     ReviewCeiling {
         /// Current `subtask_activations.review_reject_count`.
-        review_reject_count:   u32,
+        review_reject_count: u32,
         /// Plan-effective ceiling.
         max_review_rejections: u32,
     },
@@ -154,10 +154,10 @@ impl RetryInadmissibleReason {
     /// `IntentAdmitPredicateEvaluatedTotal` reason axis).
     pub fn observability_lexeme(&self) -> &'static str {
         match self {
-            RetryInadmissibleReason::NoPriorActivation       => "unknown_lane",
-            RetryInadmissibleReason::NotRetryable { .. }     => "retry_inadmissible",
+            RetryInadmissibleReason::NoPriorActivation => "unknown_lane",
+            RetryInadmissibleReason::NotRetryable { .. } => "retry_inadmissible",
             RetryInadmissibleReason::CrashCeiling { .. }
-            | RetryInadmissibleReason::ReviewCeiling { .. }  => "budget_exhausted",
+            | RetryInadmissibleReason::ReviewCeiling { .. } => "budget_exhausted",
         }
     }
 }
@@ -175,14 +175,14 @@ pub struct RetryAdmitInputs<'a> {
     /// activation row for the task, or `None` if no row exists.
     pub prior_activation_state: Option<&'a str>,
     /// Most-recent activation's `crash_retry_count`.
-    pub crash_retry_count:      u32,
+    pub crash_retry_count: u32,
     /// Most-recent activation's `review_reject_count`.
-    pub review_reject_count:    u32,
+    pub review_reject_count: u32,
     /// Plan-effective `max_crash_retries` (kernel default substituted
     /// when the plan omits the field).
-    pub max_crash_retries:      u32,
+    pub max_crash_retries: u32,
     /// Plan-effective `max_review_rejections`.
-    pub max_review_rejections:  u32,
+    pub max_review_rejections: u32,
 }
 
 /// Pure predicate: would `RetrySubTask` for this task be ADMITTED by
@@ -279,7 +279,7 @@ pub struct RetryAdmitInputs<'a> {
 pub fn admit_retry_subtask_check(inputs: &RetryAdmitInputs<'_>) -> AdmitOutcome {
     let prior_state = match inputs.prior_activation_state {
         Some(s) => s,
-        None    => return AdmitOutcome::Inadmissible(RetryInadmissibleReason::NoPriorActivation),
+        None => return AdmitOutcome::Inadmissible(RetryInadmissibleReason::NoPriorActivation),
     };
     // iter54 (INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01):
     // only `Completed + review_reject_count > 0` is admissible from a
@@ -289,11 +289,10 @@ pub fn admit_retry_subtask_check(inputs: &RetryAdmitInputs<'_>) -> AdmitOutcome 
     // PendingActivation; …"` projection lines up with what the
     // orchestrator NNSP rule 3a tells the LLM to do (`activate_subtask`
     // against the existing pending row).
-    let allow_from_review_rejection =
-        prior_state == "Completed" && inputs.review_reject_count > 0;
+    let allow_from_review_rejection = prior_state == "Completed" && inputs.review_reject_count > 0;
     if prior_state != "Failed" && !allow_from_review_rejection {
         return AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
-            prior_state:         prior_state.to_owned(),
+            prior_state: prior_state.to_owned(),
             review_reject_count: inputs.review_reject_count,
         });
     }
@@ -305,7 +304,7 @@ pub fn admit_retry_subtask_check(inputs: &RetryAdmitInputs<'_>) -> AdmitOutcome 
     }
     if inputs.review_reject_count >= inputs.max_review_rejections {
         return AdmitOutcome::Inadmissible(RetryInadmissibleReason::ReviewCeiling {
-            review_reject_count:   inputs.review_reject_count,
+            review_reject_count: inputs.review_reject_count,
             max_review_rejections: inputs.max_review_rejections,
         });
     }
@@ -323,10 +322,10 @@ mod tests {
     fn base() -> RetryAdmitInputs<'static> {
         RetryAdmitInputs {
             prior_activation_state: Some("Failed"),
-            crash_retry_count:      0,
-            review_reject_count:    0,
-            max_crash_retries:      3,
-            max_review_rejections:  2,
+            crash_retry_count: 0,
+            review_reject_count: 0,
+            max_crash_retries: 3,
+            max_review_rejections: 2,
         }
     }
 
@@ -339,7 +338,7 @@ mod tests {
     fn admits_when_completed_with_review_rejection() {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("Completed"),
-            review_reject_count:    1,
+            review_reject_count: 1,
             ..base()
         };
         assert_eq!(admit_retry_subtask_check(&inputs), AdmitOutcome::Admissible);
@@ -349,11 +348,14 @@ mod tests {
     fn rejects_when_completed_without_review_rejection() {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("Completed"),
-            review_reject_count:    0,
+            review_reject_count: 0,
             ..base()
         };
         match admit_retry_subtask_check(&inputs) {
-            AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable { prior_state, review_reject_count }) => {
+            AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
+                prior_state,
+                review_reject_count,
+            }) => {
                 assert_eq!(prior_state, "Completed");
                 assert_eq!(review_reject_count, 0);
             }
@@ -378,10 +380,11 @@ mod tests {
     /// PendingActivation; …"` projection lines up with what the NNSP
     /// already tells the orchestrator to do.
     #[test]
-    fn rejects_when_pending_activation_with_review_rejection_so_orchestrator_steers_to_activate_subtask() {
+    fn rejects_when_pending_activation_with_review_rejection_so_orchestrator_steers_to_activate_subtask(
+    ) {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("PendingActivation"),
-            review_reject_count:    1,
+            review_reject_count: 1,
             ..base()
         };
         match admit_retry_subtask_check(&inputs) {
@@ -408,12 +411,13 @@ mod tests {
     fn rejects_when_pending_activation_without_review_rejection() {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("PendingActivation"),
-            review_reject_count:    0,
+            review_reject_count: 0,
             ..base()
         };
         match admit_retry_subtask_check(&inputs) {
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
-                prior_state, review_reject_count,
+                prior_state,
+                review_reject_count,
             }) => {
                 assert_eq!(prior_state, "PendingActivation");
                 assert_eq!(review_reject_count, 0);
@@ -431,12 +435,13 @@ mod tests {
     fn rejects_active_even_with_review_rejection() {
         let inputs = RetryAdmitInputs {
             prior_activation_state: Some("Active"),
-            review_reject_count:    1,
+            review_reject_count: 1,
             ..base()
         };
         match admit_retry_subtask_check(&inputs) {
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::NotRetryable {
-                prior_state, review_reject_count,
+                prior_state,
+                review_reject_count,
             }) => {
                 assert_eq!(prior_state, "Active");
                 assert_eq!(review_reject_count, 1);
@@ -447,7 +452,10 @@ mod tests {
 
     #[test]
     fn rejects_when_no_prior_activation() {
-        let inputs = RetryAdmitInputs { prior_activation_state: None, ..base() };
+        let inputs = RetryAdmitInputs {
+            prior_activation_state: None,
+            ..base()
+        };
         assert_eq!(
             admit_retry_subtask_check(&inputs),
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::NoPriorActivation),
@@ -456,7 +464,10 @@ mod tests {
 
     #[test]
     fn rejects_when_crash_ceiling_reached() {
-        let inputs = RetryAdmitInputs { crash_retry_count: 3, ..base() };
+        let inputs = RetryAdmitInputs {
+            crash_retry_count: 3,
+            ..base()
+        };
         assert_eq!(
             admit_retry_subtask_check(&inputs),
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::CrashCeiling {
@@ -468,11 +479,14 @@ mod tests {
 
     #[test]
     fn rejects_when_review_ceiling_reached() {
-        let inputs = RetryAdmitInputs { review_reject_count: 2, ..base() };
+        let inputs = RetryAdmitInputs {
+            review_reject_count: 2,
+            ..base()
+        };
         assert_eq!(
             admit_retry_subtask_check(&inputs),
             AdmitOutcome::Inadmissible(RetryInadmissibleReason::ReviewCeiling {
-                review_reject_count:   2,
+                review_reject_count: 2,
                 max_review_rejections: 2,
             }),
         );
@@ -480,30 +494,40 @@ mod tests {
 
     #[test]
     fn human_strings_carry_load_bearing_lexemes() {
-        assert!(RetryInadmissibleReason::NoPriorActivation.human()
-                .starts_with("no prior activation"));
+        assert!(RetryInadmissibleReason::NoPriorActivation
+            .human()
+            .starts_with("no prior activation"));
         let pending_human = RetryInadmissibleReason::NotRetryable {
-            prior_state:         "PendingActivation".to_owned(),
+            prior_state: "PendingActivation".to_owned(),
             review_reject_count: 1,
-        }.human();
-        assert!(pending_human.starts_with("prior state PendingActivation"),
+        }
+        .human();
+        assert!(
+            pending_human.starts_with("prior state PendingActivation"),
             "leading lexeme remains substring-stable for the NNSP \
-             rule 3a pattern-match: {pending_human}");
-        assert!(pending_human.contains("activate_subtask"),
+             rule 3a pattern-match: {pending_human}"
+        );
+        assert!(
+            pending_human.contains("activate_subtask"),
             "iter54 (INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01): \
              reason MUST tell the operator/LLM the correct pivot \
              intent for the PendingActivation branch; absent that, \
              a future NNSP regression that drops rule 3a leaves the \
              KSB envelope with no hint, reintroducing the iter54 \
-             deadlock: {pending_human}");
+             deadlock: {pending_human}"
+        );
         assert!(RetryInadmissibleReason::CrashCeiling {
             crash_retry_count: 3,
             max_crash_retries: 3,
-        }.human().starts_with("crash_retry_count 3"));
+        }
+        .human()
+        .starts_with("crash_retry_count 3"));
         assert!(RetryInadmissibleReason::ReviewCeiling {
-            review_reject_count:   2,
+            review_reject_count: 2,
             max_review_rejections: 2,
-        }.human().starts_with("review_reject_count 2"));
+        }
+        .human()
+        .starts_with("review_reject_count 2"));
     }
 
     #[test]
@@ -514,23 +538,26 @@ mod tests {
         );
         assert_eq!(
             RetryInadmissibleReason::NotRetryable {
-                prior_state:         "Active".to_owned(),
+                prior_state: "Active".to_owned(),
                 review_reject_count: 0,
-            }.observability_lexeme(),
+            }
+            .observability_lexeme(),
             "retry_inadmissible",
         );
         assert_eq!(
             RetryInadmissibleReason::CrashCeiling {
                 crash_retry_count: 0,
                 max_crash_retries: 0,
-            }.observability_lexeme(),
+            }
+            .observability_lexeme(),
             "budget_exhausted",
         );
         assert_eq!(
             RetryInadmissibleReason::ReviewCeiling {
-                review_reject_count:   0,
+                review_reject_count: 0,
                 max_review_rejections: 0,
-            }.observability_lexeme(),
+            }
+            .observability_lexeme(),
             "budget_exhausted",
         );
     }

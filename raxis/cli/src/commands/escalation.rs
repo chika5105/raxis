@@ -24,7 +24,8 @@ use crate::GlobalFlags;
 // ---------------------------------------------------------------------------
 
 pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let escalation_id = args.first()
+    let escalation_id = args
+        .first()
         .ok_or_else(|| CliError::Usage("escalation approve requires <escalation_id>".to_owned()))?
         .clone();
 
@@ -44,29 +45,50 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
         match args[i].as_str() {
             "--scope" => {
                 i += 1;
-                scope = Some(args.get(i).ok_or_else(|| CliError::Usage("--scope requires a value".to_owned()))?.clone());
+                scope = Some(
+                    args.get(i)
+                        .ok_or_else(|| CliError::Usage("--scope requires a value".to_owned()))?
+                        .clone(),
+                );
             }
             "--max-uses" => {
                 i += 1;
-                let s = args.get(i).ok_or_else(|| CliError::Usage("--max-uses requires a number".to_owned()))?;
-                max_uses = Some(s.parse().map_err(|_| CliError::Usage(format!("--max-uses must be an integer, got {s:?}")))?);
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--max-uses requires a number".to_owned()))?;
+                max_uses = Some(s.parse().map_err(|_| {
+                    CliError::Usage(format!("--max-uses must be an integer, got {s:?}"))
+                })?);
             }
             "--valid-for" => {
                 i += 1;
-                let s = args.get(i).ok_or_else(|| CliError::Usage("--valid-for requires a number".to_owned()))?;
-                valid_for_secs = Some(s.parse().map_err(|_| CliError::Usage(format!("--valid-for must be an integer, got {s:?}")))?);
+                let s = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--valid-for requires a number".to_owned()))?;
+                valid_for_secs = Some(s.parse().map_err(|_| {
+                    CliError::Usage(format!("--valid-for must be an integer, got {s:?}"))
+                })?);
             }
             "--reveal-token" => {
                 reveal_token = true;
             }
-            other => return Err(CliError::Usage(format!("unknown escalation approve flag: {other:?}"))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown escalation approve flag: {other:?}"
+                )))
+            }
         }
         i += 1;
     }
 
-    let capability_class = scope.ok_or_else(|| CliError::Usage("escalation approve requires --scope <capability_class>".to_owned()))?;
-    let max_uses = max_uses.ok_or_else(|| CliError::Usage("escalation approve requires --max-uses <n>".to_owned()))?;
-    let valid_for_seconds = valid_for_secs.ok_or_else(|| CliError::Usage("escalation approve requires --valid-for <secs>".to_owned()))?;
+    let capability_class = scope.ok_or_else(|| {
+        CliError::Usage("escalation approve requires --scope <capability_class>".to_owned())
+    })?;
+    let max_uses = max_uses
+        .ok_or_else(|| CliError::Usage("escalation approve requires --max-uses <n>".to_owned()))?;
+    let valid_for_seconds = valid_for_secs.ok_or_else(|| {
+        CliError::Usage("escalation approve requires --valid-for <secs>".to_owned())
+    })?;
 
     let approval_scope = ApprovalScopeWire {
         capability_class: capability_class.clone(),
@@ -80,8 +102,9 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     // authority::escalation::approve_escalation; if the two halves
     // disagree on layout, the round-trip test in raxis-crypto fails at
     // build time and the IPC handler returns FAIL_OPERATOR_SIGNATURE_INVALID.
-    let key_path = flags.operator_key_path.as_deref()
-        .ok_or_else(|| CliError::Usage("--operator-key is required for escalation approve".to_owned()))?;
+    let key_path = flags.operator_key_path.as_deref().ok_or_else(|| {
+        CliError::Usage("--operator-key is required for escalation approve".to_owned())
+    })?;
     let signing_key = crate::signing::load_operator_key(key_path)?;
     let signing_input = raxis_crypto::escalation::approval_scope_signing_input(
         &escalation_id,
@@ -93,7 +116,7 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
 
     let (mut conn, _fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::ApproveEscalation {
-        escalation_id:    escalation_id.clone(),
+        escalation_id: escalation_id.clone(),
         approval_scope,
         operator_sig_hex: sig_hex,
     };
@@ -135,8 +158,7 @@ pub(crate) fn build_approval_token_lines(token: &str, reveal: bool) -> Vec<Strin
     if reveal {
         return vec![
             format!("approval_token_raw: {token}"),
-            "(Pass approval_token_raw to the planner out-of-band — this is a secret.)"
-                .to_owned(),
+            "(Pass approval_token_raw to the planner out-of-band — this is a secret.)".to_owned(),
         ];
     }
     let fingerprint = credential_fingerprint(token);
@@ -162,7 +184,8 @@ fn credential_fingerprint(credential: &str) -> String {
 // ---------------------------------------------------------------------------
 
 pub fn run_deny(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let escalation_id = args.first()
+    let escalation_id = args
+        .first()
         .ok_or_else(|| CliError::Usage("escalation deny requires <escalation_id>".to_owned()))?
         .clone();
 
@@ -172,9 +195,17 @@ pub fn run_deny(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         match args[i].as_str() {
             "--reason" => {
                 i += 1;
-                reason = Some(args.get(i).ok_or_else(|| CliError::Usage("--reason requires a value".to_owned()))?.clone());
+                reason = Some(
+                    args.get(i)
+                        .ok_or_else(|| CliError::Usage("--reason requires a value".to_owned()))?
+                        .clone(),
+                );
             }
-            other => return Err(CliError::Usage(format!("unknown escalation deny flag: {other:?}"))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown escalation deny flag: {other:?}"
+                )))
+            }
         }
         i += 1;
     }
@@ -216,8 +247,7 @@ mod reveal_token_tests {
     use super::build_approval_token_lines;
 
     /// Distinctive token so any leak is unmissable in test output.
-    const SECRET_TOKEN: &str =
-        "SECRET_APPROVAL_TOKEN_dddddddddddddddddddddddddddddddddddddddd";
+    const SECRET_TOKEN: &str = "SECRET_APPROVAL_TOKEN_dddddddddddddddddddddddddddddddddddddddd";
 
     #[test]
     fn default_redacted_lines_do_not_contain_raw_token() {
@@ -240,18 +270,24 @@ mod reveal_token_tests {
         let joined = lines.join("\n");
         assert!(joined.contains("sha256_fp="),
             "redacted output must explain WHY the token is hidden via the fingerprint marker; got: {joined}");
-        assert!(joined.contains("--reveal-token"),
-            "redacted output must point operators to the explicit opt-in flag; got: {joined}");
+        assert!(
+            joined.contains("--reveal-token"),
+            "redacted output must point operators to the explicit opt-in flag; got: {joined}"
+        );
     }
 
     #[test]
     fn reveal_flag_emits_raw_token_and_secret_warning() {
         let lines = build_approval_token_lines(SECRET_TOKEN, true);
         let joined = lines.join("\n");
-        assert!(joined.contains(&format!("approval_token_raw: {SECRET_TOKEN}")),
-            "explicit --reveal-token must produce the canonical raw-token line; got: {joined}");
-        assert!(joined.contains("this is a secret"),
-            "explicit reveal must keep the operator-facing secret-handling reminder; got: {joined}");
+        assert!(
+            joined.contains(&format!("approval_token_raw: {SECRET_TOKEN}")),
+            "explicit --reveal-token must produce the canonical raw-token line; got: {joined}"
+        );
+        assert!(
+            joined.contains("this is a secret"),
+            "explicit reveal must keep the operator-facing secret-handling reminder; got: {joined}"
+        );
     }
 
     /// Cross-check against the kernel-side fingerprint helper. See
@@ -259,14 +295,21 @@ mod reveal_token_tests {
     #[test]
     fn redacted_fingerprint_matches_kernel_side_helper() {
         let lines = build_approval_token_lines(SECRET_TOKEN, false);
-        let line = lines.first().expect("redacted output must have at least one line");
+        let line = lines
+            .first()
+            .expect("redacted output must have at least one line");
         let cli_fp = line
-            .split("sha256_fp=").nth(1).expect("redacted line must contain sha256_fp= marker")
-            .split('>').next().expect("marker must be terminated by '>'")
+            .split("sha256_fp=")
+            .nth(1)
+            .expect("redacted line must contain sha256_fp= marker")
+            .split('>')
+            .next()
+            .expect("marker must be terminated by '>'")
             .to_owned();
-        let kernel_fp =
-            raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
-        assert_eq!(cli_fp, kernel_fp,
-            "CLI redacted fingerprint must equal the kernel-side log fingerprint");
+        let kernel_fp = raxis_crypto::token::sha256_hex(SECRET_TOKEN.as_bytes())[..8].to_owned();
+        assert_eq!(
+            cli_fp, kernel_fp,
+            "CLI redacted fingerprint must equal the kernel-side log fingerprint"
+        );
     }
 }

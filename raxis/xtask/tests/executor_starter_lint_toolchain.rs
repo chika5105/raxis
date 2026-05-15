@@ -83,10 +83,8 @@ fn build_base_rootfs_fixture(dst: &Path) {
         "usr/bin/make",
     ] {
         let p = dst.join(rel);
-        fs::create_dir_all(p.parent().unwrap())
-            .expect("create parent dir");
-        fs::write(&p, b"#!/bin/sh\nexit 0\n")
-            .expect("write stub");
+        fs::create_dir_all(p.parent().unwrap()).expect("create parent dir");
+        fs::write(&p, b"#!/bin/sh\nexit 0\n").expect("write stub");
         // Mark executable so a future Linux-host run that tries
         // `chroot`-style python3 invocation does not panic on a
         // perms-check; `[ -e ]` does not require this but it
@@ -100,11 +98,8 @@ fn build_base_rootfs_fixture(dst: &Path) {
     // a regular file or a symlink passes.
     let sbin = dst.join("sbin");
     fs::create_dir_all(&sbin).unwrap();
-    std::os::unix::fs::symlink(
-        "/usr/local/bin/raxis-planner-executor",
-        sbin.join("init"),
-    )
-    .expect("symlink /sbin/init");
+    std::os::unix::fs::symlink("/usr/local/bin/raxis-planner-executor", sbin.join("init"))
+        .expect("symlink /sbin/init");
 }
 
 /// Drop the pinned ruff layout under the fixture: the CLI shim at
@@ -131,15 +126,9 @@ fn install_ruff(rootfs: &Path, version: &str) {
 /// node_modules entries for each linter plus the CLI shims on
 /// `$PATH`. Witnesses can selectively skip a package or shim to
 /// drive the specific arm under test.
-fn install_js_toolchain(
-    rootfs: &Path,
-    include_packages: &[&str],
-    include_shims:    &[&str],
-) {
+fn install_js_toolchain(rootfs: &Path, include_packages: &[&str], include_shims: &[&str]) {
     for pkg in include_packages {
-        let dir = rootfs
-            .join("usr/lib/node_modules")
-            .join(pkg);
+        let dir = rootfs.join("usr/lib/node_modules").join(pkg);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("package.json"),
@@ -219,8 +208,7 @@ fn inv_executor_image_lint_toolchain_python_01_missing_cli_shim_fails_closed() {
     let rootfs = tmp.path();
     build_base_rootfs_fixture(rootfs);
     // Skip install_ruff; install only the dist-info, NOT the shim.
-    let dist = rootfs
-        .join("usr/lib/python3.11/dist-packages/ruff-0.7.4.dist-info");
+    let dist = rootfs.join("usr/lib/python3.11/dist-packages/ruff-0.7.4.dist-info");
     fs::create_dir_all(&dist).unwrap();
     fs::write(dist.join("METADATA"), b"Name: ruff\nVersion: 0.7.4\n").unwrap();
     install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
@@ -276,7 +264,7 @@ fn inv_executor_image_lint_toolchain_python_01_version_drift_fails_closed() {
     let tmp = tempfile::tempdir().unwrap();
     let rootfs = tmp.path();
     build_base_rootfs_fixture(rootfs);
-    install_ruff(rootfs, "0.8.0");  // pin is 0.7.4
+    install_ruff(rootfs, "0.8.0"); // pin is 0.7.4
     install_js_toolchain(rootfs, JS_PACKAGES, JS_SHIMS);
 
     let (code, out) = run_verify(rootfs);
@@ -359,8 +347,10 @@ fn inv_executor_image_lint_toolchain_js_01_missing_prettier_module_fails_closed(
 
     let (code, out) = run_verify(rootfs);
     assert_ne!(code, 0);
-    assert!(out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
-            "{out}");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
+        "{out}"
+    );
     assert!(out.contains("prettier"), "{out}");
 }
 
@@ -379,8 +369,10 @@ fn inv_executor_image_lint_toolchain_js_01_missing_typescript_module_fails_close
 
     let (code, out) = run_verify(rootfs);
     assert_ne!(code, 0);
-    assert!(out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
-            "{out}");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
+        "{out}"
+    );
     assert!(out.contains("typescript"), "{out}");
 }
 
@@ -399,8 +391,10 @@ fn inv_executor_image_lint_toolchain_js_01_missing_tsx_module_fails_closed() {
 
     let (code, out) = run_verify(rootfs);
     assert_ne!(code, 0);
-    assert!(out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
-            "{out}");
+    assert!(
+        out.contains("INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 VIOLATED"),
+        "{out}"
+    );
     assert!(out.contains("tsx"), "{out}");
 }
 
@@ -429,9 +423,7 @@ fn inv_executor_image_lint_toolchain_js_01_missing_cli_shim_fails_closed() {
         "{out}",
     );
     assert!(
-        out.contains("eslint")
-            && (out.contains("/usr/bin/")
-                || out.contains("/usr/local/bin/")),
+        out.contains("eslint") && (out.contains("/usr/bin/") || out.contains("/usr/local/bin/")),
         "remediation must name the missing shim path: {out}",
     );
 }
@@ -448,9 +440,7 @@ fn inv_executor_image_lint_toolchain_js_01_accepts_usr_local_lib_mirror() {
     build_base_rootfs_fixture(rootfs);
     install_ruff(rootfs, "0.7.4");
     for pkg in JS_PACKAGES {
-        let dir = rootfs
-            .join("usr/local/lib/node_modules")
-            .join(pkg);
+        let dir = rootfs.join("usr/local/lib/node_modules").join(pkg);
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join("package.json"),
@@ -492,12 +482,10 @@ fn lint_toolchain_pins_agree_across_containerfile_manifest_and_verifier() {
     let workspace_root = manifest_dir.parent().unwrap();
     let img_dir = workspace_root.join("images/executor-starter");
 
-    let containerfile = fs::read_to_string(img_dir.join("Containerfile"))
-        .expect("read Containerfile");
-    let manifest = fs::read_to_string(img_dir.join("manifest.toml"))
-        .expect("read manifest.toml");
-    let verify = fs::read_to_string(img_dir.join("verify.sh"))
-        .expect("read verify.sh");
+    let containerfile =
+        fs::read_to_string(img_dir.join("Containerfile")).expect("read Containerfile");
+    let manifest = fs::read_to_string(img_dir.join("manifest.toml")).expect("read manifest.toml");
+    let verify = fs::read_to_string(img_dir.join("verify.sh")).expect("read verify.sh");
 
     // ── ruff ──────────────────────────────────────────────────
     let containerfile_ruff = extract_after(&containerfile, "\"ruff==", "\"")
@@ -519,20 +507,17 @@ fn lint_toolchain_pins_agree_across_containerfile_manifest_and_verifier() {
 
     // ── JS toolchain ──────────────────────────────────────────
     for (pkg, manifest_field) in [
-        ("eslint",     "eslint_version"),
-        ("prettier",   "prettier_version"),
+        ("eslint", "eslint_version"),
+        ("prettier", "prettier_version"),
         ("typescript", "typescript_version"),
-        ("tsx",        "tsx_version"),
+        ("tsx", "tsx_version"),
     ] {
         let needle_cf = format!("\"{pkg}@");
         let cf_ver = extract_after(&containerfile, &needle_cf, "\"")
-            .unwrap_or_else(|| panic!(
-                "Containerfile must pin {pkg}@<X.Y.Z>",
-            ));
-        let mf_ver = extract_manifest_field(&manifest, manifest_field)
-            .unwrap_or_else(|| panic!(
-                "manifest.toml must declare [lint_toolchain] {manifest_field}",
-            ));
+            .unwrap_or_else(|| panic!("Containerfile must pin {pkg}@<X.Y.Z>",));
+        let mf_ver = extract_manifest_field(&manifest, manifest_field).unwrap_or_else(|| {
+            panic!("manifest.toml must declare [lint_toolchain] {manifest_field}",)
+        });
         assert_eq!(
             cf_ver, mf_ver,
             "Containerfile {pkg} pin ({cf_ver}) must match \

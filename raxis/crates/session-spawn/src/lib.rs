@@ -88,6 +88,7 @@ use std::time::Duration;
 
 mod perf_telemetry;
 
+use parking_lot::Mutex;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_credential_proxy_manager::{
     CredentialProxyManager, ManagerError, SessionProxyHandles, ShutdownReport,
@@ -101,7 +102,6 @@ use raxis_isolation::{
 };
 use raxis_plan_credentials::TaskCredentialDecl;
 use thiserror::Error;
-use parking_lot::Mutex;
 use tokio::net::TcpListener;
 use tokio::task::JoinHandle;
 
@@ -115,11 +115,11 @@ use tokio::task::JoinHandle;
 /// observability surface owns its own attribute strings.
 fn failure_class_for(err: &IsolationError) -> &'static str {
     match err {
-        IsolationError::SpawnFailed(_)     => "spawn_failed",
-        IsolationError::PeerClosed         => "peer_closed",
-        IsolationError::TransportFault(_)  => "transport_fault",
-        IsolationError::SignatureMismatch  => "signature_mismatch",
-        IsolationError::ResourceLimit(_)   => "resource_limit",
+        IsolationError::SpawnFailed(_) => "spawn_failed",
+        IsolationError::PeerClosed => "peer_closed",
+        IsolationError::TransportFault(_) => "transport_fault",
+        IsolationError::SignatureMismatch => "signature_mismatch",
+        IsolationError::ResourceLimit(_) => "resource_limit",
         IsolationError::BackendInternal(_) => "backend_internal",
     }
 }
@@ -138,23 +138,23 @@ pub struct SpawnRequest {
     /// production). Used as the audit-event `session_id`, the
     /// `CredentialProxyManager` session key, and the
     /// `run_admission_loop` `session_id` argument.
-    pub session_id:        String,
+    pub session_id: String,
 
     /// Owning task id from the signed plan. Used by the credential
     /// proxy manager to scope `CredentialProxyStarted` audit events.
     /// `None` for the canonical Orchestrator session (it has no
     /// `[[tasks]]` row).
-    pub task_id:           Option<String>,
+    pub task_id: Option<String>,
 
     /// Owning initiative id. Forwarded to the in-guest IPC handshake.
-    pub initiative_id:     String,
+    pub initiative_id: String,
 
     /// The verified VM image the substrate boots.
-    pub image:             VerifiedImage,
+    pub image: VerifiedImage,
 
     /// Mounts the substrate exposes to the guest. Empty for
     /// substrates that do not support filesystem mounts.
-    pub workspace_mounts:  Vec<WorkspaceMount>,
+    pub workspace_mounts: Vec<WorkspaceMount>,
 
     /// Resource ceiling + boot args the kernel constructs for this
     /// session. The service stamps env entries (credential-proxy
@@ -163,11 +163,11 @@ pub struct SpawnRequest {
     /// preserved unless they collide on key, in which case the
     /// service-supplied value wins (the kernel is the authoritative
     /// source for the loopback URL and admission service address).
-    pub vm_spec:           VmSpec,
+    pub vm_spec: VmSpec,
 
     /// `[[tasks.credentials]]` declarations for this task. The
     /// service rehydrates one credential proxy per entry.
-    pub credentials:       Vec<TaskCredentialDecl>,
+    pub credentials: Vec<TaskCredentialDecl>,
 
     /// Per-session admission decision policy. Production wires
     /// `PolicyAdmissionService` over the active `PolicyBundle`; tests
@@ -193,21 +193,21 @@ pub struct SpawnRequest {
 #[derive(Debug)]
 pub struct SpawnHandle {
     /// Echo of the request's `session_id`.
-    pub session_id:           String,
+    pub session_id: String,
     /// VSock CID of the running session (when the substrate uses
     /// vsock; `None` for subprocess / wasm substrates).
-    pub vsock_cid:             Option<u32>,
+    pub vsock_cid: Option<u32>,
     /// `mount_as → loopback URL` for every credential proxy bound
     /// for this session. The service has already stamped these into
     /// `VmSpec.env` for the substrate; this field is exposed to the
     /// caller for diagnostic logging and for callers that need to
     /// re-expose the values through alternative channels (e.g.
     /// metadata service).
-    pub loopback_env:          BTreeMap<String, String>,
+    pub loopback_env: BTreeMap<String, String>,
     /// `host:port` the in-guest tproxy talks to over loopback (dev)
     /// or the vsock CID at V2 GA. Likewise pre-stamped into
     /// `VmSpec.env` under `RAXIS_TPROXY_KERNEL_TCP`.
-    pub admission_loopback:    SocketAddr,
+    pub admission_loopback: SocketAddr,
     /// Host-side end of the kernel ↔ guest IPC channel for
     /// substrates that surrender one at spawn time
     /// (`Session::take_kernel_ipc_fd`). The kernel-side caller is
@@ -219,16 +219,16 @@ pub struct SpawnHandle {
     /// UDS planner socket directly (subprocess, wasm) — those
     /// rely on the kernel's existing `accept_planner_loop` to pick
     /// up the connection without per-session bridging.
-    pub kernel_ipc_stream:     Option<tokio::net::UnixStream>,
+    pub kernel_ipc_stream: Option<tokio::net::UnixStream>,
 }
 
 /// Outcome of a successful `terminate_session` call.
 #[derive(Debug)]
 pub struct TerminationReport {
     /// Echo of the session id terminated.
-    pub session_id:        String,
+    pub session_id: String,
     /// Final exit status the substrate reported.
-    pub exit_status:       ExitStatus,
+    pub exit_status: ExitStatus,
     /// Per-proxy stats snapshot from the credential proxies.
     pub credential_proxy_shutdown: ShutdownReport,
 }
@@ -287,8 +287,8 @@ pub enum SpawnError {
 /// async-state-machine overhead for every short critical section.
 pub struct SessionSpawnService {
     isolation: Arc<dyn IsolationBackend>,
-    proxies:   Arc<CredentialProxyManager>,
-    audit:     Arc<dyn AuditSink>,
+    proxies: Arc<CredentialProxyManager>,
+    audit: Arc<dyn AuditSink>,
     /// V3 perf-telemetry. Optional so existing tests that build the
     /// service without an observability surface keep working; the
     /// kernel boot wires this via `with_observability` before the
@@ -311,15 +311,15 @@ pub struct SessionSpawnService {
     /// VM-shutdown / audit-emit / loop-abort work in
     /// `terminate_session` runs AFTER the guard has been dropped
     /// (`drop(table)` immediately after `remove`).
-    sessions:  Mutex<HashMap<String, ActiveSession>>,
+    sessions: Mutex<HashMap<String, ActiveSession>>,
 }
 
 /// Live state for one running session.
 struct ActiveSession {
-    session:           Box<dyn IsolationSession>,
+    session: Box<dyn IsolationSession>,
     credential_proxy_handles: SessionProxyHandles,
-    admission_loop_task:      JoinHandle<()>,
-    admission_loopback:       SocketAddr,
+    admission_loop_task: JoinHandle<()>,
+    admission_loopback: SocketAddr,
 }
 
 impl SessionSpawnService {
@@ -331,8 +331,8 @@ impl SessionSpawnService {
     /// across all sessions). `audit` is the kernel's audit sink.
     pub fn new(
         isolation: Arc<dyn IsolationBackend>,
-        proxies:   Arc<CredentialProxyManager>,
-        audit:     Arc<dyn AuditSink>,
+        proxies: Arc<CredentialProxyManager>,
+        audit: Arc<dyn AuditSink>,
     ) -> Self {
         Self {
             isolation,
@@ -348,10 +348,7 @@ impl SessionSpawnService {
     /// so the four-tier VM cold-boot histograms get stamped from the
     /// very first spawn. Builder-shaped to keep the existing 3-arg
     /// `new` constructor source-compatible with the V1/V2 call sites.
-    pub fn with_observability(
-        mut self,
-        hub: Arc<raxis_observability::ObservabilityHub>,
-    ) -> Self {
+    pub fn with_observability(mut self, hub: Arc<raxis_observability::ObservabilityHub>) -> Self {
         self.observability = Some(hub);
         self
     }
@@ -363,10 +360,7 @@ impl SessionSpawnService {
     /// destination. Builder-shaped so existing 3-arg `new`
     /// callers (smoke binaries, unit tests) stay
     /// source-compatible and silently skip stall detection.
-    pub fn with_egress_stall_tracker(
-        mut self,
-        tracker: Arc<EgressStallTracker>,
-    ) -> Self {
+    pub fn with_egress_stall_tracker(mut self, tracker: Arc<EgressStallTracker>) -> Self {
         self.egress_stall_tracker = Some(tracker);
         self
     }
@@ -378,9 +372,7 @@ impl SessionSpawnService {
     /// the matching audit emission. Returns `None` when the live-e2e
     /// fixtures / unit tests construct the service without injecting
     /// a hub via [`Self::with_observability`].
-    pub fn observability_hub(
-        &self,
-    ) -> Option<&Arc<raxis_observability::ObservabilityHub>> {
+    pub fn observability_hub(&self) -> Option<&Arc<raxis_observability::ObservabilityHub>> {
         self.observability.as_ref()
     }
 
@@ -427,10 +419,7 @@ impl SessionSpawnService {
     ///
     /// The caller's `vm_spec.env` is preserved on keys that don't
     /// collide; the service-supplied value wins on keys that do.
-    pub async fn spawn_session(
-        &self,
-        mut req: SpawnRequest,
-    ) -> Result<SpawnHandle, SpawnError> {
+    pub async fn spawn_session(&self, mut req: SpawnRequest) -> Result<SpawnHandle, SpawnError> {
         // V3 perf-telemetry: start the cold-boot wall clock the moment
         // we enter `spawn_session`. The four-tier histogram defined in
         // `specs/v3/observability-prometheus.md §3.1` measures the
@@ -441,14 +430,17 @@ impl SessionSpawnService {
         // for histogram pivoting (initramfs vs disk, dev vs prod, ...).
         let perf_t0 = std::time::Instant::now();
         let perf_image_kind = match req.image.kind {
-            raxis_isolation::ImageKind::RootfsErofs         => "rootfs_erofs",
+            raxis_isolation::ImageKind::RootfsErofs => "rootfs_erofs",
             raxis_isolation::ImageKind::RootfsInitramfsCpio => "rootfs_initramfs_cpio",
-            raxis_isolation::ImageKind::EnclaveSigStruct    => "enclave_sigstruct",
-            raxis_isolation::ImageKind::WasmModule          => "wasm_module",
+            raxis_isolation::ImageKind::EnclaveSigStruct => "enclave_sigstruct",
+            raxis_isolation::ImageKind::WasmModule => "wasm_module",
         };
 
         let session_id = req.session_id.clone();
-        let task_id    = req.task_id.clone().unwrap_or_else(|| "<orchestrator>".to_owned());
+        let task_id = req
+            .task_id
+            .clone()
+            .unwrap_or_else(|| "<orchestrator>".to_owned());
         tracing::info!(
             session_id = %session_id,
             task_id    = %task_id,
@@ -535,10 +527,12 @@ impl SessionSpawnService {
         let proxy_summaries = cred_handles.started_summaries();
         for summary in &proxy_summaries {
             let port = summary.addr.port();
-            loopback_plan.entries.push(raxis_vsock_loopback::LoopbackEntry {
-                vsock_port:          u32::from(port),
-                guest_loopback_port: port,
-            });
+            loopback_plan
+                .entries
+                .push(raxis_vsock_loopback::LoopbackEntry {
+                    vsock_port: u32::from(port),
+                    guest_loopback_port: port,
+                });
         }
         if !loopback_plan.is_empty() {
             req.vm_spec.env.insert(
@@ -575,9 +569,9 @@ impl SessionSpawnService {
         // admission listener bound above. Drop on the listener
         // releases the port immediately.
         let isolation_for_spawn = Arc::clone(&self.isolation);
-        let image_for_spawn     = req.image.clone();
-        let mounts_for_spawn    = req.workspace_mounts.clone();
-        let vm_spec_for_spawn   = req.vm_spec.clone();
+        let image_for_spawn = req.image.clone();
+        let mounts_for_spawn = req.workspace_mounts.clone();
+        let vm_spec_for_spawn = req.vm_spec.clone();
         // V3 perf-telemetry: bracket the blocking spawn so we can
         // attribute the wall time to "host_init" (everything between
         // the start of `spawn_session` and the substrate handing back
@@ -589,11 +583,7 @@ impl SessionSpawnService {
         // userspace process, or the vsock handshake.
         let perf_host_t0 = std::time::Instant::now();
         let spawn_join = tokio::task::spawn_blocking(move || {
-            isolation_for_spawn.spawn(
-                &image_for_spawn,
-                &mounts_for_spawn,
-                &vm_spec_for_spawn,
-            )
+            isolation_for_spawn.spawn(&image_for_spawn, &mounts_for_spawn, &vm_spec_for_spawn)
         })
         .await;
         let perf_host_init_ms = perf_host_t0.elapsed().as_millis() as i64;
@@ -652,10 +642,9 @@ impl SessionSpawnService {
         //            VM, the admission listener, and the
         //            credential proxies before surfacing the error.
         for entry in loopback_plan.iter() {
-            if let Err(e) = session.register_loopback_listener(
-                entry.vsock_port,
-                entry.guest_loopback_port,
-            ) {
+            if let Err(e) =
+                session.register_loopback_listener(entry.vsock_port, entry.guest_loopback_port)
+            {
                 tracing::error!(
                     session_id = %session_id,
                     vsock_port = entry.vsock_port,
@@ -695,23 +684,22 @@ impl SessionSpawnService {
         // The kernel cannot proceed without the IPC channel for
         // substrates that produced one — silently dropping the fd
         // would surface as a vsock CONNECT timeout in the guest.
-        let kernel_ipc_stream: Option<tokio::net::UnixStream> =
-            match session.take_kernel_ipc_fd() {
-                Some(fd) => match wrap_ipc_fd_as_unix_stream(fd) {
-                    Ok(stream) => Some(stream),
-                    Err(e) => {
-                        drop(admission_listener);
-                        let _ = session.terminate();
-                        let _ = cred_handles.shutdown();
-                        return Err(SpawnError::IsolationSpawn(
-                            raxis_isolation::IsolationError::TransportFault(format!(
-                                "session-spawn: wrap kernel IPC fd: {e}"
-                            )),
-                        ));
-                    }
-                },
-                None => None,
-            };
+        let kernel_ipc_stream: Option<tokio::net::UnixStream> = match session.take_kernel_ipc_fd() {
+            Some(fd) => match wrap_ipc_fd_as_unix_stream(fd) {
+                Ok(stream) => Some(stream),
+                Err(e) => {
+                    drop(admission_listener);
+                    let _ = session.terminate();
+                    let _ = cred_handles.shutdown();
+                    return Err(SpawnError::IsolationSpawn(
+                        raxis_isolation::IsolationError::TransportFault(format!(
+                            "session-spawn: wrap kernel IPC fd: {e}"
+                        )),
+                    ));
+                }
+            },
+            None => None,
+        };
         let perf_guest_init_ms = perf_guest_t0.elapsed().as_millis() as i64;
         // V3 perf-telemetry: stamp the four-tier cold-boot histograms
         // and bump the success counter. The vsock handshake measurement
@@ -740,7 +728,7 @@ impl SessionSpawnService {
         // which drops the futures cleanly (no half-written frames per
         // the trait contract).
         let admission_service: Arc<dyn AdmissionService> = Arc::from(req.admission_service);
-        let audit_for_loop    = Arc::clone(&self.audit);
+        let audit_for_loop = Arc::clone(&self.audit);
         let session_id_for_loop = session_id.clone();
         // V2 reviewer-egress-defaults-decision.md §7. Clone the
         // (optional) shared tracker handle into the per-loop task
@@ -769,7 +757,7 @@ impl SessionSpawnService {
                 let (read, write) = sock.into_split();
                 let svc = Arc::clone(&admission_service);
                 let audit_for_inner = Arc::clone(&audit_for_loop);
-                let sid_for_inner   = session_id_for_loop.clone();
+                let sid_for_inner = session_id_for_loop.clone();
                 let stall_for_inner = stall_tracker_for_loop.clone();
                 tokio::spawn(async move {
                     if let Err(e) = run_admission_loop_with_stall_tracker(
@@ -779,7 +767,9 @@ impl SessionSpawnService {
                         audit_for_inner,
                         sid_for_inner.clone(),
                         stall_for_inner,
-                    ).await {
+                    )
+                    .await
+                    {
                         tracing::warn!(
                             session_id = %sid_for_inner,
                             error = %e,
@@ -795,15 +785,15 @@ impl SessionSpawnService {
         // the VM is already running and the in-memory live-session
         // table mutation just succeeded; the audit lands now.
         let credential_proxy_count = req.credentials.len() as u32;
-        let initiative_for_audit   = req.initiative_id.clone();
-        let task_for_audit         = req.task_id.clone();
+        let initiative_for_audit = req.initiative_id.clone();
+        let task_for_audit = req.task_id.clone();
         if let Err(e) = self.audit.emit(
             AuditEventKind::SessionVmSpawned {
-                session_id:         session_id.clone(),
-                task_id:            task_for_audit.clone(),
-                initiative_id:      initiative_for_audit,
-                backend_id:         self.isolation.backend_id().to_owned(),
-                egress_tier:        format!("{:?}", req.vm_spec.egress_tier),
+                session_id: session_id.clone(),
+                task_id: task_for_audit.clone(),
+                initiative_id: initiative_for_audit,
+                backend_id: self.isolation.backend_id().to_owned(),
+                egress_tier: format!("{:?}", req.vm_spec.egress_tier),
                 admission_loopback: admission_addr.to_string(),
                 credential_proxies: credential_proxy_count,
             },
@@ -828,15 +818,15 @@ impl SessionSpawnService {
             ActiveSession {
                 session,
                 credential_proxy_handles: cred_handles,
-                admission_loop_task:      admission_task,
-                admission_loopback:       admission_addr,
+                admission_loop_task: admission_task,
+                admission_loopback: admission_addr,
             },
         );
         drop(table);
 
         Ok(SpawnHandle {
             session_id,
-            vsock_cid:          req.vm_spec.vsock_cid,
+            vsock_cid: req.vm_spec.vsock_cid,
             loopback_env,
             admission_loopback: admission_addr,
             kernel_ipc_stream,
@@ -853,7 +843,7 @@ impl SessionSpawnService {
     pub async fn terminate_session(
         &self,
         session_id: &str,
-        grace:      Duration,
+        grace: Duration,
     ) -> Result<TerminationReport, SpawnError> {
         let mut table = self.sessions.lock();
         let mut entry = table
@@ -883,7 +873,7 @@ impl SessionSpawnService {
         let (signal_class, exit_code, backend_error) = classify_exit(&exit_status);
         if let Err(e) = self.audit.emit(
             AuditEventKind::SessionVmExited {
-                session_id:    session_id.to_owned(),
+                session_id: session_id.to_owned(),
                 signal_class,
                 exit_code,
                 backend_error,
@@ -969,10 +959,10 @@ impl SessionSpawnService {
 /// `audit-paired-writes.md §4.1`.
 fn classify_exit(status: &ExitStatus) -> (String, i32, Option<String>) {
     match status {
-        ExitStatus::GracefulExit { code }   => ("GracefulExit".into(),  *code,            None),
-        ExitStatus::SignalKilled { signum } => ("SignalKilled".into(), -signum.abs(),     None),
-        ExitStatus::Timeout                 => ("Timeout".into(),       -1,                None),
-        ExitStatus::BackendError(msg)       => ("BackendError".into(),  -2, Some(msg.clone())),
+        ExitStatus::GracefulExit { code } => ("GracefulExit".into(), *code, None),
+        ExitStatus::SignalKilled { signum } => ("SignalKilled".into(), -signum.abs(), None),
+        ExitStatus::Timeout => ("Timeout".into(), -1, None),
+        ExitStatus::BackendError(msg) => ("BackendError".into(), -2, Some(msg.clone())),
     }
 }
 

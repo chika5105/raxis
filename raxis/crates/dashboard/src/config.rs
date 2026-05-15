@@ -164,11 +164,21 @@ impl Default for DashboardConfig {
     }
 }
 
-fn default_addr() -> String { DEFAULT_DASHBOARD_ADDR.into() }
-fn default_port() -> u16 { DEFAULT_DASHBOARD_PORT }
-fn default_jwt_ttl_secs() -> u64 { DEFAULT_JWT_TTL_SECS }
-fn default_max_pending_challenges() -> usize { DEFAULT_MAX_PENDING_CHALLENGES }
-fn default_max_revoked_jwts() -> usize { DEFAULT_MAX_REVOKED_JWTS }
+fn default_addr() -> String {
+    DEFAULT_DASHBOARD_ADDR.into()
+}
+fn default_port() -> u16 {
+    DEFAULT_DASHBOARD_PORT
+}
+fn default_jwt_ttl_secs() -> u64 {
+    DEFAULT_JWT_TTL_SECS
+}
+fn default_max_pending_challenges() -> usize {
+    DEFAULT_MAX_PENDING_CHALLENGES
+}
+fn default_max_revoked_jwts() -> usize {
+    DEFAULT_MAX_REVOKED_JWTS
+}
 
 #[cfg(test)]
 mod tests {

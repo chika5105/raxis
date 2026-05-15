@@ -19,9 +19,9 @@
 // for one initiative inside one transaction, as required by INV-STORE-02.
 
 pub mod admit;
+pub mod budget;
 pub mod dag;
 pub mod lane;
-pub mod budget;
 
 pub use admit::{admit_in_tx, PlanTask};
 pub use dag::transition_to_admitted;

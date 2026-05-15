@@ -28,8 +28,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use ed25519_dalek::SigningKey;
 
 use raxis_crypto::cert::{
-    cert_status, sign_cert, validate_cert_structurally, verify_cert_self_signature,
-    CertError, CertStatus,
+    cert_status, sign_cert, validate_cert_structurally, verify_cert_self_signature, CertError,
+    CertStatus,
 };
 use raxis_types::operator_cert::{CertKind, OperatorCert};
 
@@ -43,22 +43,38 @@ use crate::GlobalFlags;
 // ---------------------------------------------------------------------------
 
 pub const DEFAULT_VALIDITY_DAYS: u32 = 365;
-pub const DEFAULT_WARN_DAYS:     u32 = 30;
-pub const DEFAULT_GRACE_DAYS:    u32 = 7;
-pub const SECS_PER_DAY:          i64 = 86_400;
+pub const DEFAULT_WARN_DAYS: u32 = 30;
+pub const DEFAULT_GRACE_DAYS: u32 = 7;
+pub const SECS_PER_DAY: i64 = 86_400;
 
 // ---------------------------------------------------------------------------
 // Subcommand dispatch
 // ---------------------------------------------------------------------------
 
-pub fn run_mint(flags: &GlobalFlags, args: &[String])           -> Result<(), CliError> { mint::run(flags, args, CertKind::Standard) }
-pub fn run_mint_emergency(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> { mint::run(flags, args, CertKind::EmergencyRecovery) }
-pub fn run_show(flags: &GlobalFlags, args: &[String])           -> Result<(), CliError> { show::run(flags, args) }
-pub fn run_verify(flags: &GlobalFlags, args: &[String])         -> Result<(), CliError> { verify::run(flags, args) }
-pub fn run_list(flags: &GlobalFlags, args: &[String])           -> Result<(), CliError> { list::run(flags, args) }
-pub fn run_install(flags: &GlobalFlags, args: &[String])        -> Result<(), CliError> { install::run(flags, args) }
-pub fn run_revoke(flags: &GlobalFlags, args: &[String])         -> Result<(), CliError> { revoke::run(flags, args) }
-pub fn run_list_revocations(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> { revoke::run_list(flags, args) }
+pub fn run_mint(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    mint::run(flags, args, CertKind::Standard)
+}
+pub fn run_mint_emergency(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    mint::run(flags, args, CertKind::EmergencyRecovery)
+}
+pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    show::run(flags, args)
+}
+pub fn run_verify(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    verify::run(flags, args)
+}
+pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    list::run(flags, args)
+}
+pub fn run_install(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    install::run(flags, args)
+}
+pub fn run_revoke(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    revoke::run(flags, args)
+}
+pub fn run_list_revocations(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
+    revoke::run_list(flags, args)
+}
 
 // ---------------------------------------------------------------------------
 // Shared helpers
@@ -72,13 +88,19 @@ fn now_unix_secs() -> i64 {
 }
 
 fn parse_u32(name: &str, raw: &str) -> Result<u32, CliError> {
-    raw.parse::<u32>()
-        .map_err(|e| CliError::Usage(format!("--{name} expects an unsigned integer; got {raw:?}: {e}")))
+    raw.parse::<u32>().map_err(|e| {
+        CliError::Usage(format!(
+            "--{name} expects an unsigned integer; got {raw:?}: {e}"
+        ))
+    })
 }
 
 fn parse_i64(name: &str, raw: &str) -> Result<i64, CliError> {
-    raw.parse::<i64>()
-        .map_err(|e| CliError::Usage(format!("--{name} expects a signed integer; got {raw:?}: {e}")))
+    raw.parse::<i64>().map_err(|e| {
+        CliError::Usage(format!(
+            "--{name} expects a signed integer; got {raw:?}: {e}"
+        ))
+    })
 }
 
 fn write_cert_toml(out: &Path, cert: &OperatorCert) -> Result<(), CliError> {
@@ -104,15 +126,19 @@ fn pubkey_hex_of(key: &SigningKey) -> String {
 }
 
 fn fingerprint_of(pubkey_hex: &str) -> Result<String, CliError> {
-    let bytes = hex::decode(pubkey_hex)
-        .map_err(|e| CliError::Key(format!("decode pubkey hex: {e}")))?;
+    let bytes =
+        hex::decode(pubkey_hex).map_err(|e| CliError::Key(format!("decode pubkey hex: {e}")))?;
     Ok(crate::conn::pubkey_fingerprint(&bytes))
 }
 
 /// Pretty-print a cert in two stable, grep-friendly columns. Used by
 /// both `show` and `verify`. Field order is the same as the on-disk
 /// TOML for human cross-reference.
-fn render_cert_human(cert: &OperatorCert, fingerprint: &str, status: Option<&CertStatus>) -> String {
+fn render_cert_human(
+    cert: &OperatorCert,
+    fingerprint: &str,
+    status: Option<&CertStatus>,
+) -> String {
     let mut out = String::new();
     out.push_str(&format!("kind                    {}\n", cert.kind.as_str()));
     out.push_str(&format!("display_name            {}\n", cert.display_name));
@@ -120,10 +146,22 @@ fn render_cert_human(cert: &OperatorCert, fingerprint: &str, status: Option<&Cer
     out.push_str(&format!("pubkey_fingerprint      {fingerprint}\n"));
     out.push_str(&format!("not_before              {}\n", cert.not_before));
     out.push_str(&format!("not_after               {}\n", cert.not_after));
-    out.push_str(&format!("warn_before_expiry_days {}\n", cert.warn_before_expiry_days));
-    out.push_str(&format!("grace_period_days       {}\n", cert.grace_period_days));
-    out.push_str(&format!("permitted_ops           [{}]\n", cert.permitted_ops.join(", ")));
-    out.push_str(&format!("contact_info            {}\n", cert.contact_info.as_deref().unwrap_or("")));
+    out.push_str(&format!(
+        "warn_before_expiry_days {}\n",
+        cert.warn_before_expiry_days
+    ));
+    out.push_str(&format!(
+        "grace_period_days       {}\n",
+        cert.grace_period_days
+    ));
+    out.push_str(&format!(
+        "permitted_ops           [{}]\n",
+        cert.permitted_ops.join(", ")
+    ));
+    out.push_str(&format!(
+        "contact_info            {}\n",
+        cert.contact_info.as_deref().unwrap_or("")
+    ));
     out.push_str(&format!("self_sig_hex            {}\n", cert.self_sig_hex));
     if let Some(s) = status {
         out.push_str(&format!("status                  {}\n", s.tag()));
@@ -139,43 +177,83 @@ mod mint {
     use super::*;
 
     pub fn run(flags: &GlobalFlags, args: &[String], kind: CertKind) -> Result<(), CliError> {
-        let mut key_path:     Option<PathBuf> = None;
-        let mut display_name: Option<String>  = None;
-        let mut out_path:     Option<PathBuf> = None;
+        let mut key_path: Option<PathBuf> = None;
+        let mut display_name: Option<String> = None;
+        let mut out_path: Option<PathBuf> = None;
         let mut validity_days = DEFAULT_VALIDITY_DAYS;
-        let mut warn_days     = DEFAULT_WARN_DAYS;
-        let mut grace_days    = DEFAULT_GRACE_DAYS;
-        let mut not_before:   Option<i64>     = None;
-        let mut permitted_ops: Vec<String>    = Vec::new();
-        let mut contact_info: Option<String>  = None;
+        let mut warn_days = DEFAULT_WARN_DAYS;
+        let mut grace_days = DEFAULT_GRACE_DAYS;
+        let mut not_before: Option<i64> = None;
+        let mut permitted_ops: Vec<String> = Vec::new();
+        let mut contact_info: Option<String> = None;
 
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--key"            => { i += 1; key_path     = Some(PathBuf::from(arg(args, i, "--key")?)); }
-                "--display-name"   => { i += 1; display_name = Some(arg(args, i, "--display-name")?.to_owned()); }
-                "--out"            => { i += 1; out_path     = Some(PathBuf::from(arg(args, i, "--out")?)); }
-                "--validity-days"  => { i += 1; validity_days = parse_u32("validity-days", arg(args, i, "--validity-days")?)?; }
-                "--warn-days"      => { i += 1; warn_days     = parse_u32("warn-days", arg(args, i, "--warn-days")?)?; }
-                "--grace-days"     => { i += 1; grace_days    = parse_u32("grace-days", arg(args, i, "--grace-days")?)?; }
-                "--not-before"     => { i += 1; not_before    = Some(parse_i64("not-before", arg(args, i, "--not-before")?)?); }
-                "--ops"            => { i += 1; permitted_ops = arg(args, i, "--ops")?.split(',').filter(|s| !s.is_empty()).map(str::to_owned).collect(); }
-                "--contact"        => { i += 1; contact_info  = Some(arg(args, i, "--contact")?.to_owned()); }
-                other              => return Err(CliError::Usage(format!("unknown cert mint flag: {other:?}"))),
+                "--key" => {
+                    i += 1;
+                    key_path = Some(PathBuf::from(arg(args, i, "--key")?));
+                }
+                "--display-name" => {
+                    i += 1;
+                    display_name = Some(arg(args, i, "--display-name")?.to_owned());
+                }
+                "--out" => {
+                    i += 1;
+                    out_path = Some(PathBuf::from(arg(args, i, "--out")?));
+                }
+                "--validity-days" => {
+                    i += 1;
+                    validity_days = parse_u32("validity-days", arg(args, i, "--validity-days")?)?;
+                }
+                "--warn-days" => {
+                    i += 1;
+                    warn_days = parse_u32("warn-days", arg(args, i, "--warn-days")?)?;
+                }
+                "--grace-days" => {
+                    i += 1;
+                    grace_days = parse_u32("grace-days", arg(args, i, "--grace-days")?)?;
+                }
+                "--not-before" => {
+                    i += 1;
+                    not_before = Some(parse_i64("not-before", arg(args, i, "--not-before")?)?);
+                }
+                "--ops" => {
+                    i += 1;
+                    permitted_ops = arg(args, i, "--ops")?
+                        .split(',')
+                        .filter(|s| !s.is_empty())
+                        .map(str::to_owned)
+                        .collect();
+                }
+                "--contact" => {
+                    i += 1;
+                    contact_info = Some(arg(args, i, "--contact")?.to_owned());
+                }
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert mint flag: {other:?}"
+                    )))
+                }
             }
             i += 1;
         }
 
         let key_path = key_path
             .or_else(|| flags.operator_key_path.clone())
-            .ok_or_else(|| CliError::Usage("cert mint requires --key <path> or --operator-key global flag".to_owned()))?;
-        let display_name = display_name
-            .ok_or_else(|| CliError::Usage("cert mint requires --display-name <name>".to_owned()))?;
+            .ok_or_else(|| {
+                CliError::Usage(
+                    "cert mint requires --key <path> or --operator-key global flag".to_owned(),
+                )
+            })?;
+        let display_name = display_name.ok_or_else(|| {
+            CliError::Usage("cert mint requires --display-name <name>".to_owned())
+        })?;
         let out_path = out_path
             .ok_or_else(|| CliError::Usage("cert mint requires --out <path>".to_owned()))?;
 
         let signing_key = crate::signing::load_operator_key(&key_path)?;
-        let pubkey_hex  = pubkey_hex_of(&signing_key);
+        let pubkey_hex = pubkey_hex_of(&signing_key);
 
         // ── Build the cert per kind ──────────────────────────────────
         let cert = match kind {
@@ -191,13 +269,13 @@ mod mint {
                     kind: CertKind::Standard,
                     display_name,
                     pubkey_hex,
-                    not_before:              nb,
-                    not_after:               na,
+                    not_before: nb,
+                    not_after: na,
                     warn_before_expiry_days: warn_days,
-                    grace_period_days:       grace_days,
+                    grace_period_days: grace_days,
                     permitted_ops,
                     contact_info,
-                    self_sig_hex:            String::new(),
+                    self_sig_hex: String::new(),
                 };
                 c.self_sig_hex = sign_cert(&c, &signing_key);
                 c
@@ -209,7 +287,9 @@ mod mint {
                 // EmergencyHasWrongPermissions / EmergencyHasValidityWindow
                 // checks at policy load). We surface a hint if the operator
                 // tried to set them rather than silently dropping.
-                if !permitted_ops.is_empty() && permitted_ops.as_slice() != ["RotateEpoch".to_owned()].as_slice() {
+                if !permitted_ops.is_empty()
+                    && permitted_ops.as_slice() != ["RotateEpoch".to_owned()].as_slice()
+                {
                     return Err(CliError::Usage(format!(
                         "cert mint-emergency rejects --ops other than 'RotateEpoch'; \
                          the kernel structurally pins emergency certs to ['RotateEpoch']. \
@@ -225,13 +305,13 @@ mod mint {
                     kind: CertKind::EmergencyRecovery,
                     display_name,
                     pubkey_hex,
-                    not_before:              0,
-                    not_after:               0,
+                    not_before: 0,
+                    not_after: 0,
                     warn_before_expiry_days: 0,
-                    grace_period_days:       0,
-                    permitted_ops:           vec!["RotateEpoch".to_owned()],
+                    grace_period_days: 0,
+                    permitted_ops: vec!["RotateEpoch".to_owned()],
                     contact_info,
-                    self_sig_hex:            String::new(),
+                    self_sig_hex: String::new(),
                 };
                 c.self_sig_hex = sign_cert(&c, &signing_key);
                 c
@@ -255,7 +335,11 @@ mod mint {
 
         write_cert_toml(&out_path, &cert)?;
         let fp = fingerprint_of(&cert.pubkey_hex)?;
-        println!("✓ Minted {} cert → {}", cert.kind.as_str(), out_path.display());
+        println!(
+            "✓ Minted {} cert → {}",
+            cert.kind.as_str(),
+            out_path.display()
+        );
         println!("  pubkey_fingerprint  {fp}");
         if cert.kind == CertKind::Standard {
             println!("  not_before          {}", cert.not_before);
@@ -284,15 +368,22 @@ mod show {
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--json" => { json = true; }
+                "--json" => {
+                    json = true;
+                }
                 a if !a.starts_with('-') && path.is_none() => {
                     path = Some(PathBuf::from(a));
                 }
-                other => return Err(CliError::Usage(format!("unknown cert show flag: {other:?}"))),
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert show flag: {other:?}"
+                    )))
+                }
             }
             i += 1;
         }
-        let path = path.ok_or_else(|| CliError::Usage("cert show requires <cert.toml>".to_owned()))?;
+        let path =
+            path.ok_or_else(|| CliError::Usage("cert show requires <cert.toml>".to_owned()))?;
         let cert = read_cert_toml(&path)?;
         let fp = fingerprint_of(&cert.pubkey_hex)?;
         if json {
@@ -326,17 +417,30 @@ mod verify {
 
     pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         let mut path: Option<PathBuf> = None;
-        let mut at_time: Option<i64>  = None;
+        let mut at_time: Option<i64> = None;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--at-time" => { i += 1; at_time = Some(parse_i64("at-time", args.get(i).map(|s| s.as_str()).unwrap_or(""))?); }
-                a if !a.starts_with('-') && path.is_none() => { path = Some(PathBuf::from(a)); }
-                other => return Err(CliError::Usage(format!("unknown cert verify flag: {other:?}"))),
+                "--at-time" => {
+                    i += 1;
+                    at_time = Some(parse_i64(
+                        "at-time",
+                        args.get(i).map(|s| s.as_str()).unwrap_or(""),
+                    )?);
+                }
+                a if !a.starts_with('-') && path.is_none() => {
+                    path = Some(PathBuf::from(a));
+                }
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert verify flag: {other:?}"
+                    )))
+                }
             }
             i += 1;
         }
-        let path = path.ok_or_else(|| CliError::Usage("cert verify requires <cert.toml>".to_owned()))?;
+        let path =
+            path.ok_or_else(|| CliError::Usage("cert verify requires <cert.toml>".to_owned()))?;
         let cert = read_cert_toml(&path)?;
         let fp = fingerprint_of(&cert.pubkey_hex)?;
 
@@ -387,8 +491,14 @@ mod list {
         let mut json = false;
         for a in args {
             match a.as_str() {
-                "--json" => { json = true; }
-                other   => return Err(CliError::Usage(format!("unknown cert list flag: {other:?}"))),
+                "--json" => {
+                    json = true;
+                }
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert list flag: {other:?}"
+                    )))
+                }
             }
         }
         // `flags.data_dir` is non-optional in the global parser — `main.rs`
@@ -401,22 +511,25 @@ mod list {
 
         let now = now_unix_secs();
         if json {
-            let arr: Vec<_> = rows.iter().map(|r| {
-                let cert = r.clone().into_operator_cert();
-                let status = cert_status(&cert, now);
-                serde_json::json!({
-                    "pubkey_fingerprint": r.pubkey_fingerprint,
-                    "epoch_id":           r.epoch_id,
-                    "kind":               r.kind.as_str(),
-                    "display_name":       r.display_name,
-                    "not_before":         r.not_before,
-                    "not_after":          r.not_after,
-                    "permitted_ops":      r.permitted_ops,
-                    "force_misconfig_bypass": r.force_misconfig_bypass,
-                    "installed_at":       r.installed_at,
-                    "status":             status.tag(),
+            let arr: Vec<_> = rows
+                .iter()
+                .map(|r| {
+                    let cert = r.clone().into_operator_cert();
+                    let status = cert_status(&cert, now);
+                    serde_json::json!({
+                        "pubkey_fingerprint": r.pubkey_fingerprint,
+                        "epoch_id":           r.epoch_id,
+                        "kind":               r.kind.as_str(),
+                        "display_name":       r.display_name,
+                        "not_before":         r.not_before,
+                        "not_after":          r.not_after,
+                        "permitted_ops":      r.permitted_ops,
+                        "force_misconfig_bypass": r.force_misconfig_bypass,
+                        "installed_at":       r.installed_at,
+                        "status":             status.tag(),
+                    })
                 })
-            }).collect();
+                .collect();
             println!("{}", serde_json::to_string_pretty(&arr).unwrap());
             return Ok(());
         }
@@ -435,12 +548,15 @@ mod list {
             let status = cert_status(&cert, now);
             println!(
                 "{:<32}  {:<8}  {:<18}  {:<24}  {:<10}",
-                r.pubkey_fingerprint, r.epoch_id, r.kind.as_str(), r.display_name, status.tag(),
+                r.pubkey_fingerprint,
+                r.epoch_id,
+                r.kind.as_str(),
+                r.display_name,
+                status.tag(),
             );
         }
         Ok(())
     }
-
 }
 
 // ---------------------------------------------------------------------------
@@ -487,16 +603,21 @@ mod install {
     use super::*;
 
     pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-        let mut cert_path:    Option<PathBuf> = None;
+        let mut cert_path: Option<PathBuf> = None;
         let mut new_cert_path: Option<PathBuf> = None;
-        let mut replace_for:  Option<String>  = None;
-        let mut policy_path:  Option<PathBuf> = None;
+        let mut replace_for: Option<String> = None;
+        let mut policy_path: Option<PathBuf> = None;
         let mut force_misconfig = false;
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--policy" => { i += 1; policy_path = Some(PathBuf::from(arg(args, i, "--policy")?)); }
-                "--force-misconfig" => { force_misconfig = true; }
+                "--policy" => {
+                    i += 1;
+                    policy_path = Some(PathBuf::from(arg(args, i, "--policy")?));
+                }
+                "--force-misconfig" => {
+                    force_misconfig = true;
+                }
                 "--replace-for" => {
                     i += 1;
                     replace_for = Some(arg(args, i, "--replace-for")?.to_owned());
@@ -508,12 +629,17 @@ mod install {
                 a if !a.starts_with('-') && cert_path.is_none() => {
                     cert_path = Some(PathBuf::from(a));
                 }
-                other => return Err(CliError::Usage(format!("unknown cert install flag: {other:?}"))),
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert install flag: {other:?}"
+                    )))
+                }
             }
             i += 1;
         }
-        let policy_path = policy_path
-            .ok_or_else(|| CliError::Usage("cert install requires --policy <policy.toml>".to_owned()))?;
+        let policy_path = policy_path.ok_or_else(|| {
+            CliError::Usage("cert install requires --policy <policy.toml>".to_owned())
+        })?;
 
         // Mode resolution. The two primitives are deliberately
         // surfaced as distinct flag shapes (rather than overloading
@@ -531,13 +657,15 @@ mod install {
             (None, None, Some(_)) => {
                 return Err(CliError::Usage(
                     "cert install --new-cert <path> requires --replace-for <fp> \
-                     (use the positional `cert install <cert.toml>` form for first install)".to_owned(),
+                     (use the positional `cert install <cert.toml>` form for first install)"
+                        .to_owned(),
                 ));
             }
             (Some(_), Some(_), _) | (Some(_), _, Some(_)) => {
                 return Err(CliError::Usage(
                     "cert install: positional <cert.toml> form is mutually exclusive with \
-                     --replace-for / --new-cert (rotation form)".to_owned(),
+                     --replace-for / --new-cert (rotation form)"
+                        .to_owned(),
                 ));
             }
             (None, None, None) => {
@@ -554,10 +682,18 @@ mod install {
         // Re-verify before installing so a tampered/expired cert never
         // makes it into a policy artifact.
         let violations = validate_cert_structurally(&cert);
-        verify_cert_self_signature(&cert)
-            .map_err(|e| CliError::Key(format!("cert {} failed self-sig check: {e}", cert_path.display())))?;
+        verify_cert_self_signature(&cert).map_err(|e| {
+            CliError::Key(format!(
+                "cert {} failed self-sig check: {e}",
+                cert_path.display()
+            ))
+        })?;
         if !violations.is_empty() && !force_misconfig {
-            let joined = violations.iter().map(|e| format!("  - {e}")).collect::<Vec<_>>().join("\n");
+            let joined = violations
+                .iter()
+                .map(|e| format!("  - {e}"))
+                .collect::<Vec<_>>()
+                .join("\n");
             return Err(CliError::Usage(format!(
                 "cert {} has structural violations:\n{joined}\n\
                  Re-run with --force-misconfig to set force_misconfig_bypass = true on the entry \
@@ -570,17 +706,20 @@ mod install {
             path: policy_path.display().to_string(),
             source: e,
         })?;
-        let mut doc = policy_bytes.parse::<toml::Value>()
+        let mut doc = policy_bytes
+            .parse::<toml::Value>()
             .map_err(|e| CliError::Key(format!("parse policy {}: {e}", policy_path.display())))?;
 
         let entries = doc
             .get_mut("operators")
             .and_then(|o| o.get_mut("entries"))
             .and_then(|e| e.as_array_mut())
-            .ok_or_else(|| CliError::Usage(format!(
-                "policy {} has no [[operators.entries]] block; run `raxis genesis` first",
-                policy_path.display()
-            )))?;
+            .ok_or_else(|| {
+                CliError::Usage(format!(
+                    "policy {} has no [[operators.entries]] block; run `raxis genesis` first",
+                    policy_path.display()
+                ))
+            })?;
 
         // Match strategy depends on mode. In rotation mode we look up
         // by the old fingerprint and validate pubkey continuity; in
@@ -588,46 +727,52 @@ mod install {
         // the source of truth there).
         let mut matched = false;
         for entry in entries.iter_mut() {
-            let entry_pk = entry.get("pubkey_hex")
+            let entry_pk = entry
+                .get("pubkey_hex")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
-            let entry_fp = entry.get("pubkey_fingerprint")
+            let entry_fp = entry
+                .get("pubkey_fingerprint")
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_owned();
 
             let is_match = match &replace_for {
                 Some(fp) => fp.eq_ignore_ascii_case(&entry_fp),
-                None     => entry_pk.eq_ignore_ascii_case(&cert.pubkey_hex),
+                None => entry_pk.eq_ignore_ascii_case(&cert.pubkey_hex),
             };
-            if !is_match { continue; }
+            if !is_match {
+                continue;
+            }
 
             // INV-CERT-04: rotation MUST NOT change the underlying
             // pubkey. The new cert's `pubkey_hex` MUST equal the
             // existing entry's `pubkey_hex`. (For first-install this
             // is implied by the matching strategy.)
-            if replace_for.is_some()
-                && !cert.pubkey_hex.eq_ignore_ascii_case(&entry_pk)
-            {
+            if replace_for.is_some() && !cert.pubkey_hex.eq_ignore_ascii_case(&entry_pk) {
                 return Err(CliError::Usage(format!(
                     "rotation INV-CERT-04 violation: --new-cert {} carries pubkey {} but \
                      [[operators.entries]] for fingerprint {entry_fp} has pubkey {entry_pk}. \
                      `cert install --replace-for` only refreshes the cert; to rotate the \
                      underlying operator key, use `raxis genesis --rotate operator` (which \
                      emits a new fingerprint and is a separate, audited operation).",
-                    cert_path.display(), cert.pubkey_hex,
+                    cert_path.display(),
+                    cert.pubkey_hex,
                 )));
             }
 
-            let table = entry.as_table_mut().ok_or_else(|| CliError::Key(
-                "[[operators.entries]] entry is not a TOML table".to_owned(),
-            ))?;
+            let table = entry.as_table_mut().ok_or_else(|| {
+                CliError::Key("[[operators.entries]] entry is not a TOML table".to_owned())
+            })?;
             let cert_value = toml::Value::try_from(&cert)
                 .map_err(|e| CliError::Key(format!("serialise cert: {e}")))?;
             table.insert("cert".to_owned(), cert_value);
             if force_misconfig {
-                table.insert("force_misconfig_bypass".to_owned(), toml::Value::Boolean(true));
+                table.insert(
+                    "force_misconfig_bypass".to_owned(),
+                    toml::Value::Boolean(true),
+                );
             } else {
                 // A rotation MUST drop a stale `force_misconfig_bypass = true`
                 // from the prior cert: the new cert has been re-validated
@@ -651,7 +796,8 @@ mod install {
                     "no [[operators.entries]] in {} matches cert pubkey_hex {}; \
                      add the operator entry first via `raxis genesis --operator-cert <path>` \
                      or rotate certs via `raxis cert install --replace-for <fp> --new-cert <path>`",
-                    policy_path.display(), cert.pubkey_hex
+                    policy_path.display(),
+                    cert.pubkey_hex
                 ),
             }));
         }
@@ -668,13 +814,18 @@ mod install {
             println!("✓ Rotated cert in {}", policy_path.display());
             println!("  operator: {fp}  ({})", cert.display_name);
             println!("  previous fingerprint: {prev_fp}");
-            println!("  the kernel will emit OperatorCertInstalled.previous_fingerprint = \"{prev_fp}\"");
+            println!(
+                "  the kernel will emit OperatorCertInstalled.previous_fingerprint = \"{prev_fp}\""
+            );
             println!("  on the next epoch advance (audit chain captures the rotation).");
         } else {
             println!("✓ Installed cert into {}", policy_path.display());
             println!("  operator: {fp}  ({})", cert.display_name);
         }
-        println!("  reminder: re-sign the policy → `raxis policy sign {} --key <op_key>`", policy_path.display());
+        println!(
+            "  reminder: re-sign the policy → `raxis policy sign {} --key <op_key>`",
+            policy_path.display()
+        );
         if force_misconfig {
             println!("  reminder: --force-misconfig set → `raxis policy sign --force-misconfig` is required");
         }
@@ -696,8 +847,12 @@ mod install {
 mod tests {
     use super::*;
 
-    fn fixture_seed() -> [u8; 32] { [0x77u8; 32] }
-    fn fixture_key() -> SigningKey { SigningKey::from_bytes(&fixture_seed()) }
+    fn fixture_seed() -> [u8; 32] {
+        [0x77u8; 32]
+    }
+    fn fixture_key() -> SigningKey {
+        SigningKey::from_bytes(&fixture_seed())
+    }
 
     fn write_seed_key_file(dir: &Path) -> PathBuf {
         // `load_operator_key` accepts a 64-char hex seed as a test
@@ -714,8 +869,8 @@ mod tests {
 
     fn empty_flags() -> GlobalFlags {
         GlobalFlags {
-            data_dir:          PathBuf::from("/tmp/raxis-cert-tests-unused"),
-            socket_path:       None,
+            data_dir: PathBuf::from("/tmp/raxis-cert-tests-unused"),
+            socket_path: None,
             operator_key_path: None,
         }
     }
@@ -728,24 +883,33 @@ mod tests {
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("chika.cert.toml");
         let args = make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
-            "--ops", "CreateInitiative,ApprovePlan",
-            "--validity-days", "30",
-            "--warn-days", "5",
-            "--grace-days", "2",
+            "--key",
+            key.to_str().unwrap(),
+            "--display-name",
+            "Chika",
+            "--out",
+            out.to_str().unwrap(),
+            "--ops",
+            "CreateInitiative,ApprovePlan",
+            "--validity-days",
+            "30",
+            "--warn-days",
+            "5",
+            "--grace-days",
+            "2",
         ]);
         run_mint(&empty_flags(), &args).unwrap();
         let cert = read_cert_toml(&out).unwrap();
 
-        assert_eq!(cert.kind,         CertKind::Standard);
+        assert_eq!(cert.kind, CertKind::Standard);
         assert_eq!(cert.display_name, "Chika");
-        assert_eq!(cert.pubkey_hex,   pubkey_hex_of(&fixture_key()));
-        assert_eq!(cert.permitted_ops,
-            vec!["CreateInitiative".to_owned(), "ApprovePlan".to_owned()]);
+        assert_eq!(cert.pubkey_hex, pubkey_hex_of(&fixture_key()));
+        assert_eq!(
+            cert.permitted_ops,
+            vec!["CreateInitiative".to_owned(), "ApprovePlan".to_owned()]
+        );
         assert_eq!(cert.warn_before_expiry_days, 5);
-        assert_eq!(cert.grace_period_days,        2);
+        assert_eq!(cert.grace_period_days, 2);
         assert_eq!(cert.not_after - cert.not_before, 30 * SECS_PER_DAY);
 
         verify_cert_self_signature(&cert).unwrap();
@@ -760,9 +924,12 @@ mod tests {
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("emerg.cert.toml");
         let args = make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "break-glass",
-            "--out", out.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--display-name",
+            "break-glass",
+            "--out",
+            out.to_str().unwrap(),
         ]);
         run_mint_emergency(&empty_flags(), &args).unwrap();
         let cert = read_cert_toml(&out).unwrap();
@@ -770,9 +937,9 @@ mod tests {
         assert_eq!(cert.kind, CertKind::EmergencyRecovery);
         assert_eq!(cert.permitted_ops, vec!["RotateEpoch".to_owned()]);
         assert_eq!(cert.not_before, 0);
-        assert_eq!(cert.not_after,  0);
+        assert_eq!(cert.not_after, 0);
         assert_eq!(cert.warn_before_expiry_days, 0);
-        assert_eq!(cert.grace_period_days,        0);
+        assert_eq!(cert.grace_period_days, 0);
         verify_cert_self_signature(&cert).unwrap();
         assert!(validate_cert_structurally(&cert).is_empty());
     }
@@ -783,14 +950,20 @@ mod tests {
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("emerg.cert.toml");
         let args = make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "break-glass",
-            "--out", out.to_str().unwrap(),
-            "--ops", "RotateEpoch,CreateInitiative",
+            "--key",
+            key.to_str().unwrap(),
+            "--display-name",
+            "break-glass",
+            "--out",
+            out.to_str().unwrap(),
+            "--ops",
+            "RotateEpoch,CreateInitiative",
         ]);
         let err = run_mint_emergency(&empty_flags(), &args).unwrap_err();
-        assert!(matches!(err, CliError::Usage(_)),
-            "expected Usage error for extra emergency ops; got {err:?}");
+        assert!(
+            matches!(err, CliError::Usage(_)),
+            "expected Usage error for extra emergency ops; got {err:?}"
+        );
     }
 
     #[test]
@@ -799,10 +972,14 @@ mod tests {
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("emerg.cert.toml");
         let args = make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "break-glass",
-            "--out", out.to_str().unwrap(),
-            "--not-before", "1700000000",
+            "--key",
+            key.to_str().unwrap(),
+            "--display-name",
+            "break-glass",
+            "--out",
+            out.to_str().unwrap(),
+            "--not-before",
+            "1700000000",
         ]);
         let err = run_mint_emergency(&empty_flags(), &args).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
@@ -816,9 +993,12 @@ mod tests {
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("chika.cert.toml");
         let args = make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
+            "--key",
+            key.to_str().unwrap(),
+            "--display-name",
+            "Chika",
+            "--out",
+            out.to_str().unwrap(),
         ]);
         let err = run_mint(&empty_flags(), &args).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
@@ -831,13 +1011,22 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("chika.cert.toml");
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
-            "--ops", "AbortTask",
-            "--validity-days", "365",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                out.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+                "--validity-days",
+                "365",
+            ]),
+        )
+        .unwrap();
 
         run_verify(&empty_flags(), &make_args(&[out.to_str().unwrap()])).unwrap();
     }
@@ -847,12 +1036,20 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("chika.cert.toml");
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                out.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
         // Flip a hex char in the self_sig and rewrite — verification
         // MUST fail.
         let mut cert = read_cert_toml(&out).unwrap();
@@ -872,16 +1069,28 @@ mod tests {
         let out = dir.path().join("chika.cert.toml");
         // Mint a cert valid for 30 days from a fixed point in the past
         // so we have a deterministic not_after to step beyond.
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
-            "--ops", "AbortTask",
-            "--validity-days", "30",
-            "--warn-days", "5",
-            "--grace-days", "2",
-            "--not-before", "1700000000",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                out.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+                "--validity-days",
+                "30",
+                "--warn-days",
+                "5",
+                "--grace-days",
+                "2",
+                "--not-before",
+                "1700000000",
+            ]),
+        )
+        .unwrap();
 
         // 1 year past not_after → Expired. `verify` exits non-zero
         // ONLY on structural / sig errors; status alone is
@@ -889,10 +1098,18 @@ mod tests {
         // pipelines that exercise expired-cert paths would always
         // be red).
         let way_after_grace = 1700000000 + 30 * SECS_PER_DAY + 365 * SECS_PER_DAY;
-        let res = run_verify(&empty_flags(),
-            &make_args(&[out.to_str().unwrap(), "--at-time", &way_after_grace.to_string()]));
-        assert!(res.is_ok(),
-            "verify must succeed even on expired certs (status is informational); got {res:?}");
+        let res = run_verify(
+            &empty_flags(),
+            &make_args(&[
+                out.to_str().unwrap(),
+                "--at-time",
+                &way_after_grace.to_string(),
+            ]),
+        );
+        assert!(
+            res.is_ok(),
+            "verify must succeed even on expired certs (status is informational); got {res:?}"
+        );
     }
 
     // ── install ────────────────────────────────────────────────────
@@ -905,12 +1122,20 @@ mod tests {
         let policy_path = dir.path().join("policy.toml");
 
         // Mint a cert.
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", cert_path.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                cert_path.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
         let cert = read_cert_toml(&cert_path).unwrap();
         let fp = fingerprint_of(&cert.pubkey_hex).unwrap();
 
@@ -929,14 +1154,21 @@ permitted_ops      = ["AbortTask"]
         );
         fs::write(&policy_path, policy_toml).unwrap();
 
-        run_install(&empty_flags(), &make_args(&[
-            cert_path.to_str().unwrap(),
-            "--policy", policy_path.to_str().unwrap(),
-        ])).unwrap();
+        run_install(
+            &empty_flags(),
+            &make_args(&[
+                cert_path.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
 
         let after = fs::read_to_string(&policy_path).unwrap();
-        assert!(after.contains("[operators.entries.cert]"),
-            "expected [operators.entries.cert] sub-table; got:\n{after}");
+        assert!(
+            after.contains("[operators.entries.cert]"),
+            "expected [operators.entries.cert] sub-table; got:\n{after}"
+        );
         assert!(after.contains("kind = \"Standard\""));
     }
 
@@ -947,12 +1179,20 @@ permitted_ops      = ["AbortTask"]
         let cert_path = dir.path().join("chika.cert.toml");
         let policy_path = dir.path().join("policy.toml");
 
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", cert_path.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                cert_path.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
 
         // Policy with a totally different pubkey.
         let other_pubkey = "ff".repeat(32);
@@ -968,10 +1208,15 @@ permitted_ops      = ["AbortTask"]
         );
         fs::write(&policy_path, policy_toml).unwrap();
 
-        let err = run_install(&empty_flags(), &make_args(&[
-            cert_path.to_str().unwrap(),
-            "--policy", policy_path.to_str().unwrap(),
-        ])).unwrap_err();
+        let err = run_install(
+            &empty_flags(),
+            &make_args(&[
+                cert_path.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -984,25 +1229,42 @@ permitted_ops      = ["AbortTask"]
 
         let initial_cert = dir.path().join("chika-v1.cert.toml");
         let rotated_cert = dir.path().join("chika-v2.cert.toml");
-        let policy_path  = dir.path().join("policy.toml");
+        let policy_path = dir.path().join("policy.toml");
 
         // Mint two certs from the SAME key (rotation refreshes the
         // cert content but keeps the pubkey by INV-CERT-04).
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", initial_cert.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika (renewed)",
-            "--out", rotated_cert.to_str().unwrap(),
-            "--ops", "AbortTask",
-            "--ops", "ApprovePlan",
-        ])).unwrap();
-        let cert  = read_cert_toml(&initial_cert).unwrap();
-        let fp    = fingerprint_of(&cert.pubkey_hex).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                initial_cert.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika (renewed)",
+                "--out",
+                rotated_cert.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+                "--ops",
+                "ApprovePlan",
+            ]),
+        )
+        .unwrap();
+        let cert = read_cert_toml(&initial_cert).unwrap();
+        let fp = fingerprint_of(&cert.pubkey_hex).unwrap();
 
         // Stage a policy.toml with the initial cert installed.
         let policy_toml = format!(
@@ -1016,21 +1278,35 @@ permitted_ops      = ["AbortTask"]
             cert.pubkey_hex
         );
         fs::write(&policy_path, policy_toml).unwrap();
-        run_install(&empty_flags(), &make_args(&[
-            initial_cert.to_str().unwrap(),
-            "--policy", policy_path.to_str().unwrap(),
-        ])).unwrap();
+        run_install(
+            &empty_flags(),
+            &make_args(&[
+                initial_cert.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
 
         // Rotation: by fingerprint + new cert path.
-        run_install(&empty_flags(), &make_args(&[
-            "--replace-for", &fp,
-            "--new-cert",    rotated_cert.to_str().unwrap(),
-            "--policy",      policy_path.to_str().unwrap(),
-        ])).unwrap();
+        run_install(
+            &empty_flags(),
+            &make_args(&[
+                "--replace-for",
+                &fp,
+                "--new-cert",
+                rotated_cert.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
 
         let after = fs::read_to_string(&policy_path).unwrap();
-        assert!(after.contains("display_name = \"Chika (renewed)\""),
-            "expected rotated display_name in policy; got:\n{after}");
+        assert!(
+            after.contains("display_name = \"Chika (renewed)\""),
+            "expected rotated display_name in policy; got:\n{after}"
+        );
     }
 
     #[test]
@@ -1048,20 +1324,36 @@ permitted_ops      = ["AbortTask"]
         let cert_b = dir.path().join("b.cert.toml");
         let policy_path = dir.path().join("policy.toml");
 
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key_a.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", cert_a.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key_b.to_str().unwrap(),
-            "--display-name", "Jinanwa",
-            "--out", cert_b.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key_a.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                cert_a.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key_b.to_str().unwrap(),
+                "--display-name",
+                "Jinanwa",
+                "--out",
+                cert_b.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
         let parsed_a = read_cert_toml(&cert_a).unwrap();
-        let fp_a     = fingerprint_of(&parsed_a.pubkey_hex).unwrap();
+        let fp_a = fingerprint_of(&parsed_a.pubkey_hex).unwrap();
 
         let policy_toml = format!(
             r#"
@@ -1074,36 +1366,57 @@ permitted_ops      = ["AbortTask"]
             parsed_a.pubkey_hex
         );
         fs::write(&policy_path, policy_toml).unwrap();
-        run_install(&empty_flags(), &make_args(&[
-            cert_a.to_str().unwrap(),
-            "--policy", policy_path.to_str().unwrap(),
-        ])).unwrap();
+        run_install(
+            &empty_flags(),
+            &make_args(&[
+                cert_a.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap();
 
-        let err = run_install(&empty_flags(), &make_args(&[
-            "--replace-for", &fp_a,
-            "--new-cert",    cert_b.to_str().unwrap(),
-            "--policy",      policy_path.to_str().unwrap(),
-        ])).unwrap_err();
+        let err = run_install(
+            &empty_flags(),
+            &make_args(&[
+                "--replace-for",
+                &fp_a,
+                "--new-cert",
+                cert_b.to_str().unwrap(),
+                "--policy",
+                policy_path.to_str().unwrap(),
+            ]),
+        )
+        .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("INV-CERT-04"),
-            "expected INV-CERT-04 violation message, got: {msg}");
+        assert!(
+            msg.contains("INV-CERT-04"),
+            "expected INV-CERT-04 violation message, got: {msg}"
+        );
     }
 
     #[test]
     fn install_replace_for_requires_new_cert_flag() {
-        let err = run_install(&empty_flags(), &make_args(&[
-            "--replace-for", "deadbeef",
-            "--policy",      "/tmp/raxis-x.toml",
-        ])).unwrap_err();
+        let err = run_install(
+            &empty_flags(),
+            &make_args(&["--replace-for", "deadbeef", "--policy", "/tmp/raxis-x.toml"]),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("requires --new-cert"));
     }
 
     #[test]
     fn install_new_cert_requires_replace_for_flag() {
-        let err = run_install(&empty_flags(), &make_args(&[
-            "--new-cert", "/tmp/x.cert.toml",
-            "--policy",   "/tmp/raxis-x.toml",
-        ])).unwrap_err();
+        let err = run_install(
+            &empty_flags(),
+            &make_args(&[
+                "--new-cert",
+                "/tmp/x.cert.toml",
+                "--policy",
+                "/tmp/raxis-x.toml",
+            ]),
+        )
+        .unwrap_err();
         assert!(err.to_string().contains("requires --replace-for"));
     }
 
@@ -1114,15 +1427,27 @@ permitted_ops      = ["AbortTask"]
         let dir = tempfile::tempdir().unwrap();
         let key = write_seed_key_file(dir.path());
         let out = dir.path().join("chika.cert.toml");
-        run_mint(&empty_flags(), &make_args(&[
-            "--key", key.to_str().unwrap(),
-            "--display-name", "Chika",
-            "--out", out.to_str().unwrap(),
-            "--ops", "AbortTask",
-        ])).unwrap();
+        run_mint(
+            &empty_flags(),
+            &make_args(&[
+                "--key",
+                key.to_str().unwrap(),
+                "--display-name",
+                "Chika",
+                "--out",
+                out.to_str().unwrap(),
+                "--ops",
+                "AbortTask",
+            ]),
+        )
+        .unwrap();
 
         run_show(&empty_flags(), &make_args(&[out.to_str().unwrap()])).unwrap();
-        run_show(&empty_flags(), &make_args(&[out.to_str().unwrap(), "--json"])).unwrap();
+        run_show(
+            &empty_flags(),
+            &make_args(&[out.to_str().unwrap(), "--json"]),
+        )
+        .unwrap();
     }
 }
 
@@ -1166,27 +1491,44 @@ mod revoke {
     use raxis_types::operator_cert::{RevocationReason, RevocationRecord};
 
     fn arg<'a>(args: &'a [String], i: usize, flag: &str) -> Result<&'a str, CliError> {
-        args.get(i).map(|s| s.as_str()).ok_or_else(|| {
-            CliError::Usage(format!("flag {flag} expects an argument"))
-        })
+        args.get(i)
+            .map(|s| s.as_str())
+            .ok_or_else(|| CliError::Usage(format!("flag {flag} expects an argument")))
     }
 
     pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         let mut cert_path: Option<PathBuf> = None;
-        let mut reason:    Option<String>  = None;
-        let mut reference: Option<String>  = None;
-        let mut force      = false;
+        let mut reason: Option<String> = None;
+        let mut reference: Option<String> = None;
+        let mut force = false;
 
         let mut i = 0;
         while i < args.len() {
             match args[i].as_str() {
-                "--help" | "-h" => { print_help(); return Ok(()); }
-                "--cert" => { i += 1; cert_path = Some(PathBuf::from(arg(args, i, "--cert")?)); }
-                "--reason" => { i += 1; reason = Some(arg(args, i, "--reason")?.to_owned()); }
-                "--reference" => { i += 1; reference = Some(arg(args, i, "--reference")?.to_owned()); }
-                "--force" => { force = true; }
-                other if other.starts_with("--") =>
-                    return Err(CliError::Usage(format!("unknown cert revoke flag: {other:?}"))),
+                "--help" | "-h" => {
+                    print_help();
+                    return Ok(());
+                }
+                "--cert" => {
+                    i += 1;
+                    cert_path = Some(PathBuf::from(arg(args, i, "--cert")?));
+                }
+                "--reason" => {
+                    i += 1;
+                    reason = Some(arg(args, i, "--reason")?.to_owned());
+                }
+                "--reference" => {
+                    i += 1;
+                    reference = Some(arg(args, i, "--reference")?.to_owned());
+                }
+                "--force" => {
+                    force = true;
+                }
+                other if other.starts_with("--") => {
+                    return Err(CliError::Usage(format!(
+                        "unknown cert revoke flag: {other:?}"
+                    )))
+                }
                 other => {
                     if cert_path.is_some() {
                         return Err(CliError::Usage(format!(
@@ -1199,29 +1541,32 @@ mod revoke {
             i += 1;
         }
 
-        let cert_path = cert_path.or(None).ok_or_else(|| CliError::Usage(
-            "cert revoke requires a <cert path> positional or --cert <path>".into(),
-        ))?;
-        let reason_str = reason.ok_or_else(|| CliError::Usage(
-            "cert revoke requires --reason <rotation|compromise>".into(),
-        ))?;
-        let reference = reference.ok_or_else(|| CliError::Usage(
-            "cert revoke requires --reference <id> for forensic attribution".into(),
-        ))?;
+        let cert_path = cert_path.or(None).ok_or_else(|| {
+            CliError::Usage("cert revoke requires a <cert path> positional or --cert <path>".into())
+        })?;
+        let reason_str = reason.ok_or_else(|| {
+            CliError::Usage("cert revoke requires --reason <rotation|compromise>".into())
+        })?;
+        let reference = reference.ok_or_else(|| {
+            CliError::Usage("cert revoke requires --reference <id> for forensic attribution".into())
+        })?;
         if reference.contains('|') || reference.contains('\n') || reference.contains('\r') {
             return Err(CliError::Usage(
                 "cert revoke: --reference must not contain pipe, CR, or LF characters \
                  (the canonical signing input is pipe-delimited; embedding a pipe would \
-                 cause kernel-side verification to fail). Pick a short ASCII id.".into(),
+                 cause kernel-side verification to fail). Pick a short ASCII id."
+                    .into(),
             ));
         }
 
         let reason = match reason_str.as_str() {
-            "rotation"   => RevocationReason::Rotation,
+            "rotation" => RevocationReason::Rotation,
             "compromise" => RevocationReason::Compromise,
-            other => return Err(CliError::Usage(format!(
-                "cert revoke: --reason must be \"rotation\" or \"compromise\"; got {other:?}"
-            ))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "cert revoke: --reason must be \"rotation\" or \"compromise\"; got {other:?}"
+                )))
+            }
         };
 
         let cert = read_cert_toml(&cert_path)?;
@@ -1230,7 +1575,8 @@ mod revoke {
             return Err(CliError::Usage(format!(
                 "cert revoke: cert at {} is structurally invalid ({} violations); \
                  pass --force to revoke anyway: {viol:?}",
-                cert_path.display(), viol.len(),
+                cert_path.display(),
+                viol.len(),
             )));
         }
         if let Err(e) = verify_cert_self_signature(&cert) {
@@ -1253,29 +1599,26 @@ mod revoke {
         let revoked_by_pubkey_hex = pubkey_hex_of(&signing_key);
 
         let now = now_unix_secs();
-        let signature_hex = sign_revocation(
-            &cert.pubkey_hex,
-            reason,
-            now,
-            &reference,
-            &signing_key,
-        );
+        let signature_hex =
+            sign_revocation(&cert.pubkey_hex, reason, now, &reference, &signing_key);
 
         let record = RevocationRecord {
-            subject_pubkey_hex:        cert.pubkey_hex.clone(),
-            subject_fingerprint:       fingerprint_of(&cert.pubkey_hex)?,
+            subject_pubkey_hex: cert.pubkey_hex.clone(),
+            subject_fingerprint: fingerprint_of(&cert.pubkey_hex)?,
             reason,
-            revoked_at:                now,
-            reference:                 reference.clone(),
+            revoked_at: now,
+            reference: reference.clone(),
             revoked_by_pubkey_hex,
-            revoked_by_signature_hex:  signature_hex,
-            signing_input_version:     "raxis-cert-revocation/v1".into(),
+            revoked_by_signature_hex: signature_hex,
+            signing_input_version: "raxis-cert-revocation/v1".into(),
         };
 
         // Defensive: round-trip through verify before writing so a
         // bug in the signing path surfaces here, not at kernel boot.
         verify_revocation_signature(&record).map_err(|e| {
-            CliError::Key(format!("post-sign verification failed: {e} (this is a bug)"))
+            CliError::Key(format!(
+                "post-sign verification failed: {e} (this is a bug)"
+            ))
         })?;
 
         let dir = flags.data_dir().join("revocations");
@@ -1292,9 +1635,8 @@ mod revoke {
             )));
         }
 
-        let s = toml::to_string(&record).map_err(|e| CliError::Key(format!(
-            "revocation TOML serialise failed: {e}"
-        )))?;
+        let s = toml::to_string(&record)
+            .map_err(|e| CliError::Key(format!("revocation TOML serialise failed: {e}")))?;
         write_revocation_atomic(&out_path, s.as_bytes()).map_err(|e| CliError::Io {
             path: out_path.display().to_string(),
             source: e,
@@ -1322,11 +1664,18 @@ mod revoke {
             }),
         );
 
-        println!("Revoked: {} ({})", cert.display_name, fingerprint_of(&cert.pubkey_hex)?);
+        println!(
+            "Revoked: {} ({})",
+            cert.display_name,
+            fingerprint_of(&cert.pubkey_hex)?
+        );
         println!("  reason:                {}", reason.as_str());
         println!("  reference:             {reference}");
         println!("  revoked_at:            {now}");
-        println!("  revoked_by_fp:         {}", fingerprint_of(&record.revoked_by_pubkey_hex)?);
+        println!(
+            "  revoked_by_fp:         {}",
+            fingerprint_of(&record.revoked_by_pubkey_hex)?
+        );
         println!("  on-disk path:          {}", out_path.display());
         println!();
         println!("Restart the kernel for the revocation to take effect.");
@@ -1337,11 +1686,16 @@ mod revoke {
         let mut json = false;
         for a in args {
             match a.as_str() {
-                "--help" | "-h" => { print_list_help(); return Ok(()); }
+                "--help" | "-h" => {
+                    print_list_help();
+                    return Ok(());
+                }
                 "--json" => json = true,
-                other => return Err(CliError::Usage(format!(
-                    "cert list-revocations: unknown flag {other:?}"
-                ))),
+                other => {
+                    return Err(CliError::Usage(format!(
+                        "cert list-revocations: unknown flag {other:?}"
+                    )))
+                }
             }
         }
 
@@ -1354,14 +1708,18 @@ mod revoke {
                 println!("  expected layout: {}/<pubkey_hex>.toml", dir.display());
                 return Ok(());
             }
-            Err(e) => return Err(CliError::Io {
-                path: dir.display().to_string(),
-                source: e,
-            }),
+            Err(e) => {
+                return Err(CliError::Io {
+                    path: dir.display().to_string(),
+                    source: e,
+                })
+            }
         };
         for entry in rd.flatten() {
             let path = entry.path();
-            if path.extension().and_then(|s| s.to_str()) != Some("toml") { continue; }
+            if path.extension().and_then(|s| s.to_str()) != Some("toml") {
+                continue;
+            }
             let bytes = std::fs::read(&path).map_err(|e| CliError::Io {
                 path: path.display().to_string(),
                 source: e,
@@ -1369,27 +1727,30 @@ mod revoke {
             let text = String::from_utf8_lossy(&bytes);
             match toml::from_str::<RevocationRecord>(&text) {
                 Ok(rec) => rows.push(rec),
-                Err(e) => eprintln!(
-                    "warning: skipping {} (parse failed: {e})",
-                    path.display(),
-                ),
+                Err(e) => eprintln!("warning: skipping {} (parse failed: {e})", path.display(),),
             }
         }
         rows.sort_by(|a, b| b.revoked_at.cmp(&a.revoked_at));
 
         if json {
-            let arr: Vec<serde_json::Value> = rows.iter()
-                .map(|r| serde_json::json!({
-                    "subject_pubkey_hex":   r.subject_pubkey_hex,
-                    "subject_fingerprint":  r.subject_fingerprint,
-                    "reason":               r.reason.as_str(),
-                    "revoked_at":           r.revoked_at,
-                    "reference":            r.reference,
-                    "revoked_by_pubkey_hex": r.revoked_by_pubkey_hex,
-                }))
+            let arr: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "subject_pubkey_hex":   r.subject_pubkey_hex,
+                        "subject_fingerprint":  r.subject_fingerprint,
+                        "reason":               r.reason.as_str(),
+                        "revoked_at":           r.revoked_at,
+                        "reference":            r.reference,
+                        "revoked_by_pubkey_hex": r.revoked_by_pubkey_hex,
+                    })
+                })
                 .collect();
-            println!("{}", serde_json::to_string_pretty(&serde_json::Value::Array(arr))
-                .map_err(CliError::from)?);
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&serde_json::Value::Array(arr))
+                    .map_err(CliError::from)?
+            );
             return Ok(());
         }
 
@@ -1403,7 +1764,10 @@ mod revoke {
         // signature; we just mark the row.
         let mut sig_ok: HashMap<String, bool> = HashMap::new();
         for r in &rows {
-            sig_ok.insert(r.subject_pubkey_hex.clone(), verify_revocation_signature(r).is_ok());
+            sig_ok.insert(
+                r.subject_pubkey_hex.clone(),
+                verify_revocation_signature(r).is_ok(),
+            );
         }
 
         println!(
@@ -1428,24 +1792,28 @@ mod revoke {
         data_dir: &Path,
         record: &serde_json::Value,
     ) -> std::io::Result<()> {
-        let dir  = data_dir.join("audit");
+        let dir = data_dir.join("audit");
         std::fs::create_dir_all(&dir)?;
         let path = dir.join("cert-cli.jsonl");
-        let mut line = serde_json::to_string(record)
-            .unwrap_or_else(|_| "{}".into());
+        let mut line = serde_json::to_string(record).unwrap_or_else(|_| "{}".into());
         line.push('\n');
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt;
             let mut f = std::fs::OpenOptions::new()
-                .append(true).create(true).mode(0o600).open(&path)?;
+                .append(true)
+                .create(true)
+                .mode(0o600)
+                .open(&path)?;
             f.write_all(line.as_bytes())?;
             f.sync_all()?;
         }
         #[cfg(not(unix))]
         {
             let mut f = std::fs::OpenOptions::new()
-                .append(true).create(true).open(&path)?;
+                .append(true)
+                .create(true)
+                .open(&path)?;
             f.write_all(line.as_bytes())?;
             f.sync_all()?;
         }
@@ -1453,9 +1821,9 @@ mod revoke {
     }
 
     fn write_revocation_atomic(path: &Path, body: &[u8]) -> std::io::Result<()> {
-        let parent = path.parent().ok_or_else(|| {
-            std::io::Error::other("revocation path has no parent")
-        })?;
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("revocation path has no parent"))?;
         let tmp = parent.join(format!(
             "{}.tmp.{}.{}",
             path.file_name().and_then(|s| s.to_str()).unwrap_or("rev"),
@@ -1469,13 +1837,19 @@ mod revoke {
         {
             use std::os::unix::fs::OpenOptionsExt;
             let mut f = std::fs::OpenOptions::new()
-                .write(true).create_new(true).mode(0o600).open(&tmp)?;
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(&tmp)?;
             f.write_all(body)?;
             f.sync_all()?;
         }
         #[cfg(not(unix))]
         {
-            let mut f = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+            let mut f = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&tmp)?;
             f.write_all(body)?;
             f.sync_all()?;
         }
@@ -1492,7 +1866,11 @@ mod revoke {
     }
 
     fn truncate(s: &str, n: usize) -> &str {
-        if s.len() <= n { s } else { &s[..n] }
+        if s.len() <= n {
+            s
+        } else {
+            &s[..n]
+        }
     }
 
     fn print_help() {
@@ -1583,16 +1961,16 @@ supplied reference, and a signature-verification flag (OK/BAD).
 
             // Mint a cert by hand so we don't take a dep on `mint::run` here.
             let mut cert = OperatorCert {
-                kind:                    raxis_types::operator_cert::CertKind::Standard,
-                display_name:            "Chika".into(),
-                pubkey_hex:               hex::encode(key.verifying_key().to_bytes()),
-                not_before:              0,
-                not_after:               i64::MAX / 2,
+                kind: raxis_types::operator_cert::CertKind::Standard,
+                display_name: "Chika".into(),
+                pubkey_hex: hex::encode(key.verifying_key().to_bytes()),
+                not_before: 0,
+                not_after: i64::MAX / 2,
                 warn_before_expiry_days: 30,
-                grace_period_days:       7,
-                permitted_ops:           vec!["AbortTask".into()],
-                contact_info:            None,
-                self_sig_hex:            String::new(),
+                grace_period_days: 7,
+                permitted_ops: vec!["AbortTask".into()],
+                contact_info: None,
+                self_sig_hex: String::new(),
             };
             cert.self_sig_hex = raxis_crypto::cert::sign_cert(&cert, &key);
             let cert_path = tmp.path().join("op.cert.toml");
@@ -1601,12 +1979,17 @@ supplied reference, and a signature-verification flag (OK/BAD).
             let flags = empty_flags(tmp.path().to_path_buf(), key_path);
             let args = vec![
                 cert_path.to_string_lossy().to_string(),
-                "--reason".into(), "rotation".into(),
-                "--reference".into(), "ticket-123".into(),
+                "--reason".into(),
+                "rotation".into(),
+                "--reference".into(),
+                "ticket-123".into(),
             ];
             super::run(&flags, &args).expect("revoke");
 
-            let out = tmp.path().join("revocations").join(format!("{}.toml", cert.pubkey_hex));
+            let out = tmp
+                .path()
+                .join("revocations")
+                .join(format!("{}.toml", cert.pubkey_hex));
             assert!(out.exists());
             let body = std::fs::read_to_string(&out).unwrap();
             let rec: RevocationRecord = toml::from_str(&body).unwrap();
@@ -1625,8 +2008,10 @@ supplied reference, and a signature-verification flag (OK/BAD).
             let flags = empty_flags(tmp.path().to_path_buf(), key_path);
             let args = vec![
                 cert_path.to_string_lossy().to_string(),
-                "--reason".into(), "rotation".into(),
-                "--reference".into(), "bad|ref".into(),
+                "--reason".into(),
+                "rotation".into(),
+                "--reference".into(),
+                "bad|ref".into(),
             ];
             let err = super::run(&flags, &args).unwrap_err();
             let msg = format!("{err:?}");
@@ -1643,12 +2028,17 @@ supplied reference, and a signature-verification flag (OK/BAD).
             let flags = empty_flags(tmp.path().to_path_buf(), key_path);
             let args = vec![
                 cert_path.to_string_lossy().to_string(),
-                "--reason".into(), "expired".into(),
-                "--reference".into(), "x".into(),
+                "--reason".into(),
+                "expired".into(),
+                "--reference".into(),
+                "x".into(),
             ];
             let err = super::run(&flags, &args).unwrap_err();
             let msg = format!("{err:?}");
-            assert!(msg.contains("rotation") && msg.contains("compromise"), "{msg}");
+            assert!(
+                msg.contains("rotation") && msg.contains("compromise"),
+                "{msg}"
+            );
         }
     }
 }

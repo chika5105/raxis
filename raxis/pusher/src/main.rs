@@ -144,7 +144,9 @@ async fn main() -> ExitCode {
 
     // Final drain.
     let final_events = pusher.tick(true).await;
-    for e in final_events { log_event(&e); }
+    for e in final_events {
+        log_event(&e);
+    }
     log_event(&PusherEvent::Stopping);
     ExitCode::SUCCESS
 }
@@ -152,14 +154,14 @@ async fn main() -> ExitCode {
 #[derive(Debug, Clone)]
 struct Args {
     config_path: PathBuf,
-    data_dir:    PathBuf,
+    data_dir: PathBuf,
     health_port: u16,
 }
 
 fn parse_args() -> Result<Args, String> {
     let mut config_path: Option<PathBuf> = None;
-    let mut data_dir:    Option<PathBuf> = None;
-    let mut health_port: u16              = 9501;
+    let mut data_dir: Option<PathBuf> = None;
+    let mut health_port: u16 = 9501;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -167,11 +169,15 @@ fn parse_args() -> Result<Args, String> {
                 config_path = Some(PathBuf::from(args.next().ok_or("--config expects a path")?));
             }
             "--data-dir" => {
-                data_dir = Some(PathBuf::from(args.next().ok_or("--data-dir expects a path")?));
+                data_dir = Some(PathBuf::from(
+                    args.next().ok_or("--data-dir expects a path")?,
+                ));
             }
             "--health-port" => {
                 let v = args.next().ok_or("--health-port expects an integer")?;
-                health_port = v.parse().map_err(|_| "--health-port: integer required".to_owned())?;
+                health_port = v
+                    .parse()
+                    .map_err(|_| "--health-port: integer required".to_owned())?;
             }
             "--help" | "-h" => {
                 println!("{}", USAGE);
@@ -184,7 +190,7 @@ fn parse_args() -> Result<Args, String> {
     }
     Ok(Args {
         config_path: config_path.ok_or_else(|| format!("--config required\n\n{USAGE}"))?,
-        data_dir:    data_dir.ok_or_else(|| format!("--data-dir required\n\n{USAGE}"))?,
+        data_dir: data_dir.ok_or_else(|| format!("--data-dir required\n\n{USAGE}"))?,
         health_port,
     })
 }
@@ -204,8 +210,8 @@ OPTIONS:
 ";
 
 fn build_config(
-    bundle:        &PolicyBundle,
-    args:          &Args,
+    bundle: &PolicyBundle,
+    args: &Args,
     kernel_version: String,
 ) -> Result<PusherConfig, raxis_otel_pusher::config::ConfigError> {
     PusherConfig::build(
@@ -216,21 +222,23 @@ fn build_config(
     )
 }
 
-fn build_client(cfg: &PusherConfig) -> Result<OtlpClient, raxis_otel_pusher::otlp::OtlpClientError> {
+fn build_client(
+    cfg: &PusherConfig,
+) -> Result<OtlpClient, raxis_otel_pusher::otlp::OtlpClientError> {
     OtlpClient::new(
         OtlpEndpoint::new(&cfg.pusher.otlp_endpoint),
         cfg.pusher.headers.clone(),
         raxis_otel_pusher::retry::BackoffPolicy {
-            initial:      cfg.pusher.backoff_initial,
-            max:          cfg.pusher.backoff_max,
-            jitter:       cfg.pusher.backoff_jitter,
+            initial: cfg.pusher.backoff_initial,
+            max: cfg.pusher.backoff_max,
+            jitter: cfg.pusher.backoff_jitter,
             max_attempts: 8,
         },
         cfg.export_timeout(),
         ResourceAttrs {
             service_name: cfg.resource.service_name.clone(),
-            environment:  cfg.resource.environment.clone(),
-            extra:        cfg.resource.extra.clone(),
+            environment: cfg.resource.environment.clone(),
+            extra: cfg.resource.extra.clone(),
         },
     )
 }
@@ -256,5 +264,5 @@ fn log_event(ev: &PusherEvent) {
             stream, new_segment,
         ),
     };
-    eprintln!("{{\"level\":\"info\",{}}}", &json[1..json.len()-1]);
+    eprintln!("{{\"level\":\"info\",{}}}", &json[1..json.len() - 1]);
 }

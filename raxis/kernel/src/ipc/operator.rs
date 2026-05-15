@@ -108,7 +108,9 @@ pub async fn dispatch_loop(
         // rather than once at `dispatch_loop` entry so a policy
         // rotation mid-loop is reflected in subsequent logs
         // without restarting the per-operator connection.
-        let operator_display: Option<String> = ctx.policy.load_full()
+        let operator_display: Option<String> = ctx
+            .policy
+            .load_full()
             .operator_display_name(&operator.fingerprint);
         let operator_display_str: Option<&str> = operator_display.as_deref();
 
@@ -120,7 +122,9 @@ pub async fn dispatch_loop(
             // open so the CLI can show a useful message.
             Err(JsonFrameError::Decode(e)) => {
                 dispatch_log::frame_decode_failed(
-                    &operator.fingerprint, operator_display_str, &e.to_string(),
+                    &operator.fingerprint,
+                    operator_display_str,
+                    &e.to_string(),
                 );
                 let resp = OperatorResponse::Error {
                     code: "INVALID_REQUEST".to_owned(),
@@ -164,12 +168,18 @@ pub async fn dispatch_loop(
             now_unix,
         ) {
             crate::authority::cert_check::CertGuard::Allow => { /* fall through */ }
-            crate::authority::cert_check::CertGuard::Deny { wire_code, wire_detail } => {
+            crate::authority::cert_check::CertGuard::Deny {
+                wire_code,
+                wire_detail,
+            } => {
                 dispatch_log::cert_denied(
-                    op_name, &operator.fingerprint, operator_display_str, wire_code,
+                    op_name,
+                    &operator.fingerprint,
+                    operator_display_str,
+                    wire_code,
                 );
                 let resp = OperatorResponse::Error {
-                    code:   wire_code.to_owned(),
+                    code: wire_code.to_owned(),
                     detail: wire_detail,
                 };
                 write_json_frame_async(&mut stream, &resp).await?;
@@ -183,7 +193,10 @@ pub async fn dispatch_loop(
         // works even on handlers that consume the request by value.
         let context_fields = request_context_fields(&request);
         dispatch_log::op_request(
-            op_name, &operator.fingerprint, operator_display_str, &context_fields,
+            op_name,
+            &operator.fingerprint,
+            operator_display_str,
+            &context_fields,
         );
         let started = std::time::Instant::now();
 
@@ -202,13 +215,20 @@ pub async fn dispatch_loop(
         if let OperatorRequest::SubscribeInitiative { initiative_id } = &request {
             let initiative_id = initiative_id.clone();
             match crate::ipc::operator_ergonomics::validate_subscribe_admission(
-                initiative_id.clone(), &ctx,
-            ).await {
+                initiative_id.clone(),
+                &ctx,
+            )
+            .await
+            {
                 Ok(ack) => {
                     let latency_ms = started.elapsed().as_millis() as u64;
                     dispatch_log::op_response(
-                        op_name, &operator.fingerprint, operator_display_str,
-                        &ack, &context_fields, latency_ms,
+                        op_name,
+                        &operator.fingerprint,
+                        operator_display_str,
+                        &ack,
+                        &context_fields,
+                        latency_ms,
                     );
                     // iter44 — `INV-OBS-OPERATOR-IPC-COVERAGE-01`.
                     // Emit before the streaming runner takes over —
@@ -226,15 +246,22 @@ pub async fn dispatch_loop(
                     // events, then returns when the initiative
                     // terminates or the operator disconnects.
                     crate::ipc::operator_ergonomics::stream_subscribe_initiative(
-                        &mut stream, initiative_id, &ctx,
-                    ).await?;
+                        &mut stream,
+                        initiative_id,
+                        &ctx,
+                    )
+                    .await?;
                     return Ok(());
                 }
                 Err(err_resp) => {
                     let latency_ms = started.elapsed().as_millis() as u64;
                     dispatch_log::op_response(
-                        op_name, &operator.fingerprint, operator_display_str,
-                        &err_resp, &context_fields, latency_ms,
+                        op_name,
+                        &operator.fingerprint,
+                        operator_display_str,
+                        &err_resp,
+                        &context_fields,
+                        latency_ms,
                     );
                     crate::observability::record_operator_ipc(
                         ctx.observability.as_ref(),
@@ -334,9 +361,9 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
             // fingerprint makes admission failures correlatable
             // with the operator's local bundle without dumping
             // kilobytes of plan_bundle_hex into operator stderr.
-            ("initiative_id",     initiative_id.clone()),
+            ("initiative_id", initiative_id.clone()),
             ("bundle_sha256_hex", bundle_sha256_hex.clone()),
-            ("signed_by_hex",     signed_by_hex.clone()),
+            ("signed_by_hex", signed_by_hex.clone()),
         ],
         OperatorRequest::ApprovePlan {
             initiative_id,
@@ -356,11 +383,17 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
         OperatorRequest::RetryTask { task_id } => {
             vec![("task_id", task_id.clone())]
         }
-        OperatorRequest::ResumeTask { task_id, resumed_by } => vec![
+        OperatorRequest::ResumeTask {
+            task_id,
+            resumed_by,
+        } => vec![
             ("task_id", task_id.clone()),
             ("resumed_by", resumed_by.clone()),
         ],
-        OperatorRequest::AbortTask { task_id, aborted_by } => vec![
+        OperatorRequest::AbortTask {
+            task_id,
+            aborted_by,
+        } => vec![
             ("task_id", task_id.clone()),
             ("aborted_by", aborted_by.clone()),
         ],
@@ -384,12 +417,12 @@ fn request_context_fields(req: &OperatorRequest) -> Vec<(&'static str, String)> 
             ("policy_path", policy_path.clone()),
             ("sig_path", sig_path.clone()),
         ],
-        OperatorRequest::QuarantineInitiative { initiative_id, .. } => vec![
-            ("initiative_id", initiative_id.clone()),
-        ],
-        OperatorRequest::QuarantinePlansBy { target_fingerprint, .. } => vec![
-            ("target_fingerprint", target_fingerprint.clone()),
-        ],
+        OperatorRequest::QuarantineInitiative { initiative_id, .. } => {
+            vec![("initiative_id", initiative_id.clone())]
+        }
+        OperatorRequest::QuarantinePlansBy {
+            target_fingerprint, ..
+        } => vec![("target_fingerprint", target_fingerprint.clone())],
         // V2_GAPS §12.4 — operator-ergonomics IPC stubs. Identifier
         // fields are surfaced so audit grep flows behave the same
         // shape as the V3 wired handlers.
@@ -574,7 +607,10 @@ pub(crate) mod dispatch_log {
         eprintln!(
             "{}",
             build_op_request_line(
-                op, operator_fp, operator_display, context_fields,
+                op,
+                operator_fp,
+                operator_display,
+                context_fields,
                 raxis_types::unix_now_secs(),
             ),
         );
@@ -610,7 +646,10 @@ pub(crate) mod dispatch_log {
         eprintln!(
             "{}",
             build_frame_decode_failed_line(
-                operator_fp, operator_display, detail, raxis_types::unix_now_secs(),
+                operator_fp,
+                operator_display,
+                detail,
+                raxis_types::unix_now_secs(),
             ),
         );
     }
@@ -623,7 +662,10 @@ pub(crate) mod dispatch_log {
         eprintln!(
             "{}",
             build_unauthorized_line(
-                op, operator_fp, operator_display, raxis_types::unix_now_secs(),
+                op,
+                operator_fp,
+                operator_display,
+                raxis_types::unix_now_secs(),
             ),
         );
     }
@@ -658,7 +700,10 @@ pub(crate) mod dispatch_log {
         eprintln!(
             "{}",
             build_cert_denied_line(
-                op, operator_fp, operator_display, wire_code,
+                op,
+                operator_fp,
+                operator_display,
+                wire_code,
                 raxis_types::unix_now_secs(),
             ),
         );
@@ -675,18 +720,18 @@ pub(crate) mod dispatch_log {
     /// `raxis_types::operator_wire::OperatorResponse`.
     fn response_variant_name(r: &OperatorResponse) -> &'static str {
         match r {
-            OperatorResponse::SessionCreated { .. }     => "SessionCreated",
-            OperatorResponse::SessionRevoked { .. }     => "SessionRevoked",
-            OperatorResponse::DelegationGranted { .. }  => "DelegationGranted",
-            OperatorResponse::InitiativeCreated { .. }  => "InitiativeCreated",
-            OperatorResponse::PlanApproved { .. }       => "PlanApproved",
+            OperatorResponse::SessionCreated { .. } => "SessionCreated",
+            OperatorResponse::SessionRevoked { .. } => "SessionRevoked",
+            OperatorResponse::DelegationGranted { .. } => "DelegationGranted",
+            OperatorResponse::InitiativeCreated { .. } => "InitiativeCreated",
+            OperatorResponse::PlanApproved { .. } => "PlanApproved",
             OperatorResponse::EscalationApproved { .. } => "EscalationApproved",
-            OperatorResponse::EscalationDenied { .. }   => "EscalationDenied",
-            OperatorResponse::EpochAdvanced { .. }      => "EpochAdvanced",
-            OperatorResponse::Ack { .. }                => "Ack",
-            OperatorResponse::Error { .. }              => "Error",
+            OperatorResponse::EscalationDenied { .. } => "EscalationDenied",
+            OperatorResponse::EpochAdvanced { .. } => "EpochAdvanced",
+            OperatorResponse::Ack { .. } => "Ack",
+            OperatorResponse::Error { .. } => "Error",
             OperatorResponse::InitiativeQuarantined { .. } => "InitiativeQuarantined",
-            OperatorResponse::QuarantineSwept { .. }    => "QuarantineSwept",
+            OperatorResponse::QuarantineSwept { .. } => "QuarantineSwept",
             // V2_GAPS §12.4 — operator-ergonomics IPC success
             // envelopes. As of V2.4 four of the five handlers emit
             // these arms for real (`ProposeDefaults`, `EstimateCost`,
@@ -694,12 +739,12 @@ pub(crate) mod dispatch_log {
             // `SubscribeInitiative` still answers with
             // `Error{FAIL_NOT_YET_IMPLEMENTED}` because it depends on
             // the V3 KernelPush bidirectional transport.
-            OperatorResponse::ProposedDefaults { .. }       => "ProposedDefaults",
-            OperatorResponse::CostEstimated { .. }          => "CostEstimated",
-            OperatorResponse::DryRunAdmitted { .. }         => "DryRunAdmitted",
-            OperatorResponse::InitiativeSubscribed { .. }   => "InitiativeSubscribed",
+            OperatorResponse::ProposedDefaults { .. } => "ProposedDefaults",
+            OperatorResponse::CostEstimated { .. } => "CostEstimated",
+            OperatorResponse::DryRunAdmitted { .. } => "DryRunAdmitted",
+            OperatorResponse::InitiativeSubscribed { .. } => "InitiativeSubscribed",
             OperatorResponse::InitiativePauseDescribed { .. } => "InitiativePauseDescribed",
-            OperatorResponse::TaskOutputsListed { .. }      => "TaskOutputsListed",
+            OperatorResponse::TaskOutputsListed { .. } => "TaskOutputsListed",
         }
     }
 }
@@ -720,21 +765,47 @@ async fn handle_request(
 ) -> OperatorResponse {
     match request {
         OperatorRequest::CreateSession {
-            role, worktree_root, base_sha, base_tracking_ref, lineage_id, ..
+            role,
+            worktree_root,
+            base_sha,
+            base_tracking_ref,
+            lineage_id,
+            ..
         } => {
-            handle_create_session(role, worktree_root, base_sha, base_tracking_ref, lineage_id, ctx).await
+            handle_create_session(
+                role,
+                worktree_root,
+                base_sha,
+                base_tracking_ref,
+                lineage_id,
+                ctx,
+            )
+            .await
         }
         OperatorRequest::RevokeSession { session_id } => {
             handle_revoke_session(session_id, ctx).await
         }
         OperatorRequest::GrantDelegation {
-            session_id, delegation_id, capability_class, scope_json,
-            ttl_secs, max_uses, signature_hex,
+            session_id,
+            delegation_id,
+            capability_class,
+            scope_json,
+            ttl_secs,
+            max_uses,
+            signature_hex,
         } => {
             handle_grant_delegation(
-                session_id, delegation_id, capability_class, scope_json,
-                ttl_secs, max_uses, signature_hex, operator, ctx,
-            ).await
+                session_id,
+                delegation_id,
+                capability_class,
+                scope_json,
+                ttl_secs,
+                max_uses,
+                signature_hex,
+                operator,
+                ctx,
+            )
+            .await
         }
         // Initiative lifecycle — plan-bundle-sealed admission.
         // Spec: `plan-bundle-sealing.md §3.4 + §8.1`. The hex
@@ -754,43 +825,69 @@ async fn handle_request(
             bundle_sha256_hex,
             signature_hex,
             signed_by_hex,
-        } => handle_create_initiative(
-            initiative_id, plan_bundle_hex, bundle_sha256_hex,
-            signature_hex, signed_by_hex, ctx,
-        ).await,
-        OperatorRequest::ApprovePlan { initiative_id, approving_operator } => {
-            handle_approve_plan(initiative_id, approving_operator, operator, ctx).await
+        } => {
+            handle_create_initiative(
+                initiative_id,
+                plan_bundle_hex,
+                bundle_sha256_hex,
+                signature_hex,
+                signed_by_hex,
+                ctx,
+            )
+            .await
         }
-        OperatorRequest::RejectPlan { initiative_id, rejected_by, reason } => {
-            handle_reject_plan(initiative_id, rejected_by, reason, ctx).await
+        OperatorRequest::ApprovePlan {
+            initiative_id,
+            approving_operator,
+        } => handle_approve_plan(initiative_id, approving_operator, operator, ctx).await,
+        OperatorRequest::RejectPlan {
+            initiative_id,
+            rejected_by,
+            reason,
+        } => handle_reject_plan(initiative_id, rejected_by, reason, ctx).await,
+        OperatorRequest::RetryTask { task_id } => handle_retry_task(task_id, ctx).await,
+        OperatorRequest::ResumeTask {
+            task_id,
+            resumed_by,
+        } => handle_resume_task(task_id, resumed_by, ctx).await,
+        OperatorRequest::AbortTask {
+            task_id,
+            aborted_by,
+        } => handle_abort_task(task_id, aborted_by, ctx).await,
+        OperatorRequest::AbortInitiative {
+            initiative_id,
+            aborted_by,
+        } => handle_abort_initiative(initiative_id, aborted_by, ctx).await,
+        OperatorRequest::ApproveEscalation {
+            escalation_id,
+            approval_scope,
+            operator_sig_hex,
+        } => {
+            handle_approve_escalation(
+                escalation_id,
+                approval_scope,
+                operator_sig_hex,
+                operator,
+                ctx,
+            )
+            .await
         }
-        OperatorRequest::RetryTask { task_id } => {
-            handle_retry_task(task_id, ctx).await
-        }
-        OperatorRequest::ResumeTask { task_id, resumed_by } => {
-            handle_resume_task(task_id, resumed_by, ctx).await
-        }
-        OperatorRequest::AbortTask { task_id, aborted_by } => {
-            handle_abort_task(task_id, aborted_by, ctx).await
-        }
-        OperatorRequest::AbortInitiative { initiative_id, aborted_by } => {
-            handle_abort_initiative(initiative_id, aborted_by, ctx).await
-        }
-        OperatorRequest::ApproveEscalation { escalation_id, approval_scope, operator_sig_hex } => {
-            handle_approve_escalation(escalation_id, approval_scope, operator_sig_hex, operator, ctx).await
-        }
-        OperatorRequest::DenyEscalation { escalation_id, reason } => {
-            handle_deny_escalation(escalation_id, reason, operator, ctx).await
-        }
-        OperatorRequest::RotateEpoch { policy_path, sig_path } => {
-            handle_rotate_epoch(policy_path, sig_path, operator, ctx).await
-        }
-        OperatorRequest::QuarantineInitiative { initiative_id, reason } => {
-            handle_quarantine_initiative(initiative_id, reason, operator, ctx).await
-        }
-        OperatorRequest::QuarantinePlansBy { target_fingerprint, reason } => {
-            handle_quarantine_plans_by(target_fingerprint, reason, operator, ctx).await
-        }
+        OperatorRequest::DenyEscalation {
+            escalation_id,
+            reason,
+        } => handle_deny_escalation(escalation_id, reason, operator, ctx).await,
+        OperatorRequest::RotateEpoch {
+            policy_path,
+            sig_path,
+        } => handle_rotate_epoch(policy_path, sig_path, operator, ctx).await,
+        OperatorRequest::QuarantineInitiative {
+            initiative_id,
+            reason,
+        } => handle_quarantine_initiative(initiative_id, reason, operator, ctx).await,
+        OperatorRequest::QuarantinePlansBy {
+            target_fingerprint,
+            reason,
+        } => handle_quarantine_plans_by(target_fingerprint, reason, operator, ctx).await,
 
         // ----------------------------------------------------------------
         // V2_GAPS §12.4 — Operator-ergonomics IPC. V2.4 lands real
@@ -805,11 +902,25 @@ async fn handle_request(
         OperatorRequest::ProposeDefaults { initiative_id } => {
             crate::ipc::operator_ergonomics::handle_propose_defaults(initiative_id, ctx).await
         }
-        OperatorRequest::EstimateCost { plan_toml, plan_sig_hex } => {
-            crate::ipc::operator_ergonomics::handle_estimate_cost(plan_toml, plan_sig_hex, ctx).await
+        OperatorRequest::EstimateCost {
+            plan_toml,
+            plan_sig_hex,
+        } => {
+            crate::ipc::operator_ergonomics::handle_estimate_cost(plan_toml, plan_sig_hex, ctx)
+                .await
         }
-        OperatorRequest::DryRunAdmit { plan_toml, plan_sig_hex, submitted_by } => {
-            crate::ipc::operator_ergonomics::handle_dry_run_admit(plan_toml, plan_sig_hex, submitted_by, ctx).await
+        OperatorRequest::DryRunAdmit {
+            plan_toml,
+            plan_sig_hex,
+            submitted_by,
+        } => {
+            crate::ipc::operator_ergonomics::handle_dry_run_admit(
+                plan_toml,
+                plan_sig_hex,
+                submitted_by,
+                ctx,
+            )
+            .await
         }
         // SubscribeInitiative is handled by the streaming branch
         // in `dispatch_loop` BEFORE this dispatcher runs (it
@@ -818,12 +929,14 @@ async fn handle_request(
         // typed error so the misuse is obvious in the response
         // log line.
         OperatorRequest::SubscribeInitiative { .. } => OperatorResponse::Error {
-            code:   "FAIL_INVALID_TRANSPORT".into(),
+            code: "FAIL_INVALID_TRANSPORT".into(),
             detail: "SubscribeInitiative must be invoked through the streaming dispatcher; \
-                     the per-request dispatcher does not own the connection".into(),
+                     the per-request dispatcher does not own the connection"
+                .into(),
         },
         OperatorRequest::DescribeInitiativePause { initiative_id } => {
-            crate::ipc::operator_ergonomics::handle_describe_initiative_pause(initiative_id, ctx).await
+            crate::ipc::operator_ergonomics::handle_describe_initiative_pause(initiative_id, ctx)
+                .await
         }
         OperatorRequest::ListTaskOutputs { task_id } => {
             crate::ipc::operator_ergonomics::handle_list_task_outputs(task_id, ctx).await
@@ -846,7 +959,9 @@ async fn handle_request(
 /// through operator IPC. Any other role string (wrong casing,
 /// `"gateway"`, `"verifier"`, or unknown values) is rejected with
 /// `FAIL_ROLE_NOT_OPERATOR_CREATABLE`.
-fn parse_operator_creatable_role(role_str: &str) -> Result<authority::session::Role, OperatorResponse> {
+fn parse_operator_creatable_role(
+    role_str: &str,
+) -> Result<authority::session::Role, OperatorResponse> {
     match role_str {
         // Canonical wire shape per cli-ceremony.md §4.2 line 300: the
         // literal lowercase string "planner". Locked by the wire
@@ -880,8 +995,8 @@ fn parse_operator_creatable_role(role_str: &str) -> Result<authority::session::R
 fn wire_role_str(role: &authority::session::Role) -> &'static str {
     use authority::session::Role;
     match role {
-        Role::Planner  => "planner",
-        Role::Gateway  => "gateway",
+        Role::Planner => "planner",
+        Role::Gateway => "gateway",
         Role::Verifier => "verifier",
     }
 }
@@ -939,13 +1054,13 @@ async fn handle_create_session(
     // called directly from an async task ("Cannot block the current
     // thread from within a runtime"). Same pattern as `main.rs` Step
     // 6/7b and the escalation handlers below.
-    let config           = SessionConfig::default();
-    let role_for_blocking         = role.clone();
-    let worktree_for_blocking     = worktree_root.clone();
-    let base_sha_for_blocking     = base_sha.clone();
-    let base_track_for_blocking   = base_tracking_ref.clone();
-    let lineage_for_blocking      = lineage_id.clone();
-    let store_for_blocking        = Arc::clone(&ctx.store);
+    let config = SessionConfig::default();
+    let role_for_blocking = role.clone();
+    let worktree_for_blocking = worktree_root.clone();
+    let base_sha_for_blocking = base_sha.clone();
+    let base_track_for_blocking = base_tracking_ref.clone();
+    let lineage_for_blocking = lineage_id.clone();
+    let store_for_blocking = Arc::clone(&ctx.store);
     let join_result = tokio::task::spawn_blocking(move || {
         authority::session::create_session(
             role_for_blocking,
@@ -956,13 +1071,16 @@ async fn handle_create_session(
             &config,
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
     let create_outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_CREATE_SESSION".to_owned(),
-            detail: format!("create_session spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_CREATE_SESSION".to_owned(),
+                detail: format!("create_session spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
     match create_outcome {
@@ -997,17 +1115,20 @@ async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> 
         }
     };
 
-    let store_for_blocking      = Arc::clone(&ctx.store);
+    let store_for_blocking = Arc::clone(&ctx.store);
     let session_id_for_blocking = session_id.clone();
     let join_result = tokio::task::spawn_blocking(move || {
         authority::session::revoke_session(&session_id_for_blocking, &store_for_blocking)
-    }).await;
+    })
+    .await;
     let revoke_outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_REVOKE_SESSION".to_owned(),
-            detail: format!("revoke_session spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_REVOKE_SESSION".to_owned(),
+                detail: format!("revoke_session spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
     match revoke_outcome {
@@ -1087,13 +1208,13 @@ async fn handle_grant_delegation(
         }
     };
 
-    let store_for_blocking         = Arc::clone(&ctx.store);
-    let session_for_blocking       = session_id.clone();
-    let delegation_for_blocking    = delegation_id.clone();
-    let capability_for_blocking    = capability_class.clone();
-    let scope_for_blocking         = scope_json.clone();
-    let fp_for_blocking            = operator.fingerprint.clone();
-    let max_ttl                    = policy_snapshot.max_delegation_ttl().as_secs();
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let session_for_blocking = session_id.clone();
+    let delegation_for_blocking = delegation_id.clone();
+    let capability_for_blocking = capability_class.clone();
+    let scope_for_blocking = scope_json.clone();
+    let fp_for_blocking = operator.fingerprint.clone();
+    let max_ttl = policy_snapshot.max_delegation_ttl().as_secs();
     let join_result = tokio::task::spawn_blocking(move || {
         authority::delegation::grant_delegation(
             &session_for_blocking,
@@ -1108,23 +1229,26 @@ async fn handle_grant_delegation(
             max_ttl,
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
     let grant_outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_GRANT_DELEGATION".to_owned(),
-            detail: format!("grant_delegation spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_GRANT_DELEGATION".to_owned(),
+                detail: format!("grant_delegation spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
     match grant_outcome {
         Ok(()) => OperatorResponse::DelegationGranted { delegation_id },
-        Err(authority::keys::AuthorityError::DelegationAlreadyActive { existing_delegation_id }) => {
-            OperatorResponse::Error {
-                code: "FAIL_DELEGATION_ALREADY_ACTIVE".to_owned(),
-                detail: format!("delegation {existing_delegation_id} already active"),
-            }
-        }
+        Err(authority::keys::AuthorityError::DelegationAlreadyActive {
+            existing_delegation_id,
+        }) => OperatorResponse::Error {
+            code: "FAIL_DELEGATION_ALREADY_ACTIVE".to_owned(),
+            detail: format!("delegation {existing_delegation_id} already active"),
+        },
         Err(e) => OperatorResponse::Error {
             code: "FAIL_GRANT_DELEGATION".to_owned(),
             detail: e.to_string(),
@@ -1149,11 +1273,11 @@ async fn handle_grant_delegation(
 /// based plan TOML + signature) into this one, leaving the sealed-
 /// bundle pipeline as the sole admission path on the wire.
 async fn handle_create_initiative(
-    initiative_id:     String,
-    plan_bundle_hex:   String,
+    initiative_id: String,
+    plan_bundle_hex: String,
     bundle_sha256_hex: String,
-    signature_hex:     String,
-    signed_by_hex:     String,
+    signature_hex: String,
+    signed_by_hex: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
     // Step 1 — hex-decode the envelope. Errors here are
@@ -1162,10 +1286,12 @@ async fn handle_create_initiative(
     // structured feedback for trivially-malformed wire payloads.
     let plan_bundle = match hex::decode(&plan_bundle_hex) {
         Ok(b) => b,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("plan_bundle_hex: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("plan_bundle_hex: {e}"),
+            }
+        }
     };
     let bundle_sha256 = match hex::decode(&bundle_sha256_hex) {
         Ok(b) if b.len() == 32 => {
@@ -1173,14 +1299,18 @@ async fn handle_create_initiative(
             arr.copy_from_slice(&b);
             raxis_types::BundleSha256::new(arr)
         }
-        Ok(b) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("bundle_sha256_hex: expected 32 bytes, got {}", b.len()),
-        },
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("bundle_sha256_hex: {e}"),
-        },
+        Ok(b) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("bundle_sha256_hex: expected 32 bytes, got {}", b.len()),
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("bundle_sha256_hex: {e}"),
+            }
+        }
     };
     let signature = match hex::decode(&signature_hex) {
         Ok(b) if b.len() == 64 => {
@@ -1188,14 +1318,18 @@ async fn handle_create_initiative(
             arr.copy_from_slice(&b);
             arr
         }
-        Ok(b) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("signature_hex: expected 64 bytes, got {}", b.len()),
-        },
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("signature_hex: {e}"),
-        },
+        Ok(b) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("signature_hex: expected 64 bytes, got {}", b.len()),
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("signature_hex: {e}"),
+            }
+        }
     };
     let signed_by = match hex::decode(&signed_by_hex) {
         Ok(b) if b.len() == 8 => {
@@ -1203,14 +1337,18 @@ async fn handle_create_initiative(
             arr.copy_from_slice(&b);
             raxis_types::OperatorFingerprint::new(arr)
         }
-        Ok(b) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("signed_by_hex: expected 8 bytes, got {}", b.len()),
-        },
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
-            detail: format!("signed_by_hex: {e}"),
-        },
+        Ok(b) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("signed_by_hex: expected 8 bytes, got {}", b.len()),
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_BUNDLE_DECODE_FAILED".to_owned(),
+                detail: format!("signed_by_hex: {e}"),
+            }
+        }
     };
 
     let req = initiatives::v2_admission::V2AdmissionRequest {
@@ -1238,10 +1376,10 @@ async fn handle_create_initiative(
     match outcome {
         Ok(result) => OperatorResponse::InitiativeCreated {
             initiative_id: result.initiative_id,
-            status:        result.status,
+            status: result.status,
         },
         Err(e) => OperatorResponse::Error {
-            code:   e.fail_code().to_owned(),
+            code: e.fail_code().to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1271,14 +1409,14 @@ async fn handle_create_initiative(
 /// hex-decode it, and hand the bytes to `lifecycle::approve_plan`, which
 /// then performs canonical Ed25519 verification over the plan signing domain.
 async fn handle_approve_plan(
-    initiative_id:      String,
+    initiative_id: String,
     approving_operator: String,
-    authenticated:      &AuthenticatedOperator,
-    ctx:                &Arc<HandlerContext>,
+    authenticated: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     if approving_operator != authenticated.fingerprint {
         return OperatorResponse::Error {
-            code:   "FAIL_OPERATOR_IDENTITY_MISMATCH".to_owned(),
+            code: "FAIL_OPERATOR_IDENTITY_MISMATCH".to_owned(),
             detail: format!(
                 "request.approving_operator='{approving_operator}' does not match \
                  authenticated operator '{}'",
@@ -1293,25 +1431,29 @@ async fn handle_approve_plan(
     let policy_snapshot = ctx.policy.load_full();
     let entry = match policy_snapshot.operator_entry(&approving_operator) {
         Some(e) => e,
-        None => return OperatorResponse::Error {
-            code:   "FAIL_OPERATOR_UNKNOWN".to_owned(),
-            detail: format!(
-                "approving_operator '{approving_operator}' has no entry in policy.operators",
-            ),
-        },
+        None => {
+            return OperatorResponse::Error {
+                code: "FAIL_OPERATOR_UNKNOWN".to_owned(),
+                detail: format!(
+                    "approving_operator '{approving_operator}' has no entry in policy.operators",
+                ),
+            }
+        }
     };
 
     let pubkey_bytes = match hex::decode(&entry.pubkey_hex) {
         Ok(b) => b,
-        Err(e) => return OperatorResponse::Error {
-            // Policy validation should have caught this at load time; reaching
-            // this branch indicates either a corrupted policy file accepted by
-            // an older loader, or hand-editing of the in-memory bundle.
-            code:   "FAIL_POLICY_OPERATOR_PUBKEY_INVALID".to_owned(),
-            detail: format!(
-                "policy entry for '{approving_operator}' has malformed pubkey_hex: {e}",
-            ),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                // Policy validation should have caught this at load time; reaching
+                // this branch indicates either a corrupted policy file accepted by
+                // an older loader, or hand-editing of the in-memory bundle.
+                code: "FAIL_POLICY_OPERATOR_PUBKEY_INVALID".to_owned(),
+                detail: format!(
+                    "policy entry for '{approving_operator}' has malformed pubkey_hex: {e}",
+                ),
+            };
+        }
     };
 
     let policy_epoch = policy_snapshot.epoch();
@@ -1321,8 +1463,7 @@ async fn handle_approve_plan(
     // against the policy that was authoritative at approval time
     // (avoids a TOCTOU between policy reload and the spawn_blocking
     // hop into `approve_plan`).
-    let policy_default_target_ref =
-        policy_snapshot.git_default_target_ref().to_owned();
+    let policy_default_target_ref = policy_snapshot.git_default_target_ref().to_owned();
     let policy_target_ref_locked = policy_snapshot.git_target_ref_locked();
     // V2_GAPS §E1 — snapshot the operator-declared
     // `[environments.<label>]` map and `[[permitted_credentials]]`
@@ -1333,8 +1474,10 @@ async fn handle_approve_plan(
     // (the kernel later runs the heavy work inside
     // `spawn_blocking`, so `'static` data avoids cross-thread
     // borrow gymnastics).
-    let policy_environments_snapshot: std::collections::HashMap<String, raxis_policy::EnvironmentConfig> =
-        policy_snapshot.environments().clone();
+    let policy_environments_snapshot: std::collections::HashMap<
+        String,
+        raxis_policy::EnvironmentConfig,
+    > = policy_snapshot.environments().clone();
     let policy_permitted_credentials_snapshot: Vec<raxis_policy::PermittedCredentialConfig> =
         policy_snapshot.permitted_credentials().to_vec();
     // V2_GAPS §13 (V2.5 BLOCKER) — snapshot the operator-published
@@ -1346,16 +1489,14 @@ async fn handle_approve_plan(
     // `vm_image`) targets the same stable epoch view.
     let policy_vm_images_snapshot: Vec<raxis_policy::VmImageConfig> =
         policy_snapshot.vm_images().to_vec();
-    let policy_default_executor_image_snapshot:
-        Option<raxis_policy::DefaultExecutorImageConfig> =
+    let policy_default_executor_image_snapshot: Option<raxis_policy::DefaultExecutorImageConfig> =
         policy_snapshot.default_executor_image().cloned();
     // V2 `elastic-vm-scaling.md §2.1` — snapshot the operator
     // `[elastic]` block at the same epoch the plan was submitted
     // under so plan-narrows-policy (INV-ELASTIC-01) is evaluated
     // against a stable view. Cloned so the spawn_blocking hop
     // owns 'static data without cross-thread borrows.
-    let policy_elastic_snapshot: raxis_policy::ElasticConfig =
-        policy_snapshot.elastic().clone();
+    let policy_elastic_snapshot: raxis_policy::ElasticConfig = policy_snapshot.elastic().clone();
     // V2 §Step 28 + INV-SCHED-03 — snapshot the operator's
     // `[[lanes]]` registry at the same epoch the plan was
     // submitted against. Drives
@@ -1369,18 +1510,17 @@ async fn handle_approve_plan(
     // which silently breaks the orchestrator's terminal-event
     // emission and surfaces as a harness deadline hang. Cloned so
     // the spawn_blocking hop owns 'static data.
-    let policy_lanes_snapshot: Vec<raxis_policy::LaneEntry> =
-        policy_snapshot.lanes().to_vec();
+    let policy_lanes_snapshot: Vec<raxis_policy::LaneEntry> = policy_snapshot.lanes().to_vec();
     // Snapshot the operator's display name from the same bundle we
     // resolved the pubkey from, so the audit event records the name
     // that was authoritative at approval time. See
     // `kernel-store.md` §2.5.2 "Operator display-name fields".
     let approving_op_display_name = Some(entry.display_name.clone());
-    let store_for_blocking          = Arc::clone(&ctx.store);
-    let audit_for_blocking          = Arc::clone(&ctx.audit);
-    let plan_registry_for_blocking  = Arc::clone(&ctx.plan_registry);
-    let initiative_id_for_blocking  = initiative_id.clone();
-    let approving_op_for_blocking   = approving_operator.clone();
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let audit_for_blocking = Arc::clone(&ctx.audit);
+    let plan_registry_for_blocking = Arc::clone(&ctx.plan_registry);
+    let initiative_id_for_blocking = initiative_id.clone();
+    let approving_op_for_blocking = approving_operator.clone();
     let artifact_store_for_blocking = ctx.artifact_store.as_ref().map(Arc::clone);
     let join_result = tokio::task::spawn_blocking(move || {
         lifecycle::approve_plan(
@@ -1402,13 +1542,16 @@ async fn handle_approve_plan(
             &plan_registry_for_blocking,
             artifact_store_for_blocking.as_deref(),
         )
-    }).await;
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_APPROVE_PLAN".to_owned(),
-            detail: format!("approve_plan spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_APPROVE_PLAN".to_owned(),
+                detail: format!("approve_plan spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(result) => {
@@ -1463,9 +1606,9 @@ async fn handle_approve_plan(
                              \"task_prompt_bytes\":{task_prompt_len},\
                              \"kernel_ipc_bridged\":{bridged}}}",
                             initiative_id = result.initiative_id,
-                            session_id    = handle.session_id,
-                            admission     = handle.admission_loopback,
-                            bridged       = handle.kernel_ipc_stream.is_some(),
+                            session_id = handle.session_id,
+                            admission = handle.admission_loopback,
+                            bridged = handle.kernel_ipc_stream.is_some(),
                         );
                         // Hand the substrate-surrendered IPC stream
                         // (when one exists — microVM substrates only;
@@ -1488,15 +1631,15 @@ async fn handle_approve_plan(
                                        a follow-up operator command is needed to drive the \
                                        orchestrator boot once the substrate is available\"}}",
                             initiative_id = result.initiative_id,
-                            session_id    = orch_session_id,
-                            err           = e,
+                            session_id = orch_session_id,
+                            err = e,
                         );
                     }
                 }
             }
 
             OperatorResponse::PlanApproved {
-                initiative_id:  result.initiative_id,
+                initiative_id: result.initiative_id,
                 tasks_admitted: result.tasks_admitted,
             }
         }
@@ -1506,19 +1649,24 @@ async fn handle_approve_plan(
             // dedicated wire codes so the CLI's diagnostic does not
             // bury the conflict under a generic FAIL_APPROVE_PLAN.
             lifecycle::LifecycleError::PlanTargetRefInvalid {
-                rule, plan_value, policy_value, suggestion,
+                rule,
+                plan_value,
+                policy_value,
+                suggestion,
             } => {
                 let code = match *rule {
-                    "locked"  => raxis_types::OperatorErrorCode::FailPolicyLockedField,
+                    "locked" => raxis_types::OperatorErrorCode::FailPolicyLockedField,
                     "invalid" => raxis_types::OperatorErrorCode::FailWorkspaceTargetRefInvalid,
                     // Future rules added to LifecycleError::PlanTargetRefInvalid
                     // should be wired here too; until then, fall back to the
                     // generic FAIL_APPROVE_PLAN so the operator still sees the
                     // diagnostic instead of silently 200-OK.
-                    _ => return OperatorResponse::Error {
-                        code:   "FAIL_APPROVE_PLAN".to_owned(),
-                        detail: e.to_string(),
-                    },
+                    _ => {
+                        return OperatorResponse::Error {
+                            code: "FAIL_APPROVE_PLAN".to_owned(),
+                            detail: e.to_string(),
+                        }
+                    }
                 };
                 let detail_json = serde_json::json!({
                     "rule":         rule,
@@ -1526,14 +1674,15 @@ async fn handle_approve_plan(
                     "plan_value":   plan_value,
                     "policy_value": policy_value,
                     "suggestion":   suggestion,
-                }).to_string();
+                })
+                .to_string();
                 OperatorResponse::Error {
-                    code:   code.to_string(),
+                    code: code.to_string(),
                     detail: detail_json,
                 }
             }
             _ => OperatorResponse::Error {
-                code:   "FAIL_APPROVE_PLAN".to_owned(),
+                code: "FAIL_APPROVE_PLAN".to_owned(),
                 detail: e.to_string(),
             },
         },
@@ -1560,7 +1709,7 @@ fn build_egress_allowlist_from_policy(
 ) -> raxis_egress_admission::EgressAllowlist {
     raxis_egress_admission::EgressAllowlist {
         exact_hosts: policy.effective_egress_domains(),
-        patterns:    policy.effective_egress_patterns(),
+        patterns: policy.effective_egress_patterns(),
         credential_proxy_real_targets: Default::default(),
     }
 }
@@ -1568,14 +1717,14 @@ fn build_egress_allowlist_from_policy(
 /// RejectPlan — set status = Rejected; initiative must be in PlanSubmitted.
 async fn handle_reject_plan(
     initiative_id: String,
-    rejected_by:   String,
-    reason:        Option<String>,
+    rejected_by: String,
+    reason: Option<String>,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let store_for_blocking         = Arc::clone(&ctx.store);
+    let store_for_blocking = Arc::clone(&ctx.store);
     let initiative_id_for_blocking = initiative_id.clone();
-    let rejected_by_for_blocking   = rejected_by.clone();
-    let reason_for_blocking        = reason.clone();
+    let rejected_by_for_blocking = rejected_by.clone();
+    let reason_for_blocking = reason.clone();
     let join_result = tokio::task::spawn_blocking(move || {
         lifecycle::reject_plan(
             &initiative_id_for_blocking,
@@ -1583,20 +1732,23 @@ async fn handle_reject_plan(
             reason_for_blocking.as_deref(),
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_REJECT_PLAN".to_owned(),
-            detail: format!("reject_plan spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_REJECT_PLAN".to_owned(),
+                detail: format!("reject_plan spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("initiative {initiative_id} rejected"),
         },
         Err(e) => OperatorResponse::Error {
-            code:   "FAIL_REJECT_PLAN".to_owned(),
+            code: "FAIL_REJECT_PLAN".to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1605,35 +1757,37 @@ async fn handle_reject_plan(
 /// RetryTask — transition a Failed task back to Admitted.
 /// Spec: "retry_task — transition a Failed task back to Admitted."
 async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorResponse {
-    let store_for_blocking   = Arc::clone(&ctx.store);
+    let store_for_blocking = Arc::clone(&ctx.store);
     let task_id_for_blocking = task_id.clone();
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — pass the audit
     // sink through so the operator-driven `Failed → Admitted` edge
     // surfaces on the dashboard's `SubscribeInitiative` push
     // stream. Pre-fix this transition only emitted a structured
     // log line and the dashboard never observed the retry.
-    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> =
-        Arc::clone(&ctx.audit);
+    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> = Arc::clone(&ctx.audit);
     let join_result = tokio::task::spawn_blocking(move || {
         lifecycle::retry_task(
             &task_id_for_blocking,
             &store_for_blocking,
             Some(audit_for_blocking.as_ref()),
         )
-    }).await;
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_RETRY_TASK".to_owned(),
-            detail: format!("retry_task spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_RETRY_TASK".to_owned(),
+                detail: format!("retry_task spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("task {task_id} retried (→ Admitted)"),
         },
         Err(e) => OperatorResponse::Error {
-            code:   "FAIL_RETRY_TASK".to_owned(),
+            code: "FAIL_RETRY_TASK".to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1644,14 +1798,14 @@ async fn handle_retry_task(task_id: String, ctx: &HandlerContext) -> OperatorRes
 /// Uses task_transitions directly: the FSM edge BlockedRecoveryPending→Admitted
 /// is legal per the FSM table in task_transitions.rs.
 async fn handle_resume_task(
-    task_id:    String,
+    task_id: String,
     resumed_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
     use crate::initiatives::task_transitions::{transition_task_with_audit, TransitionActor};
     use raxis_types::TaskState;
 
-    let store_for_blocking   = Arc::clone(&ctx.store);
+    let store_for_blocking = Arc::clone(&ctx.store);
     let task_id_for_blocking = task_id.clone();
     let resumed_by_for_blocking = resumed_by.clone();
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` — operator-driven
@@ -1659,10 +1813,11 @@ async fn handle_resume_task(
     // dashboard's `SubscribeInitiative` push stream. Use the
     // audit-aware `transition_task_with_audit` wrapper so the
     // paired-write fires post-commit.
-    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> =
-        Arc::clone(&ctx.audit);
+    let audit_for_blocking: Arc<dyn raxis_audit_tools::AuditSink> = Arc::clone(&ctx.audit);
     let join_result = tokio::task::spawn_blocking(move || {
-        let actor = TransitionActor::Operator { fingerprint: resumed_by_for_blocking };
+        let actor = TransitionActor::Operator {
+            fingerprint: resumed_by_for_blocking,
+        };
         transition_task_with_audit(
             &task_id_for_blocking,
             TaskState::Admitted,
@@ -1672,20 +1827,23 @@ async fn handle_resume_task(
             audit_for_blocking.as_ref(),
             None,
         )
-    }).await;
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_RESUME_TASK".to_owned(),
-            detail: format!("resume_task spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_RESUME_TASK".to_owned(),
+                detail: format!("resume_task spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(_record) => OperatorResponse::Ack {
             message: format!("task {task_id} resumed (→ Admitted)"),
         },
         Err(e) => OperatorResponse::Error {
-            code:   "FAIL_RESUME_TASK".to_owned(),
+            code: "FAIL_RESUME_TASK".to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1693,29 +1851,36 @@ async fn handle_resume_task(
 
 /// AbortTask — cancel a single non-terminal task.
 async fn handle_abort_task(
-    task_id:    String,
+    task_id: String,
     aborted_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let store_for_blocking      = Arc::clone(&ctx.store);
-    let task_id_for_blocking    = task_id.clone();
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let task_id_for_blocking = task_id.clone();
     let aborted_by_for_blocking = aborted_by.clone();
     let join_result = tokio::task::spawn_blocking(move || {
-        lifecycle::abort_task(&task_id_for_blocking, &aborted_by_for_blocking, &store_for_blocking)
-    }).await;
+        lifecycle::abort_task(
+            &task_id_for_blocking,
+            &aborted_by_for_blocking,
+            &store_for_blocking,
+        )
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_ABORT_TASK".to_owned(),
-            detail: format!("abort_task spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_ABORT_TASK".to_owned(),
+                detail: format!("abort_task spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("task {task_id} aborted"),
         },
         Err(e) => OperatorResponse::Error {
-            code:   "FAIL_ABORT_TASK".to_owned(),
+            code: "FAIL_ABORT_TASK".to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1724,32 +1889,35 @@ async fn handle_abort_task(
 /// AbortInitiative — set status = Aborted; cancel all non-terminal tasks.
 async fn handle_abort_initiative(
     initiative_id: String,
-    aborted_by:    String,
+    aborted_by: String,
     ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let store_for_blocking          = Arc::clone(&ctx.store);
-    let initiative_id_for_blocking  = initiative_id.clone();
-    let aborted_by_for_blocking     = aborted_by.clone();
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let initiative_id_for_blocking = initiative_id.clone();
+    let aborted_by_for_blocking = aborted_by.clone();
     let join_result = tokio::task::spawn_blocking(move || {
         lifecycle::abort_initiative(
             &initiative_id_for_blocking,
             &aborted_by_for_blocking,
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
     let outcome = match join_result {
         Ok(r) => r,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_ABORT_INITIATIVE".to_owned(),
-            detail: format!("abort_initiative spawn_blocking join failed: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_ABORT_INITIATIVE".to_owned(),
+                detail: format!("abort_initiative spawn_blocking join failed: {e}"),
+            }
+        }
     };
     match outcome {
         Ok(()) => OperatorResponse::Ack {
             message: format!("initiative {initiative_id} aborted"),
         },
         Err(e) => OperatorResponse::Error {
-            code:   "FAIL_ABORT_INITIATIVE".to_owned(),
+            code: "FAIL_ABORT_INITIATIVE".to_owned(),
             detail: e.to_string(),
         },
     }
@@ -1789,19 +1957,21 @@ fn cap_reason(reason: Option<String>) -> Option<String> {
 /// insert.
 async fn handle_quarantine_initiative(
     initiative_id: String,
-    reason:        Option<String>,
-    operator:      &AuthenticatedOperator,
-    ctx:           &HandlerContext,
+    reason: Option<String>,
+    operator: &AuthenticatedOperator,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let reason_capped   = cap_reason(reason);
-    let store_arc       = Arc::clone(&ctx.store);
+    let reason_capped = cap_reason(reason);
+    let store_arc = Arc::clone(&ctx.store);
     let initiative_clone = initiative_id.clone();
-    let operator_fp     = operator.fingerprint.clone();
-    let now             = raxis_types::unix_now_secs() as i64;
-    let reason_for_blk  = reason_capped.clone();
+    let operator_fp = operator.fingerprint.clone();
+    let now = raxis_types::unix_now_secs() as i64;
+    let reason_for_blk = reason_capped.clone();
     // §2.5.2 "Operator display-name fields" — snapshot now, before
     // we cross the spawn_blocking boundary.
-    let quarantined_by_display_name = ctx.policy.load_full()
+    let quarantined_by_display_name = ctx
+        .policy
+        .load_full()
         .operator_display_name(&operator.fingerprint);
 
     let join_result = tokio::task::spawn_blocking(move || {
@@ -1816,26 +1986,31 @@ async fn handle_quarantine_initiative(
         )?;
         tx.commit()?;
         Ok::<bool, QuarantineHandlerError>(was_new)
-    }).await;
+    })
+    .await;
 
     let was_new = match join_result {
-        Ok(Ok(b))   => b,
-        Ok(Err(e))  => return OperatorResponse::Error {
-            code:   "FAIL_QUARANTINE_INITIATIVE".to_owned(),
-            detail: e.to_string(),
-        },
-        Err(e)      => return OperatorResponse::Error {
-            code:   "FAIL_QUARANTINE_INITIATIVE".to_owned(),
-            detail: format!("quarantine_initiative spawn_blocking join failed: {e}"),
-        },
+        Ok(Ok(b)) => b,
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code: "FAIL_QUARANTINE_INITIATIVE".to_owned(),
+                detail: e.to_string(),
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_QUARANTINE_INITIATIVE".to_owned(),
+                detail: format!("quarantine_initiative spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
     if was_new {
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::InitiativeQuarantined {
-                initiative_id:  initiative_id.clone(),
+                initiative_id: initiative_id.clone(),
                 quarantined_by: operator.fingerprint.clone(),
-                reason:         reason_capped,
+                reason: reason_capped,
                 quarantined_by_display_name,
             },
             None,
@@ -1854,7 +2029,7 @@ async fn handle_quarantine_initiative(
 
     OperatorResponse::InitiativeQuarantined {
         initiative_id,
-        quarantined_at:          now,
+        quarantined_at: now,
         was_already_quarantined: !was_new,
     }
 }
@@ -1865,16 +2040,16 @@ async fn handle_quarantine_initiative(
 /// `OperatorQuarantineSwept` event.
 async fn handle_quarantine_plans_by(
     target_fingerprint: String,
-    reason:             Option<String>,
-    operator:           &AuthenticatedOperator,
-    ctx:                &HandlerContext,
+    reason: Option<String>,
+    operator: &AuthenticatedOperator,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
-    let reason_capped   = cap_reason(reason);
-    let store_arc       = Arc::clone(&ctx.store);
-    let target_clone    = target_fingerprint.clone();
-    let operator_fp     = operator.fingerprint.clone();
-    let now             = raxis_types::unix_now_secs() as i64;
-    let reason_for_blk  = reason_capped.clone();
+    let reason_capped = cap_reason(reason);
+    let store_arc = Arc::clone(&ctx.store);
+    let target_clone = target_fingerprint.clone();
+    let operator_fp = operator.fingerprint.clone();
+    let now = raxis_types::unix_now_secs() as i64;
+    let reason_for_blk = reason_capped.clone();
     // §2.5.2 "Operator display-name fields" — snapshot both
     // operator names from the same policy bundle. The *target*
     // operator may have already been removed from policy (this
@@ -1885,10 +2060,8 @@ async fn handle_quarantine_plans_by(
     // so the rendered name will be marked as historical, exactly
     // as `kernel-store.md` §2.5.2 prescribes).
     let policy_snapshot = ctx.policy.load_full();
-    let quarantined_by_display_name = policy_snapshot
-        .operator_display_name(&operator.fingerprint);
-    let target_display_name = policy_snapshot
-        .operator_display_name(&target_fingerprint);
+    let quarantined_by_display_name = policy_snapshot.operator_display_name(&operator.fingerprint);
+    let target_display_name = policy_snapshot.operator_display_name(&target_fingerprint);
     drop(policy_snapshot);
 
     let join_result = tokio::task::spawn_blocking(move || {
@@ -1903,18 +2076,23 @@ async fn handle_quarantine_plans_by(
         )?;
         tx.commit()?;
         Ok::<Vec<String>, QuarantineHandlerError>(newly)
-    }).await;
+    })
+    .await;
 
     let newly_quarantined_ids = match join_result {
-        Ok(Ok(v))   => v,
-        Ok(Err(e))  => return OperatorResponse::Error {
-            code:   "FAIL_QUARANTINE_PLANS_BY".to_owned(),
-            detail: e.to_string(),
-        },
-        Err(e)      => return OperatorResponse::Error {
-            code:   "FAIL_QUARANTINE_PLANS_BY".to_owned(),
-            detail: format!("quarantine_plans_by spawn_blocking join failed: {e}"),
-        },
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code: "FAIL_QUARANTINE_PLANS_BY".to_owned(),
+                detail: e.to_string(),
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_QUARANTINE_PLANS_BY".to_owned(),
+                detail: format!("quarantine_plans_by spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
     // One per-initiative event PLUS the rollup. Per-initiative
@@ -1924,9 +2102,9 @@ async fn handle_quarantine_plans_by(
     for id in &newly_quarantined_ids {
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::InitiativeQuarantined {
-                initiative_id:  id.clone(),
+                initiative_id: id.clone(),
                 quarantined_by: operator.fingerprint.clone(),
-                reason:         reason_capped.clone(),
+                reason: reason_capped.clone(),
                 quarantined_by_display_name: quarantined_by_display_name.clone(),
             },
             None,
@@ -1942,9 +2120,9 @@ async fn handle_quarantine_plans_by(
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::OperatorQuarantineSwept {
             target_fingerprint: target_fingerprint.clone(),
-            quarantined_by:     operator.fingerprint.clone(),
-            count:              newly_quarantined_ids.len() as u64,
-            reason:             reason_capped,
+            quarantined_by: operator.fingerprint.clone(),
+            count: newly_quarantined_ids.len() as u64,
+            reason: reason_capped,
             quarantined_by_display_name,
             target_display_name,
         },
@@ -1981,12 +2159,14 @@ impl std::fmt::Display for QuarantineHandlerError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Sqlite(e) => write!(f, "sqlite: {e}"),
-            Self::View(e)   => write!(f, "{e}"),
+            Self::View(e) => write!(f, "{e}"),
         }
     }
 }
 impl From<rusqlite::Error> for QuarantineHandlerError {
-    fn from(e: rusqlite::Error) -> Self { Self::Sqlite(e) }
+    fn from(e: rusqlite::Error) -> Self {
+        Self::Sqlite(e)
+    }
 }
 impl From<raxis_store::views::initiative_quarantines::QuarantineViewError>
     for QuarantineHandlerError
@@ -2014,11 +2194,11 @@ impl From<raxis_store::views::initiative_quarantines::QuarantineViewError>
 /// `main.rs` uses for `recovery::reconcile` and the verifier-token
 /// issuance path in `gates::verifier_runner`.
 async fn handle_approve_escalation(
-    escalation_id:    String,
-    approval_scope:   raxis_types::operator_wire::ApprovalScopeWire,
+    escalation_id: String,
+    approval_scope: raxis_types::operator_wire::ApprovalScopeWire,
     operator_sig_hex: String,
-    operator:         &AuthenticatedOperator,
-    ctx:              &Arc<HandlerContext>,
+    operator: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — pre-classify
     // the escalation by class + initiator. The kernel-initiated
@@ -2032,22 +2212,21 @@ async fn handle_approve_escalation(
     let class_lookup = lookup_escalation_class_initiator(&ctx.store, &escalation_id).await;
     if let Ok(Some((class, initiator))) = &class_lookup {
         if class == "LogicalDeadlock" && initiator == "Kernel" {
-            return handle_approve_logical_deadlock(
-                escalation_id, operator, ctx,
-            ).await;
+            return handle_approve_logical_deadlock(escalation_id, operator, ctx).await;
         }
     }
 
     let signature = match hex::decode(&operator_sig_hex) {
         Ok(b) => b,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_APPROVE_ESCALATION".to_owned(),
-            detail: format!("operator_sig_hex is not valid hex: {e}"),
-        },
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_APPROVE_ESCALATION".to_owned(),
+                detail: format!("operator_sig_hex is not valid hex: {e}"),
+            }
+        }
     };
-    handle_approve_escalation_standard_path(
-        escalation_id, approval_scope, signature, operator, ctx,
-    ).await
+    handle_approve_escalation_standard_path(escalation_id, approval_scope, signature, operator, ctx)
+        .await
 }
 
 /// One-shot lookup of `(class, initiator)` for an `escalations`
@@ -2055,28 +2234,35 @@ async fn handle_approve_escalation(
 /// whether to fall through to the standard not-found path; returns
 /// `Err` on SQL failure (caller logs + falls through).
 async fn lookup_escalation_class_initiator(
-    store:         &Arc<raxis_store::Store>,
+    store: &Arc<raxis_store::Store>,
     escalation_id: &str,
 ) -> Result<Option<(String, String)>, rusqlite::Error> {
     use rusqlite::OptionalExtension;
     let store_for_blocking = Arc::clone(store);
     let escalation_id_for_blocking = escalation_id.to_owned();
-    tokio::task::spawn_blocking(move || -> Result<Option<(String, String)>, rusqlite::Error> {
-        let conn = store_for_blocking.lock_sync();
-        let row: Option<(String, String)> = conn.query_row(
-            &format!(
-                "SELECT class, initiator FROM {ESCALATIONS}
+    tokio::task::spawn_blocking(
+        move || -> Result<Option<(String, String)>, rusqlite::Error> {
+            let conn = store_for_blocking.lock_sync();
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    &format!(
+                        "SELECT class, initiator FROM {ESCALATIONS}
                   WHERE escalation_id = ?1",
-                ESCALATIONS = raxis_store::Table::Escalations.as_str(),
-            ),
-            rusqlite::params![&escalation_id_for_blocking],
-            |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-        ).optional()?;
-        Ok(row)
-    }).await
-    .unwrap_or_else(|join_err| Err(rusqlite::Error::ToSqlConversionFailure(
-        Box::new(std::io::Error::other(format!("join failed: {join_err}"))),
-    )))
+                        ESCALATIONS = raxis_store::Table::Escalations.as_str(),
+                    ),
+                    rusqlite::params![&escalation_id_for_blocking],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            Ok(row)
+        },
+    )
+    .await
+    .unwrap_or_else(|join_err| {
+        Err(rusqlite::Error::ToSqlConversionFailure(Box::new(
+            std::io::Error::other(format!("join failed: {join_err}")),
+        )))
+    })
 }
 
 /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — kernel-initiated
@@ -2088,21 +2274,25 @@ async fn lookup_escalation_class_initiator(
 /// dispatching here.
 async fn handle_approve_logical_deadlock(
     escalation_id: String,
-    operator:      &AuthenticatedOperator,
-    ctx:           &Arc<HandlerContext>,
+    operator: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     let store_for_blocking = Arc::clone(&ctx.store);
     let escalation_id_blocking = escalation_id.clone();
-    let join_result = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
-        let mut conn = store_for_blocking.lock_sync();
-        let tx = conn.transaction()?;
-        let initiative_id =
-            crate::orch_respawn_ceiling::approve_logical_deadlock_escalation_in_tx(
-                &tx, &escalation_id_blocking, raxis_types::unix_now_secs(),
-            )?;
-        tx.commit()?;
-        Ok(initiative_id)
-    }).await;
+    let join_result =
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+            let mut conn = store_for_blocking.lock_sync();
+            let tx = conn.transaction()?;
+            let initiative_id =
+                crate::orch_respawn_ceiling::approve_logical_deadlock_escalation_in_tx(
+                    &tx,
+                    &escalation_id_blocking,
+                    raxis_types::unix_now_secs(),
+                )?;
+            tx.commit()?;
+            Ok(initiative_id)
+        })
+        .await;
 
     let initiative_id = match join_result {
         Ok(Ok(Some(id))) => id,
@@ -2116,13 +2306,13 @@ async fn handle_approve_logical_deadlock(
         }
         Ok(Err(e)) => {
             return OperatorResponse::Error {
-                code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+                code: "FAIL_APPROVE_ESCALATION".to_owned(),
                 detail: format!("approve_logical_deadlock SQL error: {e}"),
             };
         }
         Err(join_err) => {
             return OperatorResponse::Error {
-                code:   "FAIL_APPROVE_ESCALATION".to_owned(),
+                code: "FAIL_APPROVE_ESCALATION".to_owned(),
                 detail: format!("approve_logical_deadlock join failed: {join_err}"),
             };
         }
@@ -2132,7 +2322,7 @@ async fn handle_approve_logical_deadlock(
         raxis_audit_tools::AuditEventKind::OperatorApprovedRespawnEscalation {
             initiative_id: initiative_id.clone(),
             escalation_id: escalation_id.clone(),
-            operator_id:   operator.fingerprint.clone(),
+            operator_id: operator.fingerprint.clone(),
         },
         None,
         None,
@@ -2148,46 +2338,46 @@ async fn handle_approve_logical_deadlock(
     // = retry" semantic actually fires a new orchestrator session.
     // The respawn driver's own ceiling check will run again on
     // entry, but starts fresh because we just reset the counter.
-    let ctx_for_respawn  = Arc::clone(ctx);
+    let ctx_for_respawn = Arc::clone(ctx);
     let init_for_respawn = initiative_id.clone();
     tokio::spawn(async move {
         let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
-            &init_for_respawn, ctx_for_respawn,
-        ).await;
+            &init_for_respawn,
+            ctx_for_respawn,
+        )
+        .await;
     });
 
     OperatorResponse::EscalationApproved {
         escalation_id,
-        approval_token_id:  String::new(),
+        approval_token_id: String::new(),
         approval_token_raw: String::new(),
-        expires_at:         0,
+        expires_at: 0,
     }
 }
 
 async fn handle_approve_escalation_standard_path(
-    escalation_id:    String,
-    approval_scope:   raxis_types::operator_wire::ApprovalScopeWire,
-    signature:        Vec<u8>,
-    operator:         &AuthenticatedOperator,
-    ctx:              &Arc<HandlerContext>,
+    escalation_id: String,
+    approval_scope: raxis_types::operator_wire::ApprovalScopeWire,
+    signature: Vec<u8>,
+    operator: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
-
     // Pin one snapshot of the bundle: the FSM call below must run
     // against the same epoch we recorded in the audit metadata.
-    let policy_snapshot       = ctx.policy.load_full();
+    let policy_snapshot = ctx.policy.load_full();
     // §2.5.2 "Operator display-name fields" — snapshot the
     // operator's display name from the same bundle the FSM call
     // will use. We resolve before `policy_snapshot` moves into
     // `spawn_blocking` so the audit emit (which runs after the
     // join) can use the cached value without re-loading the
     // ArcSwap (which might point at a newer epoch by then).
-    let approved_by_display_name = policy_snapshot
-        .operator_display_name(&operator.fingerprint);
-    let store_for_blocking    = Arc::clone(&ctx.store);
-    let fp_for_blocking       = operator.fingerprint.clone();
+    let approved_by_display_name = policy_snapshot.operator_display_name(&operator.fingerprint);
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let fp_for_blocking = operator.fingerprint.clone();
     let escalation_id_blocking = escalation_id.clone();
-    let scope_for_blocking    = approval_scope.clone();
-    let policy_epoch          = policy_snapshot.epoch();
+    let scope_for_blocking = approval_scope.clone();
+    let policy_epoch = policy_snapshot.epoch();
 
     let join_result = tokio::task::spawn_blocking(move || {
         crate::authority::escalation::approve_escalation(
@@ -2199,14 +2389,17 @@ async fn handle_approve_escalation_standard_path(
             &policy_snapshot,
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
 
     let approve_outcome = match join_result {
         Ok(r) => r,
-        Err(join_err) => return OperatorResponse::Error {
-            code:   "FAIL_APPROVE_ESCALATION".to_owned(),
-            detail: format!("approve_escalation spawn_blocking join failed: {join_err}"),
-        },
+        Err(join_err) => {
+            return OperatorResponse::Error {
+                code: "FAIL_APPROVE_ESCALATION".to_owned(),
+                detail: format!("approve_escalation spawn_blocking join failed: {join_err}"),
+            }
+        }
     };
 
     match approve_outcome {
@@ -2225,7 +2418,7 @@ async fn handle_approve_escalation_standard_path(
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::EscalationApproved {
                     escalation_id: escalation_id.clone(),
-                    approved_by:   operator.fingerprint.clone(),
+                    approved_by: operator.fingerprint.clone(),
                     approved_by_display_name,
                 },
                 None,
@@ -2239,13 +2432,13 @@ async fn handle_approve_escalation_standard_path(
             }
             OperatorResponse::EscalationApproved {
                 escalation_id,
-                approval_token_id:  result.approval_token_id,
+                approval_token_id: result.approval_token_id,
                 approval_token_raw: result.approval_token_raw,
-                expires_at:         result.expires_at,
+                expires_at: result.expires_at,
             }
         }
         Err(e) => OperatorResponse::Error {
-            code:   e.error_code().to_owned(),
+            code: e.error_code().to_owned(),
             detail: e.to_string(),
         },
     }
@@ -2258,14 +2451,14 @@ async fn handle_approve_escalation_standard_path(
 /// emits `OperatorDeniedRespawnEscalation` post-commit.
 async fn handle_deny_logical_deadlock(
     escalation_id: String,
-    reason:        Option<String>,
-    operator:      &AuthenticatedOperator,
-    ctx:           &Arc<HandlerContext>,
+    reason: Option<String>,
+    operator: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     if let Some(r) = reason.as_ref() {
         if r.chars().count() > 512 {
             return OperatorResponse::Error {
-                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                code: "FAIL_DENY_ESCALATION".to_owned(),
                 detail: format!(
                     "reason exceeds 512-character limit (was {} chars)",
                     r.chars().count()
@@ -2277,19 +2470,21 @@ async fn handle_deny_logical_deadlock(
     let store_for_blocking = Arc::clone(&ctx.store);
     let escalation_id_blocking = escalation_id.clone();
     let reason_for_blocking = reason.clone();
-    let join_result = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
-        let mut conn = store_for_blocking.lock_sync();
-        let tx = conn.transaction()?;
-        let initiative_id =
-            crate::orch_respawn_ceiling::deny_logical_deadlock_escalation_in_tx(
-                &tx,
-                &escalation_id_blocking,
-                raxis_types::unix_now_secs(),
-                reason_for_blocking.as_deref(),
-            )?;
-        tx.commit()?;
-        Ok(initiative_id)
-    }).await;
+    let join_result =
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+            let mut conn = store_for_blocking.lock_sync();
+            let tx = conn.transaction()?;
+            let initiative_id =
+                crate::orch_respawn_ceiling::deny_logical_deadlock_escalation_in_tx(
+                    &tx,
+                    &escalation_id_blocking,
+                    raxis_types::unix_now_secs(),
+                    reason_for_blocking.as_deref(),
+                )?;
+            tx.commit()?;
+            Ok(initiative_id)
+        })
+        .await;
 
     let initiative_id = match join_result {
         Ok(Ok(Some(id))) => id,
@@ -2303,13 +2498,13 @@ async fn handle_deny_logical_deadlock(
         }
         Ok(Err(e)) => {
             return OperatorResponse::Error {
-                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                code: "FAIL_DENY_ESCALATION".to_owned(),
                 detail: format!("deny_logical_deadlock SQL error: {e}"),
             };
         }
         Err(join_err) => {
             return OperatorResponse::Error {
-                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                code: "FAIL_DENY_ESCALATION".to_owned(),
                 detail: format!("deny_logical_deadlock join failed: {join_err}"),
             };
         }
@@ -2319,7 +2514,7 @@ async fn handle_deny_logical_deadlock(
         raxis_audit_tools::AuditEventKind::OperatorDeniedRespawnEscalation {
             initiative_id: initiative_id.clone(),
             escalation_id: escalation_id.clone(),
-            operator_id:   operator.fingerprint.clone(),
+            operator_id: operator.fingerprint.clone(),
         },
         None,
         None,
@@ -2334,7 +2529,7 @@ async fn handle_deny_logical_deadlock(
     let _ = operator;
     OperatorResponse::EscalationDenied {
         escalation_id,
-        denied_at:  raxis_types::unix_now_secs(),
+        denied_at: raxis_types::unix_now_secs(),
     }
 }
 
@@ -2343,9 +2538,9 @@ async fn handle_deny_logical_deadlock(
 /// event is the only durable record per kernel-store.md §2.5.5.
 async fn handle_deny_escalation(
     escalation_id: String,
-    reason:        Option<String>,
-    operator:      &AuthenticatedOperator,
-    ctx:           &Arc<HandlerContext>,
+    reason: Option<String>,
+    operator: &AuthenticatedOperator,
+    ctx: &Arc<HandlerContext>,
 ) -> OperatorResponse {
     // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — pre-classify
     // and dispatch kernel-initiated `LogicalDeadlock` rows to the
@@ -2355,16 +2550,14 @@ async fn handle_deny_escalation(
     let class_lookup = lookup_escalation_class_initiator(&ctx.store, &escalation_id).await;
     if let Ok(Some((class, initiator))) = &class_lookup {
         if class == "LogicalDeadlock" && initiator == "Kernel" {
-            return handle_deny_logical_deadlock(
-                escalation_id, reason, operator, ctx,
-            ).await;
+            return handle_deny_logical_deadlock(escalation_id, reason, operator, ctx).await;
         }
     }
 
     if let Some(r) = reason.as_ref() {
         if r.chars().count() > 512 {
             return OperatorResponse::Error {
-                code:   "FAIL_DENY_ESCALATION".to_owned(),
+                code: "FAIL_DENY_ESCALATION".to_owned(),
                 detail: format!(
                     "reason exceeds 512-character limit (was {} chars)",
                     r.chars().count()
@@ -2377,12 +2570,14 @@ async fn handle_deny_escalation(
     // any blocking work. The deny path doesn't otherwise pin a
     // bundle (it has no FSM-vs-epoch coupling like approve does),
     // but we still want a consistent audit-emit name.
-    let denied_by_display_name = ctx.policy.load_full()
+    let denied_by_display_name = ctx
+        .policy
+        .load_full()
         .operator_display_name(&operator.fingerprint);
-    let store_for_blocking     = Arc::clone(&ctx.store);
-    let fp_for_blocking        = operator.fingerprint.clone();
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let fp_for_blocking = operator.fingerprint.clone();
     let escalation_id_blocking = escalation_id.clone();
-    let reason_for_blocking    = reason.clone();
+    let reason_for_blocking = reason.clone();
     let join_result = tokio::task::spawn_blocking(move || {
         crate::authority::escalation::deny_escalation(
             &escalation_id_blocking,
@@ -2390,21 +2585,24 @@ async fn handle_deny_escalation(
             &fp_for_blocking,
             &store_for_blocking,
         )
-    }).await;
+    })
+    .await;
     let deny_outcome = match join_result {
         Ok(r) => r,
-        Err(join_err) => return OperatorResponse::Error {
-            code:   "FAIL_DENY_ESCALATION".to_owned(),
-            detail: format!("deny_escalation spawn_blocking join failed: {join_err}"),
-        },
+        Err(join_err) => {
+            return OperatorResponse::Error {
+                code: "FAIL_DENY_ESCALATION".to_owned(),
+                detail: format!("deny_escalation spawn_blocking join failed: {join_err}"),
+            }
+        }
     };
     match deny_outcome {
         Ok(result) => {
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::EscalationDenied {
                     escalation_id: escalation_id.clone(),
-                    denied_by:     operator.fingerprint.clone(),
-                    reason:        reason.clone(),
+                    denied_by: operator.fingerprint.clone(),
+                    reason: reason.clone(),
                     denied_by_display_name,
                 },
                 None,
@@ -2422,7 +2620,7 @@ async fn handle_deny_escalation(
             }
         }
         Err(e) => OperatorResponse::Error {
-            code:   e.error_code().to_owned(),
+            code: e.error_code().to_owned(),
             detail: e.to_string(),
         },
     }
@@ -2463,29 +2661,30 @@ async fn handle_deny_escalation(
 /// defence; the operator-visible epoch advance is committed and
 /// readers already see the new bundle through the `ArcSwap`.
 async fn handle_rotate_epoch(
-    policy_path:  String,
-    sig_path:     String,
-    operator:     &AuthenticatedOperator,
-    ctx:          &HandlerContext,
+    policy_path: String,
+    sig_path: String,
+    operator: &AuthenticatedOperator,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
     use crate::policy_manager;
 
     let policy_path_buf = std::path::PathBuf::from(&policy_path);
-    let sig_path_buf    = std::path::PathBuf::from(&sig_path);
+    let sig_path_buf = std::path::PathBuf::from(&sig_path);
 
     // Step 1: path containment. Done before opening the files so a
     // non-existent path under data_dir surfaces as a `read failed`
     // (forensically distinct from a real path that escapes).
     let policy_dir = ctx.data_dir.join("policy");
-    for (label, path) in [("policy_path", &policy_path_buf), ("sig_path", &sig_path_buf)] {
+    for (label, path) in [
+        ("policy_path", &policy_path_buf),
+        ("sig_path", &sig_path_buf),
+    ] {
         if let Err(e) = policy_manager::canonicalize_under_data_dir(path, &policy_dir) {
             // Emit PolicyAdvanceRejected for forensic visibility, then
             // surface the typed error code on the wire.
-            emit_policy_advance_rejected(
-                ctx, &operator.fingerprint, &policy_path, &sig_path, &e,
-            );
+            emit_policy_advance_rejected(ctx, &operator.fingerprint, &policy_path, &sig_path, &e);
             return OperatorResponse::Error {
-                code:   e.error_code().to_owned(),
+                code: e.error_code().to_owned(),
                 detail: format!("{label}: {e}"),
             };
         }
@@ -2496,14 +2695,14 @@ async fn handle_rotate_epoch(
     // (KeyRegistry, Store, AuditSink, ArcSwap<PolicyBundle>) is
     // already an Arc on `ctx`.
     let registry_for_blocking = Arc::clone(&ctx.registry);
-    let store_for_blocking    = Arc::clone(&ctx.store);
-    let audit_for_blocking    = Arc::clone(&ctx.audit);
-    let policy_for_blocking   = Arc::clone(&ctx.policy);
-    let binding_for_blocking  = Arc::clone(&ctx.epoch_binding);
+    let store_for_blocking = Arc::clone(&ctx.store);
+    let audit_for_blocking = Arc::clone(&ctx.audit);
+    let policy_for_blocking = Arc::clone(&ctx.policy);
+    let binding_for_blocking = Arc::clone(&ctx.epoch_binding);
     let artifact_for_blocking = ctx.artifact_store.as_ref().map(Arc::clone);
-    let triggered_by          = operator.fingerprint.clone();
-    let policy_path_blocking  = policy_path_buf.clone();
-    let sig_path_blocking     = sig_path_buf.clone();
+    let triggered_by = operator.fingerprint.clone();
+    let policy_path_blocking = policy_path_buf.clone();
+    let sig_path_blocking = sig_path_buf.clone();
 
     let join_outcome = tokio::task::spawn_blocking(move || {
         policy_manager::advance_epoch(
@@ -2535,18 +2734,22 @@ async fn handle_rotate_epoch(
             // Phase 3: best-effort gateway signal. Per spec, must NOT
             // affect the response or roll back the advance — log the
             // outcome via `GatewaySignalFailed` and move on.
-            if let Err(e) = ctx.gateway.notify_epoch_advanced(outcome.new_epoch_id).await {
+            if let Err(e) = ctx
+                .gateway
+                .notify_epoch_advanced(outcome.new_epoch_id)
+                .await
+            {
                 emit_gateway_signal_failed(ctx, "EpochAdvanced", Some(outcome.new_epoch_id), &e);
             }
             OperatorResponse::EpochAdvanced {
-                new_epoch_id:               outcome.new_epoch_id,
-                policy_sha256:              outcome.policy_sha256,
-                signed_by_authority:        outcome.signed_by_authority,
+                new_epoch_id: outcome.new_epoch_id,
+                policy_sha256: outcome.policy_sha256,
+                signed_by_authority: outcome.signed_by_authority,
                 n_delegations_marked_stale: outcome.n_delegations_marked_stale,
-                n_sessions_invalidated:     outcome.n_sessions_invalidated,
-                advanced_at:                outcome.advanced_at_unix_secs,
+                n_sessions_invalidated: outcome.n_sessions_invalidated,
+                advanced_at: outcome.advanced_at_unix_secs,
             }
-        },
+        }
         Err(e) => {
             // Phase-distinguished audit. Phase 0 failures
             // (signature, replay, malformed, path outside) get
@@ -2562,7 +2765,11 @@ async fn handle_rotate_epoch(
                 | policy_manager::PolicyError::PathOutsideDataDir { .. }
                 | policy_manager::PolicyError::ArtifactReadFailed { .. } => {
                     emit_policy_advance_rejected(
-                        ctx, &operator.fingerprint, &policy_path, &sig_path, &e,
+                        ctx,
+                        &operator.fingerprint,
+                        &policy_path,
+                        &sig_path,
+                        &e,
                     );
                 }
                 policy_manager::PolicyError::PolicyArtifactAlreadyInstalled { .. }
@@ -2571,7 +2778,7 @@ async fn handle_rotate_epoch(
                 }
             }
             OperatorResponse::Error {
-                code:   e.error_code().to_owned(),
+                code: e.error_code().to_owned(),
                 detail: e.to_string(),
             }
         }
@@ -2582,11 +2789,11 @@ async fn handle_rotate_epoch(
 /// logged to stderr — the operator already received the typed wire
 /// error so the audit miss is forensic noise, not a correctness gap.
 fn emit_policy_advance_rejected(
-    ctx:           &HandlerContext,
-    triggered_by:  &str,
-    policy_path:   &str,
-    sig_path:      &str,
-    err:           &crate::policy_manager::PolicyError,
+    ctx: &HandlerContext,
+    triggered_by: &str,
+    policy_path: &str,
+    sig_path: &str,
+    err: &crate::policy_manager::PolicyError,
 ) {
     use crate::policy_manager::PolicyError;
 
@@ -2607,7 +2814,9 @@ fn emit_policy_advance_rejected(
             artifact_epoch,
             current_epoch,
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"PolicyAdvanceRejected\",\
@@ -2621,18 +2830,20 @@ fn emit_policy_advance_rejected(
 /// (`GatewayCallError::category()`) so forensic tooling can group by
 /// failure mode without parsing free-form text.
 fn emit_gateway_signal_failed(
-    ctx:           &HandlerContext,
-    signal_kind:   &str,
-    new_epoch_id:  Option<u64>,
-    err:           &crate::gateway::GatewayCallError,
+    ctx: &HandlerContext,
+    signal_kind: &str,
+    new_epoch_id: Option<u64>,
+    err: &crate::gateway::GatewayCallError,
 ) {
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::GatewaySignalFailed {
-            signal:       signal_kind.to_owned(),
+            signal: signal_kind.to_owned(),
             new_epoch_id,
-            reason:       err.category().to_owned(),
+            reason: err.category().to_owned(),
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"GatewaySignalFailed\",\
@@ -2645,10 +2856,7 @@ fn emit_gateway_signal_failed(
 
 /// Emit `AuditEventKind::PolicyAdvanceFailed`. Same logging
 /// guarantees as `emit_policy_advance_rejected`.
-fn emit_policy_advance_failed(
-    ctx: &HandlerContext,
-    err: &crate::policy_manager::PolicyError,
-) {
+fn emit_policy_advance_failed(ctx: &HandlerContext, err: &crate::policy_manager::PolicyError) {
     let reason = err.to_string();
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::PolicyAdvanceFailed {
@@ -2661,7 +2869,9 @@ fn emit_policy_advance_failed(
             // the human reason for diagnostics).
             new_epoch_id: 0,
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"PolicyAdvanceFailed\",\
@@ -2676,28 +2886,28 @@ fn emit_policy_advance_failed(
 
 fn op_name(req: &OperatorRequest) -> &'static str {
     match req {
-        OperatorRequest::CreateSession { .. }  => "CreateSession",
-        OperatorRequest::RevokeSession { .. }  => "RevokeSession",
-        OperatorRequest::GrantDelegation { .. }=> "GrantDelegation",
+        OperatorRequest::CreateSession { .. } => "CreateSession",
+        OperatorRequest::RevokeSession { .. } => "RevokeSession",
+        OperatorRequest::GrantDelegation { .. } => "GrantDelegation",
         OperatorRequest::CreateInitiative { .. } => "CreateInitiative",
-        OperatorRequest::ApprovePlan { .. }     => "ApprovePlan",
-        OperatorRequest::RejectPlan { .. }      => "RejectPlan",
-        OperatorRequest::RetryTask { .. }       => "RetryTask",
-        OperatorRequest::ResumeTask { .. }      => "ResumeTask",
-        OperatorRequest::AbortTask { .. }       => "AbortTask",
+        OperatorRequest::ApprovePlan { .. } => "ApprovePlan",
+        OperatorRequest::RejectPlan { .. } => "RejectPlan",
+        OperatorRequest::RetryTask { .. } => "RetryTask",
+        OperatorRequest::ResumeTask { .. } => "ResumeTask",
+        OperatorRequest::AbortTask { .. } => "AbortTask",
         OperatorRequest::AbortInitiative { .. } => "AbortInitiative",
-        OperatorRequest::ApproveEscalation { .. }=> "ApproveEscalation",
-        OperatorRequest::DenyEscalation { .. }  => "DenyEscalation",
-        OperatorRequest::RotateEpoch { .. }     => "RotateEpoch",
+        OperatorRequest::ApproveEscalation { .. } => "ApproveEscalation",
+        OperatorRequest::DenyEscalation { .. } => "DenyEscalation",
+        OperatorRequest::RotateEpoch { .. } => "RotateEpoch",
         OperatorRequest::QuarantineInitiative { .. } => "QuarantineInitiative",
-        OperatorRequest::QuarantinePlansBy { .. }    => "QuarantinePlansBy",
+        OperatorRequest::QuarantinePlansBy { .. } => "QuarantinePlansBy",
         // V2_GAPS §12.4 — operator-ergonomics stubs.
-        OperatorRequest::ProposeDefaults { .. }            => "ProposeDefaults",
-        OperatorRequest::EstimateCost { .. }               => "EstimateCost",
-        OperatorRequest::DryRunAdmit { .. }                => "DryRunAdmit",
-        OperatorRequest::SubscribeInitiative { .. }        => "SubscribeInitiative",
-        OperatorRequest::DescribeInitiativePause { .. }    => "DescribeInitiativePause",
-        OperatorRequest::ListTaskOutputs { .. }            => "ListTaskOutputs",
+        OperatorRequest::ProposeDefaults { .. } => "ProposeDefaults",
+        OperatorRequest::EstimateCost { .. } => "EstimateCost",
+        OperatorRequest::DryRunAdmit { .. } => "DryRunAdmit",
+        OperatorRequest::SubscribeInitiative { .. } => "SubscribeInitiative",
+        OperatorRequest::DescribeInitiativePause { .. } => "DescribeInitiativePause",
+        OperatorRequest::ListTaskOutputs { .. } => "ListTaskOutputs",
     }
 }
 
@@ -2727,9 +2937,9 @@ mod escalation_dispatch_tests {
 
     use ed25519_dalek::{Signer, SigningKey};
     use raxis_audit_tools::AuditEventKind;
-    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{OperatorEntry, PolicyBundle};
     use raxis_store::{Store, Table};
+    use raxis_test_support::FakeAuditSink;
     use raxis_types::operator_wire::ApprovalScopeWire;
     use raxis_types::{EscalationClass, EscalationStatus};
 
@@ -2740,23 +2950,29 @@ mod escalation_dispatch_tests {
 
     // ── shared fixtures ───────────────────────────────────────────────
 
-    const FP:           &str = "op-prime";
+    const FP: &str = "op-prime";
     // INV-STORE-03: no raw SQL table-name literals in `kernel/src`.
     // The dispatcher tests below use these constants (and the various
     // `*State::as_sql_str()` methods) instead of inline string literals.
-    const ESCALATIONS:  &str = Table::Escalations.as_str();
+    const ESCALATIONS: &str = Table::Escalations.as_str();
 
-    fn fixture_keypair() -> SigningKey { SigningKey::from_bytes(&[7u8; 32]) }
+    fn fixture_keypair() -> SigningKey {
+        SigningKey::from_bytes(&[7u8; 32])
+    }
 
     fn fixture_scope() -> ApprovalScopeWire {
         ApprovalScopeWire {
-            capability_class:  "WriteSecrets".into(),
-            max_uses:          2,
+            capability_class: "WriteSecrets".into(),
+            max_uses: 2,
             valid_for_seconds: 600,
         }
     }
 
-    fn build_ctx(store: Arc<Store>, sink: Arc<FakeAuditSink>, sk: &SigningKey) -> Arc<HandlerContext> {
+    fn build_ctx(
+        store: Arc<Store>,
+        sink: Arc<FakeAuditSink>,
+        sk: &SigningKey,
+    ) -> Arc<HandlerContext> {
         let pubkey = hex::encode(sk.verifying_key().to_bytes());
         // Stub cert: this fixture exercises the operator IPC handlers
         // bypassing PolicyBundle::validate. See
@@ -2764,17 +2980,15 @@ mod escalation_dispatch_tests {
         let cert = raxis_test_support::stub_cert_for_pubkey(pubkey.clone());
         let policy = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: FP.to_owned(),
-            display_name:       FP.to_owned(),
-            pubkey_hex:         pubkey,
-            permitted_ops:      vec![],
+            display_name: FP.to_owned(),
+            pubkey_hex: pubkey,
+            permitted_ops: vec![],
             cert,
             force_misconfig_bypass: false,
         }]);
         let data_dir = PathBuf::from("/tmp/raxis-test");
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            &data_dir,
-            sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(&data_dir, sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
@@ -2797,7 +3011,7 @@ mod escalation_dispatch_tests {
 
     fn fixture_authenticated() -> AuthenticatedOperator {
         AuthenticatedOperator {
-            fingerprint:   FP.to_owned(),
+            fingerprint: FP.to_owned(),
             permitted_ops: vec!["ApproveEscalation".into(), "DenyEscalation".into()],
         }
     }
@@ -2817,7 +3031,7 @@ mod escalation_dispatch_tests {
             // above lets the test bypass referential integrity for the
             // dispatch path under test). Table name + escalation class
             // + status string come from typed sources per INV-STORE-03.
-            let class  = EscalationClass::CapabilityUpgrade.as_sql_str();
+            let class = EscalationClass::CapabilityUpgrade.as_sql_str();
             let status = EscalationStatus::Pending.as_sql_str();
             conn.execute(
                 &format!(
@@ -2831,13 +3045,19 @@ mod escalation_dispatch_tests {
                                'unit-test', ?3, ?4, ?5, ?6)"
                 ),
                 rusqlite::params![
-                    id, class, id, status,
+                    id,
+                    class,
+                    id,
+                    status,
                     raxis_types::unix_now_secs(),
                     raxis_types::unix_now_secs() + 3600,
                 ],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// Read a column from the escalations row from inside an async test.
@@ -2848,22 +3068,31 @@ mod escalation_dispatch_tests {
             let conn = store.lock_sync();
             conn.query_row(
                 &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
-                rusqlite::params![id], |r| r.get(0),
-            ).unwrap()
-        }).await.unwrap()
+                rusqlite::params![id],
+                |r| r.get(0),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     /// Force the escalation row's status (used to set up the
     /// "already-Approved" fixture for the NotPending error path).
     async fn force_status(store: Arc<Store>, escalation_id: &str, status: EscalationStatus) {
-        let id        = escalation_id.to_owned();
-        let status_s  = status.as_sql_str().to_owned();
+        let id = escalation_id.to_owned();
+        let status_s = status.as_sql_str().to_owned();
         tokio::task::spawn_blocking(move || {
-            store.lock_sync().execute(
-                &format!("UPDATE {ESCALATIONS} SET status = ?1 WHERE escalation_id = ?2"),
-                rusqlite::params![status_s, id],
-            ).unwrap();
-        }).await.unwrap();
+            store
+                .lock_sync()
+                .execute(
+                    &format!("UPDATE {ESCALATIONS} SET status = ?1 WHERE escalation_id = ?2"),
+                    rusqlite::params![status_s, id],
+                )
+                .unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     // ── ApproveEscalation ─────────────────────────────────────────────
@@ -2871,24 +3100,28 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn approve_escalation_happy_path_returns_typed_response_and_emits_audit() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let sk    = fixture_keypair();
-        let ctx   = build_ctx(store.clone(), sink.clone(), &sk);
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let sk = fixture_keypair();
+        let ctx = build_ctx(store.clone(), sink.clone(), &sk);
+        let op = fixture_authenticated();
         let scope = fixture_scope();
 
         insert_pending_escalation(store.clone(), "esc-A").await;
 
-        let sig = sk.sign(&approval_scope_signing_input("esc-A", &scope))
-            .to_bytes().to_vec();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-A", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let resp = handle_approve_escalation(
-            "esc-A".into(), scope, hex::encode(&sig), &op, &ctx,
-        ).await;
+        let resp =
+            handle_approve_escalation("esc-A".into(), scope, hex::encode(&sig), &op, &ctx).await;
 
         match resp {
             OperatorResponse::EscalationApproved {
-                escalation_id, approval_token_id, approval_token_raw, expires_at
+                escalation_id,
+                approval_token_id,
+                approval_token_raw,
+                expires_at,
             } => {
                 assert_eq!(escalation_id, "esc-A");
                 assert!(uuid::Uuid::parse_str(&approval_token_id).is_ok());
@@ -2901,15 +3134,21 @@ mod escalation_dispatch_tests {
         // Exactly one EscalationApproved audit event emitted.
         let kinds = sink.event_kinds();
         let approved_count = kinds.iter().filter(|k| **k == "EscalationApproved").count();
-        assert_eq!(approved_count, 1,
-            "exactly one EscalationApproved audit event must fire; got: {kinds:?}");
+        assert_eq!(
+            approved_count, 1,
+            "exactly one EscalationApproved audit event must fire; got: {kinds:?}"
+        );
         // Audit payload carries the right (escalation_id, approved_by) pair.
-        let evt = sink.events().into_iter()
+        let evt = sink
+            .events()
+            .into_iter()
             .find(|e| matches!(e.kind, AuditEventKind::EscalationApproved { .. }))
             .expect("EscalationApproved event present");
         match evt.kind {
             AuditEventKind::EscalationApproved {
-                escalation_id, approved_by, approved_by_display_name,
+                escalation_id,
+                approved_by,
+                approved_by_display_name,
             } => {
                 assert_eq!(escalation_id, "esc-A");
                 assert_eq!(approved_by, FP);
@@ -2928,23 +3167,27 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn approve_escalation_with_malformed_signature_hex_is_rejected() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op = fixture_authenticated();
         insert_pending_escalation(store.clone(), "esc-1").await;
 
         let resp = handle_approve_escalation(
             "esc-1".into(),
             fixture_scope(),
             "ZZZ_not_hex".into(),
-            &op, &ctx,
-        ).await;
+            &op,
+            &ctx,
+        )
+        .await;
 
         match resp {
             OperatorResponse::Error { code, detail } => {
                 assert_eq!(code, "FAIL_APPROVE_ESCALATION");
-                assert!(detail.contains("not valid hex"),
-                    "detail must explain hex decode failure; got: {detail}");
+                assert!(
+                    detail.contains("not valid hex"),
+                    "detail must explain hex decode failure; got: {detail}"
+                );
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -2955,22 +3198,23 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn approve_escalation_maps_not_pending_to_stable_error_code() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let sk    = fixture_keypair();
-        let ctx   = build_ctx(store.clone(), sink.clone(), &sk);
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let sk = fixture_keypair();
+        let ctx = build_ctx(store.clone(), sink.clone(), &sk);
+        let op = fixture_authenticated();
         let scope = fixture_scope();
 
         insert_pending_escalation(store.clone(), "esc-1").await;
         // Force the row to Approved so the second approve attempt fails.
         force_status(store.clone(), "esc-1", EscalationStatus::Approved).await;
 
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
-            .to_bytes().to_vec();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let resp = handle_approve_escalation(
-            "esc-1".into(), scope, hex::encode(&sig), &op, &ctx,
-        ).await;
+        let resp =
+            handle_approve_escalation("esc-1".into(), scope, hex::encode(&sig), &op, &ctx).await;
 
         match resp {
             OperatorResponse::Error { code, .. } => {
@@ -2987,31 +3231,36 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn deny_escalation_happy_path_returns_typed_response_and_emits_audit() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op = fixture_authenticated();
         insert_pending_escalation(store.clone(), "esc-D").await;
 
-        let resp = handle_deny_escalation(
-            "esc-D".into(),
-            Some("scope too broad".into()),
-            &op, &ctx,
-        ).await;
+        let resp =
+            handle_deny_escalation("esc-D".into(), Some("scope too broad".into()), &op, &ctx).await;
 
         match resp {
-            OperatorResponse::EscalationDenied { escalation_id, denied_at } => {
+            OperatorResponse::EscalationDenied {
+                escalation_id,
+                denied_at,
+            } => {
                 assert_eq!(escalation_id, "esc-D");
                 assert!(denied_at > 0);
             }
             other => panic!("expected EscalationDenied, got {other:?}"),
         }
 
-        let evt = sink.events().into_iter()
+        let evt = sink
+            .events()
+            .into_iter()
             .find(|e| matches!(e.kind, AuditEventKind::EscalationDenied { .. }))
             .expect("EscalationDenied event present");
         match evt.kind {
             AuditEventKind::EscalationDenied {
-                escalation_id, denied_by, reason, denied_by_display_name,
+                escalation_id,
+                denied_by,
+                reason,
+                denied_by_display_name,
             } => {
                 assert_eq!(escalation_id, "esc-D");
                 assert_eq!(denied_by, FP);
@@ -3025,21 +3274,21 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn deny_escalation_rejects_reason_over_512_chars_before_touching_store() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op = fixture_authenticated();
         insert_pending_escalation(store.clone(), "esc-1").await;
 
         let too_long: String = "x".repeat(513);
-        let resp = handle_deny_escalation(
-            "esc-1".into(), Some(too_long), &op, &ctx,
-        ).await;
+        let resp = handle_deny_escalation("esc-1".into(), Some(too_long), &op, &ctx).await;
 
         match resp {
             OperatorResponse::Error { code, detail } => {
                 assert_eq!(code, "FAIL_DENY_ESCALATION");
-                assert!(detail.contains("512-character limit"),
-                    "detail must call out the 512 cap; got: {detail}");
+                assert!(
+                    detail.contains("512-character limit"),
+                    "detail must call out the 512 cap; got: {detail}"
+                );
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -3078,19 +3327,16 @@ mod escalation_dispatch_tests {
     #[tokio::test]
     async fn revoke_session_runs_under_tokio_without_panic() {
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store, sink, &fixture_keypair());
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx = build_ctx(store, sink, &fixture_keypair());
 
-        let resp = handle_revoke_session(
-            "00000000-0000-4000-8000-000000000000".into(),
-            &ctx,
-        ).await;
+        let resp = handle_revoke_session("00000000-0000-4000-8000-000000000000".into(), &ctx).await;
 
         // Whatever the outcome, the test passing means the runtime did
         // not panic. The exact code is FAIL_REVOKE_SESSION because the
         // session row doesn't exist.
         match resp {
-            OperatorResponse::Error { .. } | OperatorResponse::SessionRevoked { .. } => {},
+            OperatorResponse::Error { .. } | OperatorResponse::SessionRevoked { .. } => {}
             other => panic!("unexpected variant: {other:?}"),
         }
     }
@@ -3099,15 +3345,13 @@ mod escalation_dispatch_tests {
     async fn deny_escalation_at_exactly_512_chars_is_accepted() {
         // Boundary: 512 is allowed, 513 is not (covered above).
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sink  = Arc::new(FakeAuditSink::new());
-        let ctx   = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
-        let op    = fixture_authenticated();
+        let sink = Arc::new(FakeAuditSink::new());
+        let ctx = build_ctx(store.clone(), sink.clone(), &fixture_keypair());
+        let op = fixture_authenticated();
         insert_pending_escalation(store.clone(), "esc-edge").await;
 
         let exactly_max: String = "x".repeat(512);
-        let resp = handle_deny_escalation(
-            "esc-edge".into(), Some(exactly_max), &op, &ctx,
-        ).await;
+        let resp = handle_deny_escalation("esc-edge".into(), Some(exactly_max), &op, &ctx).await;
         assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }));
     }
 
@@ -3142,17 +3386,17 @@ mod escalation_dispatch_tests {
     /// inbox line would be written even though the FSM transition
     /// committed cleanly.
     fn build_ctx_with_notifying_sink(
-        store:    Arc<Store>,
+        store: Arc<Store>,
         data_dir: PathBuf,
-        sk:       &SigningKey,
+        sk: &SigningKey,
     ) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
         let pubkey = hex::encode(sk.verifying_key().to_bytes());
         let cert = raxis_test_support::stub_cert_for_pubkey(pubkey.clone());
         let policy_bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: FP.to_owned(),
-            display_name:       FP.to_owned(),
-            pubkey_hex:         pubkey,
-            permitted_ops:      vec!["ApproveEscalation".into()],
+            display_name: FP.to_owned(),
+            pubkey_hex: pubkey,
+            permitted_ops: vec!["ApproveEscalation".into()],
             cert,
             force_misconfig_bypass: false,
         }]);
@@ -3166,10 +3410,8 @@ mod escalation_dispatch_tests {
             data_dir.clone(),
         ));
 
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            &data_dir,
-            Arc::clone(&audit),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(&data_dir, Arc::clone(&audit));
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
@@ -3194,8 +3436,8 @@ mod escalation_dispatch_tests {
     /// Poll `<inbox>` until at least `min` records are present or the
     /// deadline elapses. Returns the parsed JSONL records.
     async fn await_inbox_with_min(
-        path:     &std::path::Path,
-        min:      usize,
+        path: &std::path::Path,
+        min: usize,
         deadline: Duration,
     ) -> Vec<serde_json::Value> {
         let start = std::time::Instant::now();
@@ -3212,7 +3454,8 @@ mod escalation_dispatch_tests {
                 }
             }
             if start.elapsed() > deadline {
-                return tokio::fs::read(path).await
+                return tokio::fs::read(path)
+                    .await
                     .ok()
                     .and_then(|bytes| String::from_utf8(bytes).ok())
                     .map(|s| {
@@ -3228,18 +3471,15 @@ mod escalation_dispatch_tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn approve_escalation_lands_inbox_line_via_notifying_sink() {
-        let tmp   = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sk    = fixture_keypair();
-        let (ctx, _inner_sink) = build_ctx_with_notifying_sink(
-            Arc::clone(&store),
-            tmp.path().to_path_buf(),
-            &sk,
-        );
+        let sk = fixture_keypair();
+        let (ctx, _inner_sink) =
+            build_ctx_with_notifying_sink(Arc::clone(&store), tmp.path().to_path_buf(), &sk);
         insert_pending_escalation(Arc::clone(&store), "esc-end-to-end").await;
 
         let scope = fixture_scope();
-        let sig   = sk
+        let sig = sk
             .sign(&approval_scope_signing_input("esc-end-to-end", &scope))
             .to_bytes()
             .to_vec();
@@ -3250,49 +3490,55 @@ mod escalation_dispatch_tests {
             hex::encode(&sig),
             &fixture_authenticated(),
             &ctx,
-        ).await;
-        assert!(matches!(resp, OperatorResponse::EscalationApproved { .. }),
-            "expected EscalationApproved, got {resp:?}");
+        )
+        .await;
+        assert!(
+            matches!(resp, OperatorResponse::EscalationApproved { .. }),
+            "expected EscalationApproved, got {resp:?}"
+        );
 
-        let inbox   = PolicyBundle::inbox_path_for(tmp.path());
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
         let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
-        assert_eq!(records.len(), 1,
-            "exactly one inbox record expected; got {records:?}");
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly one inbox record expected; got {records:?}"
+        );
         let r = &records[0];
         assert_eq!(r["event_kind"], "EscalationApproved");
         assert_eq!(r["payload"]["escalation_id"], "esc-end-to-end");
         assert_eq!(r["payload"]["approved_by"], FP);
         let summary = r["human_summary"].as_str().unwrap();
-        assert!(summary.contains("APPROVED"),
-            "summary should mention approval; got {summary:?}");
-        assert!(summary.contains("esc-end-to-end"),
-            "summary should include escalation_id; got {summary:?}");
+        assert!(
+            summary.contains("APPROVED"),
+            "summary should mention approval; got {summary:?}"
+        );
+        assert!(
+            summary.contains("esc-end-to-end"),
+            "summary should include escalation_id; got {summary:?}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn deny_escalation_lands_inbox_line_via_notifying_sink() {
-        let tmp   = tempfile::tempdir().expect("tempdir");
+        let tmp = tempfile::tempdir().expect("tempdir");
         let store = Arc::new(Store::open_in_memory().unwrap());
-        let sk    = fixture_keypair();
+        let sk = fixture_keypair();
         let mut op = fixture_authenticated();
         op.permitted_ops.push("DenyEscalation".into());
-        let (ctx, _inner_sink) = build_ctx_with_notifying_sink(
-            Arc::clone(&store),
-            tmp.path().to_path_buf(),
-            &sk,
-        );
+        let (ctx, _inner_sink) =
+            build_ctx_with_notifying_sink(Arc::clone(&store), tmp.path().to_path_buf(), &sk);
         insert_pending_escalation(Arc::clone(&store), "esc-deny").await;
 
-        let resp = handle_deny_escalation(
-            "esc-deny".into(),
-            Some("scope too broad".into()),
-            &op,
-            &ctx,
-        ).await;
-        assert!(matches!(resp, OperatorResponse::EscalationDenied { .. }),
-            "expected EscalationDenied, got {resp:?}");
+        let resp =
+            handle_deny_escalation("esc-deny".into(), Some("scope too broad".into()), &op, &ctx)
+                .await;
+        assert!(
+            matches!(resp, OperatorResponse::EscalationDenied { .. }),
+            "expected EscalationDenied, got {resp:?}"
+        );
 
-        let inbox   = PolicyBundle::inbox_path_for(tmp.path());
+        let inbox = PolicyBundle::inbox_path_for(tmp.path());
         let records = await_inbox_with_min(&inbox, 1, Duration::from_secs(2)).await;
         assert_eq!(records.len(), 1);
         let r = &records[0];
@@ -3300,10 +3546,14 @@ mod escalation_dispatch_tests {
         assert_eq!(r["payload"]["escalation_id"], "esc-deny");
         assert_eq!(r["payload"]["reason"], "scope too broad");
         let summary = r["human_summary"].as_str().unwrap();
-        assert!(summary.contains("DENIED"),
-            "summary should mention denial; got {summary:?}");
-        assert!(summary.contains("scope too broad"),
-            "summary should echo the operator-supplied reason; got {summary:?}");
+        assert!(
+            summary.contains("DENIED"),
+            "summary should mention denial; got {summary:?}"
+        );
+        assert!(
+            summary.contains("scope too broad"),
+            "summary should echo the operator-supplied reason; got {summary:?}"
+        );
     }
 }
 
@@ -3333,11 +3583,11 @@ mod rotate_epoch_dispatch_tests {
     use std::sync::Arc;
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_test_support::FakeAuditSink;
     use raxis_ipc::message::GatewayMessage;
     use raxis_ipc::{read_frame, write_frame};
     use raxis_policy::PolicyBundle;
     use raxis_store::Store;
+    use raxis_test_support::FakeAuditSink;
     use tokio::net::UnixStream;
 
     use crate::authority::keys::KeyRegistry;
@@ -3353,7 +3603,10 @@ mod rotate_epoch_dispatch_tests {
 
     fn authority_keys() -> (Arc<KeyRegistry>, SigningKey) {
         let sk = SigningKey::from_bytes(&AUTHORITY_SEED);
-        (Arc::new(KeyRegistry::for_tests_with_authority(sk.clone())), sk)
+        (
+            Arc::new(KeyRegistry::for_tests_with_authority(sk.clone())),
+            sk,
+        )
     }
 
     /// Build a signed `policy.toml` artifact at the requested epoch and
@@ -3369,23 +3622,23 @@ mod rotate_epoch_dispatch_tests {
     /// exercises the rotate-epoch dispatcher.
     fn write_signed_policy_artifact(
         data_dir: &Path,
-        epoch:    u64,
-        sk:       &SigningKey,
+        epoch: u64,
+        sk: &SigningKey,
     ) -> (PathBuf, PathBuf) {
         let policy_dir = data_dir.join("policy");
         std::fs::create_dir_all(&policy_dir).unwrap();
         let policy_path = policy_dir.join(format!("policy.epoch-{epoch}.toml"));
-        let sig_path    = policy_dir.join(format!("policy.epoch-{epoch}.sig"));
+        let sig_path = policy_dir.join(format!("policy.epoch-{epoch}.sig"));
 
-        let auth_hex  = hex::encode(sk.verifying_key().to_bytes());
-        let qual_hex  = "b".repeat(64);
+        let auth_hex = hex::encode(sk.verifying_key().to_bytes());
+        let qual_hex = "b".repeat(64);
         // Real operator keypair for cert minting — the all-c
         // placeholder no longer works because the cert must self-verify
         // under the operator's pubkey.
-        let op_key   = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+        let op_key = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
         let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
-        let op_fp    = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
-        let op_cert  = raxis_test_support::ephemeral_cert_with_key(
+        let op_fp = raxis_policy::loader::operator_pubkey_fingerprint(&op_pk_hex).unwrap();
+        let op_cert = raxis_test_support::ephemeral_cert_with_key(
             &op_key,
             raxis_test_support::CertOpts {
                 display_name: "Chika".to_owned(),
@@ -3454,9 +3707,9 @@ mod rotate_epoch_dispatch_tests {
     /// called directly from an `#[tokio::test]` body.
     async fn build_ctx(
         data_dir: &Path,
-        sink:     Arc<FakeAuditSink>,
+        sink: Arc<FakeAuditSink>,
         registry: Arc<KeyRegistry>,
-        gateway:  Arc<GatewayClient>,
+        gateway: Arc<GatewayClient>,
     ) -> Arc<HandlerContext> {
         let store = Arc::new(Store::open_in_memory().unwrap());
         let store_for_blocking = Arc::clone(&store);
@@ -3466,17 +3719,22 @@ mod rotate_epoch_dispatch_tests {
             // the policy_epoch_history insert path).
             let empty_bundle = PolicyBundle::for_tests_with_operators(vec![]);
             policy_manager::install_genesis_policy_epoch(
-                &store_for_blocking, "genesis-sha", "genesis-fp", 1, &empty_bundle,
-            ).unwrap();
-        }).await.unwrap();
+                &store_for_blocking,
+                "genesis-sha",
+                "genesis-fp",
+                1,
+                &empty_bundle,
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
 
         let bundle = PolicyBundle::for_tests_with_operators(vec![]);
         let policy = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
 
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            data_dir,
-            sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(data_dir, sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(data_dir);
@@ -3499,7 +3757,7 @@ mod rotate_epoch_dispatch_tests {
 
     fn fixture_operator() -> AuthenticatedOperator {
         AuthenticatedOperator {
-            fingerprint:   "op-prime".to_owned(),
+            fingerprint: "op-prime".to_owned(),
             permitted_ops: vec!["RotateEpoch".into()],
         }
     }
@@ -3510,7 +3768,7 @@ mod rotate_epoch_dispatch_tests {
     async fn rotate_epoch_dispatches_signal_to_connected_gateway() {
         let tmp = tempfile::tempdir().unwrap();
         let (registry, sk) = authority_keys();
-        let sink  = Arc::new(FakeAuditSink::new());
+        let sink = Arc::new(FakeAuditSink::new());
 
         // Install a fake gateway that reads the EpochAdvanced frame.
         let (kernel_side, mut gateway_side) = UnixStream::pair().unwrap();
@@ -3531,7 +3789,8 @@ mod rotate_epoch_dispatch_tests {
             sp.to_string_lossy().into_owned(),
             &fixture_operator(),
             &ctx,
-        ).await;
+        )
+        .await;
 
         match resp {
             OperatorResponse::EpochAdvanced { new_epoch_id, .. } => {
@@ -3539,16 +3798,23 @@ mod rotate_epoch_dispatch_tests {
             }
             other => panic!("expected EpochAdvanced, got {other:?}"),
         }
-        assert_eq!(observer.await.unwrap(), 2,
-            "gateway must have observed EpochAdvanced frame for the new epoch");
+        assert_eq!(
+            observer.await.unwrap(),
+            2,
+            "gateway must have observed EpochAdvanced frame for the new epoch"
+        );
 
         // PolicyEpochAdvanced fires on success; GatewaySignalFailed
         // MUST NOT fire when the signal succeeded.
         let kinds = sink.event_kinds();
-        assert!(kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
-            "PolicyEpochAdvanced absent: {kinds:?}");
-        assert!(!kinds.iter().any(|k| *k == "GatewaySignalFailed"),
-            "GatewaySignalFailed must NOT fire when signal delivered: {kinds:?}");
+        assert!(
+            kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            "PolicyEpochAdvanced absent: {kinds:?}"
+        );
+        assert!(
+            !kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            "GatewaySignalFailed must NOT fire when signal delivered: {kinds:?}"
+        );
     }
 
     // ── Phase 3 best-effort: gateway is NOT connected ─────────────────
@@ -3560,9 +3826,9 @@ mod rotate_epoch_dispatch_tests {
         // event MUST be emitted.
         let tmp = tempfile::tempdir().unwrap();
         let (registry, sk) = authority_keys();
-        let sink    = Arc::new(FakeAuditSink::new());
+        let sink = Arc::new(FakeAuditSink::new());
         let gateway = Arc::new(GatewayClient::new()); // never connected
-        let ctx     = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+        let ctx = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
 
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &sk);
         let resp = handle_rotate_epoch(
@@ -3570,23 +3836,42 @@ mod rotate_epoch_dispatch_tests {
             sp.to_string_lossy().into_owned(),
             &fixture_operator(),
             &ctx,
-        ).await;
+        )
+        .await;
 
-        assert!(matches!(resp, OperatorResponse::EpochAdvanced { new_epoch_id: 2, .. }),
-            "advance MUST NOT roll back when gateway is unreachable; got {resp:?}");
+        assert!(
+            matches!(
+                resp,
+                OperatorResponse::EpochAdvanced {
+                    new_epoch_id: 2,
+                    ..
+                }
+            ),
+            "advance MUST NOT roll back when gateway is unreachable; got {resp:?}"
+        );
 
         let events = sink.events();
-        let signal_evt = events.iter()
-            .find(|e| matches!(e.kind, raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }))
+        let signal_evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }
+                )
+            })
             .expect("GatewaySignalFailed audit event must be emitted on Phase 3 failure");
         match &signal_evt.kind {
             raxis_audit_tools::AuditEventKind::GatewaySignalFailed {
-                signal, new_epoch_id, reason,
+                signal,
+                new_epoch_id,
+                reason,
             } => {
                 assert_eq!(signal, "EpochAdvanced");
                 assert_eq!(*new_epoch_id, Some(2));
-                assert_eq!(reason, "unavailable",
-                    "category() must produce the stable wire string");
+                assert_eq!(
+                    reason, "unavailable",
+                    "category() must produce the stable wire string"
+                );
             }
             other => panic!("wrong audit kind: {other:?}"),
         }
@@ -3612,7 +3897,7 @@ mod rotate_epoch_dispatch_tests {
         });
 
         let sink = Arc::new(FakeAuditSink::new());
-        let ctx  = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
+        let ctx = build_ctx(tmp.path(), sink.clone(), registry, gateway).await;
 
         let (pp, sp) = write_signed_policy_artifact(tmp.path(), 2, &other_sk);
         let resp = handle_rotate_epoch(
@@ -3620,7 +3905,8 @@ mod rotate_epoch_dispatch_tests {
             sp.to_string_lossy().into_owned(),
             &fixture_operator(),
             &ctx,
-        ).await;
+        )
+        .await;
 
         match resp {
             OperatorResponse::Error { code, .. } => {
@@ -3631,8 +3917,10 @@ mod rotate_epoch_dispatch_tests {
         let kinds = sink.event_kinds();
         assert!(kinds.iter().any(|k| *k == "PolicyAdvanceRejected"));
         assert!(!kinds.iter().any(|k| *k == "PolicyEpochAdvanced"));
-        assert!(!kinds.iter().any(|k| *k == "GatewaySignalFailed"),
-            "no Phase 3 attempt → no GatewaySignalFailed; got: {kinds:?}");
+        assert!(
+            !kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            "no Phase 3 attempt → no GatewaySignalFailed; got: {kinds:?}"
+        );
 
         // Best-effort: if the observer task is still pending, abort it.
         // We deliberately do NOT block on it — if a frame *had* been
@@ -3666,18 +3954,33 @@ mod rotate_epoch_dispatch_tests {
             sp.to_string_lossy().into_owned(),
             &fixture_operator(),
             &ctx,
-        ).await;
+        )
+        .await;
 
-        assert!(matches!(resp, OperatorResponse::EpochAdvanced { new_epoch_id: 2, .. }));
+        assert!(matches!(
+            resp,
+            OperatorResponse::EpochAdvanced {
+                new_epoch_id: 2,
+                ..
+            }
+        ));
 
         let events = sink.events();
-        let evt = events.iter()
-            .find(|e| matches!(e.kind, raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }))
+        let evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::GatewaySignalFailed { .. }
+                )
+            })
             .expect("GatewaySignalFailed must fire when gateway dropped");
         match &evt.kind {
             raxis_audit_tools::AuditEventKind::GatewaySignalFailed { reason, .. } => {
-                assert!(reason == "dropped" || reason == "unavailable",
-                    "reason must be one of the stable failure categories; got {reason:?}");
+                assert!(
+                    reason == "dropped" || reason == "unavailable",
+                    "reason must be one of the stable failure categories; got {reason:?}"
+                );
             }
             _ => unreachable!(),
         }
@@ -3694,7 +3997,10 @@ mod rotate_epoch_dispatch_tests {
         });
         let msg: GatewayMessage = read_frame(&mut b).await.unwrap();
         h.await.unwrap().unwrap();
-        assert!(matches!(msg, GatewayMessage::EpochAdvanced { new_epoch_id: 99 }));
+        assert!(matches!(
+            msg,
+            GatewayMessage::EpochAdvanced { new_epoch_id: 99 }
+        ));
     }
 }
 
@@ -3742,9 +4048,8 @@ mod dispatch_logging_tests {
     /// Parse a built log line and assert it is a JSON object whose
     /// constant fields are present with the spec-mandated values.
     fn parse_and_check_constants(line: &str, expected_event: &str, expected_level: &str) -> Value {
-        let v: Value = serde_json::from_str(line).unwrap_or_else(|e| {
-            panic!("dispatch_log line is not valid JSON: {e}\nline: {line}")
-        });
+        let v: Value = serde_json::from_str(line)
+            .unwrap_or_else(|e| panic!("dispatch_log line is not valid JSON: {e}\nline: {line}"));
         assert_eq!(
             v.get("module").and_then(Value::as_str),
             Some("ipc.operator"),
@@ -3776,7 +4081,10 @@ mod dispatch_logging_tests {
         // operator workflow this line exists to support.
         let fields = vec![
             ("initiative_id", "test-minimal-001".to_owned()),
-            ("approving_operator", "abcd1234abcd1234abcd1234abcd1234".to_owned()),
+            (
+                "approving_operator",
+                "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+            ),
         ];
         let line = dispatch_log::build_op_request_line(
             "ApprovePlan",
@@ -3807,7 +4115,10 @@ mod dispatch_logging_tests {
             v.get("approving_operator").and_then(Value::as_str),
             Some("abcd1234abcd1234abcd1234abcd1234"),
         );
-        assert_eq!(v.get("ts_unix").and_then(Value::as_i64), Some(1_700_000_000));
+        assert_eq!(
+            v.get("ts_unix").and_then(Value::as_i64),
+            Some(1_700_000_000)
+        );
     }
 
     /// The dispatcher MAY have no display-name (operator removed
@@ -3879,21 +4190,24 @@ mod dispatch_logging_tests {
         // authenticate every subsequent IPC. It MUST NOT appear in
         // operator-visible stderr — pin that.
         let response = OperatorResponse::SessionCreated {
-            session_id:    "00000000-0000-4000-8000-000000000001".to_owned(),
+            session_id: "00000000-0000-4000-8000-000000000001".to_owned(),
             session_token: "SUPER_SECRET_BEARER_TOKEN_DO_NOT_LOG".to_owned(),
             // Lowercase per cli-ceremony.md §4.2 — matches what the
             // dispatcher actually emits via wire_role_str().
-            role:          "planner".to_owned(),
+            role: "planner".to_owned(),
             worktree_root: Some("/tmp/wt".to_owned()),
-            base_sha:      Some("a".repeat(40)),
-            lineage_id:    "00000000-0000-4000-8000-00000000000a".to_owned(),
+            base_sha: Some("a".repeat(40)),
+            lineage_id: "00000000-0000-4000-8000-00000000000a".to_owned(),
         };
         let line = dispatch_log::build_op_response_line(
             "CreateSession",
             "abcd1234abcd1234abcd1234abcd1234",
             Some("Chika"),
             &response,
-            &[("lineage_id", "00000000-0000-4000-8000-00000000000a".to_owned())],
+            &[(
+                "lineage_id",
+                "00000000-0000-4000-8000-00000000000a".to_owned(),
+            )],
             7,
             1_700_000_002,
         );
@@ -3925,7 +4239,7 @@ mod dispatch_logging_tests {
         // exact creation moment.
         let response = OperatorResponse::InitiativeCreated {
             initiative_id: "5c5a6cd4-95cd-47d1-a4cc-8b0ef46da235".to_owned(),
-            status:        "Draft".to_owned(),
+            status: "Draft".to_owned(),
         };
         let line = dispatch_log::build_op_response_line(
             "CreateInitiative",
@@ -4010,7 +4324,10 @@ mod dispatch_logging_tests {
             v.get("operator_fp").and_then(Value::as_str),
             Some("abcd1234abcd1234abcd1234abcd1234"),
         );
-        assert_eq!(v.get("code").and_then(Value::as_str), Some("FAIL_CERT_EXPIRED"));
+        assert_eq!(
+            v.get("code").and_then(Value::as_str),
+            Some("FAIL_CERT_EXPIRED")
+        );
     }
 
     #[test]
@@ -4023,7 +4340,7 @@ mod dispatch_logging_tests {
         // error or a path string.
         let nasty = r#"sql error: 'col "x"' contains \\backslash and ' apostrophe and "quote""#;
         let response = OperatorResponse::Error {
-            code:   "FAIL_X".to_owned(),
+            code: "FAIL_X".to_owned(),
             detail: nasty.to_owned(),
         };
         let line = dispatch_log::build_op_response_line(
@@ -4036,8 +4353,9 @@ mod dispatch_logging_tests {
             1_700_000_006,
         );
         // The line MUST be parseable as JSON…
-        let v: Value = serde_json::from_str(&line)
-            .expect("escape safety: log line must be valid JSON even with quotes/backslashes in detail");
+        let v: Value = serde_json::from_str(&line).expect(
+            "escape safety: log line must be valid JSON even with quotes/backslashes in detail",
+        );
         // …AND the round-tripped detail MUST be byte-identical.
         assert_eq!(
             v.get("detail").and_then(Value::as_str),
@@ -4054,7 +4372,7 @@ mod dispatch_logging_tests {
         // log can route on initiative_id without re-pattern-matching the
         // whole request enum at every chokepoint.
         let req = OperatorRequest::ApprovePlan {
-            initiative_id:      "test-minimal-001".to_owned(),
+            initiative_id: "test-minimal-001".to_owned(),
             approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
         };
         let fields = request_context_fields(&req);
@@ -4062,7 +4380,10 @@ mod dispatch_logging_tests {
             fields,
             vec![
                 ("initiative_id", "test-minimal-001".to_owned()),
-                ("approving_operator", "abcd1234abcd1234abcd1234abcd1234".to_owned()),
+                (
+                    "approving_operator",
+                    "abcd1234abcd1234abcd1234abcd1234".to_owned()
+                ),
             ],
         );
     }
@@ -4082,76 +4403,115 @@ mod dispatch_logging_tests {
         // this test is the runtime backstop that also pins each
         // variant's contribution.
         let cases: Vec<(OperatorRequest, &str)> = vec![
-            (OperatorRequest::CreateSession {
-                // Lowercase per cli-ceremony.md §4.2 — the canonical
-                // wire shape the CLI actually puts on the wire.
-                role:               "planner".to_owned(),
-                worktree_root:      None,
-                base_sha:           None,
-                base_tracking_ref:  None,
-                lineage_id:         "00000000-0000-4000-8000-000000000001".to_owned(),
-                task_id:            None,
-            }, "lineage_id"),
-            (OperatorRequest::RevokeSession {
-                session_id: "00000000-0000-4000-8000-000000000002".to_owned(),
-            }, "session_id"),
-            (OperatorRequest::GrantDelegation {
-                session_id:        "00000000-0000-4000-8000-000000000003".to_owned(),
-                delegation_id:     "00000000-0000-4000-8000-000000000004".to_owned(),
-                capability_class:  "ReadWorktree".to_owned(),
-                scope_json:        None,
-                ttl_secs:          60,
-                max_uses:          None,
-                signature_hex:     "00".repeat(64),
-            }, "delegation_id"),
-            (OperatorRequest::CreateInitiative {
-                initiative_id:     "0192a8f0-1234-7abc-9000-000000000001".to_owned(),
-                plan_bundle_hex:   String::new(),
-                bundle_sha256_hex: String::new(),
-                signature_hex:     String::new(),
-                signed_by_hex:     String::new(),
-            }, "initiative_id"),
-            (OperatorRequest::ApprovePlan {
-                initiative_id:      "i1".to_owned(),
-                approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            }, "initiative_id"),
-            (OperatorRequest::RejectPlan {
-                initiative_id: "i1".to_owned(),
-                rejected_by:   "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-                reason:        None,
-            }, "initiative_id"),
-            (OperatorRequest::RetryTask {
-                task_id: "t1".to_owned(),
-            }, "task_id"),
-            (OperatorRequest::ResumeTask {
-                task_id:    "t1".to_owned(),
-                resumed_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            }, "task_id"),
-            (OperatorRequest::AbortTask {
-                task_id:    "t1".to_owned(),
-                aborted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            }, "task_id"),
-            (OperatorRequest::AbortInitiative {
-                initiative_id: "i1".to_owned(),
-                aborted_by:    "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            }, "initiative_id"),
-            (OperatorRequest::ApproveEscalation {
-                escalation_id:    "e1".to_owned(),
-                approval_scope:   raxis_types::operator_wire::ApprovalScopeWire {
-                    capability_class:  "WriteSecrets".to_owned(),
-                    max_uses:          1,
-                    valid_for_seconds: 60,
+            (
+                OperatorRequest::CreateSession {
+                    // Lowercase per cli-ceremony.md §4.2 — the canonical
+                    // wire shape the CLI actually puts on the wire.
+                    role: "planner".to_owned(),
+                    worktree_root: None,
+                    base_sha: None,
+                    base_tracking_ref: None,
+                    lineage_id: "00000000-0000-4000-8000-000000000001".to_owned(),
+                    task_id: None,
                 },
-                operator_sig_hex: String::new(),
-            }, "escalation_id"),
-            (OperatorRequest::DenyEscalation {
-                escalation_id: "e1".to_owned(),
-                reason:        None,
-            }, "escalation_id"),
-            (OperatorRequest::RotateEpoch {
-                policy_path: "/tmp/p".to_owned(),
-                sig_path:    "/tmp/s".to_owned(),
-            }, "policy_path"),
+                "lineage_id",
+            ),
+            (
+                OperatorRequest::RevokeSession {
+                    session_id: "00000000-0000-4000-8000-000000000002".to_owned(),
+                },
+                "session_id",
+            ),
+            (
+                OperatorRequest::GrantDelegation {
+                    session_id: "00000000-0000-4000-8000-000000000003".to_owned(),
+                    delegation_id: "00000000-0000-4000-8000-000000000004".to_owned(),
+                    capability_class: "ReadWorktree".to_owned(),
+                    scope_json: None,
+                    ttl_secs: 60,
+                    max_uses: None,
+                    signature_hex: "00".repeat(64),
+                },
+                "delegation_id",
+            ),
+            (
+                OperatorRequest::CreateInitiative {
+                    initiative_id: "0192a8f0-1234-7abc-9000-000000000001".to_owned(),
+                    plan_bundle_hex: String::new(),
+                    bundle_sha256_hex: String::new(),
+                    signature_hex: String::new(),
+                    signed_by_hex: String::new(),
+                },
+                "initiative_id",
+            ),
+            (
+                OperatorRequest::ApprovePlan {
+                    initiative_id: "i1".to_owned(),
+                    approving_operator: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                },
+                "initiative_id",
+            ),
+            (
+                OperatorRequest::RejectPlan {
+                    initiative_id: "i1".to_owned(),
+                    rejected_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                    reason: None,
+                },
+                "initiative_id",
+            ),
+            (
+                OperatorRequest::RetryTask {
+                    task_id: "t1".to_owned(),
+                },
+                "task_id",
+            ),
+            (
+                OperatorRequest::ResumeTask {
+                    task_id: "t1".to_owned(),
+                    resumed_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                },
+                "task_id",
+            ),
+            (
+                OperatorRequest::AbortTask {
+                    task_id: "t1".to_owned(),
+                    aborted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                },
+                "task_id",
+            ),
+            (
+                OperatorRequest::AbortInitiative {
+                    initiative_id: "i1".to_owned(),
+                    aborted_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
+                },
+                "initiative_id",
+            ),
+            (
+                OperatorRequest::ApproveEscalation {
+                    escalation_id: "e1".to_owned(),
+                    approval_scope: raxis_types::operator_wire::ApprovalScopeWire {
+                        capability_class: "WriteSecrets".to_owned(),
+                        max_uses: 1,
+                        valid_for_seconds: 60,
+                    },
+                    operator_sig_hex: String::new(),
+                },
+                "escalation_id",
+            ),
+            (
+                OperatorRequest::DenyEscalation {
+                    escalation_id: "e1".to_owned(),
+                    reason: None,
+                },
+                "escalation_id",
+            ),
+            (
+                OperatorRequest::RotateEpoch {
+                    policy_path: "/tmp/p".to_owned(),
+                    sig_path: "/tmp/s".to_owned(),
+                },
+                "policy_path",
+            ),
         ];
         for (req, must_have_key) in cases {
             let op = op_name(&req);
@@ -4263,8 +4623,8 @@ mod role_parser_tests {
 
     #[test]
     fn rejects_empty_role_string() {
-        let resp = parse_operator_creatable_role("")
-            .expect_err("empty role string must be rejected");
+        let resp =
+            parse_operator_creatable_role("").expect_err("empty role string must be rejected");
         match resp {
             OperatorResponse::Error { code, .. } => {
                 assert_eq!(code, "FAIL_ROLE_NOT_OPERATOR_CREATABLE")
@@ -4292,7 +4652,7 @@ mod role_parser_tests {
     /// SQL form) for a wire-shaped output.
     #[test]
     fn wire_role_str_emits_canonical_lowercase_for_gateway_and_verifier() {
-        assert_eq!(wire_role_str(&Role::Gateway),  "gateway");
+        assert_eq!(wire_role_str(&Role::Gateway), "gateway");
         assert_eq!(wire_role_str(&Role::Verifier), "verifier");
     }
 
@@ -4304,8 +4664,7 @@ mod role_parser_tests {
     #[test]
     fn wire_role_string_round_trips_through_parse_and_format() {
         let inbound = "planner";
-        let parsed = parse_operator_creatable_role(inbound)
-            .expect("'planner' must parse");
+        let parsed = parse_operator_creatable_role(inbound).expect("'planner' must parse");
         assert_eq!(
             wire_role_str(&parsed),
             inbound,
@@ -4331,9 +4690,9 @@ mod quarantine_dispatch_tests {
     use std::path::Path;
     use std::sync::Arc;
 
-    use raxis_test_support::FakeAuditSink;
     use raxis_policy::PolicyBundle;
     use raxis_store::Store;
+    use raxis_test_support::FakeAuditSink;
 
     use crate::authority::keys::KeyRegistry;
     use crate::gateway::client::GatewayClient;
@@ -4350,20 +4709,25 @@ mod quarantine_dispatch_tests {
         tokio::task::spawn_blocking(move || {
             let empty_bundle = PolicyBundle::for_tests_with_operators(vec![]);
             policy_manager::install_genesis_policy_epoch(
-                &store_for_blocking, "genesis-sha", "genesis-fp", 1, &empty_bundle,
-            ).unwrap();
-        }).await.unwrap();
+                &store_for_blocking,
+                "genesis-sha",
+                "genesis-fp",
+                1,
+                &empty_bundle,
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
 
-        let bundle   = PolicyBundle::for_tests_with_operators(vec![]);
-        let policy   = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
+        let bundle = PolicyBundle::for_tests_with_operators(vec![]);
+        let policy = Arc::new(arc_swap::ArcSwap::from_pointee(bundle));
         let registry = Arc::new(KeyRegistry::stub_for_tests());
-        let gateway  = Arc::new(GatewayClient::new());
-        let sink     = Arc::new(FakeAuditSink::new());
+        let gateway = Arc::new(GatewayClient::new());
+        let sink = Arc::new(FakeAuditSink::new());
 
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            data_dir,
-            sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(data_dir, sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(data_dir);
@@ -4387,11 +4751,8 @@ mod quarantine_dispatch_tests {
 
     fn fixture_operator(fp: &str) -> AuthenticatedOperator {
         AuthenticatedOperator {
-            fingerprint:   fp.to_owned(),
-            permitted_ops: vec![
-                "QuarantineInitiative".into(),
-                "QuarantinePlansBy".into(),
-            ],
+            fingerprint: fp.to_owned(),
+            permitted_ops: vec!["QuarantineInitiative".into(), "QuarantinePlansBy".into()],
         }
     }
 
@@ -4414,8 +4775,11 @@ mod quarantine_dispatch_tests {
                      VALUES (?1, 'ApprovedPlan', '{{}}', 'sha', 1700000000)"
                 ),
                 rusqlite::params![id],
-            ).unwrap();
-        }).await.unwrap();
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// Insert a `signed_plan_artifacts` row attributing approval to the
@@ -4424,13 +4788,8 @@ mod quarantine_dispatch_tests {
     /// migration 3 `signed_by_fingerprint` column):
     ///   (initiative_id PK, plan_bytes BLOB, plan_sig BLOB,
     ///    stored_at INTEGER, signed_by_fingerprint TEXT)
-    async fn insert_signed_plan(
-        ctx:           Arc<HandlerContext>,
-        initiative_id: &str,
-        signed_by_fp:  &str,
-    ) {
-        const SIGNED_PLAN_ARTIFACTS: &str =
-            raxis_store::Table::SignedPlanArtifacts.as_str();
+    async fn insert_signed_plan(ctx: Arc<HandlerContext>, initiative_id: &str, signed_by_fp: &str) {
+        const SIGNED_PLAN_ARTIFACTS: &str = raxis_store::Table::SignedPlanArtifacts.as_str();
         let id = initiative_id.to_owned();
         let fp = signed_by_fp.to_owned();
         tokio::task::spawn_blocking(move || {
@@ -4442,8 +4801,11 @@ mod quarantine_dispatch_tests {
                      VALUES (?1, x'00', x'00', 1700000000, ?2)"
                 ),
                 rusqlite::params![id, fp],
-            ).unwrap();
-        }).await.unwrap();
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// Read-side helper — hopped onto the blocking pool to match the
@@ -4453,7 +4815,9 @@ mod quarantine_dispatch_tests {
         tokio::task::spawn_blocking(move || {
             let conn = ctx.store.lock_sync();
             raxis_store::views::initiative_quarantines::is_quarantined_rw(&conn, &id).unwrap()
-        }).await.unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     // ── Handler 1: QuarantineInitiative ──────────────────────────────
@@ -4469,27 +4833,40 @@ mod quarantine_dispatch_tests {
             Some("leaked key".to_owned()),
             &fixture_operator("op-prime"),
             &ctx,
-        ).await;
+        )
+        .await;
 
         match resp {
             OperatorResponse::InitiativeQuarantined {
-                initiative_id, was_already_quarantined, ..
+                initiative_id,
+                was_already_quarantined,
+                ..
             } => {
                 assert_eq!(initiative_id, "init-1");
-                assert!(!was_already_quarantined,
-                    "first quarantine MUST report was_already_quarantined=false");
+                assert!(
+                    !was_already_quarantined,
+                    "first quarantine MUST report was_already_quarantined=false"
+                );
             }
             other => panic!("expected InitiativeQuarantined, got {other:?}"),
         }
 
         let q = is_quarantined_rw(Arc::clone(&ctx), "init-1").await;
-        assert!(q, "is_quarantined_rw must return true after handler commits");
+        assert!(
+            q,
+            "is_quarantined_rw must return true after handler commits"
+        );
 
         // Exactly one InitiativeQuarantined audit event for the new row.
         let kinds = sink.event_kinds();
-        let n_quarantined = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
-        assert_eq!(n_quarantined, 1,
-            "expected exactly one InitiativeQuarantined audit event, got: {kinds:?}");
+        let n_quarantined = kinds
+            .iter()
+            .filter(|k| **k == "InitiativeQuarantined")
+            .count();
+        assert_eq!(
+            n_quarantined, 1,
+            "expected exactly one InitiativeQuarantined audit event, got: {kinds:?}"
+        );
     }
 
     #[tokio::test]
@@ -4504,7 +4881,8 @@ mod quarantine_dispatch_tests {
             None,
             &fixture_operator("op-prime"),
             &ctx,
-        ).await;
+        )
+        .await;
 
         // Second call: duplicate — must be a no-op write AND no-op audit.
         let resp2 = handle_quarantine_initiative(
@@ -4512,21 +4890,28 @@ mod quarantine_dispatch_tests {
             None,
             &fixture_operator("op-prime"),
             &ctx,
-        ).await;
+        )
+        .await;
 
         match resp2 {
             OperatorResponse::InitiativeQuarantined {
-                was_already_quarantined: true, ..
+                was_already_quarantined: true,
+                ..
             } => { /* expected */ }
-            other => panic!(
-                "second quarantine MUST flag was_already_quarantined=true; got {other:?}"
-            ),
+            other => {
+                panic!("second quarantine MUST flag was_already_quarantined=true; got {other:?}")
+            }
         }
 
         let kinds = sink.event_kinds();
-        let n = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
-        assert_eq!(n, 1,
-            "duplicate quarantine MUST NOT re-emit the audit event; got: {kinds:?}");
+        let n = kinds
+            .iter()
+            .filter(|k| **k == "InitiativeQuarantined")
+            .count();
+        assert_eq!(
+            n, 1,
+            "duplicate quarantine MUST NOT re-emit the audit event; got: {kinds:?}"
+        );
     }
 
     // ── Handler 2: QuarantinePlansBy ─────────────────────────────────
@@ -4550,12 +4935,14 @@ mod quarantine_dispatch_tests {
             Some("rotated key".to_owned()),
             &fixture_operator("op-prime"),
             &ctx,
-        ).await;
+        )
+        .await;
 
         let mut swept_ids = match resp {
-            OperatorResponse::QuarantineSwept { newly_quarantined_ids, .. } => {
-                newly_quarantined_ids
-            }
+            OperatorResponse::QuarantineSwept {
+                newly_quarantined_ids,
+                ..
+            } => newly_quarantined_ids,
             other => panic!("expected QuarantineSwept, got {other:?}"),
         };
         swept_ids.sort();
@@ -4563,15 +4950,28 @@ mod quarantine_dispatch_tests {
 
         // Audit: one per-initiative event PLUS one rollup.
         let kinds = sink.event_kinds();
-        let n_per = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
-        let n_roll = kinds.iter().filter(|k| **k == "OperatorQuarantineSwept").count();
-        assert_eq!(n_per, 2,
-            "expected 2 per-initiative InitiativeQuarantined events, got: {kinds:?}");
-        assert_eq!(n_roll, 1,
-            "expected exactly one OperatorQuarantineSwept rollup event, got: {kinds:?}");
+        let n_per = kinds
+            .iter()
+            .filter(|k| **k == "InitiativeQuarantined")
+            .count();
+        let n_roll = kinds
+            .iter()
+            .filter(|k| **k == "OperatorQuarantineSwept")
+            .count();
+        assert_eq!(
+            n_per, 2,
+            "expected 2 per-initiative InitiativeQuarantined events, got: {kinds:?}"
+        );
+        assert_eq!(
+            n_roll, 1,
+            "expected exactly one OperatorQuarantineSwept rollup event, got: {kinds:?}"
+        );
 
         let q = is_quarantined_rw(Arc::clone(&ctx), "init-c").await;
-        assert!(!q, "initiatives signed by other operators MUST NOT be swept");
+        assert!(
+            !q,
+            "initiatives signed by other operators MUST NOT be swept"
+        );
     }
 
     #[tokio::test]
@@ -4585,10 +4985,14 @@ mod quarantine_dispatch_tests {
             None,
             &fixture_operator("op-prime"),
             &ctx,
-        ).await;
+        )
+        .await;
 
         match resp {
-            OperatorResponse::QuarantineSwept { newly_quarantined_ids, .. } => {
+            OperatorResponse::QuarantineSwept {
+                newly_quarantined_ids,
+                ..
+            } => {
                 assert!(newly_quarantined_ids.is_empty());
             }
             other => panic!("expected QuarantineSwept, got {other:?}"),
@@ -4599,11 +5003,18 @@ mod quarantine_dispatch_tests {
         // attempted the action — forensic continuity matters even when
         // no rows changed.
         let kinds = sink.event_kinds();
-        let n_per = kinds.iter().filter(|k| **k == "InitiativeQuarantined").count();
-        let n_roll = kinds.iter().filter(|k| **k == "OperatorQuarantineSwept").count();
-        assert_eq!(n_per, 0,
-            "no per-initiative event should fire when nothing matched: {kinds:?}");
-        assert_eq!(n_roll, 1,
-            "rollup must fire even on empty sweep: {kinds:?}");
+        let n_per = kinds
+            .iter()
+            .filter(|k| **k == "InitiativeQuarantined")
+            .count();
+        let n_roll = kinds
+            .iter()
+            .filter(|k| **k == "OperatorQuarantineSwept")
+            .count();
+        assert_eq!(
+            n_per, 0,
+            "no per-initiative event should fire when nothing matched: {kinds:?}"
+        );
+        assert_eq!(n_roll, 1, "rollup must fire even on empty sweep: {kinds:?}");
     }
 }

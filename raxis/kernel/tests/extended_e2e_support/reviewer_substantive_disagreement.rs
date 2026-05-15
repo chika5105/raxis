@@ -151,11 +151,7 @@ pub const TASK_REVIEW_LINT_B: &str = "review-lint-defect-B";
 /// pin or rotates the pinned target needs only to update the
 /// `lint_defect.md` prompt; the witness keeps matching as long
 /// as the chosen target's basename is in this set.
-pub const LINT_DEFECT_TARGET_BASENAMES: &[&str] = &[
-    "greeting.rs",
-    "greet.ts",
-    "greet.py",
-];
+pub const LINT_DEFECT_TARGET_BASENAMES: &[&str] = &["greeting.rs", "greet.ts", "greet.py"];
 
 // ---------------------------------------------------------------------------
 // ReviewerSubstantiveDisagreementWitness.
@@ -163,12 +159,12 @@ pub const LINT_DEFECT_TARGET_BASENAMES: &[&str] = &[
 
 /// Combined chain-side + SQLite-side witness. See module docs.
 pub struct ReviewerSubstantiveDisagreementWitness {
-    pub executor_task_id:   String,
+    pub executor_task_id: String,
     pub reviewer_a_task_id: String,
     pub reviewer_b_task_id: String,
     /// Path to `kernel.db` for the run under test. The witness
     /// opens a read-only connection at evaluation time.
-    pub sqlite_path:        PathBuf,
+    pub sqlite_path: PathBuf,
 }
 
 /// Report shape returned by `evaluate`. Mirrors
@@ -176,17 +172,17 @@ pub struct ReviewerSubstantiveDisagreementWitness {
 /// failures with the same formatter shape.
 #[derive(Debug, Default)]
 pub struct ReviewerSubstantiveReport {
-    pub saw_reviewer_a:        bool,
-    pub saw_executor_respawn:  bool,
-    pub saw_reviewer_b:        bool,
-    pub saw_aggregation_pass:  bool,
+    pub saw_reviewer_a: bool,
+    pub saw_executor_respawn: bool,
+    pub saw_reviewer_b: bool,
+    pub saw_aggregation_pass: bool,
     /// The actual `last_critique` text read from SQLite (if any).
-    pub last_critique:         Option<String>,
+    pub last_critique: Option<String>,
     /// Subset of [`LINT_DEFECT_TARGET_BASENAMES`] matched in
     /// `last_critique` (empty if none matched).
-    pub matched_basenames:     Vec<&'static str>,
+    pub matched_basenames: Vec<&'static str>,
     /// Surfaced read errors (sqlite, IO) rather than panicking.
-    pub error:                 Option<String>,
+    pub error: Option<String>,
 }
 
 impl ReviewerSubstantiveReport {
@@ -221,11 +217,10 @@ impl ReviewerSubstantiveDisagreementWitness {
     #[must_use]
     pub fn for_realistic_plan(sqlite_path: &Path) -> Self {
         Self {
-            executor_task_id:   super::plan_realistic::TASK_LINT_RUNNER_PYTHON
-                                    .to_owned(),
+            executor_task_id: super::plan_realistic::TASK_LINT_RUNNER_PYTHON.to_owned(),
             reviewer_a_task_id: TASK_REVIEW_LINT_A.to_owned(),
             reviewer_b_task_id: TASK_REVIEW_LINT_B.to_owned(),
-            sqlite_path:        sqlite_path.to_path_buf(),
+            sqlite_path: sqlite_path.to_path_buf(),
         }
     }
 
@@ -237,21 +232,17 @@ impl ReviewerSubstantiveDisagreementWitness {
         report
     }
 
-    fn evaluate_chain(
-        &self,
-        chain: &[AuditEvent],
-        report: &mut ReviewerSubstantiveReport,
-    ) {
+    fn evaluate_chain(&self, chain: &[AuditEvent], report: &mut ReviewerSubstantiveReport) {
         for ev in chain {
             match typed(ev) {
                 Some(AuditEventKind::IntentAccepted {
-                    task_id, intent_kind, ..
+                    task_id,
+                    intent_kind,
+                    ..
                 }) if intent_kind == "SubmitReview" => {
                     if task_id == self.reviewer_a_task_id {
                         report.saw_reviewer_a = true;
-                    } else if task_id == self.reviewer_b_task_id
-                        && report.saw_reviewer_a
-                    {
+                    } else if task_id == self.reviewer_b_task_id && report.saw_reviewer_a {
                         report.saw_reviewer_b = true;
                     }
                 }
@@ -269,18 +260,16 @@ impl ReviewerSubstantiveDisagreementWitness {
                 // rows is gone. The `saw_reviewer_a` guard
                 // remains for ordering — `RetrySubTask` MUST
                 // follow at least one Reviewer rejection.
-                Some(AuditEventKind::ExecutorRespawnFromReviewRejection {
-                    task_id, ..
-                }) if task_id == self.executor_task_id
-                    && report.saw_reviewer_a =>
+                Some(AuditEventKind::ExecutorRespawnFromReviewRejection { task_id, .. })
+                    if task_id == self.executor_task_id && report.saw_reviewer_a =>
                 {
                     report.saw_executor_respawn = true;
                 }
                 Some(AuditEventKind::ReviewAggregationCompleted {
-                    executor_task_id, verdict, ..
-                }) if executor_task_id == self.executor_task_id
-                    && verdict == "AllPassed" =>
-                {
+                    executor_task_id,
+                    verdict,
+                    ..
+                }) if executor_task_id == self.executor_task_id && verdict == "AllPassed" => {
                     report.saw_aggregation_pass = true;
                 }
                 _ => {}
@@ -291,20 +280,15 @@ impl ReviewerSubstantiveDisagreementWitness {
     fn evaluate_sqlite(&self, report: &mut ReviewerSubstantiveReport) {
         match rusqlite::Connection::open_with_flags(
             &self.sqlite_path,
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
-                | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
         ) {
             Ok(conn) => {
                 let tasks = Table::Tasks.as_str();
-                let sql = format!(
-                    "SELECT last_critique FROM {tasks} WHERE task_id = ?1",
-                );
+                let sql = format!("SELECT last_critique FROM {tasks} WHERE task_id = ?1",);
                 let critique = conn
-                    .query_row(
-                        &sql,
-                        rusqlite::params![&self.executor_task_id],
-                        |row| row.get::<_, Option<String>>(0),
-                    )
+                    .query_row(&sql, rusqlite::params![&self.executor_task_id], |row| {
+                        row.get::<_, Option<String>>(0)
+                    })
                     .unwrap_or(None);
                 if let Some(text) = &critique {
                     for name in LINT_DEFECT_TARGET_BASENAMES {
@@ -337,58 +321,60 @@ mod tests {
     use raxis_audit_tools::AuditEvent;
     use uuid::Uuid;
 
-    fn ev(
-        seq: u64,
-        kind: AuditEventKind,
-        task_id: Option<&str>,
-    ) -> AuditEvent {
+    fn ev(seq: u64, kind: AuditEventKind, task_id: Option<&str>) -> AuditEvent {
         let event_kind = match &kind {
             AuditEventKind::IntentAccepted { .. } => "IntentAccepted",
             AuditEventKind::SessionVmSpawned { .. } => "SessionVmSpawned",
             AuditEventKind::ExecutorRespawnFromReviewRejection { .. } => {
                 "ExecutorRespawnFromReviewRejection"
             }
-            AuditEventKind::ReviewAggregationCompleted { .. } => {
-                "ReviewAggregationCompleted"
-            }
+            AuditEventKind::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             _ => "Other",
         }
         .to_owned();
         AuditEvent {
             seq,
-            event_id:      Uuid::nil(),
+            event_id: Uuid::nil(),
             event_kind,
-            session_id:    None,
-            task_id:       task_id.map(str::to_owned),
+            session_id: None,
+            task_id: task_id.map(str::to_owned),
             initiative_id: None,
-            payload:       serde_json::to_value(&kind).unwrap(),
-            emitted_at:    1700000000 + seq as i64,
-            prev_sha256:   "0".repeat(64),
+            payload: serde_json::to_value(&kind).unwrap(),
+            emitted_at: 1700000000 + seq as i64,
+            prev_sha256: "0".repeat(64),
         }
     }
 
     fn submit_review_intent(seq: u64, task_id: &str) -> AuditEvent {
-        ev(seq, AuditEventKind::IntentAccepted {
-            task_id:         task_id.to_owned(),
-            session_id:      format!("sess-{task_id}"),
-            intent_kind:     "SubmitReview".to_owned(),
-            base_sha:        None,
-            head_sha:        None,
-            sequence_number: 1,
-            remaining_units: 99,
-        }, Some(task_id))
+        ev(
+            seq,
+            AuditEventKind::IntentAccepted {
+                task_id: task_id.to_owned(),
+                session_id: format!("sess-{task_id}"),
+                intent_kind: "SubmitReview".to_owned(),
+                base_sha: None,
+                head_sha: None,
+                sequence_number: 1,
+                remaining_units: 99,
+            },
+            Some(task_id),
+        )
     }
 
     fn vm_spawn(seq: u64, task_id: &str) -> AuditEvent {
-        ev(seq, AuditEventKind::SessionVmSpawned {
-            session_id:         format!("sess-{task_id}-respawn"),
-            task_id:            Some(task_id.to_owned()),
-            initiative_id:      "init-realistic".to_owned(),
-            backend_id:         "test-backend".to_owned(),
-            egress_tier:        "Mediated".to_owned(),
-            admission_loopback: "127.0.0.1:0".to_owned(),
-            credential_proxies: 0,
-        }, Some(task_id))
+        ev(
+            seq,
+            AuditEventKind::SessionVmSpawned {
+                session_id: format!("sess-{task_id}-respawn"),
+                task_id: Some(task_id.to_owned()),
+                initiative_id: "init-realistic".to_owned(),
+                backend_id: "test-backend".to_owned(),
+                egress_tier: "Mediated".to_owned(),
+                admission_loopback: "127.0.0.1:0".to_owned(),
+                credential_proxies: 0,
+            },
+            Some(task_id),
+        )
     }
 
     /// Fixture builder for the `ExecutorRespawnFromReviewRejection`
@@ -398,28 +384,32 @@ mod tests {
     /// chain seq so the witness's "second match" path (round-3 retry
     /// on a still-disagreed task) sees distinct ids.
     fn respawn_review(seq: u64, task_id: &str, review_reject_count: u32) -> AuditEvent {
-        ev(seq, AuditEventKind::ExecutorRespawnFromReviewRejection {
-            task_id:             task_id.to_owned(),
-            prior_activation_id: format!("prior-{task_id}-{seq}"),
-            new_activation_id:   format!("new-{task_id}-{seq}"),
-            review_reject_count,
-        }, Some(task_id))
+        ev(
+            seq,
+            AuditEventKind::ExecutorRespawnFromReviewRejection {
+                task_id: task_id.to_owned(),
+                prior_activation_id: format!("prior-{task_id}-{seq}"),
+                new_activation_id: format!("new-{task_id}-{seq}"),
+                review_reject_count,
+            },
+            Some(task_id),
+        )
     }
 
     fn aggregation_pass(seq: u64, executor_task_id: &str) -> AuditEvent {
-        ev(seq, AuditEventKind::ReviewAggregationCompleted {
-            executor_task_id:              executor_task_id.to_owned(),
-            triggered_by_reviewer_task_id: TASK_REVIEW_LINT_B.to_owned(),
-            reviewer_count:                2,
-            verdict:                       "AllPassed".to_owned(),
-        }, Some(executor_task_id))
+        ev(
+            seq,
+            AuditEventKind::ReviewAggregationCompleted {
+                executor_task_id: executor_task_id.to_owned(),
+                triggered_by_reviewer_task_id: TASK_REVIEW_LINT_B.to_owned(),
+                reviewer_count: 2,
+                verdict: "AllPassed".to_owned(),
+            },
+            Some(executor_task_id),
+        )
     }
 
-    fn seed_tasks_db(
-        tmpdir: &Path,
-        executor_task: &str,
-        critique: Option<&str>,
-    ) -> PathBuf {
+    fn seed_tasks_db(tmpdir: &Path, executor_task: &str, critique: Option<&str>) -> PathBuf {
         let db_path = tmpdir.join("kernel.db");
         let conn = rusqlite::Connection::open(&db_path).unwrap();
         let tasks = Table::Tasks.as_str();
@@ -428,22 +418,22 @@ mod tests {
                 task_id TEXT PRIMARY KEY,\
                 last_critique TEXT\
             );",
-        )).unwrap();
+        ))
+        .unwrap();
         conn.execute(
-            &format!(
-                "INSERT INTO {tasks} (task_id, last_critique) VALUES (?1, ?2)",
-            ),
+            &format!("INSERT INTO {tasks} (task_id, last_critique) VALUES (?1, ?2)",),
             rusqlite::params![executor_task, critique],
-        ).unwrap();
+        )
+        .unwrap();
         db_path
     }
 
     fn witness(sqlite_path: &Path) -> ReviewerSubstantiveDisagreementWitness {
         ReviewerSubstantiveDisagreementWitness {
-            executor_task_id:   "lint-defect".to_owned(),
+            executor_task_id: "lint-defect".to_owned(),
             reviewer_a_task_id: TASK_REVIEW_LINT_A.to_owned(),
             reviewer_b_task_id: TASK_REVIEW_LINT_B.to_owned(),
-            sqlite_path:        sqlite_path.to_path_buf(),
+            sqlite_path: sqlite_path.to_path_buf(),
         }
     }
 
@@ -459,8 +449,11 @@ mod tests {
     #[test]
     fn clean_chain_with_substantive_critique_passes() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seed_tasks_db(tmp.path(), "lint-defect",
-            Some("rejected: greeting.rs introduces clippy::useless_conversion"));
+        let db = seed_tasks_db(
+            tmp.path(),
+            "lint-defect",
+            Some("rejected: greeting.rs introduces clippy::useless_conversion"),
+        );
         let w = witness(&db);
         let report = w.evaluate(&clean_chain());
         assert!(report.is_pass(), "expected pass; got {report:#?}");
@@ -481,8 +474,11 @@ mod tests {
     #[test]
     fn vibes_only_critique_fails_substantive_check() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seed_tasks_db(tmp.path(), "lint-defect",
-            Some("rejected: the diff just looks bad"));
+        let db = seed_tasks_db(
+            tmp.path(),
+            "lint-defect",
+            Some("rejected: the diff just looks bad"),
+        );
         let w = witness(&db);
         let report = w.evaluate(&clean_chain());
         assert!(!report.is_pass());
@@ -492,8 +488,11 @@ mod tests {
     #[test]
     fn missing_respawn_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seed_tasks_db(tmp.path(), "lint-defect",
-            Some("rejected: greet.ts has a prefer-const violation"));
+        let db = seed_tasks_db(
+            tmp.path(),
+            "lint-defect",
+            Some("rejected: greet.ts has a prefer-const violation"),
+        );
         let w = witness(&db);
         let chain = vec![
             submit_review_intent(0, TASK_REVIEW_LINT_A),
@@ -509,11 +508,13 @@ mod tests {
         let report = w.evaluate(&chain);
         assert!(!report.is_pass());
         assert!(report.saw_reviewer_a);
-        assert!(!report.saw_executor_respawn,
+        assert!(
+            !report.saw_executor_respawn,
             "round-1 SessionVmSpawned alone must NOT satisfy \
              saw_executor_respawn — only \
              ExecutorRespawnFromReviewRejection does (INV-AUDIT-04 + \
-             INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01)");
+             INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01)"
+        );
         assert!(report.matched_basenames.contains(&"greet.ts"));
     }
 
@@ -524,8 +525,11 @@ mod tests {
     #[test]
     fn round_1_session_vm_spawn_does_not_mask_round_2_anchor() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seed_tasks_db(tmp.path(), "lint-defect",
-            Some("rejected: greet.py adds an unused import"));
+        let db = seed_tasks_db(
+            tmp.path(),
+            "lint-defect",
+            Some("rejected: greet.py adds an unused import"),
+        );
         let w = witness(&db);
         let chain = vec![
             // Round-1: initial executor spawn fires SessionVmSpawned
@@ -540,19 +544,26 @@ mod tests {
             aggregation_pass(4, "lint-defect"),
         ];
         let report = w.evaluate(&chain);
-        assert!(report.is_pass(),
-            "round-1 spawn + round-2 retry-anchor chain must pass: {report:#?}");
-        assert!(report.saw_executor_respawn,
+        assert!(
+            report.is_pass(),
+            "round-1 spawn + round-2 retry-anchor chain must pass: {report:#?}"
+        );
+        assert!(
+            report.saw_executor_respawn,
             "ExecutorRespawnFromReviewRejection at seq=2 must drive \
              saw_executor_respawn regardless of the earlier round-1 \
-             SessionVmSpawned at seq=0");
+             SessionVmSpawned at seq=0"
+        );
     }
 
     #[test]
     fn missing_aggregation_pass_fails() {
         let tmp = tempfile::tempdir().unwrap();
-        let db = seed_tasks_db(tmp.path(), "lint-defect",
-            Some("rejected: greet.py adds an unused import"));
+        let db = seed_tasks_db(
+            tmp.path(),
+            "lint-defect",
+            Some("rejected: greet.py adds an unused import"),
+        );
         let w = witness(&db);
         let chain = vec![
             submit_review_intent(0, TASK_REVIEW_LINT_A),
@@ -572,7 +583,9 @@ mod tests {
         let w = witness(&db_path);
         let report = w.evaluate(&clean_chain());
         assert!(!report.is_pass());
-        assert!(report.error.is_some(),
-            "missing db must surface as error: {report:#?}");
+        assert!(
+            report.error.is_some(),
+            "missing db must surface as error: {report:#?}"
+        );
     }
 }

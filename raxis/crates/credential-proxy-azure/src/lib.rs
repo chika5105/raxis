@@ -95,13 +95,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -109,7 +109,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-pub use forwarding::{AZURE_JSON_CONTENT_TYPE, AzureCacheValue, ForwardOutcome, ForwardingConfig};
+pub use forwarding::{AzureCacheValue, ForwardOutcome, ForwardingConfig, AZURE_JSON_CONTENT_TYPE};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -122,13 +122,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -146,32 +149,32 @@ pub struct ProxyConfig {
     /// Address the inbound listener binds to. Production wires
     /// `127.0.0.1:9003` so an `/etc/hosts` rewrite of
     /// `169.254.169.254 → 127.0.0.1` reaches the proxy.
-    pub listen_addr:     String,
+    pub listen_addr: String,
     /// Credential to resolve per request. Bytes must parse as
     /// either `KEY=VALUE` env-style or as a JSON object containing
     /// at least an `access_token` (or `AZURE_ACCESS_TOKEN`) field.
     pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:        OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Lease length advertised in `expires_in`. SDKs refresh shortly
     /// before this elapses.
-    pub lease_seconds:   u64,
+    pub lease_seconds: u64,
     /// Azure tenant ID. Returned in audit events. Operator-declared
     /// in `[[tasks.credentials]]`.
-    pub tenant_id:       String,
+    pub tenant_id: String,
     /// Optional managed-identity client ID mirrored back in the
     /// response body. Useful for SDKs that record the identity that
     /// minted the token.
-    pub client_id:       Option<String>,
+    pub client_id: Option<String>,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:    Restrictions,
+    pub restrictions: Restrictions,
     /// V3 forwarding configuration. When `Some`, the IMDS
     /// `/metadata/identity/oauth2/token` endpoint drives a
     /// real `client_credentials`-grant OAuth2 exchange
     /// against the closed-allowlist `login.microsoftonline.com`
     /// endpoint. See `specs/v3/cloud-proxy-forwarding.md`.
-    pub forwarding:      Option<ForwardingConfig>,
+    pub forwarding: Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -184,12 +187,12 @@ pub struct ProxyStats {
     /// Number of accepted connections served.
     pub connections_served: AtomicU32,
     /// Number of requests that returned a token.
-    pub tokens_served:      AtomicU32,
+    pub tokens_served: AtomicU32,
     /// Number of requests rejected by `Restrictions` or missing
     /// `Metadata: true` header.
-    pub requests_blocked:   AtomicU32,
+    pub requests_blocked: AtomicU32,
     /// Bytes in the served response bodies.
-    pub bytes_served:       AtomicU64,
+    pub bytes_served: AtomicU64,
 }
 
 impl ProxyStats {
@@ -197,9 +200,9 @@ impl ProxyStats {
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
-            tokens_served:      self.tokens_served     .load(Ordering::Relaxed),
-            requests_blocked:   self.requests_blocked  .load(Ordering::Relaxed),
-            bytes_served:       self.bytes_served      .load(Ordering::Relaxed),
+            tokens_served: self.tokens_served.load(Ordering::Relaxed),
+            requests_blocked: self.requests_blocked.load(Ordering::Relaxed),
+            bytes_served: self.bytes_served.load(Ordering::Relaxed),
         }
     }
 }
@@ -210,11 +213,11 @@ pub struct ProxyStatsSnapshot {
     /// Number of accepted connections served.
     pub connections_served: u32,
     /// Number of requests that returned a token.
-    pub tokens_served:      u32,
+    pub tokens_served: u32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   u32,
+    pub requests_blocked: u32,
     /// Bytes in the served response bodies.
-    pub bytes_served:       u64,
+    pub bytes_served: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -243,17 +246,17 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:        OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:      CredentialName,
+        credential: CredentialName,
         /// Request path.
-        path:            String,
+        path: String,
         /// Resource URI the SDK requested (or empty if missing).
-        resource:        String,
+        resource: String,
         /// SHA-256 of `"<METHOD> <path>?resource=<resource>"`.
-        request_sha256:  String,
+        request_sha256: String,
         /// Tenant ID associated with the proxy.
-        tenant_id:       String,
+        tenant_id: String,
         /// V2_GAPS §9 Phase 2 — operator-declared ARM action
         /// vocabulary for the requested resource (e.g.
         /// `["Microsoft.Storage/storageAccounts/read"]`). Empty
@@ -263,7 +266,7 @@ pub enum AuditEvent {
         allowed_actions: Vec<String>,
         /// True if a restriction or missing header blocked this
         /// request.
-        blocked:         bool,
+        blocked: bool,
     },
 }
 
@@ -278,7 +281,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error.
         source: std::io::Error,
     },
@@ -292,15 +295,15 @@ pub enum ProxyError {
 /// types match the wire (numeric fields are strings).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct ImdsTokenResponse {
-    access_token:   String,
+    access_token: String,
     /// Empty string when not declared by the proxy decl.
-    client_id:      String,
-    expires_in:     String,
-    expires_on:     String,
+    client_id: String,
+    expires_in: String,
+    expires_on: String,
     ext_expires_in: String,
-    not_before:     String,
-    resource:       String,
-    token_type:     String,
+    not_before: String,
+    resource: String,
+    token_type: String,
 }
 
 /// Internal envelope the proxy resolves the credential into.
@@ -314,7 +317,9 @@ fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
     if trimmed.starts_with('{') {
         let v: serde_json::Value = serde_json::from_str(trimmed)
             .map_err(|_| "credential body is not valid JSON despite leading `{`")?;
-        let obj = v.as_object().ok_or("JSON credential body is not an object")?;
+        let obj = v
+            .as_object()
+            .ok_or("JSON credential body is not an object")?;
         let access_token = pick_str(obj, &["access_token", "AZURE_ACCESS_TOKEN"])
             .ok_or("missing access_token / AZURE_ACCESS_TOKEN")?
             .to_owned();
@@ -323,7 +328,9 @@ fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
         let mut access_token = None;
         for line in body.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
                 let v = v.trim().trim_matches(['"', '\''].as_ref());
@@ -338,7 +345,7 @@ fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
 }
 
 fn pick_str<'a>(
-    obj:  &'a serde_json::Map<String, serde_json::Value>,
+    obj: &'a serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
 ) -> Option<&'a str> {
     for k in keys {
@@ -355,12 +362,12 @@ fn pick_str<'a>(
 
 /// Azure IMDS-compatible credential proxy.
 pub struct AzureProxy {
-    listener:    TcpListener,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    listener: TcpListener,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<AzureCacheValue>>>,
 }
@@ -371,12 +378,13 @@ impl AzureProxy {
     /// V3-cloud-forwarding-aware constructor.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -385,7 +393,7 @@ impl AzureProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  None,
+            audit_sink: None,
             http_client: None,
             token_cache: None,
         })
@@ -393,16 +401,17 @@ impl AzureProxy {
 
     /// Bind a listener with V3 forwarding plumbing.
     pub async fn bind_v3(
-        backend:     Arc<dyn CredentialBackend>,
-        config:      ProxyConfig,
-        audit:       Arc<dyn AuditChannel>,
-        audit_sink:  Arc<dyn AuditSink>,
+        backend: Arc<dyn CredentialBackend>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
+        audit_sink: Arc<dyn AuditSink>,
         http_client: Arc<CloudHttpClient>,
         token_cache: Arc<TokenCache<AzureCacheValue>>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -411,7 +420,7 @@ impl AzureProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  Some(audit_sink),
+            audit_sink: Some(audit_sink),
             http_client: Some(http_client),
             token_cache: Some(token_cache),
         })
@@ -423,29 +432,43 @@ impl AzureProxy {
     }
 
     /// Counters snapshot.
-    pub fn stats(&self) -> ProxyStatsSnapshot { self.stats.snapshot() }
+    pub fn stats(&self) -> ProxyStatsSnapshot {
+        self.stats.snapshot()
+    }
 
     /// Borrow the underlying counters Arc.
-    pub fn stats_handle(&self) -> Arc<ProxyStats> { Arc::clone(&self.stats) }
+    pub fn stats_handle(&self) -> Arc<ProxyStats> {
+        Arc::clone(&self.stats)
+    }
 
     /// Run the accept loop until dropped.
     pub async fn serve(self) {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend     = Arc::clone(&self.backend);
-                    let config      = self.config.clone();
-                    let stats       = Arc::clone(&self.stats);
-                    let audit       = Arc::clone(&self.audit);
-                    let audit_sink  = self.audit_sink.clone();
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
+                    let backend = Arc::clone(&self.backend);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
+                    let audit_sink = self.audit_sink.clone();
                     let http_client = self.http_client.clone();
                     let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(
-                            stream, backend, config, stats, audit,
-                            audit_sink, http_client, token_cache,
-                        ).await {
+                            stream,
+                            backend,
+                            config,
+                            stats,
+                            audit,
+                            audit_sink,
+                            http_client,
+                            token_cache,
+                        )
+                        .await
+                        {
                             tracing::warn!(error = %e, "azure proxy connection ended with error");
                         }
                     });
@@ -465,12 +488,12 @@ impl AzureProxy {
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream:  TcpStream,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    mut stream: TcpStream,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<AzureCacheValue>>>,
 ) -> std::io::Result<()> {
@@ -478,26 +501,31 @@ async fn serve_one(
     let mut chunk = [0u8; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
         if buf.len() > 8192 {
             write_status(&mut stream, 431, "Request Header Fields Too Large").await?;
             return Ok(());
         }
     }
-    if buf.is_empty() { return Ok(()); }
+    if buf.is_empty() {
+        return Ok(());
+    }
 
     let mut headers = [httparse::EMPTY_HEADER; 32];
-    let mut req     = httparse::Request::new(&mut headers);
+    let mut req = httparse::Request::new(&mut headers);
     let (method, path, has_metadata_header) = match req.parse(&buf) {
         Ok(httparse::Status::Complete(_)) => {
             let method = req.method.unwrap_or("GET").to_owned();
-            let path   = req.path.unwrap_or("/").to_owned();
-            let has    = req.headers.iter().any(|h|
-                h.name.eq_ignore_ascii_case("Metadata")
-                && h.value.eq_ignore_ascii_case(b"true")
-            );
+            let path = req.path.unwrap_or("/").to_owned();
+            let has = req.headers.iter().any(|h| {
+                h.name.eq_ignore_ascii_case("Metadata") && h.value.eq_ignore_ascii_case(b"true")
+            });
             (method, path, has)
         }
         _ => {
@@ -546,19 +574,18 @@ async fn serve_one(
         http_client.as_ref(),
         token_cache.as_ref(),
     ) {
-        let resolved_bytes = match backend.resolve(
-            &config.credential_name, config.consumer.as_ref(),
-        ) {
-            Ok(v) => v,
-            Err(e) => {
-                tracing::warn!(error = %e, "azure proxy credential resolve failed");
-                write_imds_error(&mut stream, 502, "credential resolve failed").await?;
-                return Ok(());
-            }
-        };
+        let resolved_bytes =
+            match backend.resolve(&config.credential_name, config.consumer.as_ref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(error = %e, "azure proxy credential resolve failed");
+                    write_imds_error(&mut stream, 502, "credential resolve failed").await?;
+                    return Ok(());
+                }
+            };
         let body_str = match resolved_bytes.as_utf8() {
             Some(s) => s.to_owned(),
-            None    => {
+            None => {
                 tracing::warn!("azure proxy credential body is not UTF-8");
                 write_imds_error(&mut stream, 502, "credential body is not UTF-8").await?;
                 return Ok(());
@@ -567,18 +594,23 @@ async fn serve_one(
         let sp = match forwarding::parse_service_principal(&body_str) {
             Ok(s) => s,
             Err(_) => {
-                write_imds_error(&mut stream, 502, "service-principal credential malformed").await?;
+                write_imds_error(&mut stream, 502, "service-principal credential malformed")
+                    .await?;
                 return Ok(());
             }
         };
         let session_id = format!("{}:{}", config.consumer.kind, config.consumer.id);
         let outcome = forwarding::forward_or_serve_from_cache(
-            fwd, http, cache, sink,
+            fwd,
+            http,
+            cache,
+            sink,
             &session_id,
             config.credential_name.as_str(),
             &sp,
             &resource,
-        ).await;
+        )
+        .await;
         let allowed_actions_header = match config.restrictions.actions_for(&resource) {
             Some(actions) if !actions.is_empty() => {
                 let json = serde_json::to_string(actions)
@@ -598,14 +630,16 @@ async fn serve_one(
                      {allowed_actions_header}\
                      Connection: close\r\n\
                      \r\n",
-                    ct  = AZURE_JSON_CONTENT_TYPE,
+                    ct = AZURE_JSON_CONTENT_TYPE,
                     len = body_len,
                 );
                 stream.write_all(header.as_bytes()).await?;
                 stream.write_all(&body).await?;
                 stream.flush().await?;
                 stats.tokens_served.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                stats
+                    .bytes_served
+                    .fetch_add(body_len as u64, Ordering::Relaxed);
                 audit.emit(audit_event(&config, &method, &path, &resource, false));
             }
             ForwardOutcome::UpstreamEnvelope { status, body } => {
@@ -618,13 +652,15 @@ async fn serve_one(
                      Connection: close\r\n\
                      \r\n",
                     reason = code_to_reason(status),
-                    ct     = AZURE_JSON_CONTENT_TYPE,
-                    len    = body_len,
+                    ct = AZURE_JSON_CONTENT_TYPE,
+                    len = body_len,
                 );
                 stream.write_all(header.as_bytes()).await?;
                 stream.write_all(&body).await?;
                 stream.flush().await?;
-                stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+                stats
+                    .bytes_served
+                    .fetch_add(body_len as u64, Ordering::Relaxed);
             }
         }
         return Ok(());
@@ -656,17 +692,20 @@ async fn serve_one(
         }
     };
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let expires_on = now + config.lease_seconds;
     let body = ImdsTokenResponse {
-        access_token:   key.access_token,
-        client_id:      config.client_id.clone().unwrap_or_default(),
-        expires_in:     config.lease_seconds.to_string(),
-        expires_on:     expires_on.to_string(),
+        access_token: key.access_token,
+        client_id: config.client_id.clone().unwrap_or_default(),
+        expires_in: config.lease_seconds.to_string(),
+        expires_on: expires_on.to_string(),
         ext_expires_in: config.lease_seconds.to_string(),
-        not_before:     now.to_string(),
-        resource:       resource.clone(),
-        token_type:     "Bearer".to_owned(),
+        not_before: now.to_string(),
+        resource: resource.clone(),
+        token_type: "Bearer".to_owned(),
     };
     let body = serde_json::to_vec(&body)
         .map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
@@ -704,7 +743,9 @@ async fn serve_one(
     stream.flush().await?;
 
     stats.tokens_served.fetch_add(1, Ordering::Relaxed);
-    stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+    stats
+        .bytes_served
+        .fetch_add(body_len as u64, Ordering::Relaxed);
     audit.emit(audit_event(&config, &method, &path, &resource, false));
     Ok(())
 }
@@ -757,23 +798,14 @@ fn hex_digit(b: u8) -> Option<u8> {
     }
 }
 
-async fn write_status(
-    stream: &mut TcpStream,
-    code:   u16,
-    reason: &str,
-) -> std::io::Result<()> {
-    let line = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+async fn write_status(stream: &mut TcpStream, code: u16, reason: &str) -> std::io::Result<()> {
+    let line =
+        format!("HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",);
     stream.write_all(line.as_bytes()).await?;
     stream.flush().await
 }
 
-async fn write_imds_error(
-    stream: &mut TcpStream,
-    code:   u16,
-    message: &str,
-) -> std::io::Result<()> {
+async fn write_imds_error(stream: &mut TcpStream, code: u16, message: &str) -> std::io::Result<()> {
     // Match real IMDS error shape so SDKs that pattern-match the
     // body field continue to behave.
     let body = serde_json::json!({
@@ -791,7 +823,7 @@ async fn write_imds_error(
          Connection: close\r\n\
          \r\n",
         reason = code_to_reason(code),
-        len    = body_len,
+        len = body_len,
     );
     stream.write_all(header.as_bytes()).await?;
     stream.write_all(&body).await?;
@@ -814,7 +846,7 @@ fn code_to_reason(code: u16) -> &'static str {
         _ if (200..300).contains(&code) => "OK",
         _ if (400..500).contains(&code) => "Client Error",
         _ if (500..600).contains(&code) => "Server Error",
-        _   => "Error",
+        _ => "Error",
     }
 }
 
@@ -823,16 +855,16 @@ fn code_to_short(code: u16) -> &'static str {
         400 => "invalid_request",
         404 => "unsupported_endpoint",
         502 => "credential_resolve_failed",
-        _   => "error",
+        _ => "error",
     }
 }
 
 fn audit_event(
-    config:   &ProxyConfig,
-    method:   &str,
-    path:     &str,
+    config: &ProxyConfig,
+    method: &str,
+    path: &str,
     resource: &str,
-    blocked:  bool,
+    blocked: bool,
 ) -> AuditEvent {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
@@ -849,13 +881,15 @@ fn audit_event(
         .unwrap_or_default();
     AuditEvent::AzureTokenServed {
         timestamp_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        path:        path.to_owned(),
-        resource:    resource.to_owned(),
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        path: path.to_owned(),
+        resource: resource.to_owned(),
         request_sha256,
-        tenant_id:   config.tenant_id.clone(),
+        tenant_id: config.tenant_id.clone(),
         allowed_actions,
         blocked,
     }

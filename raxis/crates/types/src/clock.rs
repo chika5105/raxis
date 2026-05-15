@@ -89,7 +89,10 @@ mod tests {
         // delta is well under one whole second.
         let a = RealClock.now_unix_secs();
         let b = unix_now_secs();
-        assert!((a - b).abs() <= 1, "RealClock and unix_now_secs disagreed: a={a} b={b}");
+        assert!(
+            (a - b).abs() <= 1,
+            "RealClock and unix_now_secs disagreed: a={a} b={b}"
+        );
     }
 
     #[test]

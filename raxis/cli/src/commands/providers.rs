@@ -20,7 +20,7 @@
 //! | `0`  | Success (status rendered / reset done). |
 //! | `1`  | Error opening kernel.db or parsing args.|
 
-use raxis_store::{SqliteCircuitStore};
+use raxis_store::SqliteCircuitStore;
 use raxis_types::CircuitBreakerState;
 
 use crate::errors::CliError;
@@ -39,9 +39,13 @@ pub fn run_status(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     let conn = rusqlite::Connection::open_with_flags(
         &db_path,
         rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    ).map_err(|e| CliError::Usage(format!(
-        "cannot open kernel.db at {}: {e}", db_path.display()
-    )))?;
+    )
+    .map_err(|e| {
+        CliError::Usage(format!(
+            "cannot open kernel.db at {}: {e}",
+            db_path.display()
+        ))
+    })?;
 
     let store = SqliteCircuitStore::new(conn);
     let rows = store.list_all();
@@ -92,14 +96,11 @@ fn render_status_human(rows: &[raxis_store::CircuitRowSqlite]) {
 
     for r in rows {
         let changed = format_epoch_ms(r.last_state_change_at_ms);
-        let failure_kind = r
-            .last_failure_kind
-            .as_deref()
-            .unwrap_or("-");
+        let failure_kind = r.last_failure_kind.as_deref().unwrap_or("-");
         let state_display = match r.state {
-            CircuitBreakerState::Open     => "\x1b[31mOpen\x1b[0m",
+            CircuitBreakerState::Open => "\x1b[31mOpen\x1b[0m",
             CircuitBreakerState::HalfOpen => "\x1b[33mHalfOpen\x1b[0m",
-            CircuitBreakerState::Closed   => "Closed",
+            CircuitBreakerState::Closed => "Closed",
         };
         println!(
             "{:<16} {:<28} {:<10} {:>8}  {:<14} {:<12}",
@@ -113,8 +114,14 @@ fn render_status_human(rows: &[raxis_store::CircuitRowSqlite]) {
     }
 
     // Summary line.
-    let open_count = rows.iter().filter(|r| r.state == CircuitBreakerState::Open).count();
-    let half_open_count = rows.iter().filter(|r| r.state == CircuitBreakerState::HalfOpen).count();
+    let open_count = rows
+        .iter()
+        .filter(|r| r.state == CircuitBreakerState::Open)
+        .count();
+    let half_open_count = rows
+        .iter()
+        .filter(|r| r.state == CircuitBreakerState::HalfOpen)
+        .count();
     println!();
     println!(
         "{} provider(s) tracked. {} Open, {} HalfOpen.",
@@ -125,7 +132,9 @@ fn render_status_human(rows: &[raxis_store::CircuitRowSqlite]) {
 
     if open_count > 0 {
         println!();
-        println!("  Hint: use `raxis providers reset <provider> [<model>]` to force a breaker Closed.");
+        println!(
+            "  Hint: use `raxis providers reset <provider> [<model>]` to force a breaker Closed."
+        );
     }
 }
 
@@ -139,17 +148,21 @@ pub fn run_reset(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_reset_args(args)?;
     let db_path = flags.data_dir().join("kernel.db");
 
-    let conn = rusqlite::Connection::open(
-        &db_path,
-    ).map_err(|e| CliError::Usage(format!(
-        "cannot open kernel.db at {}: {e}", db_path.display()
-    )))?;
+    let conn = rusqlite::Connection::open(&db_path).map_err(|e| {
+        CliError::Usage(format!(
+            "cannot open kernel.db at {}: {e}",
+            db_path.display()
+        ))
+    })?;
 
     let store = SqliteCircuitStore::new(conn);
 
     // If a specific model is provided, reset just that one.
     // Otherwise, reset all models for the given provider.
-    let transitions: Vec<(raxis_store::CircuitRowSqlite, Option<raxis_store::CircuitTransition>)>;
+    let transitions: Vec<(
+        raxis_store::CircuitRowSqlite,
+        Option<raxis_store::CircuitTransition>,
+    )>;
 
     if let Some(ref model) = opts.model {
         let result = store.manual_reset(&opts.provider, model);
@@ -206,10 +219,7 @@ pub fn run_reset(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                     row.provider, row.model, t.from_state,
                 );
             } else {
-                println!(
-                    "{}/{}: already Closed (no-op)",
-                    row.provider, row.model,
-                );
+                println!("{}/{}: already Closed (no-op)", row.provider, row.model,);
             }
         }
     }

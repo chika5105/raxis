@@ -1551,8 +1551,8 @@ impl SessionProxyHandles {
         for p in &self.proxies {
             let url = match p.proxy_type {
                 "postgres" => format!("postgresql://raxis@{}/", p.addr),
-                "mysql"    => format!("mysql://raxis@{}/", p.addr),
-                "mssql"    => format!("mssql://raxis@{}/", p.addr),
+                "mysql" => format!("mysql://raxis@{}/", p.addr),
+                "mssql" => format!("mssql://raxis@{}/", p.addr),
                 // MongoDB clients (pymongo, mongo-rust-driver,
                 // mongoose) reject userinfo-without-password URIs:
                 // pymongo's `auth.parse_userinfo` raises
@@ -1571,8 +1571,8 @@ impl SessionProxyHandles {
                 // "connection closed" (the absence of any TCP
                 // accept on the proxy is indistinguishable from a
                 // local-loopback-RST from the agent's perspective).
-                "mongodb"  => format!("mongodb://{}/", p.addr),
-                "redis"    => format!("redis://{}", p.addr),
+                "mongodb" => format!("mongodb://{}/", p.addr),
+                "redis" => format!("redis://{}", p.addr),
                 // SMTP proxies are dialed as a host:port pair (no
                 // scheme). Common SMTP client libraries expect a
                 // bare `host:port`; surface that exactly so the

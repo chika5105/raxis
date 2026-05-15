@@ -17,14 +17,14 @@
 //!          with the header → 404 (not in allowlist).
 //!   3. Verify counters match.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use serde_json::Value as JsonValue;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -39,7 +39,7 @@ GCP_ACCESS_TOKEN=ya29.live-e2e-token\n\
 GCP_SERVICE_ACCOUNT_EMAIL=svc@my-live-e2e-proj.iam.gserviceaccount.com\n";
 
 struct LiveBackend {
-    body:     Vec<u8>,
+    body: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -56,43 +56,56 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.body.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+        &self,
+        name: &CredentialName,
+        _v: CredentialValue,
+        _a: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub async fn run() -> Result<()> {
     tracing::info!("gcp-proxy slice starting");
 
     let backend = Arc::new(LiveBackend {
-        body:     ENV_BODY.as_bytes().to_vec(),
+        body: ENV_BODY.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
-        listen_addr:        "127.0.0.1:0".to_owned(),
-        credential_name:    CredentialName::new("live-e2e"),
-        consumer:           OwnedConsumer::new("live-e2e-gcp-slice", "session-1"),
-        lease_seconds:      3600,
-        project_id:         "my-live-e2e-proj".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
+        credential_name: CredentialName::new("live-e2e"),
+        consumer: OwnedConsumer::new("live-e2e-gcp-slice", "session-1"),
+        lease_seconds: 3600,
+        project_id: "my-live-e2e-proj".to_owned(),
         numeric_project_id: Some(123456789),
-        forwarding:         None,
-        restrictions:       Restrictions::default(),
+        forwarding: None,
+        restrictions: Restrictions::default(),
     };
     let proxy = GcpProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
         Arc::new(NoopAuditChannel::default()),
-    ).await.context("bind GcpProxy")?;
-    let addr  = proxy.local_addr()?;
+    )
+    .await
+    .context("bind GcpProxy")?;
+    let addr = proxy.local_addr()?;
     let stats = proxy.stats_handle();
-    tokio::spawn(async move { proxy.serve().await; });
+    tokio::spawn(async move {
+        proxy.serve().await;
+    });
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
@@ -101,13 +114,14 @@ pub async fn run() -> Result<()> {
         addr,
         "/computeMetadata/v1/instance/service-accounts/default/token",
         &[("Metadata-Flavor", "Google")],
-    ).await?;
+    )
+    .await?;
     if !resp.starts_with("HTTP/1.1 200") {
         return Err(anyhow!("expected 200 OK on /token, got: {resp:.200?}"));
     }
     let body = body_of(&resp).ok_or_else(|| anyhow!("no body"))?;
-    let parsed: JsonValue = serde_json::from_str(body)
-        .with_context(|| format!("parse JSON body: {body:.200}"))?;
+    let parsed: JsonValue =
+        serde_json::from_str(body).with_context(|| format!("parse JSON body: {body:.200}"))?;
     if parsed.get("access_token").and_then(|v| v.as_str()) != Some("ya29.live-e2e-token") {
         return Err(anyhow!("access_token mismatch in body: {body}"));
     }
@@ -123,7 +137,8 @@ pub async fn run() -> Result<()> {
         addr,
         "/computeMetadata/v1/instance/service-accounts/default/token",
         &[],
-    ).await?;
+    )
+    .await?;
     if !resp.starts_with("HTTP/1.1 403") {
         return Err(anyhow!(
             "expected 403 without Metadata-Flavor: Google, got: {resp:.200?}"
@@ -135,9 +150,12 @@ pub async fn run() -> Result<()> {
         addr,
         "/computeMetadata/v1/project/project-id",
         &[("Metadata-Flavor", "Google")],
-    ).await?;
+    )
+    .await?;
     if !resp.starts_with("HTTP/1.1 200") {
-        return Err(anyhow!("expected 200 on /project/project-id, got: {resp:.200?}"));
+        return Err(anyhow!(
+            "expected 200 on /project/project-id, got: {resp:.200?}"
+        ));
     }
     let body = body_of(&resp).ok_or_else(|| anyhow!("no body"))?;
     if body.trim() != "my-live-e2e-proj" {
@@ -149,7 +167,8 @@ pub async fn run() -> Result<()> {
         addr,
         "/computeMetadata/v1/instance/network-interfaces",
         &[("Metadata-Flavor", "Google")],
-    ).await?;
+    )
+    .await?;
     if !resp.starts_with("HTTP/1.1 404") {
         return Err(anyhow!(
             "expected 404 for non-allowlisted path, got: {resp:.200?}"
@@ -184,7 +203,8 @@ async fn http_get(
     path: &str,
     extra_headers: &[(&str, &str)],
 ) -> Result<String> {
-    let mut s = TcpStream::connect(addr).await
+    let mut s = TcpStream::connect(addr)
+        .await
         .with_context(|| format!("connect to GcpProxy listener at {addr}"))?;
     let mut req = format!(
         "GET {path} HTTP/1.1\r\n\
@@ -199,7 +219,8 @@ async fn http_get(
     s.write_all(req.as_bytes()).await?;
     let mut buf = Vec::with_capacity(4096);
     let timeout = Duration::from_secs(5);
-    tokio::time::timeout(timeout, s.read_to_end(&mut buf)).await
+    tokio::time::timeout(timeout, s.read_to_end(&mut buf))
+        .await
         .map_err(|_| anyhow!("read timed out after {timeout:?}"))??;
     Ok(String::from_utf8_lossy(&buf).into_owned())
 }

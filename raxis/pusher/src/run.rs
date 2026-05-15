@@ -79,22 +79,22 @@ pub enum PusherEvent {
 /// Top-level pusher state. Owns the runtime objects (readers,
 /// batches, OTLP client) and the cursor.
 pub struct Pusher {
-    cfg:         Arc<PusherConfig>,
-    client:      OtlpClient,
-    backoff:     BackoffPolicy,
-    health:      Option<HealthHandle>,
-    state:       Arc<Mutex<PusherState>>,
+    cfg: Arc<PusherConfig>,
+    client: OtlpClient,
+    backoff: BackoffPolicy,
+    health: Option<HealthHandle>,
+    state: Arc<Mutex<PusherState>>,
 }
 
 struct PusherState {
-    cursor:      Cursor,
-    spans:       Reader,
-    metrics:     Reader,
-    span_batch:  Batch,
+    cursor: Cursor,
+    spans: Reader,
+    metrics: Reader,
+    span_batch: Batch,
     metric_batch: Batch,
-    spans_exported_total:   u64,
+    spans_exported_total: u64,
     metrics_exported_total: u64,
-    spans_dropped_total:    u64,
+    spans_dropped_total: u64,
 }
 
 impl Pusher {
@@ -102,21 +102,22 @@ impl Pusher {
     /// readers + initial batches; loads (or initialises) the
     /// cursor.
     pub fn new(cfg: PusherConfig, client: OtlpClient) -> Result<Self, PusherInitError> {
-        let cursor = Cursor::load_or_init(&cfg.cursor_path)
-            .map_err(PusherInitError::Cursor)?;
-        let mut spans   = Reader::new(cfg.segment_dir(Stream::Spans));
+        let cursor = Cursor::load_or_init(&cfg.cursor_path).map_err(PusherInitError::Cursor)?;
+        let mut spans = Reader::new(cfg.segment_dir(Stream::Spans));
         let mut metrics = Reader::new(cfg.segment_dir(Stream::Metrics));
-        spans.open_from_cursor(cursor.entry(Stream::Spans))
-             .map_err(PusherInitError::Reader)?;
-        metrics.open_from_cursor(cursor.entry(Stream::Metrics))
-               .map_err(PusherInitError::Reader)?;
+        spans
+            .open_from_cursor(cursor.entry(Stream::Spans))
+            .map_err(PusherInitError::Reader)?;
+        metrics
+            .open_from_cursor(cursor.entry(Stream::Metrics))
+            .map_err(PusherInitError::Reader)?;
         let backoff = BackoffPolicy {
-            initial:      cfg.pusher.backoff_initial,
-            max:          cfg.pusher.backoff_max,
-            jitter:       cfg.pusher.backoff_jitter,
+            initial: cfg.pusher.backoff_initial,
+            max: cfg.pusher.backoff_max,
+            jitter: cfg.pusher.backoff_jitter,
             max_attempts: 8,
         };
-        let span_batch   = Batch::new(Stream::Spans,   cfg.batch_size());
+        let span_batch = Batch::new(Stream::Spans, cfg.batch_size());
         let metric_batch = Batch::new(Stream::Metrics, cfg.batch_size());
         let cfg = Arc::new(cfg);
         Ok(Self {
@@ -130,9 +131,9 @@ impl Pusher {
                 metrics,
                 span_batch,
                 metric_batch,
-                spans_exported_total:   0,
+                spans_exported_total: 0,
                 metrics_exported_total: 0,
-                spans_dropped_total:    0,
+                spans_dropped_total: 0,
             })),
         })
     }
@@ -177,7 +178,7 @@ impl Pusher {
 
     async fn pull_into_batch(
         &self,
-        state:  &mut PusherState,
+        state: &mut PusherState,
         stream: Stream,
         events: &mut Vec<PusherEvent>,
     ) {
@@ -187,7 +188,7 @@ impl Pusher {
                 let r = pick_reader(state, stream);
                 match r.next_frame() {
                     Ok(Some(f)) => f,
-                    Ok(None)    => return,
+                    Ok(None) => return,
                     Err(e) => {
                         events.push(PusherEvent::ExportRetry {
                             stream,
@@ -217,7 +218,7 @@ impl Pusher {
 
     async fn flush_one(
         &self,
-        state:  &mut PusherState,
+        state: &mut PusherState,
         stream: Stream,
         events: &mut Vec<PusherEvent>,
     ) {
@@ -229,16 +230,24 @@ impl Pusher {
         let frames = pick_batch(state, stream).len();
         loop {
             let result = match stream {
-                Stream::Spans   => self.client
-                    .export_spans(&state.span_batch.spans, &kernel_version)
-                    .await,
-                Stream::Metrics => self.client
-                    .export_metrics(&state.metric_batch.metrics, &kernel_version)
-                    .await,
+                Stream::Spans => {
+                    self.client
+                        .export_spans(&state.span_batch.spans, &kernel_version)
+                        .await
+                }
+                Stream::Metrics => {
+                    self.client
+                        .export_metrics(&state.metric_batch.metrics, &kernel_version)
+                        .await
+                }
             };
             match result {
                 Ok(status) if (200..300).contains(&status) => {
-                    events.push(PusherEvent::ExportOk { stream, frames, status });
+                    events.push(PusherEvent::ExportOk {
+                        stream,
+                        frames,
+                        status,
+                    });
                     self.record_success(state, stream).await;
                     return;
                 }
@@ -305,9 +314,9 @@ impl Pusher {
     async fn record_success(&self, state: &mut PusherState, stream: Stream) {
         let now = unix_now();
         let frames = pick_batch(state, stream).len() as u64;
-        let tail   = pick_batch(state, stream).tail.clone();
+        let tail = pick_batch(state, stream).tail.clone();
         match stream {
-            Stream::Spans   => state.spans_exported_total   += frames,
+            Stream::Spans => state.spans_exported_total += frames,
             Stream::Metrics => state.metrics_exported_total += frames,
         }
         // Advance cursor to the tail of the just-shipped batch.
@@ -328,11 +337,7 @@ impl Pusher {
         pick_batch(state, stream).reset();
     }
 
-    fn advance_segments_if_rotated(
-        &self,
-        state: &mut PusherState,
-        events: &mut Vec<PusherEvent>,
-    ) {
+    fn advance_segments_if_rotated(&self, state: &mut PusherState, events: &mut Vec<PusherEvent>) {
         for stream in [Stream::Spans, Stream::Metrics] {
             let r = pick_reader(state, stream);
             match r.is_rotated() {
@@ -340,7 +345,10 @@ impl Pusher {
                     if matches!(r.next_frame(), Ok(None)) {
                         if let Ok(true) = r.advance_segment() {
                             let new_seg = r.current_segment().to_owned();
-                            let entry = CursorEntry { segment: new_seg.clone(), offset: 0 };
+                            let entry = CursorEntry {
+                                segment: new_seg.clone(),
+                                offset: 0,
+                            };
                             *state.cursor.entry_mut(stream) = entry;
                             let _ = state.cursor.persist(&self.cfg.cursor_path);
                             events.push(PusherEvent::SegmentAdvanced {
@@ -357,33 +365,34 @@ impl Pusher {
 
     fn snapshot(&self, state: &PusherState) -> HealthSnapshot {
         let status = match state.cursor.consecutive_failures {
-            0     => "ok",
+            0 => "ok",
             1..=4 => "degraded",
-            _     => "failing",
-        }.to_owned();
+            _ => "failing",
+        }
+        .to_owned();
         HealthSnapshot {
             status,
             last_export_attempt_unix: unix_now(),
             last_export_success_unix: state.cursor.last_export_unix,
-            consecutive_failures:     state.cursor.consecutive_failures,
-            spans_exported_total:     state.spans_exported_total,
-            metrics_exported_total:   state.metrics_exported_total,
-            spans_dropped_total:      state.spans_dropped_total,
-            cursor_lag_segments:      0,
+            consecutive_failures: state.cursor.consecutive_failures,
+            spans_exported_total: state.spans_exported_total,
+            metrics_exported_total: state.metrics_exported_total,
+            spans_dropped_total: state.spans_dropped_total,
+            cursor_lag_segments: 0,
         }
     }
 }
 
 fn pick_reader(state: &mut PusherState, stream: Stream) -> &mut Reader {
     match stream {
-        Stream::Spans   => &mut state.spans,
+        Stream::Spans => &mut state.spans,
         Stream::Metrics => &mut state.metrics,
     }
 }
 
 fn pick_batch(state: &mut PusherState, stream: Stream) -> &mut Batch {
     match stream {
-        Stream::Spans   => &mut state.span_batch,
+        Stream::Spans => &mut state.span_batch,
         Stream::Metrics => &mut state.metric_batch,
     }
 }

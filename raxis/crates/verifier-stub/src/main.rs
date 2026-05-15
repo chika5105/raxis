@@ -49,8 +49,10 @@ async fn run() -> Result<ExitCode, ExitCode> {
     let env = match parse_stub_env_from_process() {
         Ok(e) => e,
         Err(StubEnvError::Missing(var)) => {
-            eprintln!("raxis-verifier-stub: missing required env var {var}; \
-                       the parent process did not set the spawn envelope correctly");
+            eprintln!(
+                "raxis-verifier-stub: missing required env var {var}; \
+                       the parent process did not set the spawn envelope correctly"
+            );
             return Err(ExitCode::MissingEnv);
         }
         Err(StubEnvError::Invalid { var, value, reason }) => {
@@ -85,8 +87,10 @@ async fn run() -> Result<ExitCode, ExitCode> {
     let mut stream = match UnixStream::connect(&env.socket_path).await {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("raxis-verifier-stub: UnixStream::connect({}): {e}",
-                env.socket_path);
+            eprintln!(
+                "raxis-verifier-stub: UnixStream::connect({}): {e}",
+                env.socket_path
+            );
             return Err(ExitCode::IoError);
         }
     };
@@ -110,7 +114,9 @@ async fn run() -> Result<ExitCode, ExitCode> {
     if let Err(e) = write_frame(
         &mut stream,
         &IpcMessage::WitnessSubmission(StubEnvSubmission(env, submission).into_message()),
-    ).await {
+    )
+    .await
+    {
         eprintln!("raxis-verifier-stub: write_frame: {e}");
         return Err(ExitCode::IoError);
     }
@@ -129,7 +135,11 @@ async fn run() -> Result<ExitCode, ExitCode> {
     // to capture and assert against. Stderr is reserved for human
     // diagnostics; tests should not depend on stderr text.
     match ack {
-        IpcMessage::WitnessAck { verifier_run_id, accepted, reason } => {
+        IpcMessage::WitnessAck {
+            verifier_run_id,
+            accepted,
+            reason,
+        } => {
             // Print a stable JSON shape so downstream test code can
             // `serde_json::from_str` rather than regex over the line.
             // Field set is pinned by the integration test in

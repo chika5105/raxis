@@ -31,13 +31,13 @@ use std::sync::Mutex;
 use std::time::Duration;
 
 use raxis_isolation::{
-    Backend, ContentHash, EgressTier, ImageBody, ImageKind, ImageSignature, MountMode,
-    PushFrame, SessionToken, VerifiedImage, VmSpec, WorkspaceMount,
+    Backend, ContentHash, EgressTier, ImageBody, ImageKind, ImageSignature, MountMode, PushFrame,
+    SessionToken, VerifiedImage, VmSpec, WorkspaceMount,
 };
 use raxis_test_support::SubprocessIsolation;
 use raxis_worktree_staging::{
-    destroy, stage, StageInputs, BUNDLES_DIRNAME, GUEST_WORKSPACE_PATH,
-    SESSION_ENV_FILENAME, SYSTEM_PROMPT_FILENAME,
+    destroy, stage, StageInputs, BUNDLES_DIRNAME, GUEST_WORKSPACE_PATH, SESSION_ENV_FILENAME,
+    SYSTEM_PROMPT_FILENAME,
 };
 
 /// Process-global guard — `SubprocessIsolation::new` reads
@@ -56,28 +56,28 @@ fn enable_test_harness() {
 
 fn fixture_image() -> VerifiedImage {
     VerifiedImage {
-        kind:      ImageKind::RootfsErofs,
-        body:      ImageBody::Path("/tmp/raxis-step10-image".into()),
+        kind: ImageKind::RootfsErofs,
+        body: ImageBody::Path("/tmp/raxis-step10-image".into()),
         signature: ImageSignature(vec![0xAB; 64]),
-        image_id:  "raxis-step10-fixture".to_owned(),
+        image_id: "raxis-step10-fixture".to_owned(),
     }
 }
 
 fn fixture_spec(token: &str, mounts: Vec<WorkspaceMount>) -> VmSpec {
     VmSpec {
-        vcpu_count:        1,
-        mem_mib:           64,
-        egress_tier:       EgressTier::None,
-        cgroup_quota:      None,
-        boot_args:         Vec::new(),
-        entrypoint_argv:   Vec::new(),
-        session_token:     SessionToken(token.to_owned()),
-        vsock_cid:          Some(0xC1D_5070),
-        virtio_fs_mounts:  mounts,
+        vcpu_count: 1,
+        mem_mib: 64,
+        egress_tier: EgressTier::None,
+        cgroup_quota: None,
+        boot_args: Vec::new(),
+        entrypoint_argv: Vec::new(),
+        session_token: SessionToken(token.to_owned()),
+        vsock_cid: Some(0xC1D_5070),
+        virtio_fs_mounts: mounts,
         // Worktree-staging tests target the SubprocessIsolation
         // substrate; the kernel path is ignored.
         linux_kernel_path: std::path::PathBuf::new(),
-        env:               Default::default(),
+        env: Default::default(),
         guest_console_log: None,
     }
 }
@@ -90,13 +90,13 @@ fn step10_full_pipeline_stage_spawn_push_recv_destroy() {
     // 1. Stage the worktree on disk.
     let tmp = tempfile::tempdir().unwrap();
     let inputs = StageInputs {
-        data_dir:      tmp.path().to_path_buf(),
-        session_uuid:  "step10-uuid-1".to_owned(),
+        data_dir: tmp.path().to_path_buf(),
+        session_uuid: "step10-uuid-1".to_owned(),
         system_prompt: "You are an Executor.".to_owned(),
         session_token: "tok-step10".to_owned(),
-        vsock_cid:     0xC1D_5070,
-        vsock_port:    1024,
-        mount_mode:    MountMode::ReadWrite,
+        vsock_cid: 0xC1D_5070,
+        vsock_port: 1024,
+        mount_mode: MountMode::ReadWrite,
     };
     let staged = stage(&inputs).expect("stage must succeed in a fresh temp dir");
 
@@ -119,7 +119,9 @@ fn step10_full_pipeline_stage_spawn_push_recv_destroy() {
     //    canonical bytes-shape returns the same bytes verbatim.
     let payload = b"step10-vsock-frame-fixture";
     session
-        .push(&PushFrame { bytes: payload.to_vec() })
+        .push(&PushFrame {
+            bytes: payload.to_vec(),
+        })
         .expect("push of small payload must succeed");
     let received = session
         .recv_intent()
@@ -152,14 +154,14 @@ fn step10_mount_carries_content_hash_through_substrate_boundary() {
 
     let tmp = tempfile::tempdir().unwrap();
     let inputs = StageInputs {
-        data_dir:      tmp.path().to_path_buf(),
-        session_uuid:  "step10-uuid-hash".to_owned(),
+        data_dir: tmp.path().to_path_buf(),
+        session_uuid: "step10-uuid-hash".to_owned(),
         system_prompt: "Reviewer system prompt".to_owned(),
         session_token: "tok-rev".to_owned(),
-        vsock_cid:     0xC1D_5071,
-        vsock_port:    1024,
+        vsock_cid: 0xC1D_5071,
+        vsock_port: 1024,
         // Reviewer mount per Step 24.
-        mount_mode:    MountMode::ReadOnly,
+        mount_mode: MountMode::ReadOnly,
     };
     let staged = stage(&inputs).unwrap();
     let hash = staged
@@ -202,18 +204,18 @@ fn step10_distinct_sessions_stage_independent_worktrees() {
 
     let tmp = tempfile::tempdir().unwrap();
     let mut a = StageInputs {
-        data_dir:      tmp.path().to_path_buf(),
-        session_uuid:  "step10-multi-A".to_owned(),
+        data_dir: tmp.path().to_path_buf(),
+        session_uuid: "step10-multi-A".to_owned(),
         system_prompt: "Executor A".to_owned(),
         session_token: "tok-A".to_owned(),
-        vsock_cid:     0xC1D_AA01,
-        vsock_port:    1024,
-        mount_mode:    MountMode::ReadWrite,
+        vsock_cid: 0xC1D_AA01,
+        vsock_port: 1024,
+        mount_mode: MountMode::ReadWrite,
     };
     let mut b = a.clone();
-    b.session_uuid  = "step10-multi-B".to_owned();
+    b.session_uuid = "step10-multi-B".to_owned();
     b.session_token = "tok-B".to_owned();
-    b.vsock_cid     = 0xC1D_BB02;
+    b.vsock_cid = 0xC1D_BB02;
     a.system_prompt.push_str("\nbranch-A rules");
     b.system_prompt.push_str("\nbranch-B rules");
 
@@ -228,16 +230,30 @@ fn step10_distinct_sessions_stage_independent_worktrees() {
     let backend = SubprocessIsolation::new("step10-multi-int")
         .expect("substrate construction must succeed under RAXIS_TEST_HARNESS=1");
     let mut sess_a = backend
-        .spawn(&fixture_image(), &[staged_a.mount.clone()],
-               &fixture_spec("tok-A", vec![staged_a.mount.clone()]))
+        .spawn(
+            &fixture_image(),
+            &[staged_a.mount.clone()],
+            &fixture_spec("tok-A", vec![staged_a.mount.clone()]),
+        )
         .unwrap();
     let mut sess_b = backend
-        .spawn(&fixture_image(), &[staged_b.mount.clone()],
-               &fixture_spec("tok-B", vec![staged_b.mount.clone()]))
+        .spawn(
+            &fixture_image(),
+            &[staged_b.mount.clone()],
+            &fixture_spec("tok-B", vec![staged_b.mount.clone()]),
+        )
         .unwrap();
 
-    sess_a.push(&PushFrame { bytes: b"A-payload".to_vec() }).unwrap();
-    sess_b.push(&PushFrame { bytes: b"B-payload".to_vec() }).unwrap();
+    sess_a
+        .push(&PushFrame {
+            bytes: b"A-payload".to_vec(),
+        })
+        .unwrap();
+    sess_b
+        .push(&PushFrame {
+            bytes: b"B-payload".to_vec(),
+        })
+        .unwrap();
     let recv_a = sess_a.recv_intent().unwrap();
     let recv_b = sess_b.recv_intent().unwrap();
     assert_eq!(recv_a.bytes, b"A-payload");

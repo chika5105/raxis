@@ -38,8 +38,7 @@ use async_trait::async_trait;
 use serde::Serialize;
 
 use crate::model::{
-    CacheControl, CacheTtl, MessageRequest, MessageResponse, ModelClient,
-    ModelError,
+    CacheControl, CacheTtl, MessageRequest, MessageResponse, ModelClient, ModelError,
 };
 
 /// Bedrock-required version string. Pinned by AWS — bumping requires
@@ -78,11 +77,8 @@ struct BedrockRequestBody<'a> {
 }
 
 impl<'a> Serialize for BedrockRequestBody<'a> {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
-        use crate::model::{ToolSpec, Message};
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use crate::model::{Message, ToolSpec};
         use serde::ser::SerializeMap;
 
         // Fixed Anthropic-shape system block view local to this
@@ -103,10 +99,7 @@ impl<'a> Serialize for BedrockRequestBody<'a> {
             cache_control: Option<CacheControl>,
         }
         impl<'b> Serialize for ToolView<'b> {
-            fn serialize<S2: serde::Serializer>(
-                &self,
-                ser: S2,
-            ) -> Result<S2::Ok, S2::Error> {
+            fn serialize<S2: serde::Serializer>(&self, ser: S2) -> Result<S2::Ok, S2::Error> {
                 use serde::ser::SerializeMap;
                 let len = 3 + usize::from(self.cache_control.is_some());
                 let mut m = ser.serialize_map(Some(len))?;
@@ -126,10 +119,17 @@ impl<'a> Serialize for BedrockRequestBody<'a> {
         // a known length (e.g. CBOR via `bincode`); JSON is
         // length-agnostic but cheap to compute.
         let mut len = 2; // anthropic_version, max_tokens
-        if self.req.system.is_some()      { len += 1; }
-        let _: () = (); /* messages always present */ len += 1;
-        if !self.req.tools.is_empty()     { len += 1; }
-        if self.req.temperature.is_some() { len += 1; }
+        if self.req.system.is_some() {
+            len += 1;
+        }
+        let _: () = (); /* messages always present */
+        len += 1;
+        if !self.req.tools.is_empty() {
+            len += 1;
+        }
+        if self.req.temperature.is_some() {
+            len += 1;
+        }
 
         let mut m = serializer.serialize_map(Some(len))?;
         m.serialize_entry("anthropic_version", ANTHROPIC_VERSION_BEDROCK)?;
@@ -226,30 +226,30 @@ impl BedrockClient {
 
 #[async_trait]
 impl ModelClient for BedrockClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         let url = format!("{}/model/{}/invoke", self.base_url, req.model);
         let body = BedrockRequestBody { req };
-        let body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "POST",
+            url: &url,
+            method: "POST",
             headers: vec![
                 ("content-type", "application/json".to_owned()),
-                ("accept",       "application/json".to_owned()),
+                ("accept", "application/json".to_owned()),
             ],
-            body:    body_bytes,
+            body: body_bytes,
             timeout: self.request_timeout,
         };
 
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             let snippet = if resp.body.len() <= 4096 {
@@ -261,14 +261,17 @@ impl ModelClient for BedrockClient {
                     resp.body.len() - 4096,
                 )
             };
-            return Err(ModelError::Upstream { status: resp.status, body: snippet });
+            return Err(ModelError::Upstream {
+                status: resp.status,
+                body: snippet,
+            });
         }
 
         // The InvokeModel response for Anthropic-on-Bedrock IS the
         // Anthropic MessageResponse shape — same `id`, `content`,
         // `stop_reason`, `usage`. Parse directly.
-        let parsed: MessageResponse = serde_json::from_slice(&resp.body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let parsed: MessageResponse =
+            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
         Ok(parsed)
     }
 }
@@ -290,7 +293,9 @@ mod tests {
             system: Some("be helpful".to_owned()),
             messages: vec![Message {
                 role: "user".to_owned(),
-                content: vec![ContentBlock::Text { text: "hello".to_owned() }],
+                content: vec![ContentBlock::Text {
+                    text: "hello".to_owned(),
+                }],
             }],
             ..Default::default()
         }
@@ -301,8 +306,10 @@ mod tests {
         let r = req();
         let body = BedrockRequestBody { req: &r };
         let json = serde_json::to_value(&body).unwrap();
-        assert!(json.get("model").is_none(),
-            "Bedrock body MUST NOT include `model` (it's in the URL); got {json}");
+        assert!(
+            json.get("model").is_none(),
+            "Bedrock body MUST NOT include `model` (it's in the URL); got {json}"
+        );
         assert_eq!(json["anthropic_version"], ANTHROPIC_VERSION_BEDROCK);
         assert_eq!(json["max_tokens"], 256);
         assert_eq!(json["system"], "be helpful");
@@ -323,15 +330,16 @@ mod tests {
         r.cache_tools = true;
         r.cache_messages = true; // intentionally true to assert suppression
         r.tools = vec![crate::model::ToolSpec {
-            name:         "read_file".to_owned(),
-            description:  "read".to_owned(),
+            name: "read_file".to_owned(),
+            description: "read".to_owned(),
             input_schema: serde_json::json!({"type":"object"}),
         }];
         let body = BedrockRequestBody { req: &r };
         let json = serde_json::to_value(&body).unwrap();
 
         // System projected as block array carrying cache_control.
-        let sys = json["system"].as_array()
+        let sys = json["system"]
+            .as_array()
             .expect("cache_system=true MUST project system to a block array");
         assert_eq!(sys[0]["type"], "text");
         assert_eq!(sys[0]["text"], "be helpful");
@@ -343,8 +351,10 @@ mod tests {
 
         // Bedrock MUST NOT emit a top-level cache_control (it does
         // not support Anthropic automatic caching).
-        assert!(json.get("cache_control").is_none(),
-            "Bedrock MUST NOT emit top-level cache_control; got {json}");
+        assert!(
+            json.get("cache_control").is_none(),
+            "Bedrock MUST NOT emit top-level cache_control; got {json}"
+        );
     }
 
     #[tokio::test]
@@ -369,9 +379,13 @@ mod tests {
             let mut total = 0;
             loop {
                 let n = sock.read(&mut buf[total..]).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 total += n;
-                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             // The Anthropic-on-Bedrock response IS the Anthropic
             // MessageResponse shape.
@@ -406,8 +420,12 @@ mod tests {
             let mut buf = vec![0u8; 8192];
             loop {
                 let n = sock.read(&mut buf).await.unwrap();
-                if n == 0 { break; }
-                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if n == 0 {
+                    break;
+                }
+                if buf[..n].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             let _ = sock.write_all(
                 b"HTTP/1.1 403 Forbidden\r\nContent-Length: 12\r\nConnection: close\r\n\r\nAccessDenied",

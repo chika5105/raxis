@@ -20,9 +20,9 @@ pub struct BackoffPolicy {
     /// Initial delay. Doubled each step.
     pub initial: Duration,
     /// Saturating cap on the doubled delay.
-    pub max:     Duration,
+    pub max: Duration,
     /// Jitter as a fraction of the delay, in `[0.0, 1.0]`.
-    pub jitter:  f64,
+    pub jitter: f64,
     /// Hard cap on retry attempts. The 9th attempt drops the
     /// batch and advances the cursor anyway. (8 attempts of
     /// retries + 1 initial = 9 total.)
@@ -32,9 +32,9 @@ pub struct BackoffPolicy {
 impl Default for BackoffPolicy {
     fn default() -> Self {
         Self {
-            initial:      Duration::from_millis(500),
-            max:          Duration::from_secs(30),
-            jitter:       0.25,
+            initial: Duration::from_millis(500),
+            max: Duration::from_secs(30),
+            jitter: 0.25,
             max_attempts: 8,
         }
     }
@@ -48,7 +48,7 @@ impl BackoffPolicy {
     pub fn delay(&self, n: u32) -> Duration {
         let exp = 2u128.saturating_pow(n.min(31));
         let base_ms = (self.initial.as_millis()).saturating_mul(exp);
-        let cap_ms  = self.max.as_millis();
+        let cap_ms = self.max.as_millis();
         let base_ms = base_ms.min(cap_ms);
         let with_jitter = apply_jitter(base_ms, self.jitter);
         // Clamp to u64 ms so the resulting Duration is always
@@ -87,9 +87,9 @@ mod tests {
     #[test]
     fn delay_grows_exponentially_until_cap() {
         let p = BackoffPolicy {
-            initial:      Duration::from_millis(100),
-            max:          Duration::from_secs(5),
-            jitter:       0.0,
+            initial: Duration::from_millis(100),
+            max: Duration::from_secs(5),
+            jitter: 0.0,
             max_attempts: 8,
         };
         assert_eq!(p.delay(0), Duration::from_millis(100));
@@ -102,9 +102,9 @@ mod tests {
     #[test]
     fn jitter_is_bounded() {
         let p = BackoffPolicy {
-            initial:      Duration::from_secs(1),
-            max:          Duration::from_secs(2),
-            jitter:       0.5,
+            initial: Duration::from_secs(1),
+            max: Duration::from_secs(2),
+            jitter: 0.5,
             max_attempts: 8,
         };
         for _ in 0..1000 {
@@ -116,7 +116,10 @@ mod tests {
 
     #[test]
     fn should_retry_caps_at_max_attempts() {
-        let p = BackoffPolicy { max_attempts: 3, ..BackoffPolicy::default() };
+        let p = BackoffPolicy {
+            max_attempts: 3,
+            ..BackoffPolicy::default()
+        };
         assert!(p.should_retry(0));
         assert!(p.should_retry(1));
         assert!(p.should_retry(2));

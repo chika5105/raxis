@@ -14,14 +14,14 @@ use crate::scheduler::SchedulerError;
 const MAX_DAG_DEPTH: usize = 64;
 
 // Table name shorthands — defined once so each SQL string is readable.
-const TASKS: &str          = Table::Tasks.as_str();
-const DAG_EDGES: &str      = Table::TaskDagEdges.as_str();
+const TASKS: &str = Table::Tasks.as_str();
+const DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 
 pub fn add_task(
     initiative_id: &str,
-    task_id:       &str,
-    dependencies:  &[String],
-    store:         &Store,
+    task_id: &str,
+    dependencies: &[String],
+    store: &Store,
 ) -> Result<(), SchedulerError> {
     let conn = store.lock_sync();
     detect_cycle_in(&conn, task_id, dependencies)?;
@@ -39,10 +39,10 @@ pub fn add_task(
 /// which is `NOT NULL REFERENCES initiatives(initiative_id)` per
 /// kernel-store.md §2.5.1 Table 6.
 pub fn insert_edges_in(
-    conn:          &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     initiative_id: &str,
-    task_id:       &str,
-    dependencies:  &[String],
+    task_id: &str,
+    dependencies: &[String],
 ) -> Result<(), SchedulerError> {
     if dependencies.is_empty() {
         return Ok(());
@@ -69,8 +69,8 @@ pub fn insert_edges_in(
 ///
 /// The implementation is iterative DFS bounded by `MAX_DAG_DEPTH`.
 pub fn detect_cycle_in(
-    conn:          &rusqlite::Connection,
-    new_task:      &str,
+    conn: &rusqlite::Connection,
+    new_task: &str,
     proposed_deps: &[String],
 ) -> Result<(), SchedulerError> {
     let mut stmt = conn.prepare_cached(&format!(
@@ -79,7 +79,7 @@ pub fn detect_cycle_in(
 
     for dep in proposed_deps {
         let mut visited = std::collections::HashSet::new();
-        let mut stack   = vec![(dep.to_owned(), 0usize)];
+        let mut stack = vec![(dep.to_owned(), 0usize)];
 
         while let Some((node, depth)) = stack.pop() {
             if depth > MAX_DAG_DEPTH {
@@ -107,11 +107,8 @@ pub fn detect_cycle_in(
 /// Return all task IDs ready for the planner in `initiative_id`.
 ///
 /// Ready = state Admitted + all predecessors Completed.
-pub fn next_ready_tasks(
-    initiative_id: &str,
-    store:         &Store,
-) -> Result<Vec<String>, SchedulerError> {
-    let admitted  = TaskState::Admitted.as_sql_str();
+pub fn next_ready_tasks(initiative_id: &str, store: &Store) -> Result<Vec<String>, SchedulerError> {
+    let admitted = TaskState::Admitted.as_sql_str();
     let completed = TaskState::Completed.as_sql_str();
 
     let conn = store.lock_sync();
@@ -139,9 +136,9 @@ pub fn next_ready_tasks(
 ///
 /// Called by `handlers/witness.rs` after a gate-recheck returns Pass.
 pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
-    let to_state   = TaskState::Admitted.as_sql_str();
+    let to_state = TaskState::Admitted.as_sql_str();
     let from_state = TaskState::GatesPending.as_sql_str();
-    let now        = unix_now_secs();
+    let now = unix_now_secs();
 
     let conn = store.lock_sync();
     let rows = conn.execute(
@@ -154,7 +151,7 @@ pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), Schedu
     if rows == 0 {
         return Err(SchedulerError::InvalidStateTransition {
             task_id: task_id.to_owned(),
-            reason:  format!("task is not in {from_state} state"),
+            reason: format!("task is not in {from_state} state"),
         });
     }
     Ok(())
@@ -162,9 +159,9 @@ pub fn transition_to_admitted(task_id: &str, store: &Store) -> Result<(), Schedu
 
 /// Transition a task to `Completed` state.
 pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerError> {
-    let completed      = TaskState::Completed.as_sql_str();
+    let completed = TaskState::Completed.as_sql_str();
     let terminal_not_in = terminal_states_not_in_sql();
-    let now            = unix_now_secs();
+    let now = unix_now_secs();
 
     let conn = store.lock_sync();
     let rows = conn.execute(
@@ -177,7 +174,7 @@ pub fn mark_task_complete(task_id: &str, store: &Store) -> Result<(), SchedulerE
     if rows == 0 {
         return Err(SchedulerError::InvalidStateTransition {
             task_id: task_id.to_owned(),
-            reason:  "task is already in a terminal state".to_owned(),
+            reason: "task is already in a terminal state".to_owned(),
         });
     }
     Ok(())

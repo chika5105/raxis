@@ -31,8 +31,8 @@ use parking_lot::Mutex;
 use crate::exporter::{NoopExporter, ObservabilityExporter};
 use crate::redact::Redactor;
 use crate::types::{
-    AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType,
-    SpanData, SpanEvent, SpanKind, SpanName, SpanStatus,
+    AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType, SpanData,
+    SpanEvent, SpanKind, SpanName, SpanStatus,
 };
 
 // ---------------------------------------------------------------------------
@@ -47,13 +47,13 @@ use crate::types::{
 pub struct HubConfig {
     /// Master switch. When `false`, the hub holds a `NoopExporter`
     /// and every `record_*` call short-circuits before sanitisation.
-    pub enabled:           bool,
+    pub enabled: bool,
     /// In-memory bound: max spans + metrics queued before the hub
     /// drops on overflow. Default 8192; range [256, 1_048_576].
-    pub max_queue_depth:   usize,
+    pub max_queue_depth: usize,
     /// Head sampling rate for spans. Range [0.0, 1.0]. 1.0 = always
     /// sample; 0.0 = never sample. Metrics are unsampled.
-    pub sample_rate:       f64,
+    pub sample_rate: f64,
     /// Per-span attribute cap. Excess attributes are dropped at
     /// `RecordingSpan::set_attr` time.
     pub max_attrs_per_span: usize,
@@ -68,14 +68,13 @@ pub struct HubConfig {
 impl Default for HubConfig {
     fn default() -> Self {
         Self {
-            enabled:             false,
-            max_queue_depth:     8192,
-            sample_rate:         0.1,
-            max_attrs_per_span:  32,
+            enabled: false,
+            max_queue_depth: 8192,
+            sample_rate: 0.1,
+            max_attrs_per_span: 32,
             max_events_per_span: 16,
-            histogram_buckets:   vec![
-                1.0, 5.0, 10.0, 25.0, 50.0, 100.0,
-                250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+            histogram_buckets: vec![
+                1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
             ],
         }
     }
@@ -110,10 +109,10 @@ impl DropReason {
     /// `raxis.observability.dropped.total` metric.
     pub fn label(&self) -> &'static str {
         match self {
-            Self::QueueFull        => "queue_full",
+            Self::QueueFull => "queue_full",
             Self::RedactionFailure => "redaction_failure",
-            Self::Disabled         => "disabled",
-            Self::Sampled          => "sampled",
+            Self::Disabled => "disabled",
+            Self::Sampled => "sampled",
         }
     }
 }
@@ -127,10 +126,10 @@ impl DropReason {
 /// `Arc`; expensive to construct from scratch — call once in
 /// `kernel/src/main.rs`.
 pub struct ObservabilityHub {
-    cfg:       HubConfig,
-    redactor:  Redactor,
-    exporter:  Arc<dyn ObservabilityExporter>,
-    state:     Mutex<HubState>,
+    cfg: HubConfig,
+    redactor: Redactor,
+    exporter: Arc<dyn ObservabilityExporter>,
+    state: Mutex<HubState>,
     /// Process-wide trace-id counter source. Combined with the start
     /// nanos to derive a unique 16-byte id without needing an
     /// external RNG dep.
@@ -142,7 +141,7 @@ pub struct ObservabilityHub {
 
 #[derive(Debug, Default)]
 struct HubState {
-    spans:   Vec<SpanData>,
+    spans: Vec<SpanData>,
     metrics: Vec<MetricData>,
 }
 
@@ -151,23 +150,17 @@ impl ObservabilityHub {
     /// don't care about observability use this.
     pub fn disabled() -> Self {
         let exporter: Arc<dyn ObservabilityExporter> = Arc::new(NoopExporter);
-        Self::new(
-            HubConfig::default(),
-            exporter,
-        )
+        Self::new(HubConfig::default(), exporter)
     }
 
     /// Construct a hub with the given config and exporter.
-    pub fn new(
-        cfg:      HubConfig,
-        exporter: Arc<dyn ObservabilityExporter>,
-    ) -> Self {
+    pub fn new(cfg: HubConfig, exporter: Arc<dyn ObservabilityExporter>) -> Self {
         Self {
             cfg,
-            redactor:    Redactor,
+            redactor: Redactor,
             exporter,
-            state:       Mutex::new(HubState::default()),
-            next_seed:   AtomicU64::new(1),
+            state: Mutex::new(HubState::default()),
+            next_seed: AtomicU64::new(1),
             drop_counts: [
                 AtomicU64::new(0),
                 AtomicU64::new(0),
@@ -181,9 +174,9 @@ impl ObservabilityHub {
     /// rooted at `<root>/observability/`. Returns the hub plus the
     /// exporter so callers can cleanly pipe `shutdown()` through it.
     pub fn with_ring_at(
-        cfg:            HubConfig,
-        root:           impl AsRef<Path>,
-        ring_cfg:       crate::ring::RingConfig,
+        cfg: HubConfig,
+        root: impl AsRef<Path>,
+        ring_cfg: crate::ring::RingConfig,
         kernel_version: impl Into<String>,
     ) -> std::io::Result<(Self, Arc<dyn ObservabilityExporter>)> {
         let exp = Arc::new(crate::exporter::RingFileExporter::open(
@@ -197,10 +190,14 @@ impl ObservabilityHub {
 
     /// Whether observability is enabled. Emit sites can short-circuit
     /// expensive attribute construction by checking this first.
-    pub fn enabled(&self) -> bool { self.cfg.enabled }
+    pub fn enabled(&self) -> bool {
+        self.cfg.enabled
+    }
 
     /// Effective hub config (read-only).
-    pub fn config(&self) -> &HubConfig { &self.cfg }
+    pub fn config(&self) -> &HubConfig {
+        &self.cfg
+    }
 
     // ── Span API ────────────────────────────────────────────────────────
 
@@ -212,8 +209,8 @@ impl ObservabilityHub {
     /// intent-admission, etc.).
     pub fn start_span(
         self: &Arc<Self>,
-        name:   SpanName,
-        kind:   SpanKind,
+        name: SpanName,
+        kind: SpanKind,
         parent: Option<&SpanContext>,
     ) -> RecordingSpan {
         // Disabled fast path.
@@ -228,7 +225,7 @@ impl ObservabilityHub {
             }
             None => {
                 let trace_id = self.next_id_16();
-                let span_id  = self.next_id_8();
+                let span_id = self.next_id_8();
                 (trace_id, span_id, None)
             }
         };
@@ -249,11 +246,11 @@ impl ObservabilityHub {
                     name,
                     kind,
                     start_unix_nanos: now,
-                    end_unix_nanos:   now,
-                    status:           SpanStatus::Ok,
-                    status_message:   None,
-                    attrs:            AttrMap::new(),
-                    events:           Vec::new(),
+                    end_unix_nanos: now,
+                    status: SpanStatus::Ok,
+                    status_message: None,
+                    attrs: AttrMap::new(),
+                    events: Vec::new(),
                 },
             }),
         }
@@ -263,7 +260,7 @@ impl ObservabilityHub {
     /// redactor pre-check. Called from `RecordingSpan::end`.
     fn submit_span(&self, span: SpanData) {
         let span = match self.redactor.sanitize_span(span) {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(e) => {
                 self.bump_drop(DropReason::RedactionFailure);
                 eprintln!(
@@ -285,39 +282,33 @@ impl ObservabilityHub {
     // ── Metric API ──────────────────────────────────────────────────────
 
     /// Record a counter increment.
-    pub fn record_counter(
-        &self,
-        name:   MetricName,
-        labels: AttrMap,
-        delta:  f64,
-    ) {
-        if !self.cfg.enabled { return; }
+    pub fn record_counter(&self, name: MetricName, labels: AttrMap, delta: f64) {
+        if !self.cfg.enabled {
+            return;
+        }
         let m = MetricData {
             name,
-            metric_type:  MetricType::Counter,
-            unit:         name.default_unit(),
+            metric_type: MetricType::Counter,
+            unit: name.default_unit(),
             labels,
-            datapoint:    DataPoint::Sum { value: delta },
-            unix_nanos:   unix_now_nanos(),
+            datapoint: DataPoint::Sum { value: delta },
+            unix_nanos: unix_now_nanos(),
         };
         self.submit_metric(m);
     }
 
     /// Record (overwrite) a gauge value.
-    pub fn record_gauge(
-        &self,
-        name:   MetricName,
-        labels: AttrMap,
-        value:  f64,
-    ) {
-        if !self.cfg.enabled { return; }
+    pub fn record_gauge(&self, name: MetricName, labels: AttrMap, value: f64) {
+        if !self.cfg.enabled {
+            return;
+        }
         let m = MetricData {
             name,
-            metric_type:  MetricType::Gauge,
-            unit:         name.default_unit(),
+            metric_type: MetricType::Gauge,
+            unit: name.default_unit(),
             labels,
-            datapoint:    DataPoint::Sum { value },
-            unix_nanos:   unix_now_nanos(),
+            datapoint: DataPoint::Sum { value },
+            unix_nanos: unix_now_nanos(),
         };
         self.submit_metric(m);
     }
@@ -325,13 +316,10 @@ impl ObservabilityHub {
     /// Record one observation into a histogram. Uses the hub-wide
     /// default bucket boundaries from
     /// [`HubConfig::histogram_buckets`].
-    pub fn record_histogram(
-        &self,
-        name:   MetricName,
-        labels: AttrMap,
-        value:  f64,
-    ) {
-        if !self.cfg.enabled { return; }
+    pub fn record_histogram(&self, name: MetricName, labels: AttrMap, value: f64) {
+        if !self.cfg.enabled {
+            return;
+        }
         self.record_histogram_with_buckets_inner(
             name,
             labels,
@@ -365,49 +353,54 @@ impl ObservabilityHub {
     /// have.
     pub fn record_histogram_with_buckets(
         &self,
-        name:    MetricName,
-        labels:  AttrMap,
-        value:   f64,
+        name: MetricName,
+        labels: AttrMap,
+        value: f64,
         buckets: Vec<f64>,
     ) {
-        if !self.cfg.enabled { return; }
+        if !self.cfg.enabled {
+            return;
+        }
         self.record_histogram_with_buckets_inner(name, labels, value, buckets);
     }
 
     fn record_histogram_with_buckets_inner(
         &self,
-        name:    MetricName,
-        labels:  AttrMap,
-        value:   f64,
+        name: MetricName,
+        labels: AttrMap,
+        value: f64,
         buckets: Vec<f64>,
     ) {
         let mut counts = vec![0u64; buckets.len() + 1];
         let mut idx = buckets.len();
         for (i, b) in buckets.iter().enumerate() {
-            if value <= *b { idx = i; break; }
+            if value <= *b {
+                idx = i;
+                break;
+            }
         }
         counts[idx] = 1;
         let m = MetricData {
             name,
-            metric_type:  MetricType::Histogram,
-            unit:         name.default_unit(),
+            metric_type: MetricType::Histogram,
+            unit: name.default_unit(),
             labels,
-            datapoint:    DataPoint::Histo {
+            datapoint: DataPoint::Histo {
                 buckets,
                 counts,
-                sum:    value,
-                count:  1,
-                min:    value,
-                max:    value,
+                sum: value,
+                count: 1,
+                min: value,
+                max: value,
             },
-            unix_nanos:   unix_now_nanos(),
+            unix_nanos: unix_now_nanos(),
         };
         self.submit_metric(m);
     }
 
     fn submit_metric(&self, metric: MetricData) {
         let metric = match self.redactor.sanitize_metric(metric) {
-            Ok(m)  => m,
+            Ok(m) => m,
             Err(e) => {
                 self.bump_drop(DropReason::RedactionFailure);
                 eprintln!(
@@ -432,13 +425,10 @@ impl ObservabilityHub {
     pub fn flush(&self) -> (usize, usize) {
         let (spans, metrics) = {
             let mut s = self.state.lock();
-            (
-                std::mem::take(&mut s.spans),
-                std::mem::take(&mut s.metrics),
-            )
+            (std::mem::take(&mut s.spans), std::mem::take(&mut s.metrics))
         };
         let span_n = spans.len();
-        let met_n  = metrics.len();
+        let met_n = metrics.len();
         if !spans.is_empty() {
             self.exporter.export_spans(&spans);
         }
@@ -452,10 +442,22 @@ impl ObservabilityHub {
     /// [`DropReason`].
     pub fn drop_counters(&self) -> [(DropReason, u64); 4] {
         [
-            (DropReason::QueueFull,        self.drop_counts[0].load(Ordering::Relaxed)),
-            (DropReason::RedactionFailure, self.drop_counts[1].load(Ordering::Relaxed)),
-            (DropReason::Disabled,         self.drop_counts[2].load(Ordering::Relaxed)),
-            (DropReason::Sampled,          self.drop_counts[3].load(Ordering::Relaxed)),
+            (
+                DropReason::QueueFull,
+                self.drop_counts[0].load(Ordering::Relaxed),
+            ),
+            (
+                DropReason::RedactionFailure,
+                self.drop_counts[1].load(Ordering::Relaxed),
+            ),
+            (
+                DropReason::Disabled,
+                self.drop_counts[2].load(Ordering::Relaxed),
+            ),
+            (
+                DropReason::Sampled,
+                self.drop_counts[3].load(Ordering::Relaxed),
+            ),
         ]
     }
 
@@ -475,10 +477,10 @@ impl ObservabilityHub {
 
     fn bump_drop(&self, reason: DropReason) {
         let i = match reason {
-            DropReason::QueueFull        => 0,
+            DropReason::QueueFull => 0,
             DropReason::RedactionFailure => 1,
-            DropReason::Disabled         => 2,
-            DropReason::Sampled          => 3,
+            DropReason::Disabled => 2,
+            DropReason::Sampled => 3,
         };
         self.drop_counts[i].fetch_add(1, Ordering::Relaxed);
     }
@@ -492,7 +494,7 @@ impl ObservabilityHub {
         // wallclock + counter combo gives us collision-free ids
         // across hub instances on the same host.
         let seed = self.next_seed.fetch_add(1, Ordering::Relaxed);
-        let now  = unix_now_nanos();
+        let now = unix_now_nanos();
         let mut out = [0u8; 16];
         out[..8].copy_from_slice(&now.to_le_bytes());
         out[8..].copy_from_slice(&seed.to_le_bytes());
@@ -517,7 +519,7 @@ pub struct SpanContext {
     /// Trace identifier.
     pub trace_id: [u8; 16],
     /// Span identifier within the trace.
-    pub span_id:  [u8; 8],
+    pub span_id: [u8; 8],
 }
 
 /// Drop-on-end span recorder. Adding attributes after `.end()` is a
@@ -527,7 +529,7 @@ pub struct RecordingSpan {
 }
 
 struct RecordingInner {
-    hub:  Arc<ObservabilityHub>,
+    hub: Arc<ObservabilityHub>,
     data: SpanData,
 }
 
@@ -543,11 +545,15 @@ impl RecordingSpan {
 
     /// Whether this span is recording. Emit sites can use this to
     /// short-circuit expensive attribute construction.
-    pub fn is_recording(&self) -> bool { self.inner.is_some() }
+    pub fn is_recording(&self) -> bool {
+        self.inner.is_some()
+    }
 
     /// Set an attribute. Silently truncated to `max_attrs_per_span`.
     pub fn set_attr(&mut self, key: &str, value: impl Into<AttrValue>) {
-        let Some(inner) = self.inner.as_mut() else { return; };
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
         if inner.data.attrs.len() >= inner.hub.cfg.max_attrs_per_span {
             return;
         }
@@ -557,7 +563,9 @@ impl RecordingSpan {
     /// Add a within-span event. Silently dropped past
     /// `max_events_per_span`.
     pub fn add_event(&mut self, name: EventName, attrs: AttrMap) {
-        let Some(inner) = self.inner.as_mut() else { return; };
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
         if inner.data.events.len() >= inner.hub.cfg.max_events_per_span {
             return;
         }
@@ -570,7 +578,9 @@ impl RecordingSpan {
 
     /// Mark the span's status. Defaults to `Ok`.
     pub fn set_status(&mut self, status: SpanStatus, message: Option<String>) {
-        let Some(inner) = self.inner.as_mut() else { return; };
+        let Some(inner) = self.inner.as_mut() else {
+            return;
+        };
         inner.data.status = status;
         inner.data.status_message = message;
     }
@@ -582,11 +592,11 @@ impl RecordingSpan {
         match &self.inner {
             Some(inner) => SpanContext {
                 trace_id: inner.data.trace_id,
-                span_id:  inner.data.span_id,
+                span_id: inner.data.span_id,
             },
             None => SpanContext {
                 trace_id: [0; 16],
-                span_id:  [0; 8],
+                span_id: [0; 8],
             },
         }
     }
@@ -594,7 +604,9 @@ impl RecordingSpan {
     /// Finalise the span and submit to the hub. Consumes self —
     /// further mutation is a compile error.
     pub fn end(mut self) {
-        let Some(mut inner) = self.inner.take() else { return; };
+        let Some(mut inner) = self.inner.take() else {
+            return;
+        };
         inner.data.end_unix_nanos = unix_now_nanos();
         inner.hub.submit_span(inner.data);
     }
@@ -625,8 +637,12 @@ fn unix_now_nanos() -> u64 {
 /// Deterministic head sampling: take the low 64 bits of the trace_id
 /// and compare to `rate * u64::MAX`.
 fn sample_decision(trace_id: [u8; 16], rate: f64) -> bool {
-    if rate >= 1.0 { return true; }
-    if rate <= 0.0 { return false; }
+    if rate >= 1.0 {
+        return true;
+    }
+    if rate <= 0.0 {
+        return false;
+    }
     let low = u64::from_le_bytes(trace_id[8..].try_into().unwrap());
     let frac = (low as f64) / (u64::MAX as f64);
     frac < rate
@@ -646,10 +662,10 @@ mod tests {
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:             true,
-            max_queue_depth:     1024,
-            sample_rate:         1.0,
-            max_attrs_per_span:  32,
+            enabled: true,
+            max_queue_depth: 1024,
+            sample_rate: 1.0,
+            max_attrs_per_span: 32,
             max_events_per_span: 16,
             ..HubConfig::default()
         };
@@ -665,8 +681,8 @@ mod tests {
         let (hub, exp) = enabled_hub();
         let mut s = hub.start_span(SpanName::IntentAdmission, SpanKind::Internal, None);
         s.set_attr("intent_kind", "CompleteTask");
-        s.set_attr("verdict",     "Accepted");
-        s.set_attr("latency_ms",  42i64);
+        s.set_attr("verdict", "Accepted");
+        s.set_attr("latency_ms", 42i64);
         s.end();
         hub.flush();
         let collected = exp.spans();
@@ -704,8 +720,14 @@ mod tests {
         hub.flush();
         let spans = exp.spans();
         assert_eq!(spans.len(), 2);
-        let intent = spans.iter().find(|s| s.name == SpanName::IntentAdmission).unwrap();
-        let fetch  = spans.iter().find(|s| s.name == SpanName::GatewayFetch).unwrap();
+        let intent = spans
+            .iter()
+            .find(|s| s.name == SpanName::IntentAdmission)
+            .unwrap();
+        let fetch = spans
+            .iter()
+            .find(|s| s.name == SpanName::GatewayFetch)
+            .unwrap();
         assert_eq!(fetch.parent_span_id, Some(intent.span_id));
         assert_eq!(intent.trace_id, fetch.trace_id);
     }
@@ -727,9 +749,9 @@ mod tests {
     fn queue_full_drops_records() {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:         true,
+            enabled: true,
             max_queue_depth: 3,
-            sample_rate:     1.0,
+            sample_rate: 1.0,
             max_attrs_per_span: 4,
             max_events_per_span: 4,
             ..HubConfig::default()
@@ -746,7 +768,10 @@ mod tests {
             );
         }
         let drops = hub.drop_counters();
-        assert!(drops[0].1 >= 7, "queue_full counter ≥7 (dropped at least 7 of 10)");
+        assert!(
+            drops[0].1 >= 7,
+            "queue_full counter ≥7 (dropped at least 7 of 10)"
+        );
         // We never lose more than the queue depth from the actual buffer.
         let (_spans, n_metrics) = hub.flush();
         assert!(n_metrics <= 3, "flush ≤ queue depth, got {n_metrics}");
@@ -756,7 +781,7 @@ mod tests {
     fn sampling_zero_drops_every_span() {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 0.0,
             ..HubConfig::default()
         };

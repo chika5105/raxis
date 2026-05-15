@@ -58,14 +58,17 @@ pub fn read(conn: &RoConn) -> Result<KernelMeta, KernelMetaError> {
         |r| r.get(0),
     )?;
 
-    let policy_epoch: Option<i64> = conn.query_row(
-        &format!(
-            "SELECT MAX(epoch_id) FROM {}",
-            Table::PolicyEpochHistory.as_str(),
-        ),
-        [],
-        |r| r.get::<_, Option<i64>>(0),
-    ).optional()?.flatten();
+    let policy_epoch: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT MAX(epoch_id) FROM {}",
+                Table::PolicyEpochHistory.as_str(),
+            ),
+            [],
+            |r| r.get::<_, Option<i64>>(0),
+        )
+        .optional()?
+        .flatten();
 
     Ok(KernelMeta {
         schema_version,
@@ -112,15 +115,17 @@ mod tests {
             const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {POLICY_EPOCH_HISTORY} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {POLICY_EPOCH_HISTORY} \
                      (epoch_id, policy_sha256, signed_by_authority, \
                       triggered_by_operator, advanced_at) \
                      VALUES (?1, ?2, ?3, ?4, ?5)"
-                ),
-                rusqlite::params![1_i64, "deadbeef", "fp", "op", 1_700_000_000_i64],
-            ).unwrap();
+                    ),
+                    rusqlite::params![1_i64, "deadbeef", "fp", "op", 1_700_000_000_i64],
+                )
+                .unwrap();
         }
 
         let conn = open_ro(tmp.path()).expect("ro open");

@@ -237,19 +237,15 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
     let operator_fingerprint = pubkey_fingerprint_from_hex(&operator_pubkey_hex)
         .map_err(|e| KernelError::BootstrapFailed { reason: e })?;
     let op_pub_path = keys_dir.join(format!("operator_{operator_fingerprint}.pub"));
-    write_file_0444(
-        &op_pub_path,
-        operator_pubkey_hex.as_bytes(),
-    )?;
+    write_file_0444(&op_pub_path, operator_pubkey_hex.as_bytes())?;
     // Persist the supplied cert into <keys_dir>/operator_<fp>.cert.toml so
     // a future `raxis cert show` / `raxis cert verify` against the data
     // dir can find the genesis cert without the operator having to retain
     // their original cert artefact.
     let op_cert_path = keys_dir.join(format!("operator_{operator_fingerprint}.cert.toml"));
-    let cert_toml = toml::to_string(&operator_cert)
-        .map_err(|e| KernelError::BootstrapFailed {
-            reason: format!("cannot serialise cert for {}: {e}", op_cert_path.display()),
-        })?;
+    let cert_toml = toml::to_string(&operator_cert).map_err(|e| KernelError::BootstrapFailed {
+        reason: format!("cannot serialise cert for {}: {e}", op_cert_path.display()),
+    })?;
     write_file_0444(&op_cert_path, cert_toml.as_bytes())?;
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"bootstrap\",\"action\":\"registered operator\",\"fingerprint\":\"{operator_fingerprint}\",\"cert_kind\":\"{kind}\"}}",
@@ -297,15 +293,33 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
 
     // Step 8: Print summary.
     println!("\n=== RAXIS Genesis Complete ===");
-    println!("  authority_keypair : {}", keys_dir.join("authority_keypair.pem").display());
-    println!("  quality_keypair   : {}", keys_dir.join("quality_keypair.pem").display());
-    println!("  verifier_token_key: {}", keys_dir.join("verifier_token_key.bin").display());
+    println!(
+        "  authority_keypair : {}",
+        keys_dir.join("authority_keypair.pem").display()
+    );
+    println!(
+        "  quality_keypair   : {}",
+        keys_dir.join("quality_keypair.pem").display()
+    );
+    println!(
+        "  verifier_token_key: {}",
+        keys_dir.join("verifier_token_key.bin").display()
+    );
     println!("  operator key      : {}", op_pub_path.display());
-    println!("  operator cert     : {} (kind={})",
-        op_cert_path.display(), operator_cert.kind.as_str());
-    println!("  policy.toml       : {}", policy_dir.join("policy.toml").display());
+    println!(
+        "  operator cert     : {} (kind={})",
+        op_cert_path.display(),
+        operator_cert.kind.as_str()
+    );
+    println!(
+        "  policy.toml       : {}",
+        policy_dir.join("policy.toml").display()
+    );
     println!("\nNext step: sign the policy artifact:");
-    println!("  raxis-cli policy sign {} --key <your_private_key>", policy_dir.join("policy.toml").display());
+    println!(
+        "  raxis-cli policy sign {} --key <your_private_key>",
+        policy_dir.join("policy.toml").display()
+    );
     println!("Then start the kernel:");
     println!("  raxis-kernel");
 
@@ -441,15 +455,20 @@ fn read_verifying_key_from_pem(pem_path: &Path) -> Result<VerifyingKey, KernelEr
         .skip_while(|l| !l.contains("BEGIN ED25519 PUBLIC KEY"))
         .nth(1)
         .ok_or_else(|| KernelError::BootstrapFailed {
-            reason: format!("malformed PEM in {}: missing public key line", pem_path.display()),
+            reason: format!(
+                "malformed PEM in {}: missing public key line",
+                pem_path.display()
+            ),
         })?
         .trim();
     let pub_bytes = hex::decode(pub_hex).map_err(|e| KernelError::BootstrapFailed {
         reason: format!("cannot hex-decode pubkey in {}: {e}", pem_path.display()),
     })?;
-    let pub_arr: [u8; 32] = pub_bytes.try_into().map_err(|_| KernelError::BootstrapFailed {
-        reason: format!("pubkey in {} is not 32 bytes", pem_path.display()),
-    })?;
+    let pub_arr: [u8; 32] = pub_bytes
+        .try_into()
+        .map_err(|_| KernelError::BootstrapFailed {
+            reason: format!("pubkey in {} is not 32 bytes", pem_path.display()),
+        })?;
     VerifyingKey::from_bytes(&pub_arr).map_err(|e| KernelError::BootstrapFailed {
         reason: format!("invalid Ed25519 pubkey in {}: {e}", pem_path.display()),
     })
@@ -503,7 +522,7 @@ fn write_genesis_policy(
     let policy_path = policy_dir.join("policy.toml");
 
     let authority_hex = hex::encode(authority_vk.as_bytes());
-    let quality_hex   = hex::encode(quality_vk.as_bytes());
+    let quality_hex = hex::encode(quality_vk.as_bytes());
 
     // Default placeholder worktree root, scoped under data_dir so the
     // genesis artifact does not silently grant access to anything outside
@@ -514,10 +533,10 @@ fn write_genesis_policy(
     let default_worktree_root_str = default_worktree_root.display().to_string();
     let allowed_worktree_roots: [&str; 1] = [default_worktree_root_str.as_str()];
 
-    let policy_content = raxis_genesis_tools::render_genesis_policy_toml(
-        raxis_genesis_tools::GenesisPolicyInputs {
-            authority_pubkey_hex:   &authority_hex,
-            quality_pubkey_hex:     &quality_hex,
+    let policy_content =
+        raxis_genesis_tools::render_genesis_policy_toml(raxis_genesis_tools::GenesisPolicyInputs {
+            authority_pubkey_hex: &authority_hex,
+            quality_pubkey_hex: &quality_hex,
             operator_pubkey_hex,
             operator_fingerprint,
             // Caller-injected timestamp — kernel uses the same wall-clock
@@ -525,11 +544,10 @@ fn write_genesis_policy(
             // record's `signed_at` and the audit record's `emitted_at` are
             // taken from the same monotonic baseline.
             // `raxis_types::unix_now_secs()` already returns i64.
-            signed_at_unix_secs:    unix_now_secs(),
+            signed_at_unix_secs: unix_now_secs(),
             allowed_worktree_roots: &allowed_worktree_roots,
             operator_cert,
-        },
-    );
+        });
 
     write_file_0644(&policy_path, policy_content.as_bytes())?;
     Ok(())
@@ -707,7 +725,10 @@ fn write_file_0400(path: &Path, data: &[u8]) -> Result<(), KernelError> {
     use std::io::Write;
     if path.exists() {
         return Err(KernelError::BootstrapFailed {
-            reason: format!("{} already exists; remove it before re-running genesis", path.display()),
+            reason: format!(
+                "{} already exists; remove it before re-running genesis",
+                path.display()
+            ),
         });
     }
     let mut file = std::fs::OpenOptions::new()
@@ -722,9 +743,10 @@ fn write_file_0400(path: &Path, data: &[u8]) -> Result<(), KernelError> {
         .map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot chmod 0400 {}: {e}", path.display()),
         })?;
-    file.write_all(data).map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("cannot write {}: {e}", path.display()),
-    })?;
+    file.write_all(data)
+        .map_err(|e| KernelError::BootstrapFailed {
+            reason: format!("cannot write {}: {e}", path.display()),
+        })?;
     file.sync_all().map_err(|e| KernelError::BootstrapFailed {
         reason: format!("fsync failed {}: {e}", path.display()),
     })
@@ -745,9 +767,10 @@ fn write_file_0444(path: &Path, data: &[u8]) -> Result<(), KernelError> {
         .map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot chmod 0444 {}: {e}", path.display()),
         })?;
-    file.write_all(data).map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("cannot write {}: {e}", path.display()),
-    })
+    file.write_all(data)
+        .map_err(|e| KernelError::BootstrapFailed {
+            reason: format!("cannot write {}: {e}", path.display()),
+        })
 }
 
 /// Write bytes to `path` with mode 0644.
@@ -765,9 +788,10 @@ fn write_file_0644(path: &Path, data: &[u8]) -> Result<(), KernelError> {
         .map_err(|e| KernelError::BootstrapFailed {
             reason: format!("cannot chmod 0644 {}: {e}", path.display()),
         })?;
-    file.write_all(data).map_err(|e| KernelError::BootstrapFailed {
-        reason: format!("cannot write {}: {e}", path.display()),
-    })
+    file.write_all(data)
+        .map_err(|e| KernelError::BootstrapFailed {
+            reason: format!("cannot write {}: {e}", path.display()),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -870,9 +894,9 @@ mod integration {
         let (_tmp, config, _) = fresh_bootstrap_env();
         run_inner(&config).expect("run_inner must succeed on a fresh data_dir");
 
-        let keys   = config.data_dir.join("keys");
+        let keys = config.data_dir.join("keys");
         let policy = config.data_dir.join("policy");
-        let audit  = config.data_dir.join("audit");
+        let audit = config.data_dir.join("audit");
 
         for p in &[
             keys.join("authority_keypair.pem"),
@@ -889,7 +913,11 @@ mod integration {
         let (_, op_pk_hex) = fixed_operator_key();
         let fp = pubkey_fingerprint_from_hex(&op_pk_hex).unwrap();
         let op_path = keys.join(format!("operator_{fp}.pub"));
-        assert!(op_path.exists(), "operator pubkey file missing: {}", op_path.display());
+        assert!(
+            op_path.exists(),
+            "operator pubkey file missing: {}",
+            op_path.display()
+        );
     }
 
     #[test]
@@ -897,7 +925,7 @@ mod integration {
         let (_tmp, config, _) = fresh_bootstrap_env();
         run_inner(&config).expect("run_inner");
 
-        let keys   = config.data_dir.join("keys");
+        let keys = config.data_dir.join("keys");
         let policy = config.data_dir.join("policy");
 
         // cli-ceremony.md §4.2 fixes the modes for every output:
@@ -910,9 +938,9 @@ mod integration {
         // via `OpenOptions::open(...)` without an explicit mode call, so
         // its bits are governed by the process umask; we don't pin them.
         assert_eq!(mode_bits(&keys.join("authority_keypair.pem")), 0o400);
-        assert_eq!(mode_bits(&keys.join("quality_keypair.pem")),   0o400);
+        assert_eq!(mode_bits(&keys.join("quality_keypair.pem")), 0o400);
         assert_eq!(mode_bits(&keys.join("verifier_token_key.bin")), 0o400);
-        assert_eq!(mode_bits(&policy.join("policy.toml")),         0o644);
+        assert_eq!(mode_bits(&policy.join("policy.toml")), 0o644);
 
         let (_, op_pk_hex) = fixed_operator_key();
         let fp = pubkey_fingerprint_from_hex(&op_pk_hex).unwrap();
@@ -1002,13 +1030,14 @@ mod integration {
         config.force = true;
         run_inner(&config).expect("force re-run must succeed");
 
-        let store = raxis_store::Store::open(&tmp.path().join("kernel.db"))
-            .expect("re-open kernel.db");
+        let store =
+            raxis_store::Store::open(&tmp.path().join("kernel.db")).expect("re-open kernel.db");
         let conn = store.lock_sync();
         let count: i64 = conn
             .query_row(
                 &format!("SELECT COUNT(*) FROM {POLICY_EPOCH_HISTORY}"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
         assert_eq!(count, 1, "genesis row must remain unique after re-run");
@@ -1058,14 +1087,13 @@ mod integration {
         // hit it indirectly through the recovery::reconcile entry point,
         // which calls verify_audit_chain first and propagates its error.
         // The return value carries swept_tasks=0 on a clean chain.
-        let result = crate::recovery::reconcile(
-            &raxis_test_support::mem_store(),
-            &audit_dir,
+        let result = crate::recovery::reconcile(&raxis_test_support::mem_store(), &audit_dir);
+        let report =
+            result.expect("recovery::reconcile must accept the genesis chain bootstrap wrote");
+        assert_eq!(
+            report.swept_tasks, 0,
+            "fresh genesis has no in-flight tasks"
         );
-        let report = result.expect(
-            "recovery::reconcile must accept the genesis chain bootstrap wrote",
-        );
-        assert_eq!(report.swept_tasks, 0,    "fresh genesis has no in-flight tasks");
         assert_eq!(report.expired_tokens, 0, "fresh genesis has no live tokens");
         assert_eq!(
             report.folded_integration_merge_attempts, 0,
@@ -1108,11 +1136,19 @@ mod integration {
             .unwrap();
 
         // All three views MUST agree on the same 32-char fingerprint.
-        assert_eq!(signed_by, fp_via_loader,
-            "policy.meta.signed_by != raxis_policy::operator_pubkey_fingerprint");
-        assert_eq!(signed_by, on_disk_fp,
-            "policy.meta.signed_by != filename fingerprint");
-        assert_eq!(signed_by.len(), 32, "fingerprint must be SHA-256[:16] = 32 hex chars");
+        assert_eq!(
+            signed_by, fp_via_loader,
+            "policy.meta.signed_by != raxis_policy::operator_pubkey_fingerprint"
+        );
+        assert_eq!(
+            signed_by, on_disk_fp,
+            "policy.meta.signed_by != filename fingerprint"
+        );
+        assert_eq!(
+            signed_by.len(),
+            32,
+            "fingerprint must be SHA-256[:16] = 32 hex chars"
+        );
     }
 
     #[test]
@@ -1131,9 +1167,8 @@ mod integration {
         run_inner(&config).expect("run_inner");
 
         let bootstrap_audit = config.data_dir.join("audit");
-        let bootstrap_line = std::fs::read_to_string(
-            bootstrap_audit.join("segment-000.jsonl"),
-        ).unwrap();
+        let bootstrap_line =
+            std::fs::read_to_string(bootstrap_audit.join("segment-000.jsonl")).unwrap();
         let bootstrap_rec: serde_json::Value =
             serde_json::from_str(bootstrap_line.lines().next().unwrap()).unwrap();
 
@@ -1143,10 +1178,18 @@ mod integration {
         let fixture_rec = &fixture_recs[0];
 
         // Same set of keys, same type for each.
-        let bootstrap_keys: std::collections::BTreeSet<&str> =
-            bootstrap_rec.as_object().unwrap().keys().map(String::as_str).collect();
-        let fixture_keys: std::collections::BTreeSet<&str> =
-            fixture_rec.as_object().unwrap().keys().map(String::as_str).collect();
+        let bootstrap_keys: std::collections::BTreeSet<&str> = bootstrap_rec
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let fixture_keys: std::collections::BTreeSet<&str> = fixture_rec
+            .as_object()
+            .unwrap()
+            .keys()
+            .map(String::as_str)
+            .collect();
         assert_eq!(
             bootstrap_keys, fixture_keys,
             "AuditDir::write_genesis_record key set has drifted from bootstrap's emitter",
@@ -1166,8 +1209,10 @@ mod integration {
                 || (b.is_null() && f.is_null())
                 || (b.is_array() && f.is_array())
                 || (b.is_object() && f.is_object());
-            assert!(same_kind,
-                "field {k:?}: bootstrap is {b:?}, fixture is {f:?} — JSON kinds differ");
+            assert!(
+                same_kind,
+                "field {k:?}: bootstrap is {b:?}, fixture is {f:?} — JSON kinds differ"
+            );
         }
 
         // Spot-pin the values that MUST be byte-identical regardless of
@@ -1180,7 +1225,10 @@ mod integration {
         // (we mint 512 → 128 hex chars), fingerprint = SHA-256[:16] = 32 hex.
         assert_eq!(bootstrap_rec["genesis_nonce"].as_str().unwrap().len(), 128);
         assert_eq!(
-            bootstrap_rec["authority_pubkey_fingerprint"].as_str().unwrap().len(),
+            bootstrap_rec["authority_pubkey_fingerprint"]
+                .as_str()
+                .unwrap()
+                .len(),
             32,
         );
         assert_eq!(
@@ -1206,25 +1254,27 @@ mod integration {
         let registry_fp = crate::authority::authority_pubkey_fingerprint(&registry);
 
         // (b) Authority pubkey echoed inside the policy.toml.
-        let (bundle, _, _) = raxis_policy::load_policy(
-            &config.data_dir.join("policy").join("policy.toml"),
-        ).unwrap();
+        let (bundle, _, _) =
+            raxis_policy::load_policy(&config.data_dir.join("policy").join("policy.toml")).unwrap();
         let policy_pk_bytes = bundle.authority_pubkey_bytes().unwrap();
         let mut h = Sha256::new();
         h.update(&policy_pk_bytes);
         let policy_fp = hex::encode(&h.finalize()[..16]);
 
         // (c) Fingerprint embedded in the genesis audit record.
-        let line = std::fs::read_to_string(
-            config.data_dir.join("audit").join("segment-000.jsonl"),
-        ).unwrap();
+        let line = std::fs::read_to_string(config.data_dir.join("audit").join("segment-000.jsonl"))
+            .unwrap();
         let rec: serde_json::Value = serde_json::from_str(line.lines().next().unwrap()).unwrap();
         let audit_fp = rec["authority_pubkey_fingerprint"].as_str().unwrap();
 
-        assert_eq!(registry_fp, policy_fp,
-            "registry-derived fingerprint must equal policy-file fingerprint");
-        assert_eq!(registry_fp, audit_fp,
-            "registry-derived fingerprint must equal audit-record fingerprint");
+        assert_eq!(
+            registry_fp, policy_fp,
+            "registry-derived fingerprint must equal policy-file fingerprint"
+        );
+        assert_eq!(
+            registry_fp, audit_fp,
+            "registry-derived fingerprint must equal audit-record fingerprint"
+        );
     }
 }
 
@@ -1249,7 +1299,8 @@ mod edge_cases {
         std::fs::write(
             &cert_path,
             toml::to_string(&cert).expect("serialise cert").as_bytes(),
-        ).unwrap();
+        )
+        .unwrap();
         let config = BootstrapConfig {
             data_dir: tmp.path().to_path_buf(),
             operator_cert_path: Some(cert_path),
@@ -1277,15 +1328,17 @@ mod edge_cases {
     /// this module.
     fn good_cert() -> OperatorCert {
         let key = SigningKey::from_bytes(&[0xD1u8; 32]);
-        ephemeral_cert_with_key(&key, CertOpts {
-            // Anchor `now` to a value that places the cert squarely in
-            // the Active zone — no warn / grace overlap inside any
-            // edge-case test.
-            now_unix_secs: 1_700_000_000,
-            ..CertOpts::default()
-        })
+        ephemeral_cert_with_key(
+            &key,
+            CertOpts {
+                // Anchor `now` to a value that places the cert squarely in
+                // the Active zone — no warn / grace overlap inside any
+                // edge-case test.
+                now_unix_secs: 1_700_000_000,
+                ..CertOpts::default()
+            },
+        )
     }
-
 
     // ── Re-genesis guard ────────────────────────────────────────────────────
 
@@ -1324,14 +1377,13 @@ mod edge_cases {
         run_inner(&config).expect("bootstrap");
 
         let providers_dir = tmp.path().join("providers");
-        let meta = std::fs::metadata(&providers_dir)
-            .expect("providers/ must exist after bootstrap");
+        let meta =
+            std::fs::metadata(&providers_dir).expect("providers/ must exist after bootstrap");
         assert!(meta.is_dir(), "providers/ must be a directory");
 
         use std::os::unix::fs::PermissionsExt;
         let mode = meta.permissions().mode() & 0o777;
-        assert_eq!(mode, 0o700,
-            "providers/ must be chmod 0700; got 0{mode:o}");
+        assert_eq!(mode, 0o700, "providers/ must be chmod 0700; got 0{mode:o}");
     }
 
     // ── keys/ directory mode (raxis doctor FAIL fix) ───────────────────────
@@ -1416,8 +1468,7 @@ mod edge_cases {
         run_inner(&config).expect("bootstrap");
 
         let runtime_dir = tmp.path().join("runtime");
-        let meta = std::fs::metadata(&runtime_dir)
-            .expect("runtime/ must exist after bootstrap");
+        let meta = std::fs::metadata(&runtime_dir).expect("runtime/ must exist after bootstrap");
         assert!(meta.is_dir(), "runtime/ must be a directory");
         // No chmod 0700 contract here: heartbeat.json carries no
         // secrets and is intended to be readable by the operator's
@@ -1433,13 +1484,16 @@ mod edge_cases {
         let (tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).expect("bootstrap");
 
-        let (bundle, _, _) = raxis_policy::load_policy(
-            &tmp.path().join("policy/policy.toml"),
-        ).expect("genesis policy must load");
-        assert!(bundle.gateway().is_none(),
-            "genesis template must NOT activate [gateway]; operator must opt in");
-        assert!(bundle.providers().is_empty(),
-            "genesis template must NOT activate [[providers]]; operator must opt in");
+        let (bundle, _, _) = raxis_policy::load_policy(&tmp.path().join("policy/policy.toml"))
+            .expect("genesis policy must load");
+        assert!(
+            bundle.gateway().is_none(),
+            "genesis template must NOT activate [gateway]; operator must opt in"
+        );
+        assert!(
+            bundle.providers().is_empty(),
+            "genesis template must NOT activate [[providers]]; operator must opt in"
+        );
     }
 
     #[test]
@@ -1461,8 +1515,10 @@ mod edge_cases {
         let pk2 = crate::authority::authority_pubkey_fingerprint(
             &crate::authority::load_key_registry(&config.data_dir).unwrap(),
         );
-        assert_ne!(pk1, pk2,
-            "force re-genesis must mint a new authority keypair");
+        assert_ne!(
+            pk1, pk2,
+            "force re-genesis must mint a new authority keypair"
+        );
     }
 
     // ── Operator cert input validation ──────────────────────────────────────
@@ -1515,9 +1571,7 @@ mod edge_cases {
         // operator would see a "successful" genesis they cannot start.
         let mut cert = good_cert();
         cert.pubkey_hex = "deadbeef".to_owned(); // 8 chars, not 64
-        let (_tmp, config) = fresh_env_with_cert_bytes(
-            toml::to_string(&cert).unwrap().as_bytes(),
-        );
+        let (_tmp, config) = fresh_env_with_cert_bytes(toml::to_string(&cert).unwrap().as_bytes());
         let err = run_inner(&config).expect_err("structurally-invalid cert must error");
         match err {
             KernelError::BootstrapFailed { reason } => {
@@ -1543,9 +1597,7 @@ mod edge_cases {
         let mut sig_bytes = hex::decode(&cert.self_sig_hex).unwrap();
         sig_bytes[63] ^= 0x01;
         cert.self_sig_hex = hex::encode(&sig_bytes);
-        let (_tmp, config) = fresh_env_with_cert_bytes(
-            toml::to_string(&cert).unwrap().as_bytes(),
-        );
+        let (_tmp, config) = fresh_env_with_cert_bytes(toml::to_string(&cert).unwrap().as_bytes());
         let err = run_inner(&config).expect_err("tampered self-sig must error");
         match err {
             KernelError::BootstrapFailed { reason } => {
@@ -1580,13 +1632,15 @@ mod edge_cases {
                 break;
             }
         }
-        let cert_path = cert_file
-            .expect("bootstrap must write operator_<fp>.cert.toml under keys/");
+        let cert_path =
+            cert_file.expect("bootstrap must write operator_<fp>.cert.toml under keys/");
         let raw = std::fs::read_to_string(&cert_path).unwrap();
-        let parsed: OperatorCert =
-            toml::from_str(&raw).expect("persisted cert must round-trip");
-        assert_eq!(parsed, good_cert(),
-            "persisted cert must equal the cert bootstrap was supplied");
+        let parsed: OperatorCert = toml::from_str(&raw).expect("persisted cert must round-trip");
+        assert_eq!(
+            parsed,
+            good_cert(),
+            "persisted cert must equal the cert bootstrap was supplied"
+        );
 
         // Mode bits: the cert is public material (it embeds only the
         // pubkey, never the private key) and must be world-readable
@@ -1594,8 +1648,10 @@ mod edge_cases {
         // can inspect it.
         use std::os::unix::fs::PermissionsExt;
         let mode = std::fs::metadata(&cert_path).unwrap().permissions().mode() & 0o777;
-        assert_eq!(mode, 0o444,
-            "operator_<fp>.cert.toml must be chmod 0444 (public material); got 0{mode:o}");
+        assert_eq!(
+            mode, 0o444,
+            "operator_<fp>.cert.toml must be chmod 0444 (public material); got 0{mode:o}"
+        );
     }
 
     // ── Authority and quality keys must be DISTINCT ─────────────────────────
@@ -1614,8 +1670,10 @@ mod edge_cases {
         let qual_path = config.data_dir.join("keys").join("quality_keypair.pem");
         let auth_pem = std::fs::read_to_string(&auth_path).unwrap();
         let qual_pem = std::fs::read_to_string(&qual_path).unwrap();
-        assert_ne!(auth_pem, qual_pem,
-            "authority_keypair.pem and quality_keypair.pem MUST contain distinct key material");
+        assert_ne!(
+            auth_pem, qual_pem,
+            "authority_keypair.pem and quality_keypair.pem MUST contain distinct key material"
+        );
     }
 
     // ── Verifier token key bytes are 32 bytes exactly ───────────────────────
@@ -1624,11 +1682,13 @@ mod edge_cases {
     fn verifier_token_key_is_exactly_32_bytes() {
         let (_tmp, config) = fresh_env_with_good_cert();
         run_inner(&config).unwrap();
-        let key = std::fs::read(
-            config.data_dir.join("keys").join("verifier_token_key.bin"),
-        ).unwrap();
-        assert_eq!(key.len(), 32,
-            "verifier_token_key.bin MUST be 32 bytes (HMAC-SHA256 key size)");
+        let key =
+            std::fs::read(config.data_dir.join("keys").join("verifier_token_key.bin")).unwrap();
+        assert_eq!(
+            key.len(),
+            32,
+            "verifier_token_key.bin MUST be 32 bytes (HMAC-SHA256 key size)"
+        );
     }
 
     // ── Genesis nonce uniqueness across invocations ─────────────────────────
@@ -1640,9 +1700,9 @@ mod edge_cases {
         // could not distinguish two distinct kernel installs from one.
         let (_tmp, mut config) = fresh_env_with_good_cert();
         run_inner(&config).unwrap();
-        let line1 = std::fs::read_to_string(
-            config.data_dir.join("audit").join("segment-000.jsonl"),
-        ).unwrap();
+        let line1 =
+            std::fs::read_to_string(config.data_dir.join("audit").join("segment-000.jsonl"))
+                .unwrap();
 
         // Wipe ONLY the audit segment (so the next run will append fresh)
         // and rerun with --force so the key files get overwritten too.
@@ -1650,13 +1710,11 @@ mod edge_cases {
         config.force = true;
         run_inner(&config).unwrap();
 
-        let line2 = std::fs::read_to_string(
-            config.data_dir.join("audit").join("segment-000.jsonl"),
-        ).unwrap();
-        let rec1: serde_json::Value =
-            serde_json::from_str(line1.lines().next().unwrap()).unwrap();
-        let rec2: serde_json::Value =
-            serde_json::from_str(line2.lines().next().unwrap()).unwrap();
+        let line2 =
+            std::fs::read_to_string(config.data_dir.join("audit").join("segment-000.jsonl"))
+                .unwrap();
+        let rec1: serde_json::Value = serde_json::from_str(line1.lines().next().unwrap()).unwrap();
+        let rec2: serde_json::Value = serde_json::from_str(line2.lines().next().unwrap()).unwrap();
         assert_ne!(
             rec1["genesis_nonce"], rec2["genesis_nonce"],
             "two genesis runs must mint distinct nonces",

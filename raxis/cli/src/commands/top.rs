@@ -48,8 +48,8 @@ use crate::errors::CliError;
 use crate::GlobalFlags;
 
 const DEFAULT_INTERVAL_SECS: u64 = 2;
-const MIN_INTERVAL_SECS:     u64 = 1;
-const MAX_INTERVAL_SECS:     u64 = 60;
+const MIN_INTERVAL_SECS: u64 = 1;
+const MAX_INTERVAL_SECS: u64 = 60;
 
 // ────────────────────────────────────────────────────────────────────
 // Entry point
@@ -98,16 +98,16 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy)]
 struct TopOpts {
     interval: u64,
-    once:     bool,
-    cleared:  bool,
+    once: bool,
+    cleared: bool,
 }
 
 impl Default for TopOpts {
     fn default() -> Self {
         Self {
             interval: DEFAULT_INTERVAL_SECS,
-            once:     false,
-            cleared:  true,
+            once: false,
+            cleared: true,
         }
     }
 }
@@ -123,7 +123,9 @@ fn parse_args(args: &[String]) -> Result<TopOpts, CliError> {
                     CliError::Usage("--interval requires N seconds (1..=60)".to_owned())
                 })?;
                 let n = raw.parse::<u64>().map_err(|_| {
-                    CliError::Usage(format!("--interval must be a positive integer, got {raw:?}"))
+                    CliError::Usage(format!(
+                        "--interval must be a positive integer, got {raw:?}"
+                    ))
                 })?;
                 if !(MIN_INTERVAL_SECS..=MAX_INTERVAL_SECS).contains(&n) {
                     return Err(CliError::Usage(format!(
@@ -190,8 +192,8 @@ struct TopSnapshot {
     heartbeat: Option<Snapshot>,
     heartbeat_err: Option<String>,
     initiatives: initiatives::InitiativeStateCounts,
-    tasks:       tasks::TaskStateCounts,
-    sessions:    sessions::SessionStateCounts,
+    tasks: tasks::TaskStateCounts,
+    sessions: sessions::SessionStateCounts,
     pending_escalations: u64,
     workload_err: Option<String>,
     captured_at: u64,
@@ -261,9 +263,9 @@ fn render_one<W: Write>(out: &mut W, snap: &TopSnapshot, cleared: bool) {
             let _ = writeln!(
                 out,
                 "  kernel: pid={pid} state={state} epoch={epoch} schema=v{schema}",
-                pid    = h.kernel_pid,
-                state  = h.state,
-                epoch  = h.policy_epoch,
+                pid = h.kernel_pid,
+                state = h.state,
+                epoch = h.policy_epoch,
                 schema = h.store_schema_version,
             );
             let _ = writeln!(
@@ -294,22 +296,22 @@ fn render_one<W: Write>(out: &mut W, snap: &TopSnapshot, cleared: bool) {
             "  initiatives: total={total} executing={ex} approved_plan={ap} \
              completed={cp} aborted={ab}",
             total = snap.initiatives.total,
-            ex    = snap.initiatives.executing,
-            ap    = snap.initiatives.approved_plan,
-            cp    = snap.initiatives.completed,
-            ab    = snap.initiatives.aborted,
+            ex = snap.initiatives.executing,
+            ap = snap.initiatives.approved_plan,
+            cp = snap.initiatives.completed,
+            ab = snap.initiatives.aborted,
         );
         let _ = writeln!(
             out,
             "  tasks:        total={total} admitted={ad} running={rn} \
              gates_pending={gp} blocked={bl} completed={cp} failed={fl}",
             total = snap.tasks.total,
-            ad    = snap.tasks.admitted,
-            rn    = snap.tasks.running,
-            gp    = snap.tasks.gates_pending,
-            bl    = snap.tasks.blocked_recovery_pending,
-            cp    = snap.tasks.completed,
-            fl    = snap.tasks.failed,
+            ad = snap.tasks.admitted,
+            rn = snap.tasks.running,
+            gp = snap.tasks.gates_pending,
+            bl = snap.tasks.blocked_recovery_pending,
+            cp = snap.tasks.completed,
+            fl = snap.tasks.failed,
         );
         let _ = writeln!(
             out,
@@ -353,10 +355,12 @@ mod tests {
     #[test]
     fn parse_args_accepts_each_flag() {
         let o = parse_args(&[
-            "--interval".to_owned(), "5".to_owned(),
+            "--interval".to_owned(),
+            "5".to_owned(),
             "--once".to_owned(),
             "--no-clear".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(o.interval, 5);
         assert!(o.once);
         assert!(!o.cleared);
@@ -365,10 +369,7 @@ mod tests {
     #[test]
     fn parse_args_rejects_out_of_range_interval() {
         for bad in ["0", "61", "abc", ""] {
-            let err = parse_args(&[
-                "--interval".to_owned(),
-                bad.to_owned(),
-            ]).unwrap_err();
+            let err = parse_args(&["--interval".to_owned(), bad.to_owned()]).unwrap_err();
             assert!(matches!(err, CliError::Usage(_)), "input={bad:?}");
         }
     }
@@ -383,17 +384,25 @@ mod tests {
     fn render_one_renders_heartbeat_when_present() {
         let snap = TopSnapshot {
             heartbeat: Some(Snapshot::new(
-                42, 0, unix_now_secs(),
+                42,
+                0,
+                unix_now_secs(),
                 raxis_runtime::KernelLifecycleState::Running,
-                7, 1, 4, 0, 0, 0, 0,
+                7,
+                1,
+                4,
+                0,
+                0,
+                0,
+                0,
             )),
             heartbeat_err: None,
-            initiatives:   initiatives::InitiativeStateCounts::default(),
-            tasks:         tasks::TaskStateCounts::default(),
-            sessions:      sessions::SessionStateCounts::default(),
+            initiatives: initiatives::InitiativeStateCounts::default(),
+            tasks: tasks::TaskStateCounts::default(),
+            sessions: sessions::SessionStateCounts::default(),
             pending_escalations: 0,
-            workload_err:  None,
-            captured_at:   123,
+            workload_err: None,
+            captured_at: 123,
         };
         let mut buf: Vec<u8> = Vec::new();
         render_one(&mut buf, &snap, /*cleared=*/ false);
@@ -418,7 +427,10 @@ mod tests {
                 cancelled: 0,
             },
             sessions: sessions::SessionStateCounts {
-                active: 3, expired: 0, revoked: 0, total: 3,
+                active: 3,
+                expired: 0,
+                revoked: 0,
+                total: 3,
             },
             pending_escalations: 1,
             ..Default::default()

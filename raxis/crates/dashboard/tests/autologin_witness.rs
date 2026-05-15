@@ -93,10 +93,10 @@ async fn boot_dashboard_for_autologin() -> (
     Arc<InMemoryDashboardData>,
 ) {
     let cfg = DashboardConfig {
-        enabled:      true,
+        enabled: true,
         bind_address: "127.0.0.1".into(),
-        bind_port:    0,
-        static_dir:   None,
+        bind_port: 0,
+        static_dir: None,
         ..Default::default()
     };
     // Distinct seed from every other fixture in the test binary so
@@ -146,8 +146,7 @@ async fn mint_jwt_via_http(
         .await
         .expect("challenge send");
     assert_eq!(challenge_resp.status(), 200, "challenge endpoint must 200");
-    let challenge_json: serde_json::Value =
-        challenge_resp.json().await.expect("challenge json");
+    let challenge_json: serde_json::Value = challenge_resp.json().await.expect("challenge json");
     let challenge_hex = challenge_json["challenge"]
         .as_str()
         .expect("challenge field is string")
@@ -199,7 +198,7 @@ fn default_jwt_ttl_secs_outlives_realistic_kernel_uptime() {
          crates/dashboard/src/config.rs for the rationale comment + the \
          dashboard-hardening.md §2.8 spec contract.",
         default = DEFAULT_JWT_TTL_SECS,
-        min     = AUTOLOGIN_MIN_TTL_SECS,
+        min = AUTOLOGIN_MIN_TTL_SECS,
     );
 }
 
@@ -226,8 +225,7 @@ fn default_jwt_ttl_secs_outlives_realistic_kernel_uptime() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn autologin_jwt_outlives_realistic_kernel_uptime_and_authorizes_reads() {
-    let (handle, base, signing_key, _fp, data) =
-        boot_dashboard_for_autologin().await;
+    let (handle, base, signing_key, _fp, data) = boot_dashboard_for_autologin().await;
 
     // Seed one initiative so the follow-up read returns a non-empty
     // body — guarantees the JWT actually carried us past the auth
@@ -239,22 +237,22 @@ async fn autologin_jwt_outlives_realistic_kernel_uptime_and_authorizes_reads() {
     // wire-shape drift surfaces here.
     data.push_initiative(raxis_dashboard::data::InitiativeView {
         summary: raxis_dashboard::data::InitiativeListEntry {
-            initiative_id:   "init-autologin-witness".into(),
-            display_name:    "init-autologin-witness".into(),
-            state:           "Active".into(),
-            task_count:      0,
+            initiative_id: "init-autologin-witness".into(),
+            display_name: "init-autologin-witness".into(),
+            state: "Active".into(),
+            task_count: 0,
             completed_tasks: 0,
-            failed_tasks:    0,
-            created_at:      1_700_000_000,
-            updated_at:      1_700_000_000,
+            failed_tasks: 0,
+            created_at: 1_700_000_000,
+            updated_at: 1_700_000_000,
         },
-        approved_by:  None,
-        plan_sha256:  None,
-        target_ref:   None,
+        approved_by: None,
+        plan_sha256: None,
+        target_ref: None,
         policy_epoch: 1,
-        tasks:        Vec::new(),
-        edges:        Vec::new(),
-        failure:      None,
+        tasks: Vec::new(),
+        edges: Vec::new(),
+        failure: None,
     });
 
     let verify_body = mint_jwt_via_http(&base, &signing_key).await;

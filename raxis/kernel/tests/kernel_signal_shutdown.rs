@@ -112,15 +112,28 @@ fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
     assert!(
         output.status.success(),
         "kernel bootstrap failed (exit code {}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
+        output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "<signalled>".to_owned()),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );
 
     // Sanity-check the bootstrap left the artifacts we need.
-    assert!(data_dir.join("policy/policy.toml").exists(), "policy.toml missing after bootstrap");
-    assert!(data_dir.join("audit/segment-000.jsonl").exists(), "audit segment missing after bootstrap");
-    assert!(data_dir.join("keys/authority_keypair.pem").exists(), "authority key missing after bootstrap");
+    assert!(
+        data_dir.join("policy/policy.toml").exists(),
+        "policy.toml missing after bootstrap"
+    );
+    assert!(
+        data_dir.join("audit/segment-000.jsonl").exists(),
+        "audit segment missing after bootstrap"
+    );
+    assert!(
+        data_dir.join("keys/authority_keypair.pem").exists(),
+        "authority key missing after bootstrap"
+    );
 
     tmp
 }
@@ -205,7 +218,10 @@ impl KernelHandle {
         // alive and uniquely ours for the lifetime of `self`. `signum`
         // is a constant from libc. `kill(2)` is async-signal-safe.
         let rc = unsafe { libc::kill(pid, signum) };
-        assert!(rc == 0, "kill({pid}, {signum}) returned {rc}, errno set by libc");
+        assert!(
+            rc == 0,
+            "kill({pid}, {signum}) returned {rc}, errno set by libc"
+        );
     }
 
     /// Wait up to `deadline` for the child to exit. Returns the exit
@@ -244,8 +260,7 @@ fn read_audit_segment(data_dir: &Path) -> Vec<serde_json::Value> {
         .unwrap_or_else(|e| panic!("read audit segment {path:?}: {e}"));
     text.lines()
         .filter(|l| !l.trim().is_empty())
-        .map(|l| serde_json::from_str(l)
-            .unwrap_or_else(|e| panic!("parse audit line {l:?}: {e}")))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("parse audit line {l:?}: {e}")))
         .collect()
 }
 
@@ -285,22 +300,35 @@ fn sigterm_triggers_graceful_shutdown_and_kernel_stopped_audit() {
     // `{ "kind": "KernelStopped", "reason": "SIGTERM" }` — flattened
     // under `payload`, NOT nested as `payload.KernelStopped.reason`.
     let records = read_audit_segment(data_dir.path());
-    let last = records.last().expect("audit segment must have at least one record after shutdown");
-    assert_eq!(last["event_kind"].as_str(), Some("KernelStopped"),
-        "last audit event must be KernelStopped; full last record: {last}");
-    assert_eq!(last["payload"]["kind"].as_str(), Some("KernelStopped"),
-        "payload.kind discriminant must match event_kind; full last record: {last}");
+    let last = records
+        .last()
+        .expect("audit segment must have at least one record after shutdown");
+    assert_eq!(
+        last["event_kind"].as_str(),
+        Some("KernelStopped"),
+        "last audit event must be KernelStopped; full last record: {last}"
+    );
+    assert_eq!(
+        last["payload"]["kind"].as_str(),
+        Some("KernelStopped"),
+        "payload.kind discriminant must match event_kind; full last record: {last}"
+    );
     let reason = last["payload"]["reason"]
         .as_str()
         .expect("KernelStopped record must have payload.reason");
-    assert_eq!(reason, "SIGTERM",
-        "KernelStopped reason should match the signal we sent; full last record: {last}");
+    assert_eq!(
+        reason, "SIGTERM",
+        "KernelStopped reason should match the signal we sent; full last record: {last}"
+    );
 
     // Cleanup contract: the three UDS socket files must be removed on exit.
     for name in &["operator.sock", "planner.sock", "gateway.sock"] {
         let p = data_dir.path().join("sockets").join(name);
-        assert!(!p.exists(),
-            "socket file {name} must be removed on graceful shutdown; still at {}", p.display());
+        assert!(
+            !p.exists(),
+            "socket file {name} must be removed on graceful shutdown; still at {}",
+            p.display()
+        );
     }
 }
 
@@ -335,8 +363,10 @@ fn sigint_also_triggers_graceful_shutdown_with_distinct_audit_reason() {
     let last = records.last().expect("audit segment must have last record");
     assert_eq!(last["event_kind"].as_str(), Some("KernelStopped"));
     let reason = last["payload"]["reason"].as_str().unwrap();
-    assert_eq!(reason, "SIGINT",
-        "the audit reason MUST distinguish SIGINT from SIGTERM so operators can grep");
+    assert_eq!(
+        reason, "SIGINT",
+        "the audit reason MUST distinguish SIGINT from SIGTERM so operators can grep"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -363,8 +393,8 @@ fn audit_chain_intact_across_kernel_started_and_kernel_stopped() {
     // kernel boot would do. Any chain corruption here would cause
     // cross-restart fail-closed at the next boot.
     let segment = data_dir.path().join("audit/segment-000.jsonl");
-    let resume = raxis_audit_tools::last_chain_state(&segment)
-        .expect("post-shutdown chain MUST be intact");
+    let resume =
+        raxis_audit_tools::last_chain_state(&segment).expect("post-shutdown chain MUST be intact");
     let info = resume.expect("segment is non-empty after a clean run");
 
     // V2 fail-closed boot: the chain MUST contain
@@ -393,7 +423,12 @@ fn audit_chain_intact_across_kernel_started_and_kernel_stopped() {
         .collect();
     let valid_shapes: &[&[&str]] = &[
         // Substrate admitted (Linux+KVM or macOS); no fallback bypass.
-        &["GenesisRecord", "KernelStarted", "IsolationSubstrateSelected", "KernelStopped"],
+        &[
+            "GenesisRecord",
+            "KernelStarted",
+            "IsolationSubstrateSelected",
+            "KernelStopped",
+        ],
         // Substrate admitted under the unsafe-fallback flag.
         &[
             "GenesisRecord",
@@ -431,8 +466,11 @@ fn kernel_can_restart_cleanly_and_chain_persists() {
     // Boot 1
     {
         let mut kernel = KernelHandle::spawn(&kernel_bin, data_dir.path());
-        assert!(kernel.wait_for_ready(Duration::from_secs(10)),
-            "first boot never bound sockets; stderr:\n{}", kernel.captured_stderr());
+        assert!(
+            kernel.wait_for_ready(Duration::from_secs(10)),
+            "first boot never bound sockets; stderr:\n{}",
+            kernel.captured_stderr()
+        );
         kernel.send_signal(libc::SIGTERM);
         let status = kernel.wait_with_timeout(Duration::from_secs(10));
         assert!(status.success(), "first boot exit non-zero: {status:?}");
@@ -469,10 +507,16 @@ fn kernel_can_restart_cleanly_and_chain_persists() {
     // regressions without making the whole test host-fragile.
     let records = read_audit_segment(data_dir.path());
     for (i, r) in records.iter().enumerate() {
-        assert_eq!(r["seq"].as_u64().unwrap(), i as u64,
-            "seq monotonicity must hold across restart boundary; record {i}: {r}");
+        assert_eq!(
+            r["seq"].as_u64().unwrap(),
+            i as u64,
+            "seq monotonicity must hold across restart boundary; record {i}: {r}"
+        );
     }
-    let kinds: Vec<&str> = records.iter().filter_map(|r| r["event_kind"].as_str()).collect();
+    let kinds: Vec<&str> = records
+        .iter()
+        .filter_map(|r| r["event_kind"].as_str())
+        .collect();
 
     // The two boots must produce identical sub-shapes (same admit
     // outcome each time).
@@ -480,14 +524,20 @@ fn kernel_can_restart_cleanly_and_chain_persists() {
         // Substrate admitted on both boots.
         &[
             "GenesisRecord",
-            "KernelStarted", "IsolationSubstrateSelected", "KernelStopped",
-            "KernelStarted", "IsolationSubstrateSelected", "KernelStopped",
+            "KernelStarted",
+            "IsolationSubstrateSelected",
+            "KernelStopped",
+            "KernelStarted",
+            "IsolationSubstrateSelected",
+            "KernelStopped",
         ],
         // No substrate admissible on either boot.
         &[
             "GenesisRecord",
-            "KernelStarted", "KernelStopped",
-            "KernelStarted", "KernelStopped",
+            "KernelStarted",
+            "KernelStopped",
+            "KernelStarted",
+            "KernelStopped",
         ],
     ];
     assert!(

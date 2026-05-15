@@ -73,10 +73,10 @@ use crate::ipc::context::HandlerContext;
 /// vsock device as the auth boundary; A3 carries an explicit token)
 /// and `FAIL_AUDIT_EMIT` (paired-write contract failure).
 mod reasons {
-    pub const HOST_NOT_IN_ALLOWLIST:    &str = "host_not_in_allowlist";
-    pub const PROTOCOL_NOT_PERMITTED:   &str = "protocol_not_permitted";
-    pub const SESSION_TOKEN_MISMATCH:   &str = "FAIL_SESSION_TOKEN_MISMATCH";
-    pub const AUDIT_EMIT_FAILED:        &str = "FAIL_AUDIT_EMIT";
+    pub const HOST_NOT_IN_ALLOWLIST: &str = "host_not_in_allowlist";
+    pub const PROTOCOL_NOT_PERMITTED: &str = "protocol_not_permitted";
+    pub const SESSION_TOKEN_MISMATCH: &str = "FAIL_SESSION_TOKEN_MISMATCH";
+    pub const AUDIT_EMIT_FAILED: &str = "FAIL_AUDIT_EMIT";
 }
 
 // ---------------------------------------------------------------------------
@@ -105,18 +105,18 @@ pub struct RegisteredTunnel {
     /// behalf. The tunnel listener uses this directly — the guest
     /// does NOT get to specify a destination on the tunnel
     /// connection itself.
-    pub destination:  SocketAddr,
+    pub destination: SocketAddr,
     /// Single-use token the guest sends in the tunnel-handshake
     /// frame to authenticate against this entry.
     pub tunnel_token: [u8; 32],
     /// Session whose admission produced this tunnel. Recorded so
     /// the tunnel listener can audit the byte-tunnel open against
     /// the same session id the admission was tied to.
-    pub session_id:   String,
+    pub session_id: String,
     /// Hostname / SNI the admission decision matched on, for
     /// audit-correlation purposes only — the tunnel listener does
     /// not re-validate hostname here (the admission already did).
-    pub host_or_sni:  Option<String>,
+    pub host_or_sni: Option<String>,
 }
 
 /// In-memory single-use tunnel registry. Construct once at kernel
@@ -198,7 +198,7 @@ pub async fn handle(
     registry: &Arc<TunnelRegistry>,
 ) -> TproxyAdmissionResponse {
     let request_id = req.request_id;
-    let started    = Instant::now();
+    let started = Instant::now();
 
     // ── Step 1: resolve session token → SessionRow ────────────────
     let session = match resolve_session(&req.session_token, ctx).await {
@@ -211,12 +211,7 @@ pub async fn handle(
             // pass "" as the canonical "unknown" marker — same
             // convention `handlers::planner_fetch` uses for the
             // mismatch path).
-            emit_denied_audit(
-                ctx,
-                "",
-                &req,
-                reasons::SESSION_TOKEN_MISMATCH,
-            );
+            emit_denied_audit(ctx, "", &req, reasons::SESSION_TOKEN_MISMATCH);
             crate::observability::record_egress_check(
                 &ctx.observability,
                 "deny",
@@ -236,10 +231,7 @@ pub async fn handle(
     // union (operator-declared + implicit-provider grants) is
     // already computed by `PolicyBundle::effective_egress_*`,
     // matching the legacy Tier-1 chokepoint's decision boundary.
-    let host_for_match = req
-        .sni
-        .as_deref()
-        .or(req.host_header.as_deref());
+    let host_for_match = req.sni.as_deref().or(req.host_header.as_deref());
 
     let allowed = match (req.protocol, host_for_match) {
         // Raw TCP with no observable hostname: admission falls
@@ -251,7 +243,7 @@ pub async fn handle(
         // Known protocols with a hostname: hostname allowlist match.
         (_, Some(host)) => {
             let policy = ctx.policy.load();
-            let domains  = policy.effective_egress_domains();
+            let domains = policy.effective_egress_domains();
             let patterns = policy.effective_egress_patterns();
             host_allowed_against_lists(host, &domains, &patterns)
         }
@@ -323,20 +315,14 @@ pub async fn handle(
     }
 
     let (tunnel_id, _token_echo) = registry.register(RegisteredTunnel {
-        destination:  req.destination,
+        destination: req.destination,
         tunnel_token,
-        session_id:   session.session_id.clone(),
-        host_or_sni:  host_for_match.map(str::to_owned),
+        session_id: session.session_id.clone(),
+        host_or_sni: host_for_match.map(str::to_owned),
     });
 
     // ── Step 4: paired audit BEFORE response ──────────────────────
-    let audit_ok = emit_granted_audit(
-        ctx,
-        &session.session_id,
-        &req,
-        host_for_match,
-        tunnel_id,
-    );
+    let audit_ok = emit_granted_audit(ctx, &session.session_id, &req, host_for_match, tunnel_id);
     if !audit_ok {
         // Audit emission failed — fail closed: remove the tunnel
         // we just registered (so the guest cannot consume it on a
@@ -378,18 +364,18 @@ fn deny(request_id: Uuid, reason: &str, hint: Option<String>) -> TproxyAdmission
 /// fail-closed on audit emission failure per
 /// `INV-AUDIT-TPROXY-ADMIT-01`.
 fn emit_denied_audit(
-    ctx:        &Arc<HandlerContext>,
+    ctx: &Arc<HandlerContext>,
     session_id: &str,
-    req:        &TproxyAdmissionRequest,
-    reason:     &str,
+    req: &TproxyAdmissionRequest,
+    reason: &str,
 ) -> bool {
     let kind = AuditEventKind::TproxyAdmissionDenied {
-        session_id:        session_id.to_owned(),
-        host_or_sni:       host_or_sni_for_audit(req),
-        original_dst_ip:   req.destination.ip().to_string(),
+        session_id: session_id.to_owned(),
+        host_or_sni: host_or_sni_for_audit(req),
+        original_dst_ip: req.destination.ip().to_string(),
         original_dst_port: req.destination.port(),
-        protocol:          req.protocol.as_str().to_owned(),
-        reason:            reason.to_owned(),
+        protocol: req.protocol.as_str().to_owned(),
+        reason: reason.to_owned(),
     };
     let session_anchor = if session_id.is_empty() {
         None
@@ -413,19 +399,19 @@ fn emit_denied_audit(
 /// the admission decision with the upstream-socket open audit
 /// event the tunnel listener emits later.
 fn emit_granted_audit(
-    ctx:           &Arc<HandlerContext>,
-    session_id:    &str,
-    req:           &TproxyAdmissionRequest,
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+    req: &TproxyAdmissionRequest,
     host_for_match: Option<&str>,
-    tunnel_id:     Uuid,
+    tunnel_id: Uuid,
 ) -> bool {
     let kind = AuditEventKind::TproxyAdmissionGranted {
-        session_id:        session_id.to_owned(),
-        host_or_sni:       host_for_match.map(str::to_owned),
-        original_dst_ip:   req.destination.ip().to_string(),
+        session_id: session_id.to_owned(),
+        host_or_sni: host_for_match.map(str::to_owned),
+        original_dst_ip: req.destination.ip().to_string(),
         original_dst_port: req.destination.port(),
-        protocol:          req.protocol.as_str().to_owned(),
-        tunnel_id:         tunnel_id.to_string(),
+        protocol: req.protocol.as_str().to_owned(),
+        tunnel_id: tunnel_id.to_string(),
     };
     match ctx.audit.emit(kind, Some(session_id), None, None) {
         Ok(_) => true,
@@ -495,7 +481,7 @@ fn hint_for_denied_host(host: Option<&str>) -> String {
 
 async fn resolve_session(
     token: &str,
-    ctx:   &Arc<HandlerContext>,
+    ctx: &Arc<HandlerContext>,
 ) -> Option<crate::authority::session::SessionRow> {
     let store = Arc::clone(&ctx.store);
     let token_owned = token.to_owned();
@@ -519,46 +505,93 @@ mod tests {
     fn reasons_pinned_to_wire_strings() {
         // Audit dashboards / forensic tools key on these strings.
         // A typo'd reason silently misroutes alerts; pin them.
-        assert_eq!(reasons::HOST_NOT_IN_ALLOWLIST,  "host_not_in_allowlist");
+        assert_eq!(reasons::HOST_NOT_IN_ALLOWLIST, "host_not_in_allowlist");
         assert_eq!(reasons::PROTOCOL_NOT_PERMITTED, "protocol_not_permitted");
-        assert_eq!(reasons::SESSION_TOKEN_MISMATCH, "FAIL_SESSION_TOKEN_MISMATCH");
-        assert_eq!(reasons::AUDIT_EMIT_FAILED,      "FAIL_AUDIT_EMIT");
+        assert_eq!(
+            reasons::SESSION_TOKEN_MISMATCH,
+            "FAIL_SESSION_TOKEN_MISMATCH"
+        );
+        assert_eq!(reasons::AUDIT_EMIT_FAILED, "FAIL_AUDIT_EMIT");
     }
 
     #[test]
     fn host_match_exact_case_insensitive() {
         let exact = vec!["api.anthropic.com".to_owned()];
         let patterns: Vec<String> = vec![];
-        assert!(host_allowed_against_lists("api.anthropic.com", &exact, &patterns));
-        assert!(host_allowed_against_lists("API.ANTHROPIC.com", &exact, &patterns));
-        assert!(!host_allowed_against_lists("evil.example.com", &exact, &patterns));
+        assert!(host_allowed_against_lists(
+            "api.anthropic.com",
+            &exact,
+            &patterns
+        ));
+        assert!(host_allowed_against_lists(
+            "API.ANTHROPIC.com",
+            &exact,
+            &patterns
+        ));
+        assert!(!host_allowed_against_lists(
+            "evil.example.com",
+            &exact,
+            &patterns
+        ));
     }
 
     #[test]
     fn host_match_suffix_pattern() {
         let exact: Vec<String> = vec![];
         let patterns = vec!["*.anthropic.com".to_owned()];
-        assert!(host_allowed_against_lists("api.anthropic.com", &exact, &patterns));
-        assert!(host_allowed_against_lists("staging.api.anthropic.com", &exact, &patterns));
-        assert!(host_allowed_against_lists("anthropic.com", &exact, &patterns));
-        assert!(!host_allowed_against_lists("anthropic-evil.com", &exact, &patterns));
+        assert!(host_allowed_against_lists(
+            "api.anthropic.com",
+            &exact,
+            &patterns
+        ));
+        assert!(host_allowed_against_lists(
+            "staging.api.anthropic.com",
+            &exact,
+            &patterns
+        ));
+        assert!(host_allowed_against_lists(
+            "anthropic.com",
+            &exact,
+            &patterns
+        ));
+        assert!(!host_allowed_against_lists(
+            "anthropic-evil.com",
+            &exact,
+            &patterns
+        ));
     }
 
     #[test]
     fn host_match_prefix_pattern() {
         let exact: Vec<String> = vec![];
         let patterns = vec!["registry.*".to_owned()];
-        assert!(host_allowed_against_lists("registry.npmjs.org", &exact, &patterns));
+        assert!(host_allowed_against_lists(
+            "registry.npmjs.org",
+            &exact,
+            &patterns
+        ));
         assert!(host_allowed_against_lists("registry", &exact, &patterns));
-        assert!(!host_allowed_against_lists("evil-registry.com", &exact, &patterns));
+        assert!(!host_allowed_against_lists(
+            "evil-registry.com",
+            &exact,
+            &patterns
+        ));
     }
 
     #[test]
     fn host_match_wildcard_admits_all() {
         let exact: Vec<String> = vec![];
         let patterns = vec!["*".to_owned()];
-        assert!(host_allowed_against_lists("anything.example.com", &exact, &patterns));
-        assert!(host_allowed_against_lists("evil.example", &exact, &patterns));
+        assert!(host_allowed_against_lists(
+            "anything.example.com",
+            &exact,
+            &patterns
+        ));
+        assert!(host_allowed_against_lists(
+            "evil.example",
+            &exact,
+            &patterns
+        ));
     }
 
     #[test]
@@ -566,10 +599,10 @@ mod tests {
         let reg = TunnelRegistry::new();
         let dst: SocketAddr = "1.2.3.4:443".parse().unwrap();
         let tunnel = RegisteredTunnel {
-            destination:  dst,
+            destination: dst,
             tunnel_token: [0x7Au8; 32],
-            session_id:   "sess".to_owned(),
-            host_or_sni:  Some("api.example.com".to_owned()),
+            session_id: "sess".to_owned(),
+            host_or_sni: Some("api.example.com".to_owned()),
         };
         let (id, token) = reg.register(tunnel);
         assert_eq!(reg.len(), 1);
@@ -583,10 +616,10 @@ mod tests {
     fn tunnel_registry_consume_with_wrong_token_returns_none() {
         let reg = TunnelRegistry::new();
         let (id, _token) = reg.register(RegisteredTunnel {
-            destination:  "1.2.3.4:443".parse().unwrap(),
+            destination: "1.2.3.4:443".parse().unwrap(),
             tunnel_token: [0xAAu8; 32],
-            session_id:   "sess".to_owned(),
-            host_or_sni:  None,
+            session_id: "sess".to_owned(),
+            host_or_sni: None,
         });
         // Single-use: an attacker presenting the wrong token still
         // removes the entry (so the legitimate guest can't dial in
@@ -609,38 +642,44 @@ mod tests {
     #[test]
     fn host_or_sni_for_audit_prefers_sni_over_host_header() {
         let req = TproxyAdmissionRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "tok".to_owned(),
-            sni:           Some("sni.example.com".to_owned()),
-            host_header:   Some("host.example.com".to_owned()),
-            destination:   "1.2.3.4:443".parse().unwrap(),
-            protocol:      TproxyProtocol::Tls,
+            sni: Some("sni.example.com".to_owned()),
+            host_header: Some("host.example.com".to_owned()),
+            destination: "1.2.3.4:443".parse().unwrap(),
+            protocol: TproxyProtocol::Tls,
         };
-        assert_eq!(host_or_sni_for_audit(&req).as_deref(), Some("sni.example.com"));
+        assert_eq!(
+            host_or_sni_for_audit(&req).as_deref(),
+            Some("sni.example.com")
+        );
     }
 
     #[test]
     fn host_or_sni_for_audit_falls_back_to_host_header() {
         let req = TproxyAdmissionRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "tok".to_owned(),
-            sni:           None,
-            host_header:   Some("host.example.com".to_owned()),
-            destination:   "1.2.3.4:80".parse().unwrap(),
-            protocol:      TproxyProtocol::Http,
+            sni: None,
+            host_header: Some("host.example.com".to_owned()),
+            destination: "1.2.3.4:80".parse().unwrap(),
+            protocol: TproxyProtocol::Http,
         };
-        assert_eq!(host_or_sni_for_audit(&req).as_deref(), Some("host.example.com"));
+        assert_eq!(
+            host_or_sni_for_audit(&req).as_deref(),
+            Some("host.example.com")
+        );
     }
 
     #[test]
     fn host_or_sni_for_audit_is_none_when_neither_present() {
         let req = TproxyAdmissionRequest {
-            request_id:    Uuid::nil(),
+            request_id: Uuid::nil(),
             session_token: "tok".to_owned(),
-            sni:           None,
-            host_header:   None,
-            destination:   "1.2.3.4:443".parse().unwrap(),
-            protocol:      TproxyProtocol::Tcp,
+            sni: None,
+            host_header: None,
+            destination: "1.2.3.4:443".parse().unwrap(),
+            protocol: TproxyProtocol::Tcp,
         };
         assert!(host_or_sni_for_audit(&req).is_none());
     }

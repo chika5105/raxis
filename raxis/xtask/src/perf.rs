@@ -93,7 +93,7 @@ fn write_consolidated_report() -> Result<()> {
     let date = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let consolidated_path = dir.join(format!("perf-report-{date}.md"));
 
-    let vm_section  = read_subreport_or_placeholder(&dir, "vm-cold-boot",     &date);
+    let vm_section = read_subreport_or_placeholder(&dir, "vm-cold-boot", &date);
     let aud_section = read_subreport_or_placeholder(&dir, "audit-throughput", &date);
 
     let body = format!(
@@ -112,14 +112,17 @@ fn write_consolidated_report() -> Result<()> {
          ---\n\n\
          ## audit-throughput\n\n\
          {aud_section}\n",
-        vm_name  = "vm-cold-boot",
+        vm_name = "vm-cold-boot",
         aud_name = "audit-throughput",
-        ts       = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
+        ts = chrono::Utc::now().format("%Y-%m-%d %H:%M:%S"),
     );
 
     std::fs::write(&consolidated_path, body)
         .with_context(|| format!("write {}", consolidated_path.display()))?;
-    eprintln!("    wrote consolidated report: {}", consolidated_path.display());
+    eprintln!(
+        "    wrote consolidated report: {}",
+        consolidated_path.display()
+    );
     Ok(())
 }
 
@@ -567,8 +570,14 @@ mod tests {
     fn read_subreport_or_placeholder_emits_loud_marker_on_missing() {
         let tmp = tempfile::tempdir().unwrap();
         let got = read_subreport_or_placeholder(tmp.path(), "vm-cold-boot", "2026-05-12");
-        assert!(got.contains("MISSING"), "missing-report placeholder, got: {got:?}");
-        assert!(got.contains("vm-cold-boot"), "placeholder names the failing subcommand");
+        assert!(
+            got.contains("MISSING"),
+            "missing-report placeholder, got: {got:?}"
+        );
+        assert!(
+            got.contains("vm-cold-boot"),
+            "placeholder names the failing subcommand"
+        );
     }
 
     #[test]
@@ -586,7 +595,9 @@ mod tests {
         assert!(got.contains("p99: 99 ms"));
         // The H1 of the inner file is stripped so it can be re-framed
         // under the consolidated report's `## vm-cold-boot` heading.
-        assert!(!got.contains("# VM cold-boot perf report"),
-            "inner H1 must be stripped; got {got:?}");
+        assert!(
+            !got.contains("# VM cold-boot perf report"),
+            "inner H1 must be stripped; got {got:?}"
+        );
     }
 }

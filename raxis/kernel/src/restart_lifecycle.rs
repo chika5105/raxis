@@ -39,10 +39,10 @@ use crate::deadlock_dump;
 /// `dumps_processed` for an info log line.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct RehydrationOutcome {
-    pub dumps_processed:                 u32,
-    pub kernel_deadlock_detected_emits:  u32,
-    pub kernel_restart_initiated_emits:  u32,
-    pub kernel_restart_completed_emits:  u32,
+    pub dumps_processed: u32,
+    pub kernel_deadlock_detected_emits: u32,
+    pub kernel_restart_initiated_emits: u32,
+    pub kernel_restart_completed_emits: u32,
 }
 
 /// Sentinel-file view used by the rehydration path. Serde-skips
@@ -162,9 +162,9 @@ pub fn read_sentinel_any_status(sentinel_path: &Path) -> Option<SentinelView> {
 /// `spawn_blocking` worker (the kernel's `main.rs` calls it
 /// directly from the runtime thread because it is sync-bounded).
 pub fn rehydrate_restart_context(
-    audit:             &dyn AuditSink,
-    data_dir:          &Path,
-    sentinel:          Option<SentinelView>,
+    audit: &dyn AuditSink,
+    data_dir: &Path,
+    sentinel: Option<SentinelView>,
     recovery_sweep_ms: u64,
 ) -> RehydrationOutcome {
     let mut outcome = RehydrationOutcome::default();
@@ -187,12 +187,14 @@ pub fn rehydrate_restart_context(
         match deadlock_dump::read_dump(dump_path) {
             Ok(dump) => match audit.emit(
                 AuditEventKind::KernelDeadlockDetected {
-                    thread_count:          dump.thread_count,
-                    lock_count:            dump.lock_count,
-                    dump_path:             Some(dump_path_str.clone()),
+                    thread_count: dump.thread_count,
+                    lock_count: dump.lock_count,
+                    dump_path: Some(dump_path_str.clone()),
                     detected_at_unix_secs: dump.detected_at_unix_secs,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             ) {
                 Ok(_) => {
                     outcome.kernel_deadlock_detected_emits =
@@ -220,12 +222,14 @@ pub fn rehydrate_restart_context(
                 if audit
                     .emit(
                         AuditEventKind::KernelDeadlockDetected {
-                            thread_count:          0,
-                            lock_count:            0,
-                            dump_path:             Some(dump_path_str.clone()),
+                            thread_count: 0,
+                            lock_count: 0,
+                            dump_path: Some(dump_path_str.clone()),
                             detected_at_unix_secs: 0,
                         },
-                        None, None, None,
+                        None,
+                        None,
+                        None,
                     )
                     .is_ok()
                 {
@@ -245,7 +249,8 @@ pub fn rehydrate_restart_context(
 
     // 2. Supervisor said `Restarting` — emit the paired sequence.
     if let Some(sup) = sentinel {
-        let sup_reason = sup.last_restart_reason
+        let sup_reason = sup
+            .last_restart_reason
             .unwrap_or_else(|| "PanicAbort".to_owned());
         let prev_exit = sup.prev_run_exit_code.unwrap_or(0);
         let attempt_n = sup.attempt_n.unwrap_or(1);
@@ -263,12 +268,14 @@ pub fn rehydrate_restart_context(
         if audit
             .emit(
                 AuditEventKind::KernelRestartInitiated {
-                    reason:             reason.clone(),
+                    reason: reason.clone(),
                     prev_run_exit_code: prev_exit,
                     attempt_n,
                     max_attempts,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .map_err(|e| {
                 eprintln!(
@@ -287,9 +294,11 @@ pub fn rehydrate_restart_context(
                 AuditEventKind::KernelRestartCompleted {
                     prev_run_exit_code: prev_exit,
                     recovery_sweep_ms,
-                    dump_path:          last_dump_path.clone(),
+                    dump_path: last_dump_path.clone(),
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .map_err(|e| {
                 eprintln!(
@@ -313,9 +322,11 @@ pub fn rehydrate_restart_context(
                 AuditEventKind::KernelRestartCompleted {
                     prev_run_exit_code: 70,
                     recovery_sweep_ms,
-                    dump_path:          last_dump_path,
+                    dump_path: last_dump_path,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .map_err(|e| {
                 eprintln!(
@@ -348,12 +359,8 @@ mod tests {
 
     fn open_audit(audit_dir: &Path) -> Arc<dyn AuditSink> {
         std::fs::create_dir_all(audit_dir).unwrap();
-        let writer = AuditWriter::open(
-            &audit_dir.join("segment-000.jsonl"),
-            0,
-            None,
-        )
-        .expect("open audit writer at genesis");
+        let writer = AuditWriter::open(&audit_dir.join("segment-000.jsonl"), 0, None)
+            .expect("open audit writer at genesis");
         Arc::new(FileAuditSink::new(writer))
     }
 
@@ -366,7 +373,7 @@ mod tests {
             lock_count: 2,
             cycles: vec![DeadlockCycle {
                 cycle_index: 0,
-                threads:     vec![
+                threads: vec![
                     DeadlockThread {
                         thread_id: "ThreadId(7)".to_owned(),
                         backtrace: "frame_a".to_owned(),
@@ -381,14 +388,12 @@ mod tests {
     }
 
     fn read_chain_kinds(audit_dir: &Path) -> Vec<String> {
-        let bytes = std::fs::read(audit_dir.join("segment-000.jsonl"))
-            .expect("read audit segment");
+        let bytes = std::fs::read(audit_dir.join("segment-000.jsonl")).expect("read audit segment");
         let text = String::from_utf8(bytes).expect("utf-8 audit");
         text.lines()
             .filter(|l| !l.is_empty())
             .map(|l| {
-                let v: serde_json::Value =
-                    serde_json::from_str(l).expect("audit line json");
+                let v: serde_json::Value = serde_json::from_str(l).expect("audit line json");
                 v["event_kind"].as_str().unwrap_or("").to_owned()
             })
             .collect()
@@ -399,9 +404,8 @@ mod tests {
         // hash-link / serde / schema break as `Err`. `Ok` is the
         // load-bearing chain-clean witness for
         // `INV-SUPERVISOR-RESTART-AUDIT-01`.
-        let stats = raxis_audit_tools::verify_chain_from(audit_dir, 0).expect(
-            "audit chain must verify clean across the restart boundary",
-        );
+        let stats = raxis_audit_tools::verify_chain_from(audit_dir, 0)
+            .expect("audit chain must verify clean across the restart boundary");
         assert!(
             stats.total_records > 0,
             "chain must have at least one record after rehydration",
@@ -420,8 +424,7 @@ mod tests {
         let audit_dir = data_dir.join("audit");
 
         // Seed: prior kernel's dump file.
-        deadlock_dump::write_dump(data_dir, &synthetic_dump(1_714_500_000))
-            .expect("write dump");
+        deadlock_dump::write_dump(data_dir, &synthetic_dump(1_714_500_000)).expect("write dump");
         // Seed: supervisor sentinel saying we're a restart.
         let sentinel_json = serde_json::json!({
             "schema_version": 1,
@@ -450,17 +453,17 @@ mod tests {
         audit
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       data_dir.display().to_string(),
-                    policy_epoch:   1,
+                    data_dir: data_dir.display().to_string(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
-        let sentinel = read_sentinel_for_restart(
-            &data_dir.join("kernel_lifecycle_status.json"),
-        );
+        let sentinel = read_sentinel_for_restart(&data_dir.join("kernel_lifecycle_status.json"));
         assert!(sentinel.is_some(), "sentinel must parse as Restarting");
 
         let outcome = rehydrate_restart_context(audit.as_ref(), data_dir, sentinel, 47);
@@ -512,18 +515,19 @@ mod tests {
         let dir = tempdir().unwrap();
         let data_dir = dir.path();
         let audit_dir = data_dir.join("audit");
-        deadlock_dump::write_dump(data_dir, &synthetic_dump(1_714_500_002))
-            .expect("write dump");
+        deadlock_dump::write_dump(data_dir, &synthetic_dump(1_714_500_002)).expect("write dump");
 
         let audit = open_audit(&audit_dir);
         audit
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       data_dir.display().to_string(),
-                    policy_epoch:   1,
+                    data_dir: data_dir.display().to_string(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
@@ -577,17 +581,17 @@ mod tests {
         audit
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       data_dir.display().to_string(),
-                    policy_epoch:   1,
+                    data_dir: data_dir.display().to_string(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 
-        let sentinel = read_sentinel_for_restart(
-            &data_dir.join("kernel_lifecycle_status.json"),
-        );
+        let sentinel = read_sentinel_for_restart(&data_dir.join("kernel_lifecycle_status.json"));
         let outcome = rehydrate_restart_context(audit.as_ref(), data_dir, sentinel, 5);
         assert_eq!(outcome.dumps_processed, 0);
         assert_eq!(outcome.kernel_deadlock_detected_emits, 0);
@@ -632,16 +636,16 @@ mod tests {
         audit
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       data_dir.display().to_string(),
-                    policy_epoch:   1,
+                    data_dir: data_dir.display().to_string(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .unwrap();
-        let sentinel = read_sentinel_for_restart(
-            &data_dir.join("kernel_lifecycle_status.json"),
-        );
+        let sentinel = read_sentinel_for_restart(&data_dir.join("kernel_lifecycle_status.json"));
         rehydrate_restart_context(audit.as_ref(), data_dir, sentinel, 1);
 
         // Read the third line (KernelRestartInitiated) and assert
@@ -671,11 +675,13 @@ mod tests {
         audit
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       data_dir.display().to_string(),
-                    policy_epoch:   1,
+                    data_dir: data_dir.display().to_string(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             )
             .unwrap();
 

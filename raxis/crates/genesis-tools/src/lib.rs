@@ -91,8 +91,10 @@ mod fingerprint_tests {
         let key = [0u8; 32];
         let fp = pubkey_fingerprint(&key);
         assert_eq!(fp.len(), 32, "SHA-256[:16] is 16 bytes = 32 hex chars");
-        assert!(fp.chars().all(|c| c.is_ascii_hexdigit()),
-            "fingerprint must be lowercase hex, got {fp:?}");
+        assert!(
+            fp.chars().all(|c| c.is_ascii_hexdigit()),
+            "fingerprint must be lowercase hex, got {fp:?}"
+        );
     }
 
     #[test]

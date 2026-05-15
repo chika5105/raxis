@@ -179,16 +179,16 @@ pub enum AuditEventKind {
     /// is operator-attention.
     KernelDeadlockDetected {
         /// Total threads across all detected cycles in the dump.
-        thread_count:          u32,
+        thread_count: u32,
         /// Total locks across all detected cycles in the dump.
-        lock_count:            u32,
+        lock_count: u32,
         /// Forensic dump path. `Some` for next-boot synthesised
         /// emits and the watcher's best-effort emit; `None` is
         /// reserved for synthesised emits where the dump file was
         /// missing on read (rare; carries `lock_count = 0` in that
         /// case so the dashboard still has something to render).
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        dump_path:             Option<String>,
+        dump_path: Option<String>,
         /// Unix-seconds wallclock the watcher detected the cycle
         /// at. For next-boot synthesised events this comes from
         /// the dump file's `detected_at_unix_secs`; for the
@@ -216,7 +216,7 @@ pub enum AuditEventKind {
         ///   * `"PanicAbort"`       — prior run non-zero exit, no dump.
         ///   * `"SignalCrash"`      — SIGSEGV / SIGBUS / SIGABRT.
         ///   * `"OomKilled"`        — SIGKILL not sent by supervisor.
-        reason:             String,
+        reason: String,
         /// Numeric exit status of the prior run.
         ///   * For `WEXITSTATUS` exits: the literal exit code.
         ///   * For signaled exits: `128 + signal_number` (shell
@@ -226,10 +226,10 @@ pub enum AuditEventKind {
         /// 1-indexed restart attempt within the current
         /// circuit-breaker window. The first restart after a clean
         /// run resets the counter to 1.
-        attempt_n:          u32,
+        attempt_n: u32,
         /// Operator-policy ceiling at the time of this restart
         /// (`SUPERVISOR_RESTART_MAX_ATTEMPTS`, default 3).
-        max_attempts:       u32,
+        max_attempts: u32,
     },
 
     /// V2.5 `self-healing-supervisor.md §3.4` — replacement kernel
@@ -250,12 +250,12 @@ pub enum AuditEventKind {
         /// Wall-clock duration of the boot-time crash-recovery
         /// sweep (`recovery::reconcile` Step 6 +
         /// `reconcile_git_apply_pending` Step 8a).
-        recovery_sweep_ms:  u64,
+        recovery_sweep_ms: u64,
         /// Forensic dump that triggered this restart, if the cause
         /// was a deadlock detection on the prior run. `None` for
         /// crash / OOM / signaled prior runs.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        dump_path:          Option<String>,
+        dump_path: Option<String>,
     },
 
     /// V2.5 `self-healing-supervisor.md §3.4` /
@@ -276,9 +276,9 @@ pub enum AuditEventKind {
     KernelRestartHaltedCircuitOpen {
         /// Number of restart attempts the supervisor observed in
         /// the sliding window before refusing further restarts.
-        attempts_in_window:  u32,
+        attempts_in_window: u32,
         /// Sliding-window width in seconds (default 60).
-        window_secs:         u32,
+        window_secs: u32,
         /// PascalCase classification of the most recent failure
         /// that tripped the breaker. Same set as
         /// `KernelRestartInitiated.reason`.
@@ -317,10 +317,10 @@ pub enum AuditEventKind {
     /// observability for the operator-continuity surface.
     TaskAutoResumedAfterSupervisorRestart {
         /// V1 task id whose state was re-admitted.
-        task_id:                  String,
+        task_id: String,
         /// Initiative the task belongs to. Useful for dashboard
         /// grouping ("3 tasks across initiative X auto-resumed").
-        initiative_id:            String,
+        initiative_id: String,
         /// FSM state the task held BEFORE the boot-time recovery
         /// sweep moved it to `BlockedRecoveryPending`. Recorded for
         /// forensic completeness so an operator post-mortem can
@@ -331,7 +331,7 @@ pub enum AuditEventKind {
         /// `BlockedRecoveryPending`, mirroring the operator
         /// `task resume` path; the kernel re-derives the
         /// post-Admitted state via normal scheduling).
-        prior_state:              String,
+        prior_state: String,
         /// Number of `witness_records` rows that survived the
         /// restart for this task. Always equal to whatever was
         /// already on disk (the auto-resume path does not touch
@@ -340,7 +340,7 @@ pub enum AuditEventKind {
         /// Recorded so the operator dashboard can surface "your
         /// witnesses were preserved" reassurance without re-running
         /// a count query.
-        witness_count_preserved:  u32,
+        witness_count_preserved: u32,
         /// Stable identifier for the supervisor-restart episode
         /// that triggered this auto-resume. Synthesised on the
         /// kernel side from the supervisor sentinel's
@@ -349,7 +349,7 @@ pub enum AuditEventKind {
         /// `TaskAutoResumedAfterSupervisorRestart` events from the
         /// SAME boot share the SAME `supervisor_restart_id` so the
         /// dashboard can group them as a single restart episode.
-        supervisor_restart_id:    String,
+        supervisor_restart_id: String,
     },
 
     /// V2 agent-runtime substrate selection record.
@@ -632,30 +632,30 @@ pub enum AuditEventKind {
     /// observability; not a page.
     PlannerMaxTurnsProgressivelyScaled {
         /// Task id whose spawn triggered the scaling decision.
-        task_id:       String,
+        task_id: String,
         /// 1-based attempt index
         /// (`subtask_activations.crash_retry_count + 1`).
         /// Always `>= 2` when this event is emitted; `attempt = 1`
         /// is the no-scaling case and does not emit.
-        attempt:       u32,
+        attempt: u32,
         /// Per-task / per-policy / compiled base ceiling
         /// (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`).
-        base:          u32,
+        base: u32,
         /// Per-task / per-policy / derived scaling step.
-        step:          u32,
+        step: u32,
         /// `min(base + (attempt - 1) * step, hard_ceiling)`.
-        effective:     u32,
+        effective: u32,
         /// Runtime hard ceiling clamp (`240` by default, overridable
         /// via `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`).
-        hard_ceiling:  u32,
+        hard_ceiling: u32,
         /// Stable label naming the base resolution arm verbatim:
         /// `"task"`, `"policy"`, or `"compiled-default"`. Mirrors the
         /// `source` field on the companion `PlannerMaxTurnsResolved`
         /// stderr line.
-        source:        String,
+        source: String,
         /// Stable label naming the step resolution arm verbatim:
         /// `"task"`, `"policy"`, or `"derived-default"`.
-        step_source:   String,
+        step_source: String,
     },
 
     /// V2 `elastic-vm-scaling.md §4` — admitted scaling decision.
@@ -1483,7 +1483,7 @@ pub enum AuditEventKind {
         /// Operator fingerprint whose JWT authorised the approval
         /// call. Pinned for audit-replay so the chain reader can
         /// attribute the reset to a specific operator.
-        operator_id:   String,
+        operator_id: String,
     },
 
     /// `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01` — operator denied
@@ -1499,7 +1499,7 @@ pub enum AuditEventKind {
         /// The kernel-initiated escalation that was denied.
         escalation_id: String,
         /// Operator fingerprint whose JWT authorised the deny call.
-        operator_id:   String,
+        operator_id: String,
     },
 
     // --- Escalation ---
@@ -2404,7 +2404,6 @@ pub enum AuditEventKind {
     // in-guest tproxy; an audit emission failure causes the
     // handler to return Deny with reason="FAIL_AUDIT_EMIT" so the
     // guest cannot observe an unobserved admission.
-
     /// Emitted when the A3 kernel-side tproxy admission handler
     /// admits one outbound flow over vsock. Mirrors the
     /// `TransparentProxyAdmitted` shape so dashboards keying on
@@ -2478,7 +2477,6 @@ pub enum AuditEventKind {
     },
 
     // --- V2 reviewer-egress-defaults-decision.md §5.
-
     /// Emitted ONCE per implicit-provider grant when the kernel /
     /// gateway materialises the effective egress allowlist from
     /// `PolicyBundle::default_provider_egress_grants`. Provides
@@ -2496,15 +2494,15 @@ pub enum AuditEventKind {
         /// the operator correlate the grant against the
         /// `policy_epoch_history` row that introduced or removed
         /// the underlying `[[providers]]` entry.
-        policy_epoch:  u64,
+        policy_epoch: u64,
         /// `provider_id` of the originating `[[providers]]` entry
         /// (e.g. `"anthropic-prod"`).
-        provider_id:   String,
+        provider_id: String,
         /// Provider `kind` string (e.g. `"Anthropic"`,
         /// `"http_sidecar"`).
         provider_kind: String,
         /// Implicitly granted FQDN (e.g. `"api.anthropic.com"`).
-        fqdn:          String,
+        fqdn: String,
     },
 
     /// Emitted when the kernel detects an egress-denial *stall*:
@@ -2527,29 +2525,29 @@ pub enum AuditEventKind {
     /// window so a hot stall doesn't spam the audit log).
     SessionEgressStallDetected {
         /// Session whose VM is stalling.
-        session_id:            String,
+        session_id: String,
         /// `(host_or_sni, port)` the agent has been retrying.
         /// `host_or_sni == None` for raw-TCP destinations where
         /// the in-VM proxy could not extract an SNI.
-        host_or_sni:           Option<String>,
+        host_or_sni: Option<String>,
         /// Original destination port the in-VM proxy observed.
-        original_dst_port:     u16,
+        original_dst_port: u16,
         /// Stable short reason string from the underlying
         /// `TransparentProxyDenied` events
         /// (e.g. `host_not_in_allowlist`).
-        reason:                String,
+        reason: String,
         /// Number of denials inside the sliding window that
         /// triggered the detection.
         block_count_in_window: u32,
         /// Window length in seconds (`30` per the decision spec
         /// default).
-        window_seconds:        u32,
+        window_seconds: u32,
         /// Origin tag — `"tproxy"` for Tier-1 transparent-proxy
         /// admission denials, `"kernel_mediated_fetch"` for
         /// `PlannerFetchRequest` `DomainNotAllowed` rejections.
         /// Lets the operator dashboard segment by chokepoint
         /// without re-deriving from the destination.
-        source:                String,
+        source: String,
     },
 
     // --- Credential proxy lifecycle (`credential-proxy.md §5`).
@@ -3318,7 +3316,6 @@ pub enum AuditEventKind {
     // These are SINGLE-CLASS events per `audit-paired-writes.md §4`
     // — there's no paired SQLite mutation; the audit row IS the
     // record of the operator-side intent.
-
     /// Operator marked a single notification as read via
     /// `PATCH /api/notifications/:id/read`. Audited even when no
     /// approve/deny was taken — passive operator interactions are
@@ -3327,13 +3324,13 @@ pub enum AuditEventKind {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Notification id the operator targeted.
-        notification_id:      String,
+        notification_id: String,
         /// `true` if the row was previously unread and the kernel
         /// flipped it to read. `false` if it was already read or
         /// does not exist; the action still audits.
-        updated:              bool,
+        updated: bool,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator triggered a bulk mark-all-read via
@@ -3343,9 +3340,9 @@ pub enum AuditEventKind {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows flipped from unread → read.
-        count:                u64,
+        count: u64,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened a worktree detail surface — a privileged
@@ -3362,18 +3359,20 @@ pub enum AuditEventKind {
     /// rejects anything outside the blessed surface BEFORE the
     /// data-layer call. See `specs/v2/dashboard-operator-action-
     /// audit-coverage.md §signal-vs-noise`.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorWorktreeAccessed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Operator-supplied worktree slug from the URL path.
-        worktree_id:          String,
+        worktree_id: String,
         /// `"detail"` / `"tree"` / `"log"` / `"status"` — narrow
         /// stable-wire surface name; lets dashboards distinguish
         /// "looked at metadata" from "browsed the tree".
-        surface:              String,
+        surface: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator rendered a worktree diff (`GET /api/git/worktrees/:id/diff`).
@@ -3386,18 +3385,20 @@ pub enum AuditEventKind {
     /// retired. The diff is a read of operator-blessed source
     /// material and emitting a per-click chain row only ever
     /// proved "someone browsed".
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorDiffViewed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Operator-supplied worktree slug.
-        worktree_id:          String,
+        worktree_id: String,
         /// Diff base ref / sha (`HEAD` if absent).
-        base_ref:             Option<String>,
+        base_ref: Option<String>,
         /// Diff head ref / sha (`HEAD` if absent).
-        head_ref:             Option<String>,
+        head_ref: Option<String>,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator fetched a file's raw contents from a worktree
@@ -3416,19 +3417,21 @@ pub enum AuditEventKind {
     /// validation still rejects traversal / NUL / `.git` /
     /// absolute paths BEFORE the data-layer call — none of that
     /// containment depended on the audit emission.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorFileContentFetched {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Operator-supplied worktree slug.
-        worktree_id:          String,
+        worktree_id: String,
         /// Relative path under the worktree root the operator
         /// requested. On `RejectedValidation` this is the
         /// rejected raw input; on `Accepted` this is the
         /// canonicalised relative path.
-        path:                 String,
+        path: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator triggered an audit-chain re-verify via
@@ -3444,16 +3447,18 @@ pub enum AuditEventKind {
     /// (≤ 1 reverify per ~30 s per operator) plus the cache-hit
     /// short-circuit keep the walker from being abused without
     /// the chain row.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorAuditChainReverified {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Verdict the walker returned (`"ok"` / `"broken"`).
-        verdict:              String,
+        verdict: String,
         /// Highest seq the walker observed end-to-end.
-        last_verified_seq:    u64,
+        last_verified_seq: u64,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened a session detail / notification detail
@@ -3467,14 +3472,16 @@ pub enum AuditEventKind {
     /// **Deprecated** in `worker/audit-noise-sweep-r2`. Retained
     /// on the enum so audit-tools can deserialize already-persisted
     /// chains that contain this variant.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorNotificationViewed {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Notification id the operator opened.
-        notification_id:      String,
+        notification_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator queried the subsystem-health snapshot via
@@ -3489,12 +3496,14 @@ pub enum AuditEventKind {
     /// retired — health pings are dashboard heartbeat telemetry
     /// (Prom / OTel records them at a fraction of the chain's
     /// per-row cost), not forensic events.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorHealthQueried {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     // ── Dashboard credential viewer (INV-DASHBOARD-CREDENTIAL-*) ────
@@ -3509,7 +3518,6 @@ pub enum AuditEventKind {
     // chain records "who looked at WHICH cred and when". See
     // `dashboard-operator-action-audit-coverage.md` for the gap-
     // analysis table that pinned each variant below.
-
     /// Operator listed the credentials bound to one initiative via
     /// `GET /api/initiatives/:id/credentials`. The response carries
     /// only metadata (name, proxy type, mount target, file path,
@@ -3523,18 +3531,20 @@ pub enum AuditEventKind {
     /// relevant moment, and the listing endpoint only ever
     /// surfaced metadata an admin already had role-gated access
     /// to enumerate.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorListedCredentials {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative whose credential set was listed.
-        initiative_id:        String,
+        initiative_id: String,
         /// Number of credential metadata rows returned (zero on a
         /// fresh initiative with no credentials, or on a 404 after
         /// the initiative was already validated).
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator revealed one credential's plaintext bytes via
@@ -3548,17 +3558,17 @@ pub enum AuditEventKind {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative the credential was bound to.
-        initiative_id:        String,
+        initiative_id: String,
         /// Credential name (matches `task_credential_proxies.credential_name`).
-        credential_name:      String,
+        credential_name: String,
         /// Stable-wire severity classifier — pinned to `"high"` for
         /// per-initiative credentials. The notification router
         /// matches on this so a future operator-routed alert can
         /// promote it to a Critical without rewriting every
         /// emission site.
-        severity:             String,
+        severity: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator listed system-wide credentials (provider keys, etc.)
@@ -3573,14 +3583,16 @@ pub enum AuditEventKind {
     /// `OperatorListedCredentials` — the reveal-side
     /// `OperatorRevealedSystemCredential` event records the
     /// security-relevant moment.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorListedSystemCredentials {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of system credentials surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator revealed a system-wide credential via
@@ -3594,12 +3606,12 @@ pub enum AuditEventKind {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Credential name (e.g. `"providers.anthropic-prod"`).
-        credential_name:      String,
+        credential_name: String,
         /// Stable-wire severity classifier — pinned to `"critical"`
         /// for system credentials.
-        severity:             String,
+        severity: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     // ── Operator-action audit-coverage gap-closers ──────────────────
@@ -3610,7 +3622,6 @@ pub enum AuditEventKind {
     // `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`. The
     // variants below close the gaps identified in
     // `dashboard-operator-action-audit-coverage.md §gap-analysis`.
-
     /// Operator listed initiatives via `GET /api/initiatives`.
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained on
@@ -3618,16 +3629,18 @@ pub enum AuditEventKind {
     /// chains that contain this variant; emit sites have been
     /// retired. See `specs/v2/dashboard-operator-action-audit-
     /// coverage.md §signal-vs-noise`.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedInitiativeList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows surfaced.
-        count:                u32,
+        count: u32,
         /// Optional state filter applied (`"Active"`, `"Closed"`, …).
-        state_filter:         Option<String>,
+        state_filter: Option<String>,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened the initiative-detail surface via
@@ -3637,14 +3650,16 @@ pub enum AuditEventKind {
     /// backwards-compatible deserialization of older chains; emit
     /// sites have been retired (signal-vs-noise policy in
     /// `specs/v2/dashboard-operator-action-audit-coverage.md`).
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedInitiative {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative id requested.
-        initiative_id:        String,
+        initiative_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened the initiative DAG view via
@@ -3652,14 +3667,16 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedInitiativeDag {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative id whose DAG was requested.
-        initiative_id:        String,
+        initiative_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened the per-initiative task list via
@@ -3667,30 +3684,34 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedInitiativeTasks {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative id whose task list was requested.
-        initiative_id:        String,
+        initiative_id: String,
         /// Number of tasks surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened a task detail surface via `GET /api/tasks/:id`.
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedTask {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Task id requested.
-        task_id:              String,
+        task_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened the task structured-outputs surface via
@@ -3698,32 +3719,36 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedTaskOutputs {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Task id requested.
-        task_id:              String,
+        task_id: String,
         /// Number of structured-output rows surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator listed sessions via `GET /api/sessions`.
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedSessionList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows surfaced.
-        count:                u32,
+        count: u32,
         /// Optional initiative-id filter.
         initiative_id_filter: Option<String>,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened a session detail surface via
@@ -3731,14 +3756,16 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedSession {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Session id requested.
-        session_id:           String,
+        session_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened a session SSE stream via
@@ -3754,28 +3781,32 @@ pub enum AuditEventKind {
     /// not affect kernel state — the chain row only ever
     /// recorded "someone looked", which the audit chain itself
     /// records via the events the stream mirrors.
-    #[deprecated(note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history.")]
+    #[deprecated(
+        note = "removed in audit-noise-sweep-r2 — read-only operator action; emit only mutations and security events. See audit-tightening commit history."
+    )]
     OperatorOpenedSessionStream {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Session id whose stream was attached to.
-        session_id:           String,
+        session_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator listed escalations via `GET /api/escalations`.
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedEscalationList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened an escalation detail surface via
@@ -3783,14 +3814,16 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedEscalation {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Escalation id requested.
-        escalation_id:        String,
+        escalation_id: String,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator paginated the audit chain via `GET /api/audit`.
@@ -3801,32 +3834,36 @@ pub enum AuditEventKind {
     /// via `OperatorAuditChainReverified` — that pins a kernel
     /// worker thread on a full chain walk and remains a
     /// state-affecting load.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedAuditChain {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Cursor seq passed in (`None` ⇒ tail).
-        cursor_seq:           Option<u64>,
+        cursor_seq: Option<u64>,
         /// Page size returned.
-        count:                u32,
+        count: u32,
         /// Optional initiative-id filter.
         initiative_id_filter: Option<String>,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator opened the operator inbox via `GET /api/inbox`.
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedInbox {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator listed notifications via `GET /api/notifications`.
@@ -3836,16 +3873,18 @@ pub enum AuditEventKind {
     /// The mark-read / mark-all-read mutations still audit via
     /// `OperatorNotificationMarkedRead` /
     /// `OperatorNotificationsMarkedAllRead`.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedNotifications {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of rows surfaced (0 for the unread-count endpoint).
-        count:                u32,
+        count: u32,
         /// `true` iff the operator passed `unread_only=true`.
-        unread_only:          bool,
+        unread_only: bool,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator viewed the policy snapshot via `GET /api/policy`.
@@ -3854,14 +3893,16 @@ pub enum AuditEventKind {
     /// backwards-compatible deserialization; emit sites retired.
     /// The `PUT /api/policy/toml` mutation still audits via
     /// `PolicyUpdatedViaDashboard`.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedPolicySnapshot {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Active policy epoch surfaced.
-        policy_epoch:         u64,
+        policy_epoch: u64,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator viewed the raw `policy.toml` via
@@ -3872,14 +3913,16 @@ pub enum AuditEventKind {
     /// The `write_policy` role gate (and its `OperatorAuth*`
     /// chain) remain the forensic trail for "who has the keys
     /// to surface the raw allowlist".
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedPolicyToml {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Active policy epoch at the time of read.
-        policy_epoch:         u64,
+        policy_epoch: u64,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator listed git worktrees via `GET /api/git/worktrees`.
@@ -3890,14 +3933,16 @@ pub enum AuditEventKind {
     /// audit via `OperatorWorktreeAccessed` / `OperatorDiffViewed`
     /// / `OperatorFileContentFetched` because they surface
     /// operator-blessed source material.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedWorktreeList {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Number of worktrees surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator viewed a worktree's `git log` via
@@ -3910,16 +3955,18 @@ pub enum AuditEventKind {
     /// reaches the chain under the surviving worktree-access
     /// variant. New emits should use that variant; this one is
     /// dead but kept for chain-decode parity with older boots.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedWorktreeLog {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Worktree slug.
-        worktree_id:          String,
+        worktree_id: String,
         /// Number of log entries surfaced.
-        count:                u32,
+        count: u32,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 
     /// Operator viewed the plan TOML for one initiative via
@@ -3927,17 +3974,19 @@ pub enum AuditEventKind {
     ///
     /// **Deprecated** in `worker/audit-tightening`. Retained for
     /// backwards-compatible deserialization; emit sites retired.
-    #[deprecated(note = "Read-only operator views are no longer audited; emit only mutations and security events.")]
+    #[deprecated(
+        note = "Read-only operator views are no longer audited; emit only mutations and security events."
+    )]
     OperatorViewedPlanToml {
         /// JWT-derived operator fingerprint.
         operator_fingerprint: String,
         /// Initiative id whose plan was viewed.
-        initiative_id:        String,
+        initiative_id: String,
         /// Plan SHA-256 fingerprint surfaced (matches
         /// `initiatives.plan_sha256`).
-        plan_sha256:          Option<String>,
+        plan_sha256: Option<String>,
         /// Stable-wire outcome string.
-        outcome:              String,
+        outcome: String,
     },
 }
 
@@ -3966,9 +4015,7 @@ impl AuditEventKind {
             Self::SessionVmExited { .. } => "SessionVmExited",
             Self::SessionVmRespawnAttempted { .. } => "SessionVmRespawnAttempted",
             Self::SessionVmFailedFinal { .. } => "SessionVmFailedFinal",
-            Self::PlannerMaxTurnsProgressivelyScaled { .. } => {
-                "PlannerMaxTurnsProgressivelyScaled"
-            }
+            Self::PlannerMaxTurnsProgressivelyScaled { .. } => "PlannerMaxTurnsProgressivelyScaled",
             Self::SessionVmScaleEvent { .. } => "SessionVmScaleEvent",
             Self::SessionVmScaleDeferred { .. } => "SessionVmScaleDeferred",
             Self::VmImageResolved { .. } => "VmImageResolved",
@@ -3998,8 +4045,8 @@ impl AuditEventKind {
             Self::ReviewAggregationCompleted { .. } => "ReviewAggregationCompleted",
             Self::ExecutorRespawnFromReviewRejection { .. } => "ExecutorRespawnFromReviewRejection",
             Self::OrchestratorRespawnCeilingExceeded { .. } => "OrchestratorRespawnCeilingExceeded",
-            Self::OperatorApprovedRespawnEscalation   { .. } => "OperatorApprovedRespawnEscalation",
-            Self::OperatorDeniedRespawnEscalation     { .. } => "OperatorDeniedRespawnEscalation",
+            Self::OperatorApprovedRespawnEscalation { .. } => "OperatorApprovedRespawnEscalation",
+            Self::OperatorDeniedRespawnEscalation { .. } => "OperatorDeniedRespawnEscalation",
             Self::EscalationSubmitted { .. } => "EscalationSubmitted",
             Self::EscalationApproved { .. } => "EscalationApproved",
             Self::EscalationDenied { .. } => "EscalationDenied",
@@ -4084,9 +4131,7 @@ impl AuditEventKind {
             // event before returning success. Failure paths audit too
             // with the rejection class on the `outcome` field.
             Self::OperatorNotificationMarkedRead { .. } => "OperatorNotificationMarkedRead",
-            Self::OperatorNotificationsMarkedAllRead { .. } => {
-                "OperatorNotificationsMarkedAllRead"
-            }
+            Self::OperatorNotificationsMarkedAllRead { .. } => "OperatorNotificationsMarkedAllRead",
             Self::OperatorWorktreeAccessed { .. } => "OperatorWorktreeAccessed",
             Self::OperatorDiffViewed { .. } => "OperatorDiffViewed",
             Self::OperatorFileContentFetched { .. } => "OperatorFileContentFetched",
@@ -4098,12 +4143,8 @@ impl AuditEventKind {
             // audit-coverage sweep.
             Self::OperatorListedCredentials { .. } => "OperatorListedCredentials",
             Self::OperatorRevealedCredential { .. } => "OperatorRevealedCredential",
-            Self::OperatorListedSystemCredentials { .. } => {
-                "OperatorListedSystemCredentials"
-            }
-            Self::OperatorRevealedSystemCredential { .. } => {
-                "OperatorRevealedSystemCredential"
-            }
+            Self::OperatorListedSystemCredentials { .. } => "OperatorListedSystemCredentials",
+            Self::OperatorRevealedSystemCredential { .. } => "OperatorRevealedSystemCredential",
             // INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01 gap-closers.
             Self::OperatorViewedInitiativeList { .. } => "OperatorViewedInitiativeList",
             Self::OperatorViewedInitiative { .. } => "OperatorViewedInitiative",

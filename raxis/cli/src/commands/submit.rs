@@ -52,8 +52,7 @@ use raxis_crypto::{
     sha256_of_artifact_bytes, signing_input,
 };
 use raxis_types::{
-    operator_wire::OperatorRequest, BundleArtifact, BundleSha256, OperatorFingerprint,
-    PlanBundle,
+    operator_wire::OperatorRequest, BundleArtifact, BundleSha256, OperatorFingerprint, PlanBundle,
 };
 
 use crate::errors::CliError;
@@ -87,26 +86,26 @@ const MAX_ARTIFACT_COUNT_HARD_CEILING: usize = 1024;
 
 #[derive(Debug)]
 struct SubmitPlanArgs {
-    plan_toml_path:     PathBuf,
-    initiative_id:      Option<String>,
+    plan_toml_path: PathBuf,
+    initiative_id: Option<String>,
     /// `Some(true)` = explicit --dry-run; `Some(false)` = explicit
     /// --no-dry-run; `None` = no flag passed (default applies).
-    dry_run_flag:       Option<bool>,
+    dry_run_flag: Option<bool>,
 }
 
 fn parse_args(args: &[String]) -> Result<SubmitPlanArgs, CliError> {
     let mut plan_toml_path: Option<PathBuf> = None;
-    let mut initiative_id:  Option<String>  = None;
-    let mut dry_run_flag:   Option<bool>    = None;
+    let mut initiative_id: Option<String> = None;
+    let mut dry_run_flag: Option<bool> = None;
     let mut pos = 0usize;
 
     while pos < args.len() {
         match args[pos].as_str() {
             "--initiative-id" => {
                 pos += 1;
-                let v = args.get(pos).ok_or_else(|| {
-                    CliError::Usage("--initiative-id requires <id>".to_owned())
-                })?;
+                let v = args
+                    .get(pos)
+                    .ok_or_else(|| CliError::Usage("--initiative-id requires <id>".to_owned()))?;
                 initiative_id = Some(v.clone());
             }
             "--dry-run" => {
@@ -135,8 +134,7 @@ fn parse_args(args: &[String]) -> Result<SubmitPlanArgs, CliError> {
 
     let plan_toml_path = plan_toml_path.ok_or_else(|| {
         CliError::Usage(
-            "submit plan requires <plan.toml> (e.g. `raxis submit plan ./plan.toml`)"
-                .to_owned(),
+            "submit plan requires <plan.toml> (e.g. `raxis submit plan ./plan.toml`)".to_owned(),
         )
     })?;
 
@@ -169,10 +167,10 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let sub = args.first().map(|s| s.as_str()).unwrap_or("");
     match sub {
         "plan" => run_plan(flags, &args[1..]),
-        ""     => Err(CliError::Usage(
+        "" => Err(CliError::Usage(
             "submit requires a sub-command: `submit plan <plan.toml>`".to_owned(),
         )),
-        other  => Err(CliError::Usage(format!(
+        other => Err(CliError::Usage(format!(
             "unknown submit sub-command: `{other}` (expected `plan`)"
         ))),
     }
@@ -191,11 +189,9 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let dry_run = parsed.dry_run_flag.unwrap_or(false);
 
     // Phase 1: parse — read plan.toml bytes.
-    let plan_toml_bytes = std::fs::read(&parsed.plan_toml_path).map_err(|e| {
-        CliError::Io {
-            path:   parsed.plan_toml_path.display().to_string(),
-            source: e,
-        }
+    let plan_toml_bytes = std::fs::read(&parsed.plan_toml_path).map_err(|e| CliError::Io {
+        path: parsed.plan_toml_path.display().to_string(),
+        source: e,
     })?;
 
     // Cheap structural sanity: parsing as TOML is the V1 admission
@@ -203,13 +199,12 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // allocating buffers / IPC frames. Failure surfaces as a usage
     // error with the exact line/column.
     if let Err(e) = toml::from_str::<toml::Value>(
-        std::str::from_utf8(&plan_toml_bytes).map_err(|e| {
-            CliError::Usage(format!("plan.toml is not valid UTF-8: {e}"))
-        })?,
+        std::str::from_utf8(&plan_toml_bytes)
+            .map_err(|e| CliError::Usage(format!("plan.toml is not valid UTF-8: {e}")))?,
     ) {
-        return Err(CliError::Usage(format!(
-            "plan.toml is not valid TOML: {e}",
-        )));
+        return Err(CliError::Usage(
+            format!("plan.toml is not valid TOML: {e}",),
+        ));
     }
 
     // Phase 2 + 3: resolve + canonicalize host-side path references.
@@ -222,9 +217,9 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // Phase 4: bundle. plan.toml is artifacts[0] per §3.3.
     let mut artifacts: Vec<BundleArtifact> = Vec::with_capacity(1 + host_paths.len());
     artifacts.push(BundleArtifact {
-        name:   "plan.toml".to_owned(),
+        name: "plan.toml".to_owned(),
         sha256: sha256_of_artifact_bytes(&plan_toml_bytes),
-        bytes:  plan_toml_bytes,
+        bytes: plan_toml_bytes,
     });
     // Future-extension: read each host-side path's bytes here, capped
     // at MAX_ARTIFACT_BYTES_HARD_CEILING + 1. For V2 this set is
@@ -248,7 +243,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // idempotent re-submission of the same plan.toml yields a *different*
     // bundle_sha256 — which is the §3.5 idempotency contract.
     let signed_at_unix_secs = unix_now_secs_signed();
-    let bundle_nonce        = mint_bundle_nonce()?;
+    let bundle_nonce = mint_bundle_nonce()?;
 
     // Plan root per §5.1: realpath(parent_dir(plan.toml)). For the
     // V2 visitor-set-is-empty path, the plan root is informational
@@ -272,8 +267,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // `CryptoError::PlanBundleEncode`); we explicitly chain it through
     // `Into::into` because the `?` operator only applies one layer of
     // `From` conversion.
-    let canonical_input = canonical_encode(&bundle)
-        .map_err(raxis_crypto::CryptoError::from)?;
+    let canonical_input = canonical_encode(&bundle).map_err(raxis_crypto::CryptoError::from)?;
 
     // Phase 8: bundle_sha256.
     let bundle_sha = crypto_bundle_sha256(&canonical_input);
@@ -283,7 +277,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let signing_key = load_signing_key(flags)?;
     let signing_pubkey: [u8; 32] = signing_key.verifying_key().to_bytes();
     let fingerprint = pubkey_fingerprint_8(&signing_pubkey);
-    let sig_input   = signing_input(&bundle_sha);
+    let sig_input = signing_input(&bundle_sha);
     use ed25519_dalek::Signer;
     let signature: ed25519_dalek::Signature = signing_key.sign(&sig_input);
 
@@ -293,10 +287,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // secret bytes per the dalek crate's contract).
     drop(signing_key);
 
-    let initiative_id = parsed
-        .initiative_id
-        .clone()
-        .unwrap_or_else(uuid_v7_string);
+    let initiative_id = parsed.initiative_id.clone().unwrap_or_else(uuid_v7_string);
 
     if dry_run {
         emit_dry_run_summary(
@@ -317,11 +308,11 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // which the CLI surfaces transparently via
     // `plan::handle_response`.
     let request = OperatorRequest::CreateInitiative {
-        initiative_id:     initiative_id.clone(),
-        plan_bundle_hex:   hex::encode(&canonical_input),
+        initiative_id: initiative_id.clone(),
+        plan_bundle_hex: hex::encode(&canonical_input),
         bundle_sha256_hex: hex::encode(bundle_sha.as_bytes()),
-        signature_hex:     hex::encode(signature.to_bytes()),
-        signed_by_hex:     hex::encode(fingerprint.as_bytes()),
+        signature_hex: hex::encode(signature.to_bytes()),
+        signed_by_hex: hex::encode(fingerprint.as_bytes()),
     };
     let req_json = serde_json::to_value(&request).map_err(CliError::Json)?;
 
@@ -329,7 +320,7 @@ pub fn run_plan(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let resp = conn.send_request(&req_json)?;
     crate::commands::plan::handle_response(resp, |ok| {
         let returned_id = ok["initiative_id"].as_str().unwrap_or(&initiative_id);
-        let status      = ok["status"].as_str().unwrap_or("Draft");
+        let status = ok["status"].as_str().unwrap_or("Draft");
         println!("Initiative {returned_id} created. Status: {status}");
         println!("bundle_sha256: {}", hex::encode(bundle_sha.as_bytes()));
     })
@@ -347,17 +338,17 @@ fn visit_host_paths_v2_empty(_plan_toml_path: &Path) -> Vec<String> {
 }
 
 fn canonical_plan_root(plan_toml_path: &Path) -> Result<String, CliError> {
-    let parent = plan_toml_path
-        .parent()
-        .ok_or_else(|| CliError::Usage(format!(
+    let parent = plan_toml_path.parent().ok_or_else(|| {
+        CliError::Usage(format!(
             "plan.toml path has no parent directory: {}",
             plan_toml_path.display(),
-        )))?;
+        ))
+    })?;
     // Per §5.1: plan_root = realpath(parent_dir(plan.toml)). We use
     // std::fs::canonicalize (which is realpath on Unix) so symlink
     // resolution and existence are checked together.
     let canonical = std::fs::canonicalize(parent).map_err(|e| CliError::Io {
-        path:   parent.display().to_string(),
+        path: parent.display().to_string(),
         source: e,
     })?;
     // The bundle's `plan_root_relpath` is informational (§3.1: "the
@@ -393,11 +384,11 @@ fn validate_size_caps(artifacts: &[BundleArtifact]) -> Result<(), CliError> {
                 MAX_ARTIFACT_BYTES_HARD_CEILING,
             )));
         }
-        total = total
-            .checked_add(a.bytes.len())
-            .ok_or_else(|| CliError::Usage(
+        total = total.checked_add(a.bytes.len()).ok_or_else(|| {
+            CliError::Usage(
                 "FAIL_PLAN_BUNDLE_TOO_LARGE: bundle byte count overflowed usize".to_owned(),
-            ))?;
+            )
+        })?;
     }
     if total > MAX_BUNDLE_BYTES_HARD_CEILING {
         return Err(CliError::Usage(format!(
@@ -448,12 +439,12 @@ fn pubkey_fingerprint_8(pubkey: &[u8; 32]) -> OperatorFingerprint {
 }
 
 fn emit_dry_run_summary(
-    initiative_id:    &str,
-    bundle:           &PlanBundle,
-    bundle_sha256:    &BundleSha256,
-    signature:        &[u8; 64],
-    fingerprint:      &OperatorFingerprint,
-    canonical_bytes:  usize,
+    initiative_id: &str,
+    bundle: &PlanBundle,
+    bundle_sha256: &BundleSha256,
+    signature: &[u8; 64],
+    fingerprint: &OperatorFingerprint,
+    canonical_bytes: usize,
 ) {
     // Operator-friendly dry-run output. Every field the kernel will
     // see at admission step time is printed here so the operator can
@@ -463,17 +454,31 @@ fn emit_dry_run_summary(
     println!("---");
     println!("Plan-bundle dry-run summary");
     println!("  initiative_id:       {}", initiative_id);
-    println!("  schema_version:      V2.1 ({})",
-        bundle.schema_version.as_u16());
-    println!("  signed_at_unix_secs: {}",
-        bundle.signed_at_unix_secs.unwrap_or(0));
-    println!("  bundle_nonce:        {}",
-        bundle.bundle_nonce.as_ref().map(|n| n.to_hex()).unwrap_or_default());
+    println!(
+        "  schema_version:      V2.1 ({})",
+        bundle.schema_version.as_u16()
+    );
+    println!(
+        "  signed_at_unix_secs: {}",
+        bundle.signed_at_unix_secs.unwrap_or(0)
+    );
+    println!(
+        "  bundle_nonce:        {}",
+        bundle
+            .bundle_nonce
+            .as_ref()
+            .map(|n| n.to_hex())
+            .unwrap_or_default()
+    );
     println!("  plan_root_relpath:   {}", bundle.plan_root_relpath);
     println!("  artifact_count:      {}", bundle.artifacts.len());
     for (i, a) in bundle.artifacts.iter().enumerate() {
-        println!("    [{i}] {} ({} bytes, sha256={})",
-            a.name, a.bytes.len(), a.sha256.to_hex());
+        println!(
+            "    [{i}] {} ({} bytes, sha256={})",
+            a.name,
+            a.bytes.len(),
+            a.sha256.to_hex()
+        );
     }
     println!("  bundle_sha256:       {}", bundle_sha256.to_hex());
     println!("  signed_by:           {}", fingerprint.to_hex());
@@ -513,8 +518,8 @@ mod tests {
 
     fn flags_with_key(key_path: &Path) -> GlobalFlags {
         GlobalFlags {
-            data_dir:          PathBuf::from("/tmp/raxis-test-data-dir"),
-            socket_path:       None,
+            data_dir: PathBuf::from("/tmp/raxis-test-data-dir"),
+            socket_path: None,
             operator_key_path: Some(key_path.to_owned()),
         }
     }
@@ -522,7 +527,10 @@ mod tests {
     #[test]
     fn arg_parser_requires_plan_path() {
         let err = parse_args(&[]).expect_err("no args must fail");
-        assert!(format!("{err}").contains("requires <plan.toml>"), "got: {err}");
+        assert!(
+            format!("{err}").contains("requires <plan.toml>"),
+            "got: {err}"
+        );
     }
 
     #[test]
@@ -539,10 +547,11 @@ mod tests {
             "--initiative-id".into(),
             "test-id".into(),
             "--dry-run".into(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(parsed.plan_toml_path, PathBuf::from("./plan.toml"));
         assert_eq!(parsed.initiative_id, Some("test-id".to_owned()));
-        assert_eq!(parsed.dry_run_flag,  Some(true));
+        assert_eq!(parsed.dry_run_flag, Some(true));
     }
 
     #[test]
@@ -564,7 +573,7 @@ mod tests {
 
         let plan_dir = write_temp_plan_toml("[meta]\nepoch = 1\n");
         let key_file = write_temp_key();
-        let flags    = flags_with_key(key_file.path());
+        let flags = flags_with_key(key_file.path());
 
         // Run --dry-run; capture nothing (the println outputs go to
         // stdout, which we don't intercept here — the contract under
@@ -604,9 +613,9 @@ mod tests {
             nonce,
             "/some/plan/root".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
+                name: "plan.toml".to_owned(),
                 sha256: BundleSha256::new(plan_toml_sha),
-                bytes:  plan_toml_bytes,
+                bytes: plan_toml_bytes,
             }],
         );
 
@@ -621,7 +630,10 @@ mod tests {
         // Decode + verify, exactly as the kernel admission path will
         // do at §8.1 step 4 + step 9.
         let decoded = canonical_decode(&canonical).expect("canonical_decode");
-        assert_eq!(decoded, bundle, "canonical_decode must round-trip the bundle");
+        assert_eq!(
+            decoded, bundle,
+            "canonical_decode must round-trip the bundle"
+        );
         // `verify_plan_bundle_signature` expects (pubkey_bytes, &PlanBundle,
         // signature) — it re-runs canonical_encode/bundle_sha256/signing_input
         // internally so the kernel admission path cannot drift from the CLI
@@ -635,21 +647,23 @@ mod tests {
     fn validate_size_caps_rejects_oversize_artifact() {
         let too_big = vec![0u8; MAX_ARTIFACT_BYTES_HARD_CEILING + 1];
         let artifacts = vec![BundleArtifact {
-            name:   "plan.toml".to_owned(),
+            name: "plan.toml".to_owned(),
             sha256: BundleSha256::new([0u8; 32]),
-            bytes:  too_big,
+            bytes: too_big,
         }];
         let err = validate_size_caps(&artifacts).expect_err("must reject");
-        assert!(format!("{err}").contains("FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE"),
-            "got: {err}");
+        assert!(
+            format!("{err}").contains("FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn validate_size_caps_accepts_default_v2_bundle() {
         let artifacts = vec![BundleArtifact {
-            name:   "plan.toml".to_owned(),
+            name: "plan.toml".to_owned(),
             sha256: BundleSha256::new([0u8; 32]),
-            bytes:  b"[meta]\nepoch = 1\n".to_vec(),
+            bytes: b"[meta]\nepoch = 1\n".to_vec(),
         }];
         validate_size_caps(&artifacts).expect("normal-sized plan must pass");
     }
@@ -666,22 +680,29 @@ mod tests {
     #[test]
     fn missing_plan_toml_surfaces_io_error_with_path() {
         let key_file = write_temp_key();
-        let flags    = flags_with_key(key_file.path());
+        let flags = flags_with_key(key_file.path());
         let nonexistent = tempfile::tempdir().unwrap();
         let args = vec![
-            nonexistent.path().join("does-not-exist.toml").display().to_string(),
+            nonexistent
+                .path()
+                .join("does-not-exist.toml")
+                .display()
+                .to_string(),
             "--dry-run".into(),
         ];
         let err = run_plan(&flags, &args).expect_err("missing plan must fail");
         let s = format!("{err}");
-        assert!(s.contains("does-not-exist.toml"), "error must include path; got: {s}");
+        assert!(
+            s.contains("does-not-exist.toml"),
+            "error must include path; got: {s}"
+        );
     }
 
     #[test]
     fn invalid_toml_surfaces_usage_error() {
         let plan_dir = write_temp_plan_toml("not = valid = toml");
         let key_file = write_temp_key();
-        let flags    = flags_with_key(key_file.path());
+        let flags = flags_with_key(key_file.path());
         let args = vec![
             plan_dir.path().join("plan.toml").display().to_string(),
             "--dry-run".into(),
@@ -694,7 +715,7 @@ mod tests {
     #[test]
     fn submit_dispatch_rejects_unknown_subcommand() {
         let key_file = write_temp_key();
-        let flags    = flags_with_key(key_file.path());
+        let flags = flags_with_key(key_file.path());
         let err = run(&flags, &["plonk".to_owned()]).expect_err("unknown sub must fail");
         let s = format!("{err}");
         assert!(s.contains("unknown submit sub-command"), "got: {s}");
@@ -704,7 +725,7 @@ mod tests {
     #[test]
     fn submit_dispatch_rejects_empty_subcommand() {
         let key_file = write_temp_key();
-        let flags    = flags_with_key(key_file.path());
+        let flags = flags_with_key(key_file.path());
         let err = run(&flags, &[]).expect_err("empty sub must fail");
         let s = format!("{err}");
         assert!(s.contains("submit requires a sub-command"), "got: {s}");

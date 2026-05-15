@@ -10,8 +10,8 @@
 //! an HTTP/1.1 preamble above 16 KiB is a malformed request.
 
 use raxis_tproxy_protocol::{
-    extract_host_header_from_http_request_line_block, extract_sni_from_client_hello, HostParseError,
-    SniParseError,
+    extract_host_header_from_http_request_line_block, extract_sni_from_client_hello,
+    HostParseError, SniParseError,
 };
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
@@ -26,14 +26,14 @@ pub struct PeekedFlow {
     /// MUST replay these bytes to the upstream BEFORE pumping
     /// further reads from the agent (otherwise the upstream
     /// receives a truncated TLS ClientHello / HTTP request).
-    pub buffered:     Vec<u8>,
+    pub buffered: Vec<u8>,
     /// Hostname extracted from the buffer. `None` if the peek
     /// found a well-formed flow but no SNI (rare for HTTPS) or
     /// no `Host:` header (an HTTP/1.0 client without one — the
     /// kernel will deny on `host_or_sni = None`).
-    pub host_or_sni:  Option<String>,
+    pub host_or_sni: Option<String>,
     /// What the parser thinks this is.
-    pub kind:         PeekKind,
+    pub kind: PeekKind,
 }
 
 /// What the peek found.
@@ -97,7 +97,9 @@ where
 
     loop {
         if buf.len() >= PEEK_CAP_BYTES {
-            return Err(PeekError::BufferOverflow { cap: PEEK_CAP_BYTES });
+            return Err(PeekError::BufferOverflow {
+                cap: PEEK_CAP_BYTES,
+            });
         }
         let n = reader.read(&mut chunk).await?;
         if n == 0 {
@@ -120,14 +122,14 @@ where
                     match extract_sni_from_client_hello(&buf[..need]) {
                         Ok(sni) => {
                             return Ok(PeekedFlow {
-                                buffered:    buf,
+                                buffered: buf,
                                 host_or_sni: sni,
-                                kind:        PeekKind::TlsClientHello,
+                                kind: PeekKind::TlsClientHello,
                             });
                         }
                         Err(e) => {
                             return Err(PeekError::UnknownFlow {
-                                sni:  Some(e),
+                                sni: Some(e),
                                 http: None,
                             });
                         }
@@ -142,14 +144,14 @@ where
             match extract_host_header_from_http_request_line_block(&buf) {
                 Ok(host) => {
                     return Ok(PeekedFlow {
-                        buffered:    buf,
+                        buffered: buf,
                         host_or_sni: Some(host),
-                        kind:        PeekKind::Http,
+                        kind: PeekKind::Http,
                     });
                 }
                 Err(e) => {
                     return Err(PeekError::UnknownFlow {
-                        sni:  None,
+                        sni: None,
                         http: Some(e),
                     });
                 }
@@ -169,9 +171,9 @@ fn finalise_or_unknown(buf: Vec<u8>) -> Result<PeekedFlow, PeekError> {
         if buf.len() >= 5 + record_len {
             if let Ok(sni) = extract_sni_from_client_hello(&buf[..5 + record_len]) {
                 return Ok(PeekedFlow {
-                    buffered:    buf,
+                    buffered: buf,
                     host_or_sni: sni,
-                    kind:        PeekKind::TlsClientHello,
+                    kind: PeekKind::TlsClientHello,
                 });
             }
         }
@@ -180,13 +182,16 @@ fn finalise_or_unknown(buf: Vec<u8>) -> Result<PeekedFlow, PeekError> {
     if windows_has_crlf_crlf(&buf) {
         if let Ok(host) = extract_host_header_from_http_request_line_block(&buf) {
             return Ok(PeekedFlow {
-                buffered:    buf,
+                buffered: buf,
                 host_or_sni: Some(host),
-                kind:        PeekKind::Http,
+                kind: PeekKind::Http,
             });
         }
     }
-    Err(PeekError::UnknownFlow { sni: None, http: None })
+    Err(PeekError::UnknownFlow {
+        sni: None,
+        http: None,
+    })
 }
 
 #[cfg(test)]
@@ -197,10 +202,13 @@ mod tests {
     #[tokio::test]
     async fn peek_extracts_host_from_http_request() {
         let (kernel, mut client) = tokio::io::duplex(8192);
-        let send = b"GET /healthz HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: x\r\n\r\n".to_vec();
+        let send =
+            b"GET /healthz HTTP/1.1\r\nHost: api.example.com\r\nUser-Agent: x\r\n\r\n".to_vec();
         client.write_all(&send).await.unwrap();
         client.shutdown().await.unwrap();
-        let flow = peek_https_client_hello_or_http_request(kernel).await.unwrap();
+        let flow = peek_https_client_hello_or_http_request(kernel)
+            .await
+            .unwrap();
         assert_eq!(flow.kind, PeekKind::Http);
         assert_eq!(flow.host_or_sni.as_deref(), Some("api.example.com"));
         assert_eq!(flow.buffered, send);
@@ -247,7 +255,9 @@ mod tests {
         let hello = build_client_hello("api.anthropic.com");
         client.write_all(&hello).await.unwrap();
         client.shutdown().await.unwrap();
-        let flow = peek_https_client_hello_or_http_request(kernel).await.unwrap();
+        let flow = peek_https_client_hello_or_http_request(kernel)
+            .await
+            .unwrap();
         assert_eq!(flow.kind, PeekKind::TlsClientHello);
         assert_eq!(flow.host_or_sni.as_deref(), Some("api.anthropic.com"));
         assert_eq!(flow.buffered, hello);
@@ -256,9 +266,14 @@ mod tests {
     #[tokio::test]
     async fn peek_returns_unknown_flow_on_neither_tls_nor_http() {
         let (kernel, mut client) = tokio::io::duplex(64);
-        client.write_all(b"random gibberish without crlf").await.unwrap();
+        client
+            .write_all(b"random gibberish without crlf")
+            .await
+            .unwrap();
         client.shutdown().await.unwrap();
-        let err = peek_https_client_hello_or_http_request(kernel).await.unwrap_err();
+        let err = peek_https_client_hello_or_http_request(kernel)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PeekError::UnknownFlow { .. }));
     }
 
@@ -266,7 +281,9 @@ mod tests {
     async fn peek_returns_unexpected_eof_on_immediate_close() {
         let (kernel, client) = tokio::io::duplex(64);
         drop(client);
-        let err = peek_https_client_hello_or_http_request(kernel).await.unwrap_err();
+        let err = peek_https_client_hello_or_http_request(kernel)
+            .await
+            .unwrap_err();
         assert!(matches!(err, PeekError::UnexpectedEof));
     }
 }

@@ -21,13 +21,13 @@
 
 /// Stable task ids for the extended scenario. Pinned because the
 /// witness validators key on these strings.
-pub const TASK_MATERIALIZE:    &str = "materialize-records";
-pub const TASK_FANOUT_README:  &str = "fanout-readme";
-pub const TASK_FANOUT_FMT:     &str = "fanout-fmt";
+pub const TASK_MATERIALIZE: &str = "materialize-records";
+pub const TASK_FANOUT_README: &str = "fanout-readme";
+pub const TASK_FANOUT_FMT: &str = "fanout-fmt";
 pub const TASK_FANOUT_MANIFEST: &str = "fanout-manifest";
-pub const TASK_REVIEW_A:       &str = "review-materialize-A";
-pub const TASK_REVIEW_B:       &str = "review-materialize-B";
-pub const TASK_INJECT_EVIL:    &str = "inject-evil";
+pub const TASK_REVIEW_A: &str = "review-materialize-A";
+pub const TASK_REVIEW_B: &str = "review-materialize-B";
+pub const TASK_INJECT_EVIL: &str = "inject-evil";
 
 /// Lane id for the extended scenario; distinct from the
 /// single-task test's `e2e-live-lane` so a kernel running both
@@ -53,9 +53,8 @@ pub const LANE_ID: &str = "e2e-extended-lane";
 /// `cargo test -p raxis-kernel`. When authoring or revising
 /// prompts, prefer `# ...` line comments inside Python and back-
 /// ticked inline code in prose over triple-double-quoted blocks.
-pub const MATERIALIZER_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/materializer.md"
-);
+pub const MATERIALIZER_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/materializer.md");
 
 /// Build the extended `[plan]` TOML body the test submits via
 /// `OperatorIpc::submit_plan`. The `injection_prompt` parameter

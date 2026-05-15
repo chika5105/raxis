@@ -66,7 +66,10 @@ pub const TUNNEL_HANDSHAKE_LEN: usize = 16 + 32;
 ///
 /// The frame layout is documented in the module-level docs.
 #[must_use]
-pub fn encode_tunnel_handshake(tunnel_id: Uuid, tunnel_token: &[u8; 32]) -> [u8; TUNNEL_HANDSHAKE_LEN] {
+pub fn encode_tunnel_handshake(
+    tunnel_id: Uuid,
+    tunnel_token: &[u8; 32],
+) -> [u8; TUNNEL_HANDSHAKE_LEN] {
     let mut buf = [0u8; TUNNEL_HANDSHAKE_LEN];
     buf[..16].copy_from_slice(tunnel_id.as_bytes());
     buf[16..].copy_from_slice(tunnel_token);
@@ -113,7 +116,7 @@ pub enum A3AdmissionError {
         /// The `request_id` the guest minted for the request.
         sent: Uuid,
         /// The `request_id` the kernel echoed back.
-        got:  Uuid,
+        got: Uuid,
     },
 }
 
@@ -126,12 +129,12 @@ pub enum A3AdmissionError {
 /// a real vsock device — the same code runs verbatim over the
 /// `tokio_vsock::VsockStream` in production.
 pub async fn ask_admission<S>(
-    stream:        &mut S,
+    stream: &mut S,
     session_token: &str,
-    sni:           Option<String>,
-    host_header:   Option<String>,
-    destination:   SocketAddr,
-    protocol:      TproxyProtocol,
+    sni: Option<String>,
+    host_header: Option<String>,
+    destination: SocketAddr,
+    protocol: TproxyProtocol,
 ) -> Result<TproxyAdmissionResponse, A3AdmissionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -160,12 +163,12 @@ where
 
     let response_id = match &response {
         TproxyAdmissionResponse::Admit { request_id, .. } => *request_id,
-        TproxyAdmissionResponse::Deny  { request_id, .. } => *request_id,
+        TproxyAdmissionResponse::Deny { request_id, .. } => *request_id,
     };
     if response_id != request_id {
         return Err(A3AdmissionError::RequestIdMismatch {
             sent: request_id,
-            got:  response_id,
+            got: response_id,
         });
     }
     Ok(response)
@@ -176,10 +179,10 @@ where
 /// Returns a populated `DnsResolveResponse` for every input
 /// (empty `addresses` ⇒ NXDOMAIN-equivalent).
 pub async fn ask_dns_resolve<S>(
-    stream:        &mut S,
+    stream: &mut S,
     session_token: &str,
-    hostname:      &str,
-    query_type:    DnsQueryType,
+    hostname: &str,
+    query_type: DnsQueryType,
 ) -> Result<DnsResolveResponse, A3AdmissionError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -205,7 +208,7 @@ where
     if response.request_id != request_id {
         return Err(A3AdmissionError::RequestIdMismatch {
             sent: request_id,
-            got:  response.request_id,
+            got: response.request_id,
         });
     }
     Ok(response)
@@ -230,22 +233,22 @@ where
 
 fn ipc_message_variant_name(msg: &IpcMessage) -> &'static str {
     match msg {
-        IpcMessage::IntentRequest(_)              => "IntentRequest",
-        IpcMessage::EscalationRequest(_)          => "EscalationRequest",
-        IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
-        IpcMessage::PlannerExitNotice { .. }      => "PlannerExitNotice",
-        IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
-        IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+        IpcMessage::IntentRequest(_) => "IntentRequest",
+        IpcMessage::EscalationRequest(_) => "EscalationRequest",
+        IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+        IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
+        IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
+        IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
         IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
-        IpcMessage::KernelPlannerExitNoticeAck    => "KernelPlannerExitNoticeAck",
-        IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
-        IpcMessage::WitnessAck { .. }             => "WitnessAck",
-        IpcMessage::OperatorRequest(_)            => "OperatorRequest",
-        IpcMessage::OperatorResponse(_)           => "OperatorResponse",
-        IpcMessage::TproxyAdmissionRequest(_)         => "TproxyAdmissionRequest",
-        IpcMessage::KernelTproxyAdmissionResponse(_)  => "KernelTproxyAdmissionResponse",
-        IpcMessage::DnsResolveRequest(_)              => "DnsResolveRequest",
-        IpcMessage::KernelDnsResolveResponse(_)       => "KernelDnsResolveResponse",
+        IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
+        IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
+        IpcMessage::WitnessAck { .. } => "WitnessAck",
+        IpcMessage::OperatorRequest(_) => "OperatorRequest",
+        IpcMessage::OperatorResponse(_) => "OperatorResponse",
+        IpcMessage::TproxyAdmissionRequest(_) => "TproxyAdmissionRequest",
+        IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
+        IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
     }
 }
 
@@ -260,11 +263,10 @@ mod tests {
 
     #[test]
     fn handshake_round_trip_preserves_bytes() {
-        let id    = Uuid::new_v4();
+        let id = Uuid::new_v4();
         let token = [0x5Au8; 32];
         let encoded = encode_tunnel_handshake(id, &token);
-        let (got_id, got_token) =
-            decode_tunnel_handshake(&encoded).expect("decode succeeds");
+        let (got_id, got_token) = decode_tunnel_handshake(&encoded).expect("decode succeeds");
         assert_eq!(got_id, id);
         assert_eq!(got_token, token);
     }
@@ -296,13 +298,16 @@ mod tests {
                 _ => panic!("expected admission request"),
             };
             let resp = TproxyAdmissionResponse::Admit {
-                request_id:   req.request_id,
-                tunnel_id:    Uuid::nil(),
+                request_id: req.request_id,
+                tunnel_id: Uuid::nil(),
                 tunnel_token: [0x11u8; 32],
             };
-            write_frame(&mut kernel_side, &IpcMessage::KernelTproxyAdmissionResponse(resp))
-                .await
-                .expect("write");
+            write_frame(
+                &mut kernel_side,
+                &IpcMessage::KernelTproxyAdmissionResponse(resp),
+            )
+            .await
+            .expect("write");
         });
 
         let resp = ask_admission(
@@ -336,12 +341,15 @@ mod tests {
             };
             let resp = TproxyAdmissionResponse::Deny {
                 request_id: req.request_id,
-                reason:     "host_not_in_allowlist".to_owned(),
-                hint:       Some("add to policy".to_owned()),
+                reason: "host_not_in_allowlist".to_owned(),
+                hint: Some("add to policy".to_owned()),
             };
-            write_frame(&mut kernel_side, &IpcMessage::KernelTproxyAdmissionResponse(resp))
-                .await
-                .expect("write");
+            write_frame(
+                &mut kernel_side,
+                &IpcMessage::KernelTproxyAdmissionResponse(resp),
+            )
+            .await
+            .expect("write");
         });
 
         let resp = ask_admission(
@@ -371,8 +379,8 @@ mod tests {
             let _: IpcMessage = read_frame(&mut kernel_side).await.expect("read");
             let bogus = IpcMessage::WitnessAck {
                 verifier_run_id: Uuid::nil(),
-                accepted:        true,
-                reason:          None,
+                accepted: true,
+                reason: None,
             };
             write_frame(&mut kernel_side, &bogus).await.expect("write");
         });
@@ -400,13 +408,16 @@ mod tests {
             let _: IpcMessage = read_frame(&mut kernel_side).await.expect("read");
             // Kernel sends a response with a fresh (mismatched) request_id.
             let resp = TproxyAdmissionResponse::Admit {
-                request_id:   Uuid::new_v4(),
-                tunnel_id:    Uuid::nil(),
+                request_id: Uuid::new_v4(),
+                tunnel_id: Uuid::nil(),
                 tunnel_token: [0u8; 32],
             };
-            write_frame(&mut kernel_side, &IpcMessage::KernelTproxyAdmissionResponse(resp))
-                .await
-                .expect("write");
+            write_frame(
+                &mut kernel_side,
+                &IpcMessage::KernelTproxyAdmissionResponse(resp),
+            )
+            .await
+            .expect("write");
         });
         let result = ask_admission(
             &mut guest_side,
@@ -439,9 +450,12 @@ mod tests {
                 addresses: vec![Ipv4Addr::new(1, 2, 3, 4).into()],
                 ttl_secs: 60,
             };
-            write_frame(&mut kernel_side, &IpcMessage::KernelDnsResolveResponse(resp))
-                .await
-                .expect("write");
+            write_frame(
+                &mut kernel_side,
+                &IpcMessage::KernelDnsResolveResponse(resp),
+            )
+            .await
+            .expect("write");
         });
         let resp = ask_dns_resolve(
             &mut guest_side,

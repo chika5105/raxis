@@ -95,7 +95,9 @@ impl OperatorNameLookup {
     /// Equivalent to `Default::default()`; provided as a named
     /// constructor so the call site reads more clearly.
     pub fn empty() -> Self {
-        Self { by_fingerprint: HashMap::new() }
+        Self {
+            by_fingerprint: HashMap::new(),
+        }
     }
 
     /// Construct from an explicit `(fingerprint, display_name)`
@@ -105,12 +107,13 @@ impl OperatorNameLookup {
     #[cfg(test)]
     pub(crate) fn from_pairs<I, S1, S2>(pairs: I) -> Self
     where
-        I:  IntoIterator<Item = (S1, S2)>,
+        I: IntoIterator<Item = (S1, S2)>,
         S1: Into<String>,
         S2: Into<String>,
     {
         Self {
-            by_fingerprint: pairs.into_iter()
+            by_fingerprint: pairs
+                .into_iter()
                 .map(|(fp, n)| (fp.into(), n.into()))
                 .collect(),
         }
@@ -126,11 +129,12 @@ impl OperatorNameLookup {
         if !db_path.exists() {
             return Ok(Self::empty());
         }
-        let conn = raxis_store::open_ro(&db_path)
-            .map_err(|e| CliError::Policy(format!(
+        let conn = raxis_store::open_ro(&db_path).map_err(|e| {
+            CliError::Policy(format!(
                 "open {} read-only for operator-name lookup: {e}",
                 db_path.display(),
-            )))?;
+            ))
+        })?;
         let rows = match raxis_store::views::operator_certificates::list_all(&conn) {
             Ok(rs) => rs,
             // An empty / never-bootstrapped table is not an error;
@@ -141,11 +145,14 @@ impl OperatorNameLookup {
             Err(raxis_store::views::operator_certificates::OperatorCertViewError::Sqlite(_)) => {
                 return Ok(Self::empty());
             }
-            Err(e) => return Err(CliError::Policy(format!(
-                "list operator_certificates for name lookup: {e}",
-            ))),
+            Err(e) => {
+                return Err(CliError::Policy(format!(
+                    "list operator_certificates for name lookup: {e}",
+                )))
+            }
         };
-        let by_fingerprint = rows.into_iter()
+        let by_fingerprint = rows
+            .into_iter()
             .map(|r| (r.pubkey_fingerprint, r.display_name))
             .collect();
         Ok(Self { by_fingerprint })
@@ -192,9 +199,9 @@ pub fn fingerprint_prefix(fingerprint: &str) -> &str {
 /// [`ResolvedOperatorName`] using the supplied live-view lookup.
 /// Pure function — the lookup is the only side-data input.
 pub fn resolve_operator_name<'a>(
-    fingerprint:    &'a str,
-    embedded_name:  Option<&'a str>,
-    live_lookup:    &'a OperatorNameLookup,
+    fingerprint: &'a str,
+    embedded_name: Option<&'a str>,
+    live_lookup: &'a OperatorNameLookup,
 ) -> ResolvedOperatorName<'a> {
     if let Some(name) = embedded_name {
         // Empty-string display names are treated as "missing";
@@ -207,7 +214,9 @@ pub fn resolve_operator_name<'a>(
         }
     }
     if let Some(current) = live_lookup.current(fingerprint) {
-        return ResolvedOperatorName::HistoricalCurrent { current_display_name: current };
+        return ResolvedOperatorName::HistoricalCurrent {
+            current_display_name: current,
+        };
     }
     ResolvedOperatorName::Unknown
 }
@@ -226,16 +235,18 @@ pub fn resolve_operator_name<'a>(
 /// <unknown> (a1b2c3d4) [operator no longer in policy]
 /// ```
 pub fn format_operator_with_lookup(
-    fingerprint:   &str,
+    fingerprint: &str,
     embedded_name: Option<&str>,
-    live_lookup:   &OperatorNameLookup,
+    live_lookup: &OperatorNameLookup,
 ) -> String {
     let prefix = fingerprint_prefix(fingerprint);
     match resolve_operator_name(fingerprint, embedded_name, live_lookup) {
         ResolvedOperatorName::Embedded { display_name } => {
             format!("{display_name} ({prefix})")
         }
-        ResolvedOperatorName::HistoricalCurrent { current_display_name } => {
+        ResolvedOperatorName::HistoricalCurrent {
+            current_display_name,
+        } => {
             format!(
                 "{current_display_name} ({prefix}) \
                  [historical cert; current name shown — event predates display-name plumbing]",
@@ -272,10 +283,10 @@ pub struct ExtractedOperator {
     /// `"approving_operator"`, `"granted_by"`, `"target"`. Used
     /// to label the rendered output (`approved_by: Chika
     /// (a1b2c3d4)`).
-    pub role:           String,
-    pub fingerprint:    String,
+    pub role: String,
+    pub fingerprint: String,
     /// Snapshot from the event payload, if any.
-    pub embedded_name:  Option<String>,
+    pub embedded_name: Option<String>,
 }
 
 /// Walk the payload of an audit event and pull out every
@@ -300,28 +311,45 @@ pub fn extract_operators_from_event(event: &serde_json::Value) -> Vec<ExtractedO
     // Order matches the variant order in `audit/event.rs` for
     // readability of test-snapshot diffs.
     const PAIRS: &[(&str, &str, &str)] = &[
-        ("approving_operator",     "approving_operator_display_name",      "approving_operator"),
-        ("triggered_by_operator",  "triggered_by_operator_display_name",   "triggered_by"),
-        ("revoked_by",             "revoked_by_display_name",              "revoked_by"),
-        ("granted_by",             "granted_by_display_name",              "granted_by"),
-        ("approved_by",            "approved_by_display_name",             "approved_by"),
-        ("denied_by",              "denied_by_display_name",               "denied_by"),
-        ("triggered_by",           "triggered_by_display_name",            "triggered_by"),
-        ("quarantined_by",         "quarantined_by_display_name",          "quarantined_by"),
-        ("target_fingerprint",     "target_display_name",                  "target"),
+        (
+            "approving_operator",
+            "approving_operator_display_name",
+            "approving_operator",
+        ),
+        (
+            "triggered_by_operator",
+            "triggered_by_operator_display_name",
+            "triggered_by",
+        ),
+        ("revoked_by", "revoked_by_display_name", "revoked_by"),
+        ("granted_by", "granted_by_display_name", "granted_by"),
+        ("approved_by", "approved_by_display_name", "approved_by"),
+        ("denied_by", "denied_by_display_name", "denied_by"),
+        ("triggered_by", "triggered_by_display_name", "triggered_by"),
+        (
+            "quarantined_by",
+            "quarantined_by_display_name",
+            "quarantined_by",
+        ),
+        ("target_fingerprint", "target_display_name", "target"),
     ];
 
     let mut out = Vec::new();
     for (fp_field, name_field, role) in PAIRS {
-        let Some(fp) = payload.get(*fp_field).and_then(|v| v.as_str()) else { continue };
-        if fp.is_empty() { continue; }
-        let embedded_name = payload.get(*name_field)
+        let Some(fp) = payload.get(*fp_field).and_then(|v| v.as_str()) else {
+            continue;
+        };
+        if fp.is_empty() {
+            continue;
+        }
+        let embedded_name = payload
+            .get(*name_field)
             .and_then(|v| v.as_str())
             .filter(|s| !s.is_empty())
             .map(str::to_owned);
         out.push(ExtractedOperator {
-            role:          (*role).to_owned(),
-            fingerprint:   fp.to_owned(),
+            role: (*role).to_owned(),
+            fingerprint: fp.to_owned(),
             embedded_name,
         });
     }
@@ -344,14 +372,16 @@ mod tests {
             "abcd1234abcd1234abcd1234abcd1234".to_owned(),
             "ChikaRotated".to_owned(),
         );
-        let resolved = resolve_operator_name(
-            "abcd1234abcd1234abcd1234abcd1234",
-            Some("Chika"),
-            &lookup,
-        );
-        assert_eq!(resolved, ResolvedOperatorName::Embedded { display_name: "Chika" },
+        let resolved =
+            resolve_operator_name("abcd1234abcd1234abcd1234abcd1234", Some("Chika"), &lookup);
+        assert_eq!(
+            resolved,
+            ResolvedOperatorName::Embedded {
+                display_name: "Chika"
+            },
             "embedded snapshot must win — it is the authoritative \
-             name *at the time of the event*");
+             name *at the time of the event*"
+        );
     }
 
     #[test]
@@ -361,14 +391,13 @@ mod tests {
             "deadbeefdeadbeefdeadbeefdeadbeef".to_owned(),
             "Jinanwa".to_owned(),
         );
-        let resolved = resolve_operator_name(
-            "deadbeefdeadbeefdeadbeefdeadbeef",
-            None,
-            &lookup,
+        let resolved = resolve_operator_name("deadbeefdeadbeefdeadbeefdeadbeef", None, &lookup);
+        assert_eq!(
+            resolved,
+            ResolvedOperatorName::HistoricalCurrent {
+                current_display_name: "Jinanwa",
+            }
         );
-        assert_eq!(resolved, ResolvedOperatorName::HistoricalCurrent {
-            current_display_name: "Jinanwa",
-        });
     }
 
     #[test]
@@ -381,24 +410,19 @@ mod tests {
             "abcd1234abcd1234abcd1234abcd1234".to_owned(),
             "Live".to_owned(),
         );
-        let resolved = resolve_operator_name(
-            "abcd1234abcd1234abcd1234abcd1234",
-            Some(""),
-            &lookup,
+        let resolved = resolve_operator_name("abcd1234abcd1234abcd1234abcd1234", Some(""), &lookup);
+        assert_eq!(
+            resolved,
+            ResolvedOperatorName::HistoricalCurrent {
+                current_display_name: "Live",
+            }
         );
-        assert_eq!(resolved, ResolvedOperatorName::HistoricalCurrent {
-            current_display_name: "Live",
-        });
     }
 
     #[test]
     fn unknown_when_neither_source_yields_a_name() {
         let lookup = OperatorNameLookup::empty();
-        let resolved = resolve_operator_name(
-            "no_one_fp",
-            None,
-            &lookup,
-        );
+        let resolved = resolve_operator_name("no_one_fp", None, &lookup);
         assert_eq!(resolved, ResolvedOperatorName::Unknown);
     }
 
@@ -421,33 +445,32 @@ mod tests {
         // (b) Historical current — must carry the historical
         //     annotation (operators reading their own logs need
         //     to know the name didn't come from the event itself).
-        let s = format_operator_with_lookup(
-            "abcd1234abcd1234abcd1234abcd1234",
-            None,
-            &lookup,
-        );
+        let s = format_operator_with_lookup("abcd1234abcd1234abcd1234abcd1234", None, &lookup);
         assert!(s.starts_with("ChikaCurrent (abcd1234)"));
-        assert!(s.contains("[historical cert"),
-            "historical-cert annotation MUST be present for legacy events: {s}");
+        assert!(
+            s.contains("[historical cert"),
+            "historical-cert annotation MUST be present for legacy events: {s}"
+        );
         assert!(s.contains("predates display-name plumbing"));
 
         // (c) Unknown — must say so explicitly.
-        let s = format_operator_with_lookup(
-            "999999999999999999",
-            None,
-            &lookup,
-        );
+        let s = format_operator_with_lookup("999999999999999999", None, &lookup);
         assert_eq!(s, "<unknown> (99999999) [operator no longer in policy]");
     }
 
     #[test]
     fn fingerprint_prefix_truncates_long_strings_and_passes_short_ones() {
-        assert_eq!(fingerprint_prefix("abcdefghijklmnop"), "abcdefgh",
-            "long fingerprints get truncated to 8 chars");
-        assert_eq!(fingerprint_prefix("abc"), "abc",
-            "short strings pass through unchanged");
-        assert_eq!(fingerprint_prefix(""), "",
-            "empty input does not panic");
+        assert_eq!(
+            fingerprint_prefix("abcdefghijklmnop"),
+            "abcdefgh",
+            "long fingerprints get truncated to 8 chars"
+        );
+        assert_eq!(
+            fingerprint_prefix("abc"),
+            "abc",
+            "short strings pass through unchanged"
+        );
+        assert_eq!(fingerprint_prefix(""), "", "empty input does not panic");
     }
 
     #[test]
@@ -478,11 +501,13 @@ mod tests {
             "target_display_name":         "RotatedOutChika",
         });
         let extracted = extract_operators_from_event(&payload);
-        assert_eq!(extracted.len(), 2,
-            "both quarantined_by AND target operator must be extracted");
-        let by_role: std::collections::HashMap<_, _> = extracted.iter()
-            .map(|e| (e.role.as_str(), e))
-            .collect();
+        assert_eq!(
+            extracted.len(),
+            2,
+            "both quarantined_by AND target operator must be extracted"
+        );
+        let by_role: std::collections::HashMap<_, _> =
+            extracted.iter().map(|e| (e.role.as_str(), e)).collect();
         let q = by_role["quarantined_by"];
         assert_eq!(q.fingerprint, "abcd1234abcd1234abcd1234abcd1234");
         assert_eq!(q.embedded_name.as_deref(), Some("Jinanwa"));
@@ -504,9 +529,11 @@ mod tests {
         let extracted = extract_operators_from_event(&payload);
         assert_eq!(extracted.len(), 1);
         assert_eq!(extracted[0].role, "approved_by");
-        assert!(extracted[0].embedded_name.is_none(),
+        assert!(
+            extracted[0].embedded_name.is_none(),
             "legacy event must yield a `None` embedded name; the renderer \
-             falls back to the live operator_certificates lookup");
+             falls back to the live operator_certificates lookup"
+        );
     }
 
     #[test]

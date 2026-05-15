@@ -59,7 +59,9 @@ pub struct RunMode {
 }
 
 impl RunMode {
-    pub fn with_strict(strict: bool) -> Self { Self { strict } }
+    pub fn with_strict(strict: bool) -> Self {
+        Self { strict }
+    }
 }
 
 pub fn run(mode: RunMode) -> anyhow::Result<()> {
@@ -115,19 +117,19 @@ pub struct SpecGraphLint {
 
 /// One spec file's parsed metadata.
 struct ParsedSpec {
-    path:        PathBuf,
-    headings:    BTreeSet<String>,
-    fail_codes:  BTreeSet<String>,
+    path: PathBuf,
+    headings: BTreeSet<String>,
+    fail_codes: BTreeSet<String>,
     audit_kinds: BTreeSet<String>,
 }
 
 /// Diagnostic emitted by a check.
 #[derive(Debug)]
 pub struct Finding {
-    pub code:        &'static str,
+    pub code: &'static str,
     pub source_file: PathBuf,
     pub source_line: usize,
-    pub detail:      String,
+    pub detail: String,
 }
 
 impl SpecGraphLint {
@@ -135,9 +137,13 @@ impl SpecGraphLint {
     pub fn load(specs_root: &Path) -> anyhow::Result<Self> {
         let mut files: BTreeMap<String, ParsedSpec> = BTreeMap::new();
         for entry in WalkDir::new(specs_root).into_iter().filter_map(|e| e.ok()) {
-            if !entry.file_type().is_file() { continue; }
+            if !entry.file_type().is_file() {
+                continue;
+            }
             let path = entry.path();
-            if path.extension().map(|e| e != "md").unwrap_or(true) { continue; }
+            if path.extension().map(|e| e != "md").unwrap_or(true) {
+                continue;
+            }
             let basename = path
                 .file_name()
                 .and_then(|s| s.to_str())
@@ -146,17 +152,22 @@ impl SpecGraphLint {
             let body = std::fs::read_to_string(path)
                 .with_context(|| format!("read {}", path.display()))?;
             let parsed = parse_spec(&body);
-            files.insert(basename, ParsedSpec {
-                path:        path.to_path_buf(),
-                headings:    parsed.headings,
-                fail_codes:  parsed.fail_codes_defined,
-                audit_kinds: parsed.audit_kinds_defined,
-            });
+            files.insert(
+                basename,
+                ParsedSpec {
+                    path: path.to_path_buf(),
+                    headings: parsed.headings,
+                    fail_codes: parsed.fail_codes_defined,
+                    audit_kinds: parsed.audit_kinds_defined,
+                },
+            );
         }
         Ok(Self { files })
     }
 
-    pub fn file_count(&self) -> usize { self.files.len() }
+    pub fn file_count(&self) -> usize {
+        self.files.len()
+    }
     pub fn fail_code_def_count(&self) -> usize {
         self.files.values().map(|p| p.fail_codes.len()).sum()
     }
@@ -180,7 +191,7 @@ impl SpecGraphLint {
                     if let Some(target) = self.files.get(target_file) {
                         if !heading_matches(&target.headings, target_section) {
                             findings.push(Finding {
-                                code:        "LINT_SPEC_GRAPH_DANGLING_SECTION_REF",
+                                code: "LINT_SPEC_GRAPH_DANGLING_SECTION_REF",
                                 source_file: spec.path.clone(),
                                 source_line: line_no + 1,
                                 detail: format!(
@@ -203,7 +214,8 @@ impl SpecGraphLint {
         let mut fail_code_homes: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (basename, spec) in &self.files {
             for code in &spec.fail_codes {
-                fail_code_homes.entry(code.clone())
+                fail_code_homes
+                    .entry(code.clone())
                     .or_default()
                     .push(basename.clone());
             }
@@ -211,7 +223,7 @@ impl SpecGraphLint {
         for (code, homes) in fail_code_homes {
             if homes.len() > 1 {
                 findings.push(Finding {
-                    code:        "LINT_SPEC_GRAPH_DUPLICATE_FAILURE_CODE",
+                    code: "LINT_SPEC_GRAPH_DUPLICATE_FAILURE_CODE",
                     source_file: PathBuf::from(homes.first().cloned().unwrap_or_default()),
                     source_line: 0,
                     detail: format!(
@@ -227,7 +239,8 @@ impl SpecGraphLint {
         let mut audit_homes: BTreeMap<String, Vec<String>> = BTreeMap::new();
         for (basename, spec) in &self.files {
             for kind in &spec.audit_kinds {
-                audit_homes.entry(kind.clone())
+                audit_homes
+                    .entry(kind.clone())
                     .or_default()
                     .push(basename.clone());
             }
@@ -235,7 +248,7 @@ impl SpecGraphLint {
         for (kind, homes) in audit_homes {
             if homes.len() > 1 {
                 findings.push(Finding {
-                    code:        "LINT_SPEC_GRAPH_DUPLICATE_AUDIT_KIND",
+                    code: "LINT_SPEC_GRAPH_DUPLICATE_AUDIT_KIND",
                     source_file: PathBuf::from(homes.first().cloned().unwrap_or_default()),
                     source_line: 0,
                     detail: format!(
@@ -262,11 +275,13 @@ impl SpecGraphLint {
             // Surface variants that are *defined* in any spec but not
             // mentioned in audit-paired-writes.md.
             for (basename, spec) in &self.files {
-                if basename == "audit-paired-writes.md" { continue; }
+                if basename == "audit-paired-writes.md" {
+                    continue;
+                }
                 for kind in &spec.audit_kinds {
                     if !mentioned.contains(kind) {
                         findings.push(Finding {
-                            code:        "LINT_SPEC_GRAPH_AUDIT_CLASSIFICATION_MISSING",
+                            code: "LINT_SPEC_GRAPH_AUDIT_CLASSIFICATION_MISSING",
                             source_file: spec.path.clone(),
                             source_line: 0,
                             detail: format!(
@@ -312,9 +327,7 @@ impl SpecGraphLint {
 /// [`SpecGraphLint::check_all`] is a single line away from
 /// activating this check once it lands.
 #[allow(dead_code)]
-fn check_invariant_resolution(
-    _files: &BTreeMap<String, ParsedSpec>,
-) -> Vec<Finding> {
+fn check_invariant_resolution(_files: &BTreeMap<String, ParsedSpec>) -> Vec<Finding> {
     // Implementation outline:
     //
     //   1. Parse `invariants.md §1` table into
@@ -341,9 +354,7 @@ fn check_invariant_resolution(
 /// stub is intentionally a no-op until both specs adopt a
 /// structured-data block that the lint can read.
 #[allow(dead_code)]
-fn check_capability_class_completeness(
-    _files: &BTreeMap<String, ParsedSpec>,
-) -> Vec<Finding> {
+fn check_capability_class_completeness(_files: &BTreeMap<String, ParsedSpec>) -> Vec<Finding> {
     // Implementation outline:
     //
     //   1. Parse `policy-plan-authority.md` for top-level keys
@@ -366,9 +377,9 @@ fn check_capability_class_completeness(
 // ---------------------------------------------------------------------------
 
 struct ParsedSpecFields {
-    headings:                BTreeSet<String>,
-    fail_codes_defined:      BTreeSet<String>,
-    audit_kinds_defined:     BTreeSet<String>,
+    headings: BTreeSet<String>,
+    fail_codes_defined: BTreeSet<String>,
+    audit_kinds_defined: BTreeSet<String>,
 }
 
 /// Parse a spec markdown file's headings and the fail/audit
@@ -381,7 +392,9 @@ fn parse_spec(body: &str) -> ParsedSpecFields {
             in_code_fence = !in_code_fence;
             continue;
         }
-        if in_code_fence { continue; }
+        if in_code_fence {
+            continue;
+        }
         if let Some(rest) = strip_heading_marker(line) {
             // Pull the leading "§" or numeric-section label, if
             // any. The spec's "§<n>" cross-refs must resolve
@@ -403,23 +416,33 @@ fn parse_spec(body: &str) -> ParsedSpecFields {
     let fail_codes_defined = extract_fail_codes_defined(body);
     let audit_kinds_defined = extract_audit_kinds_defined(body);
 
-    ParsedSpecFields { headings, fail_codes_defined, audit_kinds_defined }
+    ParsedSpecFields {
+        headings,
+        fail_codes_defined,
+        audit_kinds_defined,
+    }
 }
 
 /// Strip a leading `# ` / `## ` / `### ` etc. and return the
 /// remainder, or `None` if the line is not a heading.
 fn strip_heading_marker(line: &str) -> Option<&str> {
     let trimmed = line.trim_start();
-    if !trimmed.starts_with('#') { return None; }
+    if !trimmed.starts_with('#') {
+        return None;
+    }
     let mut chars = trimmed.chars();
     let mut hashes = 0;
     while let Some('#') = chars.clone().next() {
         chars.next();
         hashes += 1;
-        if hashes > 6 { return None; }
+        if hashes > 6 {
+            return None;
+        }
     }
     let rest = chars.as_str();
-    if !rest.starts_with(' ') && !rest.starts_with('\t') { return None; }
+    if !rest.starts_with(' ') && !rest.starts_with('\t') {
+        return None;
+    }
     Some(rest.trim_start())
 }
 
@@ -508,23 +531,25 @@ const XREF_MARKER_ROW: &str = "<!-- spec-graph:cross-ref-row -->";
 fn extract_fail_codes_defined(body: &str) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let re = Regex::new(r"^\s*\|\s*`?(FAIL_[A-Z][A-Z0-9_]+|WARN_[A-Z][A-Z0-9_]+)").unwrap();
-    let mut in_code_fence    = false;
-    let mut pending_xref     = false;
+    let mut in_code_fence = false;
+    let mut pending_xref = false;
     let mut pending_xref_row = false;
-    let mut current_xref     = false;
-    let mut in_table         = false;
+    let mut current_xref = false;
+    let mut in_table = false;
     for line in body.lines() {
         let trimmed = line.trim();
 
         if trimmed.starts_with("```") {
-            in_code_fence    = !in_code_fence;
-            in_table         = false;
-            current_xref     = false;
-            pending_xref     = false;
+            in_code_fence = !in_code_fence;
+            in_table = false;
+            current_xref = false;
+            pending_xref = false;
             pending_xref_row = false;
             continue;
         }
-        if in_code_fence { continue; }
+        if in_code_fence {
+            continue;
+        }
 
         if trimmed == XREF_MARKER {
             pending_xref = true;
@@ -538,7 +563,7 @@ fn extract_fail_codes_defined(body: &str) -> BTreeSet<String> {
         let is_table_line = trimmed.starts_with('|');
         if is_table_line {
             if !in_table {
-                in_table     = true;
+                in_table = true;
                 current_xref = pending_xref;
                 pending_xref = false;
             }
@@ -559,7 +584,7 @@ fn extract_fail_codes_defined(body: &str) -> BTreeSet<String> {
             // Blank line: the table (if any) ends; the pending
             // markers are preserved across blanks so "marker,
             // blank, row/table" is the canonical idiom.
-            in_table     = false;
+            in_table = false;
             current_xref = false;
             continue;
         }
@@ -567,9 +592,9 @@ fn extract_fail_codes_defined(body: &str) -> BTreeSet<String> {
         // Any other content cancels both pending markers and the
         // running table state — this prevents a marker
         // accidentally suppressing a far-away row/table.
-        in_table         = false;
-        current_xref     = false;
-        pending_xref     = false;
+        in_table = false;
+        current_xref = false;
+        pending_xref = false;
         pending_xref_row = false;
     }
     out
@@ -586,9 +611,9 @@ fn extract_fail_codes_defined(body: &str) -> BTreeSet<String> {
 fn extract_audit_kinds_defined(body: &str) -> BTreeSet<String> {
     let mut out: BTreeSet<String> = BTreeSet::new();
     let mut in_code_fence = false;
-    let mut fence_lang    = String::new();
-    let mut pending_xref  = false;
-    let mut current_xref  = false;
+    let mut fence_lang = String::new();
+    let mut pending_xref = false;
+    let mut current_xref = false;
     let re = Regex::new(r"\bAuditEventKind::([A-Z][A-Za-z0-9]+)\b").unwrap();
     for line in body.lines() {
         let trimmed = line.trim();
@@ -599,9 +624,9 @@ fn extract_audit_kinds_defined(body: &str) -> BTreeSet<String> {
                 current_xref = false;
             } else {
                 in_code_fence = true;
-                fence_lang    = trimmed.trim_start_matches('`').trim().to_owned();
-                current_xref  = pending_xref;
-                pending_xref  = false;
+                fence_lang = trimmed.trim_start_matches('`').trim().to_owned();
+                current_xref = pending_xref;
+                pending_xref = false;
             }
             continue;
         }
@@ -634,23 +659,21 @@ fn extract_audit_kinds_defined(body: &str) -> BTreeSet<String> {
 /// Lazily-built section-ref regex.
 fn section_ref_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\b([a-z][a-z0-9_-]+\.md)\s+§(\d+(?:\.\d+)*)").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"\b([a-z][a-z0-9_-]+\.md)\s+§(\d+(?:\.\d+)*)").unwrap())
 }
 
 fn audit_kind_re() -> &'static Regex {
     static RE: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| {
-        Regex::new(r"\bAuditEventKind::([A-Z][A-Za-z0-9]+)\b").unwrap()
-    })
+    RE.get_or_init(|| Regex::new(r"\bAuditEventKind::([A-Z][A-Za-z0-9]+)\b").unwrap())
 }
 
 /// `<heading_set>` contains every section number we extracted.
 /// Membership: exact-match OR prefix-match (the spec routinely
 /// references `§4` to mean any subsection of section 4).
 fn heading_matches(headings: &BTreeSet<String>, target: &str) -> bool {
-    if headings.contains(target) { return true; }
+    if headings.contains(target) {
+        return true;
+    }
     let prefix = format!("{target}.");
     headings.iter().any(|h| h.starts_with(&prefix))
 }
@@ -665,7 +688,12 @@ fn workspace_root() -> anyhow::Result<PathBuf> {
     // `CARGO_MANIFEST_DIR` of this xtask crate (which is
     // `<repo>/raxis/xtask`) and walk up two parents.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    Ok(manifest_dir.parent().unwrap().parent().unwrap().to_path_buf())
+    Ok(manifest_dir
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .to_path_buf())
 }
 
 /// Suppress findings the spec-graph spec calls out as deliberate
@@ -702,13 +730,16 @@ mod tests {
         assert_eq!(extract_section_numbers("4 — Foo"), vec!["4".to_owned()]);
         assert_eq!(extract_section_numbers("4.2 Foo"), vec!["4.2".to_owned()]);
         assert_eq!(extract_section_numbers("§4.2 Foo"), vec!["4.2".to_owned()]);
-        assert_eq!(extract_section_numbers("§2.5.8 — Foo"), vec!["2.5.8".to_owned()]);
+        assert_eq!(
+            extract_section_numbers("§2.5.8 — Foo"),
+            vec!["2.5.8".to_owned()]
+        );
     }
 
     #[test]
     fn strip_heading_marker_recognises_h1_through_h4() {
-        assert_eq!(strip_heading_marker("# Foo"),    Some("Foo"));
-        assert_eq!(strip_heading_marker("## Foo"),   Some("Foo"));
+        assert_eq!(strip_heading_marker("# Foo"), Some("Foo"));
+        assert_eq!(strip_heading_marker("## Foo"), Some("Foo"));
         assert_eq!(strip_heading_marker("#### Foo"), Some("Foo"));
         assert!(strip_heading_marker("Foo").is_none());
         assert!(strip_heading_marker("####Foo").is_none()); // no space
@@ -767,8 +798,10 @@ fn x() { let _ = AuditEventKind::Baz; }\n\
 | `FAIL_REF_TWO` | … |
 ";
         let codes = extract_fail_codes_defined(body);
-        assert!(codes.is_empty(),
-            "xref-marked tables must not contribute definitions; got: {codes:?}");
+        assert!(
+            codes.is_empty(),
+            "xref-marked tables must not contribute definitions; got: {codes:?}"
+        );
     }
 
     #[test]
@@ -787,10 +820,14 @@ Some prose between tables.
 | `FAIL_REAL_DEF` | second table — definition |
 ";
         let codes = extract_fail_codes_defined(body);
-        assert!(!codes.contains("FAIL_REF_ONE"),
-            "first table is xref'd; codes from it must be excluded");
-        assert!(codes.contains("FAIL_REAL_DEF"),
-            "second table is unmarked; its codes must count as definitions: {codes:?}");
+        assert!(
+            !codes.contains("FAIL_REF_ONE"),
+            "first table is xref'd; codes from it must be excluded"
+        );
+        assert!(
+            codes.contains("FAIL_REAL_DEF"),
+            "second table is unmarked; its codes must count as definitions: {codes:?}"
+        );
     }
 
     #[test]
@@ -805,9 +842,11 @@ Some prose that follows the marker.
 | `FAIL_REAL_AFTER_PROSE` | unrelated table — defines normally |
 ";
         let codes = extract_fail_codes_defined(body);
-        assert!(codes.contains("FAIL_REAL_AFTER_PROSE"),
+        assert!(
+            codes.contains("FAIL_REAL_AFTER_PROSE"),
             "the marker must be cancelled by intervening prose so it does not silently \
-             suppress a far-away table; got: {codes:?}");
+             suppress a far-away table; got: {codes:?}"
+        );
     }
 
     #[test]
@@ -825,8 +864,10 @@ Some prose that follows the marker.
 | `FAIL_REF_BLANKS` | reference table |
 ";
         let codes = extract_fail_codes_defined(body);
-        assert!(codes.is_empty(),
-            "blank lines between marker and table must preserve the marker; got: {codes:?}");
+        assert!(
+            codes.is_empty(),
+            "blank lines between marker and table must preserve the marker; got: {codes:?}"
+        );
     }
 
     #[test]
@@ -839,8 +880,10 @@ let _ = AuditEventKind::FromRefFence;
 ```
 ";
         let kinds = extract_audit_kinds_defined(body);
-        assert!(kinds.is_empty(),
-            "xref-marked rust fences must not contribute audit-kind definitions; got: {kinds:?}");
+        assert!(
+            kinds.is_empty(),
+            "xref-marked rust fences must not contribute audit-kind definitions; got: {kinds:?}"
+        );
     }
 
     #[test]
@@ -854,12 +897,18 @@ let _ = AuditEventKind::FromRefFence;
 | `FAIL_REAL_LAST` | last row — definition |
 ";
         let codes = extract_fail_codes_defined(body);
-        assert!(codes.contains("FAIL_REAL_FIRST"),
-            "rows before the row-marker still define normally: {codes:?}");
-        assert!(!codes.contains("FAIL_REF_MIDDLE"),
-            "row-marker should suppress just the immediately following row: {codes:?}");
-        assert!(codes.contains("FAIL_REAL_LAST"),
-            "rows after the suppressed row resume normal definition: {codes:?}");
+        assert!(
+            codes.contains("FAIL_REAL_FIRST"),
+            "rows before the row-marker still define normally: {codes:?}"
+        );
+        assert!(
+            !codes.contains("FAIL_REF_MIDDLE"),
+            "row-marker should suppress just the immediately following row: {codes:?}"
+        );
+        assert!(
+            codes.contains("FAIL_REAL_LAST"),
+            "rows after the suppressed row resume normal definition: {codes:?}"
+        );
     }
 
     #[test]
@@ -897,8 +946,10 @@ let _ = AuditEventKind::FromRealFence;
 ";
         let kinds = extract_audit_kinds_defined(body);
         assert!(!kinds.contains("FromRefFence"));
-        assert!(kinds.contains("FromRealFence"),
-            "second fence is unmarked; its audit kinds must count as definitions: {kinds:?}");
+        assert!(
+            kinds.contains("FromRealFence"),
+            "second fence is unmarked; its audit kinds must count as definitions: {kinds:?}"
+        );
     }
 
     #[test]

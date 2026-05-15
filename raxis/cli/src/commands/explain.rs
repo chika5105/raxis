@@ -50,8 +50,8 @@ use raxis_store::views::WitnessRow;
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
-const AUDIT_DIR_NAME:        &str = "audit";
-const RECENT_AUDIT_EVENTS:   usize = 5;
+const AUDIT_DIR_NAME: &str = "audit";
+const RECENT_AUDIT_EVENTS: usize = 5;
 
 // ────────────────────────────────────────────────────────────────────
 // Entry point
@@ -99,7 +99,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone)]
 struct ExplainOpts {
     task_id: String,
-    json:    bool,
+    json: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<ExplainOpts, CliError> {
@@ -124,9 +124,8 @@ fn parse_args(args: &[String]) -> Result<ExplainOpts, CliError> {
         }
         i += 1;
     }
-    let task_id = task_id.ok_or_else(|| {
-        CliError::Usage("usage: raxis explain <task_id> [--json]".to_owned())
-    })?;
+    let task_id = task_id
+        .ok_or_else(|| CliError::Usage("usage: raxis explain <task_id> [--json]".to_owned()))?;
     Ok(ExplainOpts { task_id, json })
 }
 
@@ -150,7 +149,7 @@ fn print_help() {
 
 #[derive(Debug, Clone)]
 struct RecentEvent {
-    seq:        u64,
+    seq: u64,
     event_kind: String,
     emitted_at: Option<i64>,
 }
@@ -168,9 +167,11 @@ fn collect_recent_audit_events(audit_dir: &Path, task_id: &str, limit: usize) ->
     let mut keep: Vec<RecentEvent> = Vec::new();
     for rec in reader.records() {
         let Ok(rec) = rec else { continue };
-        if !record_matches_task(&rec, task_id) { continue; }
+        if !record_matches_task(&rec, task_id) {
+            continue;
+        }
         keep.push(RecentEvent {
-            seq:        rec.seq,
+            seq: rec.seq,
             event_kind: rec.event_kind,
             emitted_at: rec.emitted_at,
         });
@@ -191,11 +192,11 @@ fn record_matches_task(rec: &ChainRecord, task_id: &str) -> bool {
 // ────────────────────────────────────────────────────────────────────
 
 fn render_human<W: Write>(
-    out:       &mut W,
-    task:      &TaskRow,
-    upstream:  &[DagEdgeRow],
+    out: &mut W,
+    task: &TaskRow,
+    upstream: &[DagEdgeRow],
     witnesses: &[WitnessRow],
-    recent:    &[RecentEvent],
+    recent: &[RecentEvent],
 ) {
     let _ = writeln!(out, "raxis explain {task_id}", task_id = task.task_id);
     let _ = writeln!(out, "  initiative_id:    {}", task.initiative_id);
@@ -218,8 +219,10 @@ fn render_human<W: Write>(
             );
         }
         "BlockedRecoveryPending" => {
-            let pending: Vec<&DagEdgeRow> =
-                upstream.iter().filter(|e| !e.predecessor_satisfied).collect();
+            let pending: Vec<&DagEdgeRow> = upstream
+                .iter()
+                .filter(|e| !e.predecessor_satisfied)
+                .collect();
             let _ = writeln!(
                 out,
                 "Why: BlockedRecoveryPending is set when an upstream \
@@ -227,13 +230,16 @@ fn render_human<W: Write>(
                  (kernel-store.md §2.5.7). Unsatisfied predecessors:",
             );
             if pending.is_empty() {
-                let _ = writeln!(out, "  (none observed in views::tasks — possible kernel bug?)");
+                let _ = writeln!(
+                    out,
+                    "  (none observed in views::tasks — possible kernel bug?)"
+                );
             } else {
                 for e in &pending {
                     let _ = writeln!(
                         out,
                         "  - {tid}  (state={state})",
-                        tid   = e.other_task_id,
+                        tid = e.other_task_id,
                         state = e.other_task_state,
                     );
                 }
@@ -271,7 +277,10 @@ fn render_human<W: Write>(
 
 fn render_witness_summary_per_gate<W: Write>(out: &mut W, witnesses: &[WitnessRow]) {
     if witnesses.is_empty() {
-        let _ = writeln!(out, "  (no witnesses recorded yet — verifier may still be running)");
+        let _ = writeln!(
+            out,
+            "  (no witnesses recorded yet — verifier may still be running)"
+        );
         return;
     }
     // Group by gate_type, keep newest only (witnesses come ordered
@@ -282,9 +291,9 @@ fn render_witness_summary_per_gate<W: Write>(out: &mut W, witnesses: &[WitnessRo
             let _ = writeln!(
                 out,
                 "  - gate {gate:<24} most_recent={result:<14} run_id={run}",
-                gate   = truncate(&w.gate_type, 24),
+                gate = truncate(&w.gate_type, 24),
                 result = w.result_class,
-                run    = truncate(&w.verifier_run_id, 24),
+                run = truncate(&w.verifier_run_id, 24),
             );
         }
     }
@@ -293,18 +302,21 @@ fn render_witness_summary_per_gate<W: Write>(out: &mut W, witnesses: &[WitnessRo
 fn render_audit_tail<W: Write>(out: &mut W, recent: &[RecentEvent]) {
     let _ = writeln!(out, "Recent audit events (last {n}):", n = recent.len());
     if recent.is_empty() {
-        let _ = writeln!(out, "  (none — audit dir missing, chain broken, or task untagged)");
+        let _ = writeln!(
+            out,
+            "  (none — audit dir missing, chain broken, or task untagged)"
+        );
         return;
     }
     for e in recent {
         let _ = writeln!(
             out,
             "  seq={seq:<6} kind={kind:<32} emitted_at={at}",
-            seq  = e.seq,
+            seq = e.seq,
             kind = truncate(&e.event_kind, 32),
-            at   = match e.emitted_at {
+            at = match e.emitted_at {
                 Some(t) => t.to_string(),
-                None    => "<unset>".to_owned(),
+                None => "<unset>".to_owned(),
             },
         );
     }
@@ -315,11 +327,11 @@ fn render_audit_tail<W: Write>(out: &mut W, recent: &[RecentEvent]) {
 // ────────────────────────────────────────────────────────────────────
 
 fn render_json<W: Write>(
-    out:       &mut W,
-    task:      &TaskRow,
-    upstream:  &[DagEdgeRow],
+    out: &mut W,
+    task: &TaskRow,
+    upstream: &[DagEdgeRow],
     witnesses: &[WitnessRow],
-    recent:    &[RecentEvent],
+    recent: &[RecentEvent],
 ) {
     let v = serde_json::json!({
         "task_id":          task.task_id,
@@ -359,13 +371,13 @@ fn render_json<W: Write>(
 
 fn state_verdict(state: &str) -> &'static str {
     match state {
-        "Completed"               => "terminal_pass",
-        "Aborted" | "Rejected"    => "terminal_operator",
-        "Failed"                  => "terminal_fail",
-        "BlockedRecoveryPending"  => "blocked_predecessors",
-        "GatesPending"            => "blocked_witnesses",
-        "Admitted" | "Running"    => "in_flight",
-        _                         => "unknown",
+        "Completed" => "terminal_pass",
+        "Aborted" | "Rejected" => "terminal_operator",
+        "Failed" => "terminal_fail",
+        "BlockedRecoveryPending" => "blocked_predecessors",
+        "GatesPending" => "blocked_witnesses",
+        "Admitted" | "Running" => "in_flight",
+        _ => "unknown",
     }
 }
 
@@ -389,33 +401,33 @@ mod tests {
 
     fn sample_task(state: &str) -> TaskRow {
         TaskRow {
-            task_id:                  "t-1".to_owned(),
-            initiative_id:            "init-1".to_owned(),
-            initiative_state:         "Executing".to_owned(),
-            lane_id:                  "default".to_owned(),
-            state:                    state.to_owned(),
-            block_reason:             None,
-            actor:                    "op".to_owned(),
-            policy_epoch:             1,
-            admitted_at:              100,
-            transitioned_at:          200,
-            session_id:               Some("sess-1".to_owned()),
-            evaluation_sha:           Some("sha".to_owned()),
-            base_sha:                 Some("base".to_owned()),
+            task_id: "t-1".to_owned(),
+            initiative_id: "init-1".to_owned(),
+            initiative_state: "Executing".to_owned(),
+            lane_id: "default".to_owned(),
+            state: state.to_owned(),
+            block_reason: None,
+            actor: "op".to_owned(),
+            policy_epoch: 1,
+            admitted_at: 100,
+            transitioned_at: 200,
+            session_id: Some("sess-1".to_owned()),
+            evaluation_sha: Some("sha".to_owned()),
+            base_sha: Some("base".to_owned()),
             admission_reserved_units: Some(5),
-            actual_cost:              3,
+            actual_cost: 3,
         }
     }
 
     fn sample_witness(gate: &str, result: &str, recorded: u64) -> WitnessRow {
         WitnessRow {
             verifier_run_id: format!("run-{recorded}"),
-            task_id:         "t-1".to_owned(),
-            gate_type:       gate.to_owned(),
-            result_class:    result.to_owned(),
-            evaluation_sha:  "eval".to_owned(),
-            blob_sha256:     "blob".to_owned(),
-            recorded_at:     recorded,
+            task_id: "t-1".to_owned(),
+            gate_type: gate.to_owned(),
+            result_class: result.to_owned(),
+            evaluation_sha: "eval".to_owned(),
+            blob_sha256: "blob".to_owned(),
+            recorded_at: recorded,
         }
     }
 
@@ -427,13 +439,16 @@ mod tests {
 
     #[test]
     fn state_verdict_classifies_each_known_state() {
-        assert_eq!(state_verdict("Completed"),               "terminal_pass");
-        assert_eq!(state_verdict("Aborted"),                 "terminal_operator");
-        assert_eq!(state_verdict("Failed"),                  "terminal_fail");
-        assert_eq!(state_verdict("BlockedRecoveryPending"),  "blocked_predecessors");
-        assert_eq!(state_verdict("GatesPending"),            "blocked_witnesses");
-        assert_eq!(state_verdict("Running"),                 "in_flight");
-        assert_eq!(state_verdict("FoobarPending"),           "unknown");
+        assert_eq!(state_verdict("Completed"), "terminal_pass");
+        assert_eq!(state_verdict("Aborted"), "terminal_operator");
+        assert_eq!(state_verdict("Failed"), "terminal_fail");
+        assert_eq!(
+            state_verdict("BlockedRecoveryPending"),
+            "blocked_predecessors"
+        );
+        assert_eq!(state_verdict("GatesPending"), "blocked_witnesses");
+        assert_eq!(state_verdict("Running"), "in_flight");
+        assert_eq!(state_verdict("FoobarPending"), "unknown");
     }
 
     #[test]
@@ -469,30 +484,39 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("BlockedRecoveryPending is set"), "got: {s}");
         assert!(s.contains("t-up-pending"), "got: {s}");
-        assert!(!s.contains("t-up-ok"), "satisfied predecessors should be hidden: {s}");
+        assert!(
+            !s.contains("t-up-ok"),
+            "satisfied predecessors should be hidden: {s}"
+        );
     }
 
     #[test]
     fn render_human_gates_pending_summarises_per_gate_newest() {
         let witnesses = vec![
-            sample_witness("tests",    "Fail",         300),
+            sample_witness("tests", "Fail", 300),
             sample_witness("coverage", "Inconclusive", 200),
-            sample_witness("tests",    "Pass",         100), // older — must be ignored
+            sample_witness("tests", "Pass", 100), // older — must be ignored
         ];
         let mut buf: Vec<u8> = Vec::new();
-        render_human(
-            &mut buf,
-            &sample_task("GatesPending"),
-            &[],
-            &witnesses,
-            &[],
-        );
+        render_human(&mut buf, &sample_task("GatesPending"), &[], &witnesses, &[]);
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("most_recent=Fail"), "tests gate must report newest=Fail: {s}");
-        assert!(s.contains("most_recent=Inconclusive"), "coverage report must include: {s}");
+        assert!(
+            s.contains("most_recent=Fail"),
+            "tests gate must report newest=Fail: {s}"
+        );
+        assert!(
+            s.contains("most_recent=Inconclusive"),
+            "coverage report must include: {s}"
+        );
         // The older Pass row must NOT appear.
-        let pass_lines: Vec<&str> = s.lines().filter(|l| l.contains("most_recent=Pass")).collect();
-        assert!(pass_lines.is_empty(), "older Pass should be hidden: {pass_lines:?}");
+        let pass_lines: Vec<&str> = s
+            .lines()
+            .filter(|l| l.contains("most_recent=Pass"))
+            .collect();
+        assert!(
+            pass_lines.is_empty(),
+            "older Pass should be hidden: {pass_lines:?}"
+        );
     }
 
     #[test]
@@ -503,9 +527,11 @@ mod tests {
             &sample_task("Running"),
             &[],
             &[],
-            &[
-                RecentEvent { seq: 5, event_kind: "TaskAdmitted".to_owned(), emitted_at: Some(123) },
-            ],
+            &[RecentEvent {
+                seq: 5,
+                event_kind: "TaskAdmitted".to_owned(),
+                emitted_at: Some(123),
+            }],
         );
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("task is Running"), "got: {s}");
@@ -529,7 +555,9 @@ mod tests {
         ];
         let witnesses = vec![sample_witness("tests", "Pass", 100)];
         let recent = vec![RecentEvent {
-            seq: 7, event_kind: "TaskAdmitted".to_owned(), emitted_at: Some(10),
+            seq: 7,
+            event_kind: "TaskAdmitted".to_owned(),
+            emitted_at: Some(10),
         }];
 
         let mut buf: Vec<u8> = Vec::new();

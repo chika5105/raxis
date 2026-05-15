@@ -49,8 +49,8 @@ mod pre_populated;
 mod production;
 mod pull;
 mod registry;
-mod resolver;
 mod resolved_image;
+mod resolver;
 
 pub use cache_layout::CacheLayout;
 pub use digest::OciDigest;

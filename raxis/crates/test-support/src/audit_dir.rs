@@ -88,14 +88,14 @@ pub struct AuditDir {
 #[derive(Debug, Clone)]
 pub struct GenesisInfo {
     pub authority_fingerprint: String,
-    pub genesis_nonce:         String,
-    pub raw_line_sha256:       String,
+    pub genesis_nonce: String,
+    pub raw_line_sha256: String,
 }
 
 impl AuditDir {
     /// Create a fresh empty audit directory in a new temp dir.
     pub fn new() -> Self {
-        let tmp  = TempDir::new().expect("AuditDir: TempDir::new failed");
+        let tmp = TempDir::new().expect("AuditDir: TempDir::new failed");
         let path = tmp.path().to_path_buf();
         Self { _tmp: tmp, path }
     }
@@ -137,17 +137,9 @@ impl AuditDir {
     /// // the genesis line's SHA-256.
     /// let writer = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
     /// ```
-    pub fn open_writer_resuming_after(
-        &self,
-        next_seq: u64,
-        prev_sha256: &str,
-    ) -> AuditWriter {
-        AuditWriter::open(
-            &self.segment_path(),
-            next_seq,
-            Some(prev_sha256.to_owned()),
-        )
-        .expect("AuditDir: AuditWriter::open (resuming) failed")
+    pub fn open_writer_resuming_after(&self, next_seq: u64, prev_sha256: &str) -> AuditWriter {
+        AuditWriter::open(&self.segment_path(), next_seq, Some(prev_sha256.to_owned()))
+            .expect("AuditDir: AuditWriter::open (resuming) failed")
     }
 
     /// Wrap an [`AuditWriter`] in the production [`FileAuditSink`].
@@ -205,7 +197,8 @@ impl AuditDir {
             .expect("AuditDir::append_raw_line: open failed");
         f.write_all(line.as_bytes())
             .expect("AuditDir::append_raw_line: write failed");
-        f.sync_all().expect("AuditDir::append_raw_line: fsync failed");
+        f.sync_all()
+            .expect("AuditDir::append_raw_line: fsync failed");
     }
 
     /// Read every line of the segment, parsing each as JSON. Skips
@@ -228,8 +221,8 @@ impl AuditDir {
     /// that walk the chain need both the parsed JSON (for fields) and
     /// the raw lines (for SHA-256 verification of `prev_sha256`).
     pub fn raw_lines(&self) -> Vec<String> {
-        let raw = std::fs::read_to_string(self.segment_path())
-            .expect("AuditDir::raw_lines: read failed");
+        let raw =
+            std::fs::read_to_string(self.segment_path()).expect("AuditDir::raw_lines: read failed");
         raw.lines().map(str::to_owned).collect()
     }
 
@@ -266,7 +259,8 @@ impl AuditDir {
             .expect("AuditDir::corrupt_byte_at: seek failed");
         f.write_all(&[new_byte])
             .expect("AuditDir::corrupt_byte_at: write failed");
-        f.sync_all().expect("AuditDir::corrupt_byte_at: fsync failed");
+        f.sync_all()
+            .expect("AuditDir::corrupt_byte_at: fsync failed");
     }
 }
 
@@ -307,14 +301,17 @@ mod tests {
 
     #[test]
     fn write_genesis_record_produces_a_parseable_genesis_line() {
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         let recs = dir.read_records();
         assert_eq!(recs.len(), 1, "exactly one genesis record");
         assert_eq!(recs[0]["seq"].as_u64().unwrap(), 0);
         assert_eq!(recs[0]["event_kind"].as_str().unwrap(), "GenesisRecord");
-        assert_eq!(recs[0]["prev_sha256"].as_str().unwrap(), GENESIS_PREV_SHA256);
+        assert_eq!(
+            recs[0]["prev_sha256"].as_str().unwrap(),
+            GENESIS_PREV_SHA256
+        );
         assert_eq!(
             recs[0]["authority_pubkey_fingerprint"].as_str().unwrap(),
             info.authority_fingerprint,
@@ -323,7 +320,7 @@ mod tests {
 
     #[test]
     fn genesis_info_raw_line_sha256_matches_what_the_first_post_genesis_record_would_chain_off() {
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         // Read the raw line as it sits on disk (with trailing '\n')
@@ -335,15 +332,15 @@ mod tests {
 
     #[test]
     fn open_writer_resuming_after_genesis_chains_correctly() {
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         // First post-genesis event is seq=1, prev = SHA-256 of genesis line.
         let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
         w.append(
             AuditEventKind::KernelStarted {
-                data_dir:       "/test".to_owned(),
-                policy_epoch:   1,
+                data_dir: "/test".to_owned(),
+                policy_epoch: 1,
                 schema_version: 1,
             },
             None,

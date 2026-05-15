@@ -86,14 +86,11 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             challenge_hex.len(),
         )));
     }
-    let challenge_bytes = hex::decode(&challenge_hex).map_err(|e| {
-        CliError::Usage(format!("challenge is not valid hex: {e}"))
-    })?;
+    let challenge_bytes = hex::decode(&challenge_hex)
+        .map_err(|e| CliError::Usage(format!("challenge is not valid hex: {e}")))?;
 
     let key_path: PathBuf = flags.operator_key_path.clone().ok_or_else(|| {
-        CliError::Usage(
-            "--operator-key <path> (or RAXIS_OPERATOR_KEY env) is required".to_owned(),
-        )
+        CliError::Usage("--operator-key <path> (or RAXIS_OPERATOR_KEY env) is required".to_owned())
     })?;
 
     let signing_key = load_operator_key(&key_path)?;
@@ -166,10 +163,7 @@ mod tests {
             socket_path: None,
             operator_key_path: Some(key_file.path().to_path_buf()),
         };
-        let err = run_sign(
-            &flags,
-            &["g".repeat(64)],
-        ).unwrap_err();
+        let err = run_sign(&flags, &["g".repeat(64)]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 

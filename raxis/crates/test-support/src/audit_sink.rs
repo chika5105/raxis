@@ -26,10 +26,7 @@
 //     don't add a third implementor here because every audit-sensitive
 //     test should assert on something the sink captured.
 
-use raxis_audit_tools::{
-    sink::AuditSink,
-    AuditEvent, AuditEventKind, AuditWriterError,
-};
+use raxis_audit_tools::{sink::AuditSink, AuditEvent, AuditEventKind, AuditWriterError};
 use std::sync::Mutex;
 use uuid::Uuid;
 
@@ -38,9 +35,9 @@ use uuid::Uuid;
 /// hash and generated UUID (which would non-determinise tests).
 #[derive(Debug, Clone)]
 pub struct CapturedEvent {
-    pub kind:          AuditEventKind,
-    pub session_id:    Option<String>,
-    pub task_id:       Option<String>,
+    pub kind: AuditEventKind,
+    pub session_id: Option<String>,
+    pub task_id: Option<String>,
     pub initiative_id: Option<String>,
 }
 
@@ -58,7 +55,9 @@ pub struct FakeAuditSink {
 
 impl FakeAuditSink {
     pub fn new() -> Self {
-        Self { events: Mutex::new(Vec::new()) }
+        Self {
+            events: Mutex::new(Vec::new()),
+        }
     }
 
     /// Snapshot of every captured event in the order they were
@@ -73,10 +72,7 @@ impl FakeAuditSink {
 
     /// Convenience for tests that only care about the variant tags.
     pub fn event_kinds(&self) -> Vec<&'static str> {
-        self.events()
-            .iter()
-            .map(|e| e.kind.as_str())
-            .collect()
+        self.events().iter().map(|e| e.kind.as_str()).collect()
     }
 }
 
@@ -89,9 +85,9 @@ impl Default for FakeAuditSink {
 impl AuditSink for FakeAuditSink {
     fn emit(
         &self,
-        kind:          AuditEventKind,
-        session_id:    Option<&str>,
-        task_id:       Option<&str>,
+        kind: AuditEventKind,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
         initiative_id: Option<&str>,
     ) -> Result<AuditEvent, AuditWriterError> {
         // Synthesise a deterministic AuditEvent that mirrors what the
@@ -100,25 +96,22 @@ impl AuditSink for FakeAuditSink {
         // `seq` is sourced from the captured-events vector length so
         // it is monotonically increasing across emits on the same
         // sink.
-        let mut events = self
-            .events
-            .lock()
-            .expect("fake audit mutex poisoned");
+        let mut events = self.events.lock().expect("fake audit mutex poisoned");
         let seq = events.len() as u64;
         let payload = serde_json::to_value(&kind).map_err(AuditWriterError::Json)?;
         let event_kind_str = kind.as_str().to_owned();
         events.push(CapturedEvent {
             kind,
-            session_id:    session_id.map(str::to_owned),
-            task_id:       task_id.map(str::to_owned),
+            session_id: session_id.map(str::to_owned),
+            task_id: task_id.map(str::to_owned),
             initiative_id: initiative_id.map(str::to_owned),
         });
         Ok(AuditEvent {
             seq,
-            event_id:      Uuid::new_v4(),
-            event_kind:    event_kind_str,
-            session_id:    session_id.map(str::to_owned),
-            task_id:       task_id.map(str::to_owned),
+            event_id: Uuid::new_v4(),
+            event_kind: event_kind_str,
+            session_id: session_id.map(str::to_owned),
+            task_id: task_id.map(str::to_owned),
             initiative_id: initiative_id.map(str::to_owned),
             payload,
             // `unix_now()` is private to the writer module; reaching
@@ -147,15 +140,21 @@ mod tests {
     use std::sync::Arc;
 
     fn sample_kind(reason: &str) -> AuditEventKind {
-        AuditEventKind::KernelStopped { reason: reason.to_owned() }
+        AuditEventKind::KernelStopped {
+            reason: reason.to_owned(),
+        }
     }
 
     #[test]
     fn fake_sink_captures_events_in_order() {
         let sink = FakeAuditSink::new();
         let _ = sink.emit(sample_kind("a"), None, None, None).unwrap();
-        let _ = sink.emit(sample_kind("b"), Some("sess-1"), None, None).unwrap();
-        let _ = sink.emit(sample_kind("c"), None, Some("task-1"), Some("init-1")).unwrap();
+        let _ = sink
+            .emit(sample_kind("b"), Some("sess-1"), None, None)
+            .unwrap();
+        let _ = sink
+            .emit(sample_kind("c"), None, Some("task-1"), Some("init-1"))
+            .unwrap();
 
         let events = sink.events();
         assert_eq!(events.len(), 3);
@@ -180,7 +179,9 @@ mod tests {
             .map(|i| {
                 let s = Arc::clone(&sink);
                 std::thread::spawn(move || {
-                    let _ = s.emit(sample_kind(&format!("t{i}")), None, None, None).unwrap();
+                    let _ = s
+                        .emit(sample_kind(&format!("t{i}")), None, None, None)
+                        .unwrap();
                 })
             })
             .collect();

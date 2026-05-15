@@ -54,13 +54,13 @@ use std::time::Duration;
 // adding a dep just to share a port number would be wildly out
 // of proportion. Drift is caught by the compose-file scan test.
 
-const OBS_GRAFANA_PORT:        u16 = 3000;
-const OBS_PROMETHEUS_PORT:     u16 = 9090;
-const OBS_OTLP_HTTP_PORT:      u16 = 4318;
-const OBS_OTEL_ZPAGES_PORT:    u16 = 13133;
-const OBS_GRAFANA_ADMIN_USER:  &str = "admin";
-const OBS_GRAFANA_ADMIN_PASS:  &str = "raxis-e2e";
-const OBS_OVERVIEW_DASHBOARD:  &str = "raxis-00-overview";
+const OBS_GRAFANA_PORT: u16 = 3000;
+const OBS_PROMETHEUS_PORT: u16 = 9090;
+const OBS_OTLP_HTTP_PORT: u16 = 4318;
+const OBS_OTEL_ZPAGES_PORT: u16 = 13133;
+const OBS_GRAFANA_ADMIN_USER: &str = "admin";
+const OBS_GRAFANA_ADMIN_PASS: &str = "raxis-e2e";
+const OBS_OVERVIEW_DASHBOARD: &str = "raxis-00-overview";
 
 /// One named merged worktree to surface in the artifact block.
 /// Multiple are admissible because the realism scenario merges N
@@ -287,9 +287,7 @@ impl Tier3Reporter {
             if std::env::var("RAXIS_E2E_OPEN_OBSERVABILITY").as_deref() == Ok("1") {
                 let urls = [
                     format!("http://127.0.0.1:{OBS_GRAFANA_PORT}/"),
-                    format!(
-                        "http://127.0.0.1:{OBS_GRAFANA_PORT}/d/{OBS_OVERVIEW_DASHBOARD}"
-                    ),
+                    format!("http://127.0.0.1:{OBS_GRAFANA_PORT}/d/{OBS_OVERVIEW_DASHBOARD}"),
                 ];
                 for url in urls {
                     let _ = super::browser::open_in_best_browser(&url);
@@ -375,19 +373,19 @@ fn emit_observability_block(label: &str) {
     eprintln!(
         "[{label}] Grafana       : http://127.0.0.1:{port}/   \
          (admin/{user}, anonymous Viewer OK) {state}",
-        port  = OBS_GRAFANA_PORT,
-        user  = OBS_GRAFANA_ADMIN_PASS, // password in the labelled slot, NOT a typo:
+        port = OBS_GRAFANA_PORT,
+        user = OBS_GRAFANA_ADMIN_PASS, // password in the labelled slot, NOT a typo:
         // `admin/{pass}` matches the README phrasing.
         state = probe_state("127.0.0.1", OBS_GRAFANA_PORT),
     );
     eprintln!(
         "[{label}] Grafana home  : http://127.0.0.1:{port}/d/{uid}",
         port = OBS_GRAFANA_PORT,
-        uid  = OBS_OVERVIEW_DASHBOARD,
+        uid = OBS_OVERVIEW_DASHBOARD,
     );
     eprintln!(
         "[{label}] Prometheus    : http://127.0.0.1:{port}/         {state}",
-        port  = OBS_PROMETHEUS_PORT,
+        port = OBS_PROMETHEUS_PORT,
         state = probe_state("127.0.0.1", OBS_PROMETHEUS_PORT),
     );
     eprintln!(
@@ -397,12 +395,12 @@ fn emit_observability_block(label: &str) {
     eprintln!(
         "[{label}] OTLP/HTTP     : http://127.0.0.1:{port}        \
          (kernel [observability] push target) {state}",
-        port  = OBS_OTLP_HTTP_PORT,
+        port = OBS_OTLP_HTTP_PORT,
         state = probe_state("127.0.0.1", OBS_OTLP_HTTP_PORT),
     );
     eprintln!(
         "[{label}] OTel zPages   : http://127.0.0.1:{port}/       {state}",
-        port  = OBS_OTEL_ZPAGES_PORT,
+        port = OBS_OTEL_ZPAGES_PORT,
         state = probe_state("127.0.0.1", OBS_OTEL_ZPAGES_PORT),
     );
     // Mention the admin user in a separate line — keeping the
@@ -414,9 +412,7 @@ fn emit_observability_block(label: &str) {
         user = OBS_GRAFANA_ADMIN_USER,
         pass = OBS_GRAFANA_ADMIN_PASS,
     );
-    eprintln!(
-        "[{label}] (run `cargo xtask observability up` if any line above shows `(down)`)"
-    );
+    eprintln!("[{label}] (run `cargo xtask observability up` if any line above shows `(down)`)");
     eprintln!(
         "[{label}] (RAXIS_E2E_OPEN_OBSERVABILITY=1 opens Grafana home + raxis-00-overview \
          at end-of-run; RAXIS_E2E_BROWSER=cursor|system|none overrides which browser)"
@@ -502,10 +498,10 @@ mod tests {
         // is enough to catch a rebind without coupling to the
         // exact YAML key ordering.
         for (name, port) in [
-            ("grafana",        OBS_GRAFANA_PORT),
-            ("prometheus",     OBS_PROMETHEUS_PORT),
-            ("otlp-http",      OBS_OTLP_HTTP_PORT),
-            ("otel-zpages",    OBS_OTEL_ZPAGES_PORT),
+            ("grafana", OBS_GRAFANA_PORT),
+            ("prometheus", OBS_PROMETHEUS_PORT),
+            ("otlp-http", OBS_OTLP_HTTP_PORT),
+            ("otel-zpages", OBS_OTEL_ZPAGES_PORT),
         ] {
             let bind = format!("127.0.0.1:{port}:");
             assert!(
@@ -557,9 +553,7 @@ mod tests {
         // unit test's fixture (the test_label is "smoke" so an
         // operator skimming `/tmp/raxis-e2e-realistic.log` can
         // confirm by `rg '^\[smoke\]'`).
-        r.set_dashboard_url(
-            "http://test-fixture-not-a-real-dashboard.invalid/login",
-        );
+        r.set_dashboard_url("http://test-fixture-not-a-real-dashboard.invalid/login");
         r.mark_success();
         // Track the fire count via a local Arc<Mutex<_>> — the
         // reporter does not expose the bit publicly, so we

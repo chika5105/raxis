@@ -107,15 +107,12 @@ pub fn validate_approval_token(
         .ok_or_else(|| AuthorityError::SessionInvalid {
             reason: format!("operator fingerprint '{}' not in policy", token.issued_by),
         })?;
-    let pubkey_bytes = hex::decode(&operator_entry.pubkey_hex)
-        .map_err(|_| AuthorityError::SignatureInvalid)?;
+    let pubkey_bytes =
+        hex::decode(&operator_entry.pubkey_hex).map_err(|_| AuthorityError::SignatureInvalid)?;
 
     let signing_input = approval_signing_input(token);
-    raxis_crypto::verify::verify_ed25519(
-        &pubkey_bytes,
-        &signing_input,
-        &token.signature,
-    ).map_err(|_| AuthorityError::SignatureInvalid)?;
+    raxis_crypto::verify::verify_ed25519(&pubkey_bytes, &signing_input, &token.signature)
+        .map_err(|_| AuthorityError::SignatureInvalid)?;
 
     // Step 2: Expiry.
     let now = unix_now_secs();
@@ -177,7 +174,8 @@ pub fn revoke_approval(
             (approval_id, revoked_by, revoked_at)
          VALUES (?1, ?2, ?3)",
         rusqlite::params![approval_id, revoked_by, now],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    )
+    .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     Ok(())
 }
 
@@ -187,22 +185,26 @@ pub fn revoke_approval(
 
 fn is_revoked(approval_id: &str, store: &Store) -> Result<bool, AuthorityError> {
     let conn = store.lock_sync();
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM approval_revocations WHERE approval_id=?1",
-        rusqlite::params![approval_id],
-        |r| r.get(0),
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM approval_revocations WHERE approval_id=?1",
+            rusqlite::params![approval_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
     Ok(count > 0)
 }
 
 fn get_use_count(approval_id: &str, store: &Store) -> Result<i64, AuthorityError> {
     let conn = store.lock_sync();
     // Count how many times this approval token has been accepted in the actions table.
-    let count: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM approval_uses WHERE approval_id=?1",
-        rusqlite::params![approval_id],
-        |r| r.get(0),
-    ).unwrap_or(0);
+    let count: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM approval_uses WHERE approval_id=?1",
+            rusqlite::params![approval_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
     Ok(count)
 }
 
@@ -219,11 +221,7 @@ fn approval_signing_input(token: &ApprovalToken) -> Vec<u8> {
     .to_string();
     format!(
         "approval|{}|{}|{}|{}|{}",
-        token.approval_id,
-        token.issued_by,
-        token.issued_at,
-        token.valid_for_secs,
-        scope_json,
+        token.approval_id, token.issued_by, token.issued_at, token.valid_for_secs, scope_json,
     )
     .into_bytes()
 }

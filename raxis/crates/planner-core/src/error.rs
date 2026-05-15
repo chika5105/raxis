@@ -112,12 +112,11 @@ impl PlannerError {
             | Self::DuplicateFlag(_)
             | Self::UnknownFlag(_)
             | Self::UnexpectedFlag(_) => 2,
-            Self::MissingEnv(_)
-            | Self::EmptyEnv(_)       => 3,
+            Self::MissingEnv(_) | Self::EmptyEnv(_) => 3,
             Self::MaxTurnsExceeded { .. } => 4,
-            Self::DispatchIdle           => 5,
-            Self::TokensExceeded { .. }  => 6,
-            Self::DriverFailure(_)       => 7,
+            Self::DispatchIdle => 5,
+            Self::TokensExceeded { .. } => 6,
+            Self::DriverFailure(_) => 7,
         }
     }
 }
@@ -128,10 +127,10 @@ mod tests {
 
     #[test]
     fn argv_errors_map_to_exit_code_2() {
-        assert_eq!(PlannerError::BadArg("x").exit_code(),         2);
+        assert_eq!(PlannerError::BadArg("x").exit_code(), 2);
         assert_eq!(PlannerError::MissingValue("--x").exit_code(), 2);
-        assert_eq!(PlannerError::EmptyValue("--x").exit_code(),   2);
-        assert_eq!(PlannerError::DuplicateFlag("--x").exit_code(),2);
+        assert_eq!(PlannerError::EmptyValue("--x").exit_code(), 2);
+        assert_eq!(PlannerError::DuplicateFlag("--x").exit_code(), 2);
         assert_eq!(PlannerError::UnknownFlag("x".into()).exit_code(), 2);
         assert_eq!(PlannerError::UnexpectedFlag("--x").exit_code(), 2);
     }
@@ -139,7 +138,7 @@ mod tests {
     #[test]
     fn env_errors_map_to_exit_code_3() {
         assert_eq!(PlannerError::MissingEnv("FOO").exit_code(), 3);
-        assert_eq!(PlannerError::EmptyEnv("FOO").exit_code(),   3);
+        assert_eq!(PlannerError::EmptyEnv("FOO").exit_code(), 3);
     }
 
     #[test]
@@ -147,12 +146,13 @@ mod tests {
         assert_eq!(PlannerError::MaxTurnsExceeded { turns: 20 }.exit_code(), 4);
         assert_eq!(PlannerError::DispatchIdle.exit_code(), 5);
         assert_eq!(
-            PlannerError::TokensExceeded { which: "total", ceiling: 1000 }.exit_code(),
+            PlannerError::TokensExceeded {
+                which: "total",
+                ceiling: 1000
+            }
+            .exit_code(),
             6,
         );
-        assert_eq!(
-            PlannerError::DriverFailure("any".to_owned()).exit_code(),
-            7,
-        );
+        assert_eq!(PlannerError::DriverFailure("any".to_owned()).exit_code(), 7,);
     }
 }

@@ -33,17 +33,14 @@ use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::time::Duration;
 
-use raxis_gateway::{
-    parse_gateway_env, run_gateway_with_backend, Backend,
-};
+use raxis_gateway::{parse_gateway_env, run_gateway_with_backend, Backend};
 use raxis_ipc::message::{FetchKind, GatewayMessage};
 use raxis_ipc::{read_frame, write_frame};
 use raxis_test_support::MockBackend;
 use tokio::net::{UnixListener, UnixStream};
 use uuid::Uuid;
 
-const GATEWAY_TOKEN: &str =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const GATEWAY_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
 // ---------------------------------------------------------------------------
 // Fixture: build a `<data_dir>` with policy.toml + providers/anthropic.toml.
@@ -60,10 +57,10 @@ fn build_data_dir() -> tempfile::TempDir {
     // `[[operators.entries]]` block missing a self-signed cert whose
     // `pubkey_hex` matches the entry's. Mint that cert here from a
     // deterministic operator key so the gateway accepts the fixture.
-    let op_key   = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+    let op_key = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
     let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
-    let op_fp    = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&op_pk_hex).unwrap());
-    let op_cert  = raxis_test_support::ephemeral_cert_with_key(
+    let op_fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&op_pk_hex).unwrap());
+    let op_cert = raxis_test_support::ephemeral_cert_with_key(
         &op_key,
         raxis_test_support::CertOpts {
             display_name: "operator-1".to_owned(),
@@ -171,12 +168,14 @@ impl FakeKernel {
         // UDS path length cap (~104 chars on macOS); use std::env::temp_dir
         // + uuid suffix to stay short. Same trick as the verifier-stub
         // round-trip test.
-        let socket_path = std::env::temp_dir()
-            .join(format!("rxgw-{}.sock", Uuid::new_v4()));
+        let socket_path = std::env::temp_dir().join(format!("rxgw-{}.sock", Uuid::new_v4()));
         let _ = std::fs::remove_file(&socket_path);
         let listener = UnixListener::bind(&socket_path)
             .unwrap_or_else(|e| panic!("bind UDS at {socket_path:?}: {e}"));
-        Self { listener, socket_path }
+        Self {
+            listener,
+            socket_path,
+        }
     }
 }
 
@@ -219,8 +218,10 @@ async fn drain_handshake(stream: &mut UnixStream) {
     .expect("read handshake frame");
     match ready {
         GatewayMessage::GatewayReady { gateway_token } => {
-            assert_eq!(gateway_token, GATEWAY_TOKEN,
-                "handshake token MUST echo RAXIS_GATEWAY_TOKEN byte-for-byte");
+            assert_eq!(
+                gateway_token, GATEWAY_TOKEN,
+                "handshake token MUST echo RAXIS_GATEWAY_TOKEN byte-for-byte"
+            );
         }
         other => panic!("first frame must be GatewayReady, got {other:?}"),
     }
@@ -234,11 +235,13 @@ fn spawn_gateway(
     data_dir: PathBuf,
     backend: Arc<dyn Backend>,
 ) -> tokio::task::JoinHandle<Result<(), raxis_gateway::runtime::GatewayRunError>> {
-    let env = parse_gateway_env(GATEWAY_TOKEN, &socket.display().to_string(), &data_dir.display().to_string())
-        .expect("parse_gateway_env in test");
-    tokio::spawn(async move {
-        run_gateway_with_backend(env, backend).await
-    })
+    let env = parse_gateway_env(
+        GATEWAY_TOKEN,
+        &socket.display().to_string(),
+        &data_dir.display().to_string(),
+    )
+    .expect("parse_gateway_env in test");
+    tokio::spawn(async move { run_gateway_with_backend(env, backend).await })
 }
 
 // ---------------------------------------------------------------------------
@@ -268,7 +271,13 @@ async fn gateway_handshakes_then_returns_mock_response_for_allowed_url() {
     write_frame(&mut stream, &req).await.unwrap();
     let resp: GatewayMessage = read_frame(&mut stream).await.unwrap();
     match resp {
-        GatewayMessage::FetchResponse { fetch_id, status_code, body_bytes, error, .. } => {
+        GatewayMessage::FetchResponse {
+            fetch_id,
+            status_code,
+            body_bytes,
+            error,
+            ..
+        } => {
             assert_eq!(fetch_id, req_id, "fetch_id MUST round-trip unchanged");
             assert_eq!(status_code, Some(200));
             assert!(body_bytes.is_some());
@@ -307,7 +316,9 @@ async fn gateway_returns_domain_not_allowed_for_url_outside_egress_allowlist() {
     write_frame(&mut stream, &req).await.unwrap();
     let resp: GatewayMessage = read_frame(&mut stream).await.unwrap();
     match resp {
-        GatewayMessage::FetchResponse { error, status_code, .. } => {
+        GatewayMessage::FetchResponse {
+            error, status_code, ..
+        } => {
             assert_eq!(status_code, None);
             assert_eq!(error.as_deref(), Some("DomainNotAllowed"));
         }
@@ -338,7 +349,8 @@ fn gateway_binary_exits_with_code_64_when_required_env_var_missing() {
         .expect("spawn raxis-gateway");
     let code = out.status.code().unwrap_or(-1);
     assert_eq!(
-        code, 64,
+        code,
+        64,
         "missing env must produce EX_USAGE=64; got {code}, stderr=\n{}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -365,7 +377,9 @@ async fn gateway_returns_invalid_token_when_token_does_not_match_env() {
     write_frame(&mut stream, &req).await.unwrap();
     let resp: GatewayMessage = read_frame(&mut stream).await.unwrap();
     match resp {
-        GatewayMessage::FetchResponse { error, status_code, .. } => {
+        GatewayMessage::FetchResponse {
+            error, status_code, ..
+        } => {
             assert_eq!(status_code, None);
             assert_eq!(error.as_deref(), Some("InvalidToken"));
         }

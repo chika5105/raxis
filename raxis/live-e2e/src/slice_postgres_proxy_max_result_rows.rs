@@ -31,14 +31,14 @@
 //! Postgres 16) and fails fast with an actionable error if the
 //! container isn't running.
 
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use raxis_credential_proxy_postgres::{
-    AuditChannel, AuditEvent, OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
+    restriction::Restrictions, AuditChannel, AuditEvent, OwnedConsumer, PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
     ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,

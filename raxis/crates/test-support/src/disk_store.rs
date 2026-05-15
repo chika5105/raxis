@@ -55,13 +55,13 @@ pub struct DiskStore {
     /// Kept private so callers cannot drop the dir out from under the
     /// `Store` connection (which would leave the test in a state the
     /// production kernel could never reach).
-    _tmp:    TempDir,
+    _tmp: TempDir,
     db_path: PathBuf,
 
     /// `None` after `close()`; `Some(_)` while the connection is open.
     /// Boxed in an `Option` (rather than the `Store` itself) so the
     /// fixture can simulate "kernel shutdown" without consuming `self`.
-    store:   Option<Store>,
+    store: Option<Store>,
 }
 
 impl DiskStore {
@@ -69,10 +69,10 @@ impl DiskStore {
     /// underlying file is newly created on construction and migrations
     /// are applied — exactly the path `kernel::main::main` step 5 takes.
     pub fn new() -> Self {
-        let tmp     = TempDir::new().expect("DiskStore: TempDir::new failed");
+        let tmp = TempDir::new().expect("DiskStore: TempDir::new failed");
         let db_path = tmp.path().join(DB_FILENAME);
-        let store   = Store::open(&db_path)
-            .expect("DiskStore: Store::open failed for fresh disk store");
+        let store =
+            Store::open(&db_path).expect("DiskStore: Store::open failed for fresh disk store");
         Self {
             _tmp: tmp,
             db_path,
@@ -126,8 +126,7 @@ impl DiskStore {
              cannot simulate kernel restart on a missing DB",
             self.db_path.display(),
         );
-        let store = Store::open(&self.db_path)
-            .expect("DiskStore::reopen: Store::open failed");
+        let store = Store::open(&self.db_path).expect("DiskStore::reopen: Store::open failed");
         self.store = Some(store);
     }
 

@@ -56,19 +56,19 @@ const EMBEDDED_GATEWAY_BYTES: Option<&'static [u8]> = None;
 pub enum MaterializeError {
     #[error("create gateway dir at {path}: {source}")]
     CreateDir {
-        path:   PathBuf,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("write gateway bytes to {path}: {source}")]
     Write {
-        path:   PathBuf,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
     #[error("set permissions on {path}: {source}")]
     Permissions {
-        path:   PathBuf,
+        path: PathBuf,
         #[source]
         source: std::io::Error,
     },
@@ -96,14 +96,14 @@ pub fn materialize(data_dir: &Path) -> Result<Option<PathBuf>, MaterializeError>
 
     let dir = data_dir.join("runtime").join("embedded-gateway");
     std::fs::create_dir_all(&dir).map_err(|e| MaterializeError::CreateDir {
-        path:   dir.clone(),
+        path: dir.clone(),
         source: e,
     })?;
     set_dir_mode_0700(&dir)?;
 
     let bin = dir.join("raxis-gateway");
     std::fs::write(&bin, bytes).map_err(|e| MaterializeError::Write {
-        path:   bin.clone(),
+        path: bin.clone(),
         source: e,
     })?;
     set_file_mode_0500(&bin)?;
@@ -116,7 +116,7 @@ fn set_dir_mode_0700(path: &Path) -> Result<(), MaterializeError> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o700);
     std::fs::set_permissions(path, perms).map_err(|e| MaterializeError::Permissions {
-        path:   path.to_path_buf(),
+        path: path.to_path_buf(),
         source: e,
     })
 }
@@ -126,7 +126,7 @@ fn set_file_mode_0500(path: &Path) -> Result<(), MaterializeError> {
     use std::os::unix::fs::PermissionsExt;
     let perms = std::fs::Permissions::from_mode(0o500);
     std::fs::set_permissions(path, perms).map_err(|e| MaterializeError::Permissions {
-        path:   path.to_path_buf(),
+        path: path.to_path_buf(),
         source: e,
     })
 }

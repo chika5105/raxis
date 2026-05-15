@@ -316,36 +316,36 @@ impl Table {
     /// method as well, so renaming a table propagates at compile time.
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::SchemaVersion             => "schema_version",
-            Self::Initiatives               => "initiatives",
-            Self::SignedPlanArtifacts       => "signed_plan_artifacts",
-            Self::Tasks                     => "tasks",
-            Self::TaskDagEdges              => "task_dag_edges",
-            Self::Sessions                  => "sessions",
-            Self::Delegations               => "delegations",
-            Self::NonceCache                => "nonce_cache",
-            Self::Escalations               => "escalations",
-            Self::ApprovalTokens            => "approval_tokens",
-            Self::ApprovalProofs            => "approval_proofs",
-            Self::ApprovalTokenNonces       => "approval_token_nonces",
-            Self::VerifierRunTokens         => "verifier_run_tokens",
-            Self::WitnessRecords            => "witness_records",
-            Self::LaneBudgetReservations    => "lane_budget_reservations",
-            Self::LineageRateLimits         => "lineage_rate_limits",
-            Self::TaskIntentRanges          => "task_intent_ranges",
+            Self::SchemaVersion => "schema_version",
+            Self::Initiatives => "initiatives",
+            Self::SignedPlanArtifacts => "signed_plan_artifacts",
+            Self::Tasks => "tasks",
+            Self::TaskDagEdges => "task_dag_edges",
+            Self::Sessions => "sessions",
+            Self::Delegations => "delegations",
+            Self::NonceCache => "nonce_cache",
+            Self::Escalations => "escalations",
+            Self::ApprovalTokens => "approval_tokens",
+            Self::ApprovalProofs => "approval_proofs",
+            Self::ApprovalTokenNonces => "approval_token_nonces",
+            Self::VerifierRunTokens => "verifier_run_tokens",
+            Self::WitnessRecords => "witness_records",
+            Self::LaneBudgetReservations => "lane_budget_reservations",
+            Self::LineageRateLimits => "lineage_rate_limits",
+            Self::TaskIntentRanges => "task_intent_ranges",
             Self::TaskExportedPathSnapshots => "task_exported_path_snapshots",
-            Self::PolicyEpochHistory        => "policy_epoch_history",
-            Self::OperatorCertificates      => "operator_certificates",
-            Self::InitiativeQuarantines     => "initiative_quarantines",
-            Self::SubtaskActivations        => "subtask_activations",
-            Self::PlanBundles               => "plan_bundles",
-            Self::PlanBundleArtifacts       => "plan_bundle_artifacts",
-            Self::PlanBundleNoncesSeen      => "plan_bundle_nonces_seen",
-            Self::TaskCredentialProxies     => "task_credential_proxies",
-            Self::IntegrationMergeAttempts  => "integration_merge_attempts",
-            Self::StructuredOutputs         => "structured_outputs",
-            Self::Notifications             => "notifications",
-            Self::ProviderCircuitState      => "provider_circuit_state",
+            Self::PolicyEpochHistory => "policy_epoch_history",
+            Self::OperatorCertificates => "operator_certificates",
+            Self::InitiativeQuarantines => "initiative_quarantines",
+            Self::SubtaskActivations => "subtask_activations",
+            Self::PlanBundles => "plan_bundles",
+            Self::PlanBundleArtifacts => "plan_bundle_artifacts",
+            Self::PlanBundleNoncesSeen => "plan_bundle_nonces_seen",
+            Self::TaskCredentialProxies => "task_credential_proxies",
+            Self::IntegrationMergeAttempts => "integration_merge_attempts",
+            Self::StructuredOutputs => "structured_outputs",
+            Self::Notifications => "notifications",
+            Self::ProviderCircuitState => "provider_circuit_state",
         }
     }
 }
@@ -363,15 +363,31 @@ mod tests {
     #[test]
     fn all_variants_have_nonempty_str() {
         let all = [
-            Table::SchemaVersion, Table::Initiatives, Table::SignedPlanArtifacts,
-            Table::Tasks, Table::TaskDagEdges, Table::Sessions, Table::Delegations,
-            Table::NonceCache, Table::Escalations, Table::ApprovalTokens,
-            Table::ApprovalProofs, Table::ApprovalTokenNonces, Table::VerifierRunTokens,
-            Table::WitnessRecords, Table::LaneBudgetReservations, Table::LineageRateLimits,
-            Table::TaskIntentRanges, Table::TaskExportedPathSnapshots, Table::PolicyEpochHistory,
-            Table::OperatorCertificates, Table::InitiativeQuarantines,
+            Table::SchemaVersion,
+            Table::Initiatives,
+            Table::SignedPlanArtifacts,
+            Table::Tasks,
+            Table::TaskDagEdges,
+            Table::Sessions,
+            Table::Delegations,
+            Table::NonceCache,
+            Table::Escalations,
+            Table::ApprovalTokens,
+            Table::ApprovalProofs,
+            Table::ApprovalTokenNonces,
+            Table::VerifierRunTokens,
+            Table::WitnessRecords,
+            Table::LaneBudgetReservations,
+            Table::LineageRateLimits,
+            Table::TaskIntentRanges,
+            Table::TaskExportedPathSnapshots,
+            Table::PolicyEpochHistory,
+            Table::OperatorCertificates,
+            Table::InitiativeQuarantines,
             Table::SubtaskActivations,
-            Table::PlanBundles, Table::PlanBundleArtifacts, Table::PlanBundleNoncesSeen,
+            Table::PlanBundles,
+            Table::PlanBundleArtifacts,
+            Table::PlanBundleNoncesSeen,
             Table::TaskCredentialProxies,
             Table::IntegrationMergeAttempts,
             Table::StructuredOutputs,
@@ -397,9 +413,12 @@ mod tests {
     /// rename in code review.
     #[test]
     fn plan_bundle_sealing_table_names_are_pinned() {
-        assert_eq!(Table::PlanBundles.as_str(),          "plan_bundles");
-        assert_eq!(Table::PlanBundleArtifacts.as_str(),  "plan_bundle_artifacts");
-        assert_eq!(Table::PlanBundleNoncesSeen.as_str(), "plan_bundle_nonces_seen");
+        assert_eq!(Table::PlanBundles.as_str(), "plan_bundles");
+        assert_eq!(Table::PlanBundleArtifacts.as_str(), "plan_bundle_artifacts");
+        assert_eq!(
+            Table::PlanBundleNoncesSeen.as_str(),
+            "plan_bundle_nonces_seen"
+        );
     }
 
     /// V2 sub-task activation table name is wire-stable (it is queried

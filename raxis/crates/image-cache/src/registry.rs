@@ -37,8 +37,11 @@ pub struct RegistryRef {
 impl RegistryRef {
     /// Construct from owned strings. Both inputs must be non-empty
     /// or [`RegistryRefError::Empty`] is returned.
-    pub fn new(host: impl Into<String>, repository: impl Into<String>) -> Result<Self, RegistryRefError> {
-        let host       = host.into();
+    pub fn new(
+        host: impl Into<String>,
+        repository: impl Into<String>,
+    ) -> Result<Self, RegistryRefError> {
+        let host = host.into();
         let repository = repository.into();
         if host.is_empty() || repository.is_empty() {
             return Err(RegistryRefError::Empty);
@@ -64,7 +67,7 @@ mod tests {
     #[test]
     fn new_accepts_non_empty_inputs() {
         let r = RegistryRef::new("ghcr.io", "operator/raxis-rust").unwrap();
-        assert_eq!(r.host,       "ghcr.io");
+        assert_eq!(r.host, "ghcr.io");
         assert_eq!(r.repository, "operator/raxis-rust");
     }
 

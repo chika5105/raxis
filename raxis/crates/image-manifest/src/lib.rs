@@ -53,7 +53,7 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-use ed25519_dalek::{Signature, Verifier, VerifyingKey, SignatureError};
+use ed25519_dalek::{Signature, SignatureError, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::path::Path;
@@ -136,7 +136,7 @@ impl ImageFormat {
     /// it matches the cli flag (`--format erofs|initramfs-cpio`).
     pub fn as_str(self) -> &'static str {
         match self {
-            ImageFormat::RootfsErofs         => "erofs",
+            ImageFormat::RootfsErofs => "erofs",
             ImageFormat::RootfsInitramfsCpio => "initramfs-cpio",
         }
     }
@@ -162,8 +162,8 @@ impl Role {
     /// directory layout in `planner-harness.md §14.4`.
     pub fn as_dir_name(self) -> &'static str {
         match self {
-            Role::Reviewer        => "reviewer-core",
-            Role::Orchestrator    => "orchestrator-core",
+            Role::Reviewer => "reviewer-core",
+            Role::Orchestrator => "orchestrator-core",
             Role::ExecutorStarter => "executor-starter",
         }
     }
@@ -171,8 +171,8 @@ impl Role {
     /// Filename stem for the `<role>-<kernel_version>.img` artefact.
     pub fn artefact_stem(self) -> &'static str {
         match self {
-            Role::Reviewer        => "raxis-reviewer-core",
-            Role::Orchestrator    => "raxis-orchestrator-core",
+            Role::Reviewer => "raxis-reviewer-core",
+            Role::Orchestrator => "raxis-orchestrator-core",
             Role::ExecutorStarter => "raxis-executor-starter",
         }
     }
@@ -184,14 +184,14 @@ pub struct ManifestFile {
     /// Path inside the rootfs (always forward-slash, never absolute on
     /// disk). The host-side builder rewrites paths during tarball
     /// assembly so the recorded form is the same on every platform.
-    pub path:        String,
+    pub path: String,
     /// Lowercase-hex SHA-256 of the file's bytes.
-    pub sha256:      String,
+    pub sha256: String,
     /// Size in bytes; redundant with the digest's coverage but useful
     /// for audit-side sanity checks and image-bloat budgets.
-    pub size:        u64,
+    pub size: u64,
     /// POSIX mode bits (e.g., `0o755` for executables).
-    pub mode:        u32,
+    pub mode: u32,
 }
 
 /// Build-environment fingerprint pinned in every manifest. Operators
@@ -204,12 +204,12 @@ pub struct BuildEnv {
     /// Pinned mkfs.erofs version (e.g., "1.7.1"). Tools the builder
     /// shells out to are the largest non-determinism source — pinning
     /// the version is the minimum reproducibility contract.
-    pub erofs_version:     String,
+    pub erofs_version: String,
     /// Pinned tar implementation (e.g., "GNU tar 1.34").
-    pub tar_version:       String,
+    pub tar_version: String,
     /// Pinned zstd version, if zstd is used to compress the OCI
     /// layers (`mkfs.erofs -z zstd`).
-    pub zstd_version:      String,
+    pub zstd_version: String,
 }
 
 /// The kernel-pinned manifest structure. One TOML file per role.
@@ -218,7 +218,7 @@ pub struct ImageManifest {
     /// Schema version — see [`SCHEMA_VERSION`].
     pub schema_version: u32,
     /// Which canonical role this manifest covers.
-    pub role:           Role,
+    pub role: Role,
     /// Kernel version this image is paired with (e.g., "0.2.0").
     /// Validates the version-locking invariant called out in
     /// `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`.
@@ -234,7 +234,7 @@ pub struct ImageManifest {
     /// Stored hex-encoded so the manifest stays human-readable; the
     /// in-memory representation in [`ImageManifest::bundle_hash_bytes`]
     /// is the `[u8; 32]` form.
-    pub bundle_hash:    String,
+    pub bundle_hash: String,
     /// Lowercase-hex SHA-256 of the packed `raxis-<role>-<kernel_version>.img`
     /// blob (the rootfs the host hands to the hypervisor). The
     /// builder fills this in **after** rootfs assembly. Folding it
@@ -248,11 +248,11 @@ pub struct ImageManifest {
     /// On-disk shape of the `image_artefact_sha256`-pinned bytes.
     /// See [`ImageFormat`] for the substrate-dispatch contract.
     /// `SCHEMA_VERSION = 3` addition.
-    pub image_format:   ImageFormat,
+    pub image_format: ImageFormat,
     /// Build-environment pin (timestamps, tool versions).
-    pub build_env:      BuildEnv,
+    pub build_env: BuildEnv,
     /// Per-file inventory; sorted by `path` after `recompute_bundle_hash`.
-    pub files:          Vec<ManifestFile>,
+    pub files: Vec<ManifestFile>,
     /// SHA-256 fingerprint of the kernel signing key's verifying key
     /// (`Sha256(verifying_key.to_bytes())`). The kernel binary carries
     /// the expected value in `EXPECTED_KERNEL_SIGNING_KEY_FP` and
@@ -260,7 +260,7 @@ pub struct ImageManifest {
     pub signing_key_fp: String,
     /// Ed25519 signature over [`ImageManifest::bundle_hash_bytes`].
     /// Hex-encoded.
-    pub signature:      String,
+    pub signature: String,
 }
 
 /// Errors `verify` and the deserialiser can surface.
@@ -274,7 +274,7 @@ pub enum ManifestError {
     #[error("manifest schema_version {found} is not supported (expected {expected})")]
     SchemaVersionMismatch {
         /// What we found in the manifest.
-        found:    u32,
+        found: u32,
         /// What we know how to validate.
         expected: u32,
     },
@@ -292,7 +292,7 @@ pub enum ManifestError {
         /// What `recompute_bundle_hash` produced.
         recomputed: String,
         /// What the manifest claimed.
-        claimed:    String,
+        claimed: String,
     },
 
     /// `signing_key_fp` is malformed.
@@ -342,7 +342,7 @@ pub enum ManifestError {
     #[error("manifest builder io error at {path}: {source}")]
     Io {
         /// Path the builder was reading.
-        path:   String,
+        path: String,
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,
@@ -355,7 +355,7 @@ impl ImageManifest {
         let m: ImageManifest = toml::from_str(s)?;
         if m.schema_version != SCHEMA_VERSION {
             return Err(ManifestError::SchemaVersionMismatch {
-                found:    m.schema_version,
+                found: m.schema_version,
                 expected: SCHEMA_VERSION,
             });
         }
@@ -435,15 +435,13 @@ impl ImageManifest {
 
     /// Decode the manifest's claimed image-artefact SHA-256 into the
     /// binary form the kernel compares against the on-disk .img bytes.
-    pub fn image_artefact_sha256_bytes(
-        &self,
-    ) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
+    pub fn image_artefact_sha256_bytes(&self) -> Result<[u8; BUNDLE_HASH_LEN], ManifestError> {
         validate_artefact_sha256(&self.image_artefact_sha256)?;
-        decode_hex_n::<BUNDLE_HASH_LEN>(&self.image_artefact_sha256).ok_or_else(
-            || ManifestError::ImageArtefactSha256Malformed {
+        decode_hex_n::<BUNDLE_HASH_LEN>(&self.image_artefact_sha256).ok_or_else(|| {
+            ManifestError::ImageArtefactSha256Malformed {
                 found: self.image_artefact_sha256.clone(),
-            },
-        )
+            }
+        })
     }
 
     /// Decode the signature.
@@ -453,8 +451,7 @@ impl ImageManifest {
 
     /// Decode the signing-key fingerprint.
     pub fn signing_key_fp_bytes(&self) -> Result<[u8; KEY_FP_LEN], ManifestError> {
-        decode_hex_n::<KEY_FP_LEN>(&self.signing_key_fp)
-            .ok_or(ManifestError::SigningKeyFpMalformed)
+        decode_hex_n::<KEY_FP_LEN>(&self.signing_key_fp).ok_or(ManifestError::SigningKeyFpMalformed)
     }
 }
 
@@ -469,12 +466,12 @@ impl ImageManifest {
 /// 4. `signature` must verify against `expected_signing_key` over the
 ///    binary `bundle_hash_bytes`.
 pub fn verify(
-    manifest:             &ImageManifest,
+    manifest: &ImageManifest,
     expected_signing_key: &VerifyingKey,
 ) -> Result<(), ManifestError> {
     if manifest.schema_version != SCHEMA_VERSION {
         return Err(ManifestError::SchemaVersionMismatch {
-            found:    manifest.schema_version,
+            found: manifest.schema_version,
             expected: SCHEMA_VERSION,
         });
     }
@@ -482,11 +479,11 @@ pub fn verify(
     detect_duplicate_paths(&manifest.files)?;
 
     let recomputed = manifest.recompute_bundle_hash()?;
-    let claimed    = manifest.bundle_hash_bytes()?;
+    let claimed = manifest.bundle_hash_bytes()?;
     if recomputed != claimed {
         return Err(ManifestError::BundleHashMismatch {
             recomputed: hex::encode(recomputed),
-            claimed:    hex::encode(claimed),
+            claimed: hex::encode(claimed),
         });
     }
 
@@ -531,15 +528,15 @@ fn validate_artefact_sha256(found: &str) -> Result<(), ManifestError> {
 }
 
 fn validate_path(path: &str) -> Result<(), ManifestError> {
-    if path.is_empty()
-        || path.starts_with('/')
-        || path.contains('\\')
-        || path.contains('\0')
-    {
-        return Err(ManifestError::FilePathMalformed { found: path.to_owned() });
+    if path.is_empty() || path.starts_with('/') || path.contains('\\') || path.contains('\0') {
+        return Err(ManifestError::FilePathMalformed {
+            found: path.to_owned(),
+        });
     }
     if path.split('/').any(|seg| seg == ".." || seg == ".") {
-        return Err(ManifestError::FilePathMalformed { found: path.to_owned() });
+        return Err(ManifestError::FilePathMalformed {
+            found: path.to_owned(),
+        });
     }
     Ok(())
 }
@@ -573,15 +570,15 @@ pub fn sha256_file_hex(path: &Path) -> Result<(String, u64), ManifestError> {
     use std::io::Read;
 
     let mut f = File::open(path).map_err(|e| ManifestError::Io {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         source: e,
     })?;
     let mut hasher = Sha256::new();
-    let mut buf    = [0u8; 64 * 1024];
+    let mut buf = [0u8; 64 * 1024];
     let mut total: u64 = 0;
     loop {
         let n = f.read(&mut buf).map_err(|e| ManifestError::Io {
-            path:   path.display().to_string(),
+            path: path.display().to_string(),
             source: e,
         })?;
         if n == 0 {
@@ -616,35 +613,35 @@ mod tests {
 
         let files = vec![
             ManifestFile {
-                path:   "init".to_owned(),
+                path: "init".to_owned(),
                 sha256: "0".repeat(64),
-                size:   100,
-                mode:   0o755,
+                size: 100,
+                mode: 0o755,
             },
             ManifestFile {
-                path:   "raxis-planner".to_owned(),
+                path: "raxis-planner".to_owned(),
                 sha256: "1".repeat(64),
-                size:   2_000_000,
-                mode:   0o755,
+                size: 2_000_000,
+                mode: 0o755,
             },
         ];
 
         let mut m = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Reviewer,
+            role: Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    String::new(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
-            signature:      String::new(),
+            signature: String::new(),
         };
 
         let recomputed = m.recompute_bundle_hash().unwrap();
@@ -662,39 +659,39 @@ mod tests {
     fn verify_rejects_post_signing_file_edit() {
         let (sk, vk) = fixture_signing_key();
         let files = vec![ManifestFile {
-            path:   "init".to_owned(),
+            path: "init".to_owned(),
             sha256: "a".repeat(64),
-            size:   1,
-            mode:   0o755,
+            size: 1,
+            mode: 0o755,
         }];
 
         let mut m = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Reviewer,
+            role: Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    String::new(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let bh = m.recompute_bundle_hash().unwrap();
         m.bundle_hash = hex::encode(bh);
-        m.signature   = hex::encode(sk.sign(&bh).to_bytes());
+        m.signature = hex::encode(sk.sign(&bh).to_bytes());
 
         // Edit the file list AFTER signing.
         m.files.push(ManifestFile {
-            path:   "raxis-planner".to_owned(),
+            path: "raxis-planner".to_owned(),
             sha256: "b".repeat(64),
-            size:   1,
-            mode:   0o755,
+            size: 1,
+            mode: 0o755,
         });
 
         match verify(&m, &vk).unwrap_err() {
@@ -708,34 +705,34 @@ mod tests {
     #[test]
     fn verify_rejects_wrong_signing_key_fp() {
         let (sk_a, vk_a) = fixture_signing_key();
-        let (_, vk_b)    = fixture_signing_key();
+        let (_, vk_b) = fixture_signing_key();
 
         let files = vec![ManifestFile {
-            path:   "init".to_owned(),
+            path: "init".to_owned(),
             sha256: "a".repeat(64),
-            size:   1,
-            mode:   0o755,
+            size: 1,
+            mode: 0o755,
         }];
         let mut m = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Reviewer,
+            role: Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    String::new(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk_a)),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let bh = m.recompute_bundle_hash().unwrap();
         m.bundle_hash = hex::encode(bh);
-        m.signature   = hex::encode(sk_a.sign(&bh).to_bytes());
+        m.signature = hex::encode(sk_a.sign(&bh).to_bytes());
 
         // Verify against vk_b — different key entirely.
         match verify(&m, &vk_b).unwrap_err() {
@@ -749,26 +746,41 @@ mod tests {
     /// canonical hash sorts by path before hashing.
     #[test]
     fn recompute_bundle_hash_is_insertion_order_independent() {
-        let f1 = ManifestFile { path: "a".to_owned(), sha256: "0".repeat(64), size: 1, mode: 0o644 };
-        let f2 = ManifestFile { path: "b".to_owned(), sha256: "1".repeat(64), size: 1, mode: 0o644 };
-        let f3 = ManifestFile { path: "c".to_owned(), sha256: "2".repeat(64), size: 1, mode: 0o644 };
+        let f1 = ManifestFile {
+            path: "a".to_owned(),
+            sha256: "0".repeat(64),
+            size: 1,
+            mode: 0o644,
+        };
+        let f2 = ManifestFile {
+            path: "b".to_owned(),
+            sha256: "1".repeat(64),
+            size: 1,
+            mode: 0o644,
+        };
+        let f3 = ManifestFile {
+            path: "c".to_owned(),
+            sha256: "2".repeat(64),
+            size: 1,
+            mode: 0o644,
+        };
 
         let m_abc = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Reviewer,
+            role: Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    String::new(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files: vec![f1.clone(), f2.clone(), f3.clone()],
             signing_key_fp: "0".repeat(64),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let mut m_cba = m_abc.clone();
         m_cba.files = vec![f3, f2, f1];
@@ -785,31 +797,31 @@ mod tests {
     fn toml_round_trip_preserves_signed_state() {
         let (sk, vk) = fixture_signing_key();
         let files = vec![ManifestFile {
-            path:   "raxis-planner".to_owned(),
+            path: "raxis-planner".to_owned(),
             sha256: "1".repeat(64),
-            size:   2_000_000,
-            mode:   0o755,
+            size: 2_000_000,
+            mode: 0o755,
         }];
         let mut m = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Orchestrator,
+            role: Role::Orchestrator,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    String::new(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let bh = m.recompute_bundle_hash().unwrap();
         m.bundle_hash = hex::encode(bh);
-        m.signature   = hex::encode(sk.sign(&bh).to_bytes());
+        m.signature = hex::encode(sk.sign(&bh).to_bytes());
 
         let toml = m.to_toml();
         let parsed = ImageManifest::from_toml(&toml).unwrap();
@@ -831,7 +843,10 @@ mod tests {
             "a\\b",
             "a\0b",
         ] {
-            assert!(validate_path(bad).is_err(), "expected {bad:?} to be rejected");
+            assert!(
+                validate_path(bad).is_err(),
+                "expected {bad:?} to be rejected"
+            );
         }
         for ok in ["init", "usr/bin/sh", "raxis-planner"] {
             validate_path(ok).expect("expected ok path");
@@ -845,23 +860,33 @@ mod tests {
         let (_sk, vk) = fixture_signing_key();
         let m = ImageManifest {
             schema_version: SCHEMA_VERSION,
-            role:           Role::Reviewer,
+            role: Role::Reviewer,
             kernel_version: "0.1.0".to_owned(),
-            bundle_hash:    "0".repeat(64),
+            bundle_hash: "0".repeat(64),
             image_artefact_sha256: "0".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files: vec![
-                ManifestFile { path: "init".to_owned(), sha256: "0".repeat(64), size: 1, mode: 0o755 },
-                ManifestFile { path: "init".to_owned(), sha256: "0".repeat(64), size: 1, mode: 0o755 },
+                ManifestFile {
+                    path: "init".to_owned(),
+                    sha256: "0".repeat(64),
+                    size: 1,
+                    mode: 0o755,
+                },
+                ManifestFile {
+                    path: "init".to_owned(),
+                    sha256: "0".repeat(64),
+                    size: 1,
+                    mode: 0o755,
+                },
             ],
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
-            signature:      "0".repeat(128),
+            signature: "0".repeat(128),
         };
         match verify(&m, &vk).unwrap_err() {
             ManifestError::DuplicatePath(p) => assert_eq!(p, "init"),
@@ -879,31 +904,31 @@ mod tests {
     fn verify_rejects_post_signing_image_artefact_sha256_edit() {
         let (sk, vk) = fixture_signing_key();
         let files = vec![ManifestFile {
-            path:   "init".to_owned(),
+            path: "init".to_owned(),
             sha256: "a".repeat(64),
-            size:   1,
-            mode:   0o755,
+            size: 1,
+            mode: 0o755,
         }];
         let mut m = ImageManifest {
-            schema_version:        SCHEMA_VERSION,
-            role:                  Role::Reviewer,
-            kernel_version:        "0.1.0".to_owned(),
-            bundle_hash:           String::new(),
+            schema_version: SCHEMA_VERSION,
+            role: Role::Reviewer,
+            kernel_version: "0.1.0".to_owned(),
+            bundle_hash: String::new(),
             image_artefact_sha256: "1".repeat(64),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files,
             signing_key_fp: hex::encode(fingerprint_signing_key(&vk)),
-            signature:      String::new(),
+            signature: String::new(),
         };
         let bh = m.recompute_bundle_hash().unwrap();
         m.bundle_hash = hex::encode(bh);
-        m.signature   = hex::encode(sk.sign(&bh).to_bytes());
+        m.signature = hex::encode(sk.sign(&bh).to_bytes());
 
         // Tamperer swaps the artefact digest WITHOUT re-signing. The
         // bundle-hash recomputation will now disagree with the
@@ -924,10 +949,10 @@ mod tests {
         for bad in [
             "",
             "deadbeef",
-            "G".repeat(64).as_str(),     // non-hex char
-            "A".repeat(64).as_str(),     // uppercase hex rejected (lowercase contract)
-            "0".repeat(63).as_str(),     // wrong length
-            "0".repeat(65).as_str(),     // wrong length
+            "G".repeat(64).as_str(), // non-hex char
+            "A".repeat(64).as_str(), // uppercase hex rejected (lowercase contract)
+            "0".repeat(63).as_str(), // wrong length
+            "0".repeat(65).as_str(), // wrong length
         ] {
             assert!(
                 validate_artefact_sha256(bad).is_err(),
@@ -938,7 +963,10 @@ mod tests {
         validate_artefact_sha256(&"0".repeat(64)).unwrap();
         validate_artefact_sha256(&"a".repeat(64)).unwrap();
         validate_artefact_sha256(&"f".repeat(64)).unwrap();
-        validate_artefact_sha256("aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55").unwrap();
+        validate_artefact_sha256(
+            "aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55aa55",
+        )
+        .unwrap();
     }
 
     /// `image_artefact_sha256_bytes` round-trips a valid hex string
@@ -947,25 +975,27 @@ mod tests {
     #[test]
     fn image_artefact_sha256_bytes_round_trips_hex() {
         let m = ImageManifest {
-            schema_version:        SCHEMA_VERSION,
-            role:                  Role::Reviewer,
-            kernel_version:        "0.1.0".to_owned(),
-            bundle_hash:           "0".repeat(64),
+            schema_version: SCHEMA_VERSION,
+            role: Role::Reviewer,
+            kernel_version: "0.1.0".to_owned(),
+            bundle_hash: "0".repeat(64),
             image_artefact_sha256: "ab".repeat(32),
-            image_format:          ImageFormat::RootfsErofs,
+            image_format: ImageFormat::RootfsErofs,
             build_env: BuildEnv {
                 source_date_epoch: 1700000000,
-                erofs_version:     "1.7.1".to_owned(),
-                tar_version:       "1.34".to_owned(),
-                zstd_version:      "1.5.5".to_owned(),
+                erofs_version: "1.7.1".to_owned(),
+                tar_version: "1.34".to_owned(),
+                zstd_version: "1.5.5".to_owned(),
             },
             files: vec![],
             signing_key_fp: "0".repeat(64),
-            signature:      "0".repeat(128),
+            signature: "0".repeat(128),
         };
         let bytes = m.image_artefact_sha256_bytes().unwrap();
         assert_eq!(bytes.len(), BUNDLE_HASH_LEN);
-        for b in bytes.iter() { assert_eq!(*b, 0xab); }
+        for b in bytes.iter() {
+            assert_eq!(*b, 0xab);
+        }
     }
 
     /// Streaming SHA-256 of a temp file matches the one-shot Sha256

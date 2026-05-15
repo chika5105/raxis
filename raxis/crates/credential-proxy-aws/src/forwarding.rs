@@ -35,14 +35,14 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{
-    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost,
-    TokenCache, UpstreamError,
     audit::{
         emit_cloud_credential_cache_hit, emit_cloud_credential_cache_refreshed,
         emit_cloud_credential_forwarded, emit_cloud_credential_forwarding_denied,
     },
-    sigv4::{SigV4Inputs, sign_v4},
+    sigv4::{sign_v4, SigV4Inputs},
     time::unix_now_seconds,
+    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost, TokenCache,
+    UpstreamError,
 };
 use serde::Serialize;
 
@@ -52,19 +52,19 @@ use serde::Serialize;
 #[derive(Debug, Clone)]
 pub struct ForwardingConfig {
     /// Upstream STS host (closed-allowlist `CloudUpstreamHost`).
-    pub upstream:                CloudUpstreamHost,
+    pub upstream: CloudUpstreamHost,
     /// AWS region for SigV4 credential scope. For the global
     /// `sts.amazonaws.com` endpoint use `"us-east-1"`.
-    pub region:                  String,
+    pub region: String,
     /// Operator-declared IAM role ARN to assume. REQUIRED.
-    pub role_arn:                String,
+    pub role_arn: String,
     /// Optional ExternalId mirrored to `AssumeRole`.
-    pub external_id:             Option<String>,
+    pub external_id: Option<String>,
     /// STS `DurationSeconds` (clamped 900..=43_200).
-    pub duration_seconds:        u64,
+    pub duration_seconds: u64,
     /// Token cache safety-window. The cache module clamps to
     /// 60 s minimum.
-    pub cache_safety_window:     Duration,
+    pub cache_safety_window: Duration,
 }
 
 /// Canonical content-type of an `<ErrorResponse>` envelope.
@@ -76,15 +76,15 @@ pub const AWS_XML_CONTENT_TYPE: &str = "text/xml";
 #[serde(rename_all = "PascalCase")]
 pub struct InVmResponse {
     /// Short-lived `AccessKeyId` (the upstream returns `ASIA...`).
-    pub access_key_id:     String,
+    pub access_key_id: String,
     /// Short-lived secret access key.
     pub secret_access_key: String,
     /// Required session token.
-    pub token:             String,
+    pub token: String,
     /// ISO-8601 / RFC 3339 expiration timestamp.
-    pub expiration:        String,
+    pub expiration: String,
     /// IAM role ARN echoed for SDKs / audit consumers.
-    pub role_arn:          String,
+    pub role_arn: String,
 }
 
 /// What the proxy connection handler writes to the in-VM
@@ -100,7 +100,7 @@ pub enum ForwardOutcome {
         /// (200..600). 5xx / synthetic paths surface as 503.
         status: u16,
         /// Body bytes — written verbatim to the in-VM client.
-        body:   Vec<u8>,
+        body: Vec<u8>,
     },
 }
 
@@ -119,9 +119,9 @@ pub struct StsCacheValue {
 /// pinned so the SigV4 canonical-request hash is reproducible
 /// from the same inputs.
 pub fn build_assume_role_body(
-    role_arn:         &str,
-    role_session_name:&str,
-    external_id:      Option<&str>,
+    role_arn: &str,
+    role_session_name: &str,
+    external_id: Option<&str>,
     duration_seconds: u64,
 ) -> Vec<u8> {
     let mut parts = Vec::with_capacity(6);
@@ -142,9 +142,7 @@ pub fn build_assume_role_body(
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if b.is_ascii_alphanumeric()
-            || b == b'-' || b == b'_' || b == b'.' || b == b'~'
-        {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{:02X}", b));
@@ -158,10 +156,10 @@ fn urlencode(s: &str) -> String {
 /// closing tag missing. The shapes we care about are flat and
 /// unambiguous; a full XML dep would widen the audit surface.
 pub fn extract_xml_tag<'a>(body: &'a [u8], tag: &str) -> Option<&'a [u8]> {
-    let open  = format!("<{tag}>");
+    let open = format!("<{tag}>");
     let close = format!("</{tag}>");
     let s = std::str::from_utf8(body).ok()?;
-    let open_idx  = s.find(&open)? + open.len();
+    let open_idx = s.find(&open)? + open.len();
     let close_idx = s[open_idx..].find(&close)? + open_idx;
     Some(&body[open_idx..close_idx])
 }
@@ -170,51 +168,50 @@ pub fn extract_xml_tag<'a>(body: &'a [u8], tag: &str) -> Option<&'a [u8]> {
 #[derive(Debug, Clone)]
 pub struct AssumedCredentials {
     /// Short-lived access key id.
-    pub access_key_id:     String,
+    pub access_key_id: String,
     /// Short-lived secret access key.
     pub secret_access_key: String,
     /// Required session token.
-    pub session_token:     String,
+    pub session_token: String,
     /// Wall-clock unix-seconds upstream-claimed expiry.
-    pub expiration_unix:   u64,
+    pub expiration_unix: u64,
 }
 
 /// Parse the canonical `<AssumeRoleResponse>` success body.
 pub fn parse_assume_role_success(body: &[u8]) -> Result<AssumedCredentials, UpstreamError> {
-    let creds_block = extract_xml_tag(body, "Credentials").ok_or_else(|| {
-        UpstreamError::UpstreamMalformed("missing <Credentials>".to_owned())
-    })?;
+    let creds_block = extract_xml_tag(body, "Credentials")
+        .ok_or_else(|| UpstreamError::UpstreamMalformed("missing <Credentials>".to_owned()))?;
     let access_key_id = extract_xml_tag(creds_block, "AccessKeyId")
         .and_then(|b| std::str::from_utf8(b).ok())
-        .ok_or_else(|| UpstreamError::UpstreamMalformed(
-            "<Credentials> missing AccessKeyId".to_owned(),
-        ))?
+        .ok_or_else(|| {
+            UpstreamError::UpstreamMalformed("<Credentials> missing AccessKeyId".to_owned())
+        })?
         .trim()
         .to_owned();
     let secret_access_key = extract_xml_tag(creds_block, "SecretAccessKey")
         .and_then(|b| std::str::from_utf8(b).ok())
-        .ok_or_else(|| UpstreamError::UpstreamMalformed(
-            "<Credentials> missing SecretAccessKey".to_owned(),
-        ))?
+        .ok_or_else(|| {
+            UpstreamError::UpstreamMalformed("<Credentials> missing SecretAccessKey".to_owned())
+        })?
         .trim()
         .to_owned();
     let session_token = extract_xml_tag(creds_block, "SessionToken")
         .and_then(|b| std::str::from_utf8(b).ok())
-        .ok_or_else(|| UpstreamError::UpstreamMalformed(
-            "<Credentials> missing SessionToken".to_owned(),
-        ))?
+        .ok_or_else(|| {
+            UpstreamError::UpstreamMalformed("<Credentials> missing SessionToken".to_owned())
+        })?
         .trim()
         .to_owned();
     let expiration_str = extract_xml_tag(creds_block, "Expiration")
         .and_then(|b| std::str::from_utf8(b).ok())
-        .ok_or_else(|| UpstreamError::UpstreamMalformed(
-            "<Credentials> missing Expiration".to_owned(),
-        ))?
+        .ok_or_else(|| {
+            UpstreamError::UpstreamMalformed("<Credentials> missing Expiration".to_owned())
+        })?
         .trim();
     let expiration_unix = parse_iso8601_to_unix(expiration_str).ok_or_else(|| {
-        UpstreamError::UpstreamMalformed(format!(
-            "<Expiration> not ISO-8601 Z: {expiration_str:?}",
-        ))
+        UpstreamError::UpstreamMalformed(
+            format!("<Expiration> not ISO-8601 Z: {expiration_str:?}",),
+        )
     })?;
     Ok(AssumedCredentials {
         access_key_id,
@@ -231,12 +228,12 @@ fn parse_iso8601_to_unix(s: &str) -> Option<u64> {
     let s = s.strip_suffix('Z')?;
     let (date, time) = s.split_once('T')?;
     let mut date_parts = date.split('-');
-    let y: i64  = date_parts.next()?.parse().ok()?;
+    let y: i64 = date_parts.next()?.parse().ok()?;
     let mo: u32 = date_parts.next()?.parse().ok()?;
-    let d:  u32 = date_parts.next()?.parse().ok()?;
+    let d: u32 = date_parts.next()?.parse().ok()?;
     let time_clean = time.split('.').next()?;
     let mut t_parts = time_clean.split(':');
-    let h: u32  = t_parts.next()?.parse().ok()?;
+    let h: u32 = t_parts.next()?.parse().ok()?;
     let mi: u32 = t_parts.next()?.parse().ok()?;
     let se: u32 = t_parts.next()?.parse().ok()?;
     Some(civil_to_unix(y, mo, d, h, mi, se))
@@ -262,13 +259,17 @@ fn format_iso8601_z_unix(secs: u64) -> String {
 }
 
 fn unix_to_civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
-    let days  = (secs / 86_400) as i64;
+    let days = (secs / 86_400) as i64;
     let secs_of_day = (secs % 86_400) as u32;
     let hour = secs_of_day / 3600;
-    let min  = (secs_of_day / 60) % 60;
-    let sec  = secs_of_day % 60;
+    let min = (secs_of_day / 60) % 60;
+    let sec = secs_of_day % 60;
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = (yoe as i64) + era * 400;
@@ -287,9 +288,7 @@ fn unix_to_civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
 fn sanitize_session_name(session_id: &str) -> String {
     let mut out = String::with_capacity(session_id.len());
     for b in session_id.bytes().take(40) {
-        if b.is_ascii_alphanumeric()
-            || matches!(b, b'+'|b'='|b','|b'.'|b'@'|b'-')
-        {
+        if b.is_ascii_alphanumeric() || matches!(b, b'+' | b'=' | b',' | b'.' | b'@' | b'-') {
             out.push(b as char);
         } else {
             out.push('_');
@@ -318,11 +317,11 @@ pub fn synthesise_xml_error_envelope(code: &str, message: &str) -> Vec<u8> {
 /// Render the in-VM IMDS JSON body for the agent's SDK.
 pub fn render_in_vm_response(creds: &AssumedCredentials, role_arn: &str) -> InVmResponse {
     InVmResponse {
-        access_key_id:     creds.access_key_id.clone(),
+        access_key_id: creds.access_key_id.clone(),
         secret_access_key: creds.secret_access_key.clone(),
-        token:             creds.session_token   .clone(),
-        expiration:        format_iso8601_z_unix(creds.expiration_unix),
-        role_arn:          role_arn.to_owned(),
+        token: creds.session_token.clone(),
+        expiration: format_iso8601_z_unix(creds.expiration_unix),
+        role_arn: role_arn.to_owned(),
     }
 }
 
@@ -349,11 +348,11 @@ pub fn build_cache_key(fwd: &ForwardingConfig) -> CacheKey {
 /// the parsed credentials + the rendered in-VM JSON body bytes.
 /// All upstream-facing failure modes flow through `UpstreamError`.
 pub async fn drive_assume_role_exchange(
-    fwd:                          &ForwardingConfig,
-    http:                         &CloudHttpClient,
-    long_lived_access_key_id:     &str,
+    fwd: &ForwardingConfig,
+    http: &CloudHttpClient,
+    long_lived_access_key_id: &str,
     long_lived_secret_access_key: &str,
-    session_id:                   &str,
+    session_id: &str,
 ) -> Result<(AssumedCredentials, Vec<u8>), UpstreamError> {
     let role_session_name = format!(
         "raxis-{}-{}",
@@ -368,15 +367,15 @@ pub async fn drive_assume_role_exchange(
     );
 
     let signed = sign_v4(SigV4Inputs {
-        access_key_id:     long_lived_access_key_id,
+        access_key_id: long_lived_access_key_id,
         secret_access_key: long_lived_secret_access_key,
-        region:            &fwd.region,
-        service:           "sts",
-        method:            "POST",
-        canonical_uri:     "/",
-        canonical_query:   "",
-        host:              fwd.upstream.host(),
-        body:              &body,
+        region: &fwd.region,
+        service: "sts",
+        method: "POST",
+        canonical_uri: "/",
+        canonical_query: "",
+        host: fwd.upstream.host(),
+        body: &body,
     });
 
     let url = format!("{}/", fwd.upstream.https_base());
@@ -386,14 +385,14 @@ pub async fn drive_assume_role_exchange(
             Bytes::from(body),
             &[
                 ("authorization", signed.authorization.as_str()),
-                ("x-amz-date",    signed.amz_date.as_str()),
+                ("x-amz-date", signed.amz_date.as_str()),
             ],
         )
         .await?;
 
     if status == 200 {
         let parsed = parse_assume_role_success(&body_bytes)?;
-        let in_vm  = render_in_vm_response(&parsed, &fwd.role_arn);
+        let in_vm = render_in_vm_response(&parsed, &fwd.role_arn);
         let rendered = serde_json::to_vec(&in_vm)
             .map_err(|e| UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")))?;
         Ok((parsed, rendered))
@@ -418,11 +417,11 @@ pub async fn drive_assume_role_exchange(
 /// [`drive_assume_role_exchange`] so the cold-path code does
 /// not pay for the 4xx-body buffer on success.
 async fn drive_with_4xx_body(
-    fwd:                          &ForwardingConfig,
-    http:                         &CloudHttpClient,
-    long_lived_access_key_id:     &str,
+    fwd: &ForwardingConfig,
+    http: &CloudHttpClient,
+    long_lived_access_key_id: &str,
     long_lived_secret_access_key: &str,
-    session_id:                   &str,
+    session_id: &str,
 ) -> Result<(AssumedCredentials, Vec<u8>), (UpstreamError, Option<Vec<u8>>)> {
     let role_session_name = format!(
         "raxis-{}-{}",
@@ -436,15 +435,15 @@ async fn drive_with_4xx_body(
         fwd.duration_seconds,
     );
     let signed = sign_v4(SigV4Inputs {
-        access_key_id:     long_lived_access_key_id,
+        access_key_id: long_lived_access_key_id,
         secret_access_key: long_lived_secret_access_key,
-        region:            &fwd.region,
-        service:           "sts",
-        method:            "POST",
-        canonical_uri:     "/",
-        canonical_query:   "",
-        host:              fwd.upstream.host(),
-        body:              &body,
+        region: &fwd.region,
+        service: "sts",
+        method: "POST",
+        canonical_uri: "/",
+        canonical_query: "",
+        host: fwd.upstream.host(),
+        body: &body,
     });
     let url = format!("{}/", fwd.upstream.https_base());
     let (status, body_bytes) = http
@@ -453,27 +452,34 @@ async fn drive_with_4xx_body(
             Bytes::from(body),
             &[
                 ("authorization", signed.authorization.as_str()),
-                ("x-amz-date",    signed.amz_date.as_str()),
+                ("x-amz-date", signed.amz_date.as_str()),
             ],
         )
         .await
         .map_err(|e| (e, None))?;
 
     if status == 200 {
-        let parsed = parse_assume_role_success(&body_bytes)
-            .map_err(|e| (e, None))?;
-        let in_vm  = render_in_vm_response(&parsed, &fwd.role_arn);
-        let rendered = serde_json::to_vec(&in_vm)
-            .map_err(|e| (UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")), None))?;
+        let parsed = parse_assume_role_success(&body_bytes).map_err(|e| (e, None))?;
+        let in_vm = render_in_vm_response(&parsed, &fwd.role_arn);
+        let rendered = serde_json::to_vec(&in_vm).map_err(|e| {
+            (
+                UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")),
+                None,
+            )
+        })?;
         Ok((parsed, rendered))
     } else if (400..500).contains(&status) {
-        Err((UpstreamError::Upstream4xx(status), Some(body_bytes.to_vec())))
+        Err((
+            UpstreamError::Upstream4xx(status),
+            Some(body_bytes.to_vec()),
+        ))
     } else if (500..600).contains(&status) {
         Err((UpstreamError::Upstream5xx(status), None))
     } else {
-        Err((UpstreamError::UpstreamMalformed(format!(
-            "unexpected upstream status {status}",
-        )), None))
+        Err((
+            UpstreamError::UpstreamMalformed(format!("unexpected upstream status {status}",)),
+            None,
+        ))
     }
 }
 
@@ -486,79 +492,103 @@ async fn drive_with_4xx_body(
 /// (including the synthetic 503 for 5xx / malformed / network).
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_or_serve_from_cache(
-    fwd:             &ForwardingConfig,
-    http:            &Arc<CloudHttpClient>,
-    cache:           &Arc<TokenCache<StsCacheValue>>,
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    fwd: &ForwardingConfig,
+    http: &Arc<CloudHttpClient>,
+    cache: &Arc<TokenCache<StsCacheValue>>,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
-    long_lived_access_key_id:     &str,
+    long_lived_access_key_id: &str,
     long_lived_secret_access_key: &str,
 ) -> ForwardOutcome {
-    let key            = build_cache_key(fwd);
-    let safety_window  = fwd.cache_safety_window;
+    let key = build_cache_key(fwd);
+    let safety_window = fwd.cache_safety_window;
 
     // Cache lookup.
     if let Some(entry) = cache.get(&key).await {
         let age_ms = entry.age().as_millis() as u32;
         let ttl_ms = entry.ttl_remaining().as_millis() as u32;
         emit_cloud_credential_cache_hit(
-            audit, session_id, credential_name,
-            CloudProvider::Aws, CloudExchangeKind::AssumeRole,
-            age_ms, ttl_ms,
-        ).ok();
+            audit,
+            session_id,
+            credential_name,
+            CloudProvider::Aws,
+            CloudExchangeKind::AssumeRole,
+            age_ms,
+            ttl_ms,
+        )
+        .ok();
         let body = entry.payload.rendered_in_vm_body.clone();
         if entry.is_stale(safety_window) {
             if let Some(_guard) = cache.take_refresh_lock(&key).await {
-                let fwd2     = fwd.clone();
-                let http2    = Arc::clone(http);
-                let cache2   = Arc::clone(cache);
-                let audit2   = Arc::clone(audit);
+                let fwd2 = fwd.clone();
+                let http2 = Arc::clone(http);
+                let cache2 = Arc::clone(cache);
+                let audit2 = Arc::clone(audit);
                 let session2 = session_id.to_owned();
-                let cred2    = credential_name.to_owned();
-                let ak2      = long_lived_access_key_id.to_owned();
-                let sk2      = long_lived_secret_access_key.to_owned();
+                let cred2 = credential_name.to_owned();
+                let ak2 = long_lived_access_key_id.to_owned();
+                let sk2 = long_lived_secret_access_key.to_owned();
                 let prior_age = age_ms;
                 tokio::spawn(async move {
                     let _g = _guard;
                     let started = Instant::now();
-                    let res = drive_assume_role_exchange(
-                        &fwd2, &http2, &ak2, &sk2, &session2,
-                    ).await;
+                    let res =
+                        drive_assume_role_exchange(&fwd2, &http2, &ak2, &sk2, &session2).await;
                     let elapsed_ms = started.elapsed().as_millis() as u32;
                     let key2 = build_cache_key(&fwd2);
                     match res {
                         Ok((creds, rendered)) => {
                             let new_ttl = Duration::from_secs(
-                                creds.expiration_unix.saturating_sub(unix_now_seconds())
+                                creds.expiration_unix.saturating_sub(unix_now_seconds()),
                             );
                             let new_ttl_ms = new_ttl.as_millis() as u32;
-                            cache2.insert(
-                                key2,
-                                StsCacheValue { rendered_in_vm_body: rendered.clone() },
-                                new_ttl,
-                            ).await;
+                            cache2
+                                .insert(
+                                    key2,
+                                    StsCacheValue {
+                                        rendered_in_vm_body: rendered.clone(),
+                                    },
+                                    new_ttl,
+                                )
+                                .await;
                             emit_cloud_credential_cache_refreshed(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Aws, CloudExchangeKind::AssumeRole,
-                                prior_age, new_ttl_ms,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Aws,
+                                CloudExchangeKind::AssumeRole,
+                                prior_age,
+                                new_ttl_ms,
+                            )
+                            .ok();
                             emit_cloud_credential_forwarded(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Aws, CloudExchangeKind::AssumeRole,
-                                &fwd2.upstream, elapsed_ms, 200,
-                                rendered.len() as u32, true,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Aws,
+                                CloudExchangeKind::AssumeRole,
+                                &fwd2.upstream,
+                                elapsed_ms,
+                                200,
+                                rendered.len() as u32,
+                                true,
+                            )
+                            .ok();
                         }
                         Err(e) => {
                             emit_cloud_credential_forwarding_denied(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Aws, CloudExchangeKind::AssumeRole,
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Aws,
+                                CloudExchangeKind::AssumeRole,
                                 fwd2.upstream.host(),
                                 e.denial_reason(),
                                 e.status_code().unwrap_or(0),
                                 elapsed_ms,
-                            ).ok();
+                            )
+                            .ok();
                             // INV-CLOUD-FWD-08: failed refresh
                             // does NOT poison the cache.
                         }
@@ -572,39 +602,54 @@ pub async fn forward_or_serve_from_cache(
     // Miss: synchronous exchange.
     let started = Instant::now();
     let result = drive_with_4xx_body(
-        fwd, http,
+        fwd,
+        http,
         long_lived_access_key_id,
         long_lived_secret_access_key,
         session_id,
-    ).await;
+    )
+    .await;
     let elapsed_ms = started.elapsed().as_millis() as u32;
     match result {
         Ok((creds, rendered)) => {
-            let ttl = Duration::from_secs(
-                creds.expiration_unix.saturating_sub(unix_now_seconds())
-            );
-            cache.insert(
-                key,
-                StsCacheValue { rendered_in_vm_body: rendered.clone() },
-                ttl,
-            ).await;
+            let ttl = Duration::from_secs(creds.expiration_unix.saturating_sub(unix_now_seconds()));
+            cache
+                .insert(
+                    key,
+                    StsCacheValue {
+                        rendered_in_vm_body: rendered.clone(),
+                    },
+                    ttl,
+                )
+                .await;
             emit_cloud_credential_forwarded(
-                audit, session_id, credential_name,
-                CloudProvider::Aws, CloudExchangeKind::AssumeRole,
-                &fwd.upstream, elapsed_ms, 200,
-                rendered.len() as u32, true,
-            ).ok();
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Aws,
+                CloudExchangeKind::AssumeRole,
+                &fwd.upstream,
+                elapsed_ms,
+                200,
+                rendered.len() as u32,
+                true,
+            )
+            .ok();
             ForwardOutcome::Ok(rendered)
         }
         Err((e, maybe_body)) => {
             emit_cloud_credential_forwarding_denied(
-                audit, session_id, credential_name,
-                CloudProvider::Aws, CloudExchangeKind::AssumeRole,
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Aws,
+                CloudExchangeKind::AssumeRole,
                 fwd.upstream.host(),
                 e.denial_reason(),
                 e.status_code().unwrap_or(0),
                 elapsed_ms,
-            ).ok();
+            )
+            .ok();
             upstream_error_to_envelope(e, maybe_body)
         }
     }
@@ -615,62 +660,59 @@ pub async fn forward_or_serve_from_cache(
 /// (when the upstream body was captured); 5xx / network /
 /// timeout / malformed-success collapse to a synthetic 503 +
 /// canonical XML.
-fn upstream_error_to_envelope(
-    e:           UpstreamError,
-    body_4xx:    Option<Vec<u8>>,
-) -> ForwardOutcome {
+fn upstream_error_to_envelope(e: UpstreamError, body_4xx: Option<Vec<u8>>) -> ForwardOutcome {
     match e {
         UpstreamError::Upstream4xx(status) => ForwardOutcome::UpstreamEnvelope {
             status,
-            body: body_4xx.unwrap_or_else(||
+            body: body_4xx.unwrap_or_else(|| {
                 synthesise_xml_error_envelope("UpstreamError", "upstream returned 4xx")
-            ),
+            }),
         },
         UpstreamError::Upstream5xx(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisUpstreamUnavailable",
                 "Upstream STS endpoint returned an unrecoverable error",
             ),
         },
         UpstreamError::Network(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisUpstreamUnreachable",
                 "Network error talking to upstream STS endpoint",
             ),
         },
         UpstreamError::Timeout => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisUpstreamTimeout",
                 "Upstream STS endpoint did not respond within the deadline",
             ),
         },
         UpstreamError::UpstreamMalformed(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisUpstreamMalformed",
                 "Upstream STS endpoint returned a body that did not parse",
             ),
         },
         UpstreamError::EgressAllowlist(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisEgressBlocked",
                 "Upstream URL fell off the cloud-forwarding allowlist",
             ),
         },
         UpstreamError::MissingCredential(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisMissingCredential",
                 "Operator credential required for forwarding was missing or malformed",
             ),
         },
         UpstreamError::Misconfigured(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_xml_error_envelope(
+            body: synthesise_xml_error_envelope(
                 "RaxisMisconfigured",
                 "V3 cloud forwarding misconfigured at proxy construction",
             ),
@@ -684,11 +726,11 @@ mod tests {
 
     fn fwd() -> ForwardingConfig {
         ForwardingConfig {
-            upstream:            CloudUpstreamHost::aws_global(),
-            region:              "us-east-1".to_owned(),
-            role_arn:            "arn:aws:iam::123456789012:role/demo".to_owned(),
-            external_id:         None,
-            duration_seconds:    900,
+            upstream: CloudUpstreamHost::aws_global(),
+            region: "us-east-1".to_owned(),
+            role_arn: "arn:aws:iam::123456789012:role/demo".to_owned(),
+            external_id: None,
+            duration_seconds: 900,
             cache_safety_window: Duration::from_secs(60),
         }
     }
@@ -743,9 +785,9 @@ mod tests {
   </AssumeRoleResult>
 </AssumeRoleResponse>"#;
         let parsed = parse_assume_role_success(body).unwrap();
-        assert_eq!(parsed.access_key_id,     "ASIAEXAMPLE");
+        assert_eq!(parsed.access_key_id, "ASIAEXAMPLE");
         assert_eq!(parsed.secret_access_key, "secretBytes");
-        assert_eq!(parsed.session_token,     "sessionTokenBytes");
+        assert_eq!(parsed.session_token, "sessionTokenBytes");
         assert_eq!(parsed.expiration_unix, 1_778_608_800);
     }
 
@@ -765,12 +807,18 @@ mod tests {
 
     #[test]
     fn parse_iso8601_to_unix_pins_a_known_value() {
-        assert_eq!(parse_iso8601_to_unix("2026-05-12T18:00:00Z"), Some(1_778_608_800));
+        assert_eq!(
+            parse_iso8601_to_unix("2026-05-12T18:00:00Z"),
+            Some(1_778_608_800)
+        );
     }
 
     #[test]
     fn parse_iso8601_to_unix_handles_fractional_seconds() {
-        assert_eq!(parse_iso8601_to_unix("2026-05-12T18:00:00.123Z"), Some(1_778_608_800));
+        assert_eq!(
+            parse_iso8601_to_unix("2026-05-12T18:00:00.123Z"),
+            Some(1_778_608_800)
+        );
     }
 
     #[test]
@@ -780,7 +828,10 @@ mod tests {
 
     #[test]
     fn urlencode_pins_form_encoding() {
-        assert_eq!(urlencode("arn:aws:iam::123:role/x"), "arn%3Aaws%3Aiam%3A%3A123%3Arole%2Fx");
+        assert_eq!(
+            urlencode("arn:aws:iam::123:role/x"),
+            "arn%3Aaws%3Aiam%3A%3A123%3Arole%2Fx"
+        );
         assert_eq!(urlencode("plain"), "plain");
     }
 
@@ -788,9 +839,9 @@ mod tests {
     fn cache_key_changes_with_role_external_region() {
         let mk = |role: &str, ext: Option<&str>, region: &str| {
             let mut c = fwd();
-            c.role_arn    = role.to_owned();
+            c.role_arn = role.to_owned();
             c.external_id = ext.map(str::to_owned);
-            c.region      = region.to_owned();
+            c.region = region.to_owned();
             build_cache_key(&c)
         };
         let a = mk("arn:x", None, "us-east-1");
@@ -815,10 +866,10 @@ mod tests {
     #[test]
     fn render_in_vm_response_pins_pascal_case_json() {
         let creds = AssumedCredentials {
-            access_key_id:     "ASIA".to_owned(),
+            access_key_id: "ASIA".to_owned(),
             secret_access_key: "secret".to_owned(),
-            session_token:     "tok".to_owned(),
-            expiration_unix:   1_778_608_800,
+            session_token: "tok".to_owned(),
+            expiration_unix: 1_778_608_800,
         };
         let r = render_in_vm_response(&creds, "arn:aws:iam::123:role/demo");
         let j = serde_json::to_string(&r).unwrap();

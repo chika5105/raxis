@@ -42,12 +42,11 @@ use std::path::Path;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_store::{Store, Table};
-use raxis_types::{
-    unix_now_secs, IntegrationMergeAttemptDiscardReason,
-    IntegrationMergeAttemptState, TaskState,
-};
 #[cfg(test)]
 use raxis_types::InitiativeState;
+use raxis_types::{
+    unix_now_secs, IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState, TaskState,
+};
 
 use crate::errors::KernelError;
 use crate::initiatives::task_transitions::{transition_task, TransitionActor};
@@ -55,11 +54,11 @@ use crate::initiatives::task_transitions::{transition_task, TransitionActor};
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers and FSM state
 // strings flow through typed constants/enums; no raw SQL identifiers in
 // this file (production OR tests).
-const TASKS:                       &str = Table::Tasks.as_str();
-const VERIFIER_RUN_TOKENS:         &str = Table::VerifierRunTokens.as_str();
-const INITIATIVES:                 &str = Table::Initiatives.as_str();
-const INTEGRATION_MERGE_ATTEMPTS:  &str = Table::IntegrationMergeAttempts.as_str();
-const WITNESS_RECORDS:             &str = Table::WitnessRecords.as_str();
+const TASKS: &str = Table::Tasks.as_str();
+const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
+const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
+const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -78,11 +77,11 @@ const WITNESS_RECORDS:             &str = Table::WitnessRecords.as_str();
 /// "operator already blocked this; do not auto-resume".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SweptTaskRecord {
-    pub task_id:       String,
+    pub task_id: String,
     pub initiative_id: String,
     /// Stable SQL string of the prior state (one of `Admitted`,
     /// `Running`, `GatesPending`, `BlockedRecoveryPending`).
-    pub prior_state:   String,
+    pub prior_state: String,
 }
 
 /// Summary of what reconcile() did.
@@ -161,7 +160,7 @@ pub struct IntegrationMergeReconciliationReport {
 pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult, KernelError> {
     let chain_ok = verify_audit_chain(audit_dir)?;
 
-    let task_report  = reconcile_tasks(store);
+    let task_report = reconcile_tasks(store);
     let imerge_report = reconcile_integration_merge_attempts(store);
 
     eprintln!(
@@ -175,11 +174,11 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
     );
 
     Ok(ReconciliationResult {
-        swept_tasks:                       task_report.swept_tasks,
-        expired_tokens:                    task_report.expired_tokens,
+        swept_tasks: task_report.swept_tasks,
+        expired_tokens: task_report.expired_tokens,
         folded_integration_merge_attempts: imerge_report.folded_attempts,
         chain_ok,
-        swept_tasks_detail:                task_report.swept_tasks_detail,
+        swept_tasks_detail: task_report.swept_tasks_detail,
     })
 }
 
@@ -239,12 +238,15 @@ fn verify_audit_chain(audit_dir: &Path) -> Result<bool, KernelError> {
         reason: format!("cannot read {}: {e}", segment.display()),
     })?;
 
-    let first_line = content.lines().next().ok_or_else(|| KernelError::AuditChainBroken {
-        reason: format!(
-            "audit segment {} has no lines — genesis record missing",
-            segment.display(),
-        ),
-    })?;
+    let first_line = content
+        .lines()
+        .next()
+        .ok_or_else(|| KernelError::AuditChainBroken {
+            reason: format!(
+                "audit segment {} has no lines — genesis record missing",
+                segment.display(),
+            ),
+        })?;
     if first_line.trim().is_empty() {
         return Err(KernelError::AuditChainBroken {
             reason: format!(
@@ -316,9 +318,9 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     let mut report = ReconciliationReport::default();
 
     let mut conn = store.lock_sync();
-    let now      = unix_now_secs();
+    let now = unix_now_secs();
 
-    let blocked  = TaskState::BlockedRecoveryPending.as_sql_str();
+    let blocked = TaskState::BlockedRecoveryPending.as_sql_str();
     let terminal = terminal_task_states_sql();
 
     let tx = match conn.transaction() {
@@ -361,9 +363,9 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         };
         let rows = match stmt.query_map([], |r| {
             Ok(SweptTaskRecord {
-                task_id:       r.get(0)?,
+                task_id: r.get(0)?,
                 initiative_id: r.get(1)?,
-                prior_state:   r.get(2)?,
+                prior_state: r.get(2)?,
             })
         }) {
             Ok(rows) => rows,
@@ -412,8 +414,7 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
     // pre-sweep `prior_state`) is captured separately via
     // `swept_detail` above and projected into the audit chain
     // by the AuditSink.
-    const SWEEP_REASON: &str =
-        "kernel restart recovery sweep: task was non-terminal at \
+    const SWEEP_REASON: &str = "kernel restart recovery sweep: task was non-terminal at \
          kernel shutdown; operator action required to resume \
          (raxis task resume <task_id>) or abort \
          (raxis task abort <task_id>). \
@@ -467,9 +468,9 @@ fn reconcile_tasks(store: &Store) -> ReconciliationReport {
         return report;
     }
 
-    report.swept_tasks         = swept;
-    report.expired_tokens      = expired;
-    report.swept_tasks_detail  = swept_detail;
+    report.swept_tasks = swept;
+    report.expired_tokens = expired;
+    report.swept_tasks_detail = swept_detail;
 
     if swept > 0 || expired > 0 {
         eprintln!(
@@ -494,9 +495,9 @@ pub enum AutoResumeOutcome {
     /// and a `TaskAutoResumedAfterSupervisorRestart` event was
     /// emitted.
     Resumed {
-        task_id:                 String,
-        initiative_id:           String,
-        prior_state:             String,
+        task_id: String,
+        initiative_id: String,
+        prior_state: String,
         witness_count_preserved: u32,
     },
     /// Skipped because the initiative is operator-quarantined
@@ -504,14 +505,14 @@ pub enum AutoResumeOutcome {
     /// the existing quarantine row is the audit trail for the
     /// skip.
     SkippedQuarantined {
-        task_id:       String,
+        task_id: String,
         initiative_id: String,
     },
     /// Skipped because the task was ALREADY `BlockedRecoveryPending`
     /// before this boot's recovery sweep (operator pre-existing
     /// block — preserve operator intent). NO event emitted.
     SkippedPreExistingBlock {
-        task_id:       String,
+        task_id: String,
         initiative_id: String,
     },
     /// Skipped because the FSM transition or audit emit failed —
@@ -520,9 +521,9 @@ pub enum AutoResumeOutcome {
     /// stderr; this variant exists so the report distinguishes
     /// "deliberately skipped" from "tried to resume and failed".
     SkippedTransitionFailed {
-        task_id:       String,
+        task_id: String,
         initiative_id: String,
-        reason:        String,
+        reason: String,
     },
 }
 
@@ -534,11 +535,11 @@ pub enum AutoResumeOutcome {
 /// caller can render a deterministic dashboard view.
 #[derive(Debug, Clone, Default)]
 pub struct AutoResumeReport {
-    pub resumed:               usize,
-    pub quarantined:           usize,
-    pub pre_existing_block:    usize,
-    pub transition_failed:     usize,
-    pub outcomes:              Vec<AutoResumeOutcome>,
+    pub resumed: usize,
+    pub quarantined: usize,
+    pub pre_existing_block: usize,
+    pub transition_failed: usize,
+    pub outcomes: Vec<AutoResumeOutcome>,
     /// Stable identifier echoed onto every emitted
     /// `TaskAutoResumedAfterSupervisorRestart` event — exposed on
     /// the report so the kernel can also surface it on the
@@ -593,9 +594,9 @@ pub struct AutoResumeReport {
 /// `transition_failed` so dashboards can reflect the partial
 /// outcome.
 pub fn reconcile_after_supervisor_restart(
-    store:                 &Store,
-    audit:                 &dyn AuditSink,
-    swept_tasks_detail:    &[SweptTaskRecord],
+    store: &Store,
+    audit: &dyn AuditSink,
+    swept_tasks_detail: &[SweptTaskRecord],
     supervisor_restart_id: &str,
 ) -> AutoResumeReport {
     let mut report = AutoResumeReport {
@@ -621,10 +622,12 @@ pub fn reconcile_after_supervisor_restart(
         // ON-CLEAN-RESTART-01 skip clause 2).
         if record.prior_state == TaskState::BlockedRecoveryPending.as_sql_str() {
             report.pre_existing_block += 1;
-            report.outcomes.push(AutoResumeOutcome::SkippedPreExistingBlock {
-                task_id:       record.task_id.clone(),
-                initiative_id: record.initiative_id.clone(),
-            });
+            report
+                .outcomes
+                .push(AutoResumeOutcome::SkippedPreExistingBlock {
+                    task_id: record.task_id.clone(),
+                    initiative_id: record.initiative_id.clone(),
+                });
             continue;
         }
 
@@ -635,7 +638,7 @@ pub fn reconcile_after_supervisor_restart(
                 &conn,
                 &record.initiative_id,
             ) {
-                Ok(b)  => b,
+                Ok(b) => b,
                 // Fail-safe deny: a transient sqlite error MUST NOT
                 // silently re-resume a frozen initiative. Treat the
                 // error as "quarantined" for this sweep — operator
@@ -656,7 +659,7 @@ pub fn reconcile_after_supervisor_restart(
         if quarantined {
             report.quarantined += 1;
             report.outcomes.push(AutoResumeOutcome::SkippedQuarantined {
-                task_id:       record.task_id.clone(),
+                task_id: record.task_id.clone(),
                 initiative_id: record.initiative_id.clone(),
             });
             continue;
@@ -685,9 +688,7 @@ pub fn reconcile_after_supervisor_restart(
         );
 
         if let Ok(rec) = &transition_outcome {
-            crate::initiatives::task_transitions::emit_task_state_changed_audit(
-                audit, rec, None,
-            );
+            crate::initiatives::task_transitions::emit_task_state_changed_audit(audit, rec, None);
         }
 
         if let Err(e) = transition_outcome {
@@ -703,11 +704,13 @@ pub fn reconcile_after_supervisor_restart(
                     .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
             );
             report.transition_failed += 1;
-            report.outcomes.push(AutoResumeOutcome::SkippedTransitionFailed {
-                task_id:       record.task_id.clone(),
-                initiative_id: record.initiative_id.clone(),
-                reason,
-            });
+            report
+                .outcomes
+                .push(AutoResumeOutcome::SkippedTransitionFailed {
+                    task_id: record.task_id.clone(),
+                    initiative_id: record.initiative_id.clone(),
+                    reason,
+                });
             continue;
         }
 
@@ -718,13 +721,11 @@ pub fn reconcile_after_supervisor_restart(
         let witness_count_preserved = {
             let conn = store.lock_sync();
             match conn.query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"
-                ),
+                &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
                 rusqlite::params![&record.task_id],
                 |r| r.get::<_, i64>(0),
             ) {
-                Ok(n)  => u32::try_from(n.max(0)).unwrap_or(u32::MAX),
+                Ok(n) => u32::try_from(n.max(0)).unwrap_or(u32::MAX),
                 Err(e) => {
                     eprintln!(
                         "{{\"level\":\"warn\",\"step\":\"supervisor_auto_resume\",\
@@ -739,11 +740,11 @@ pub fn reconcile_after_supervisor_restart(
 
         if let Err(e) = audit.emit(
             AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
-                task_id:                 record.task_id.clone(),
-                initiative_id:           record.initiative_id.clone(),
-                prior_state:             record.prior_state.clone(),
+                task_id: record.task_id.clone(),
+                initiative_id: record.initiative_id.clone(),
+                prior_state: record.prior_state.clone(),
                 witness_count_preserved,
-                supervisor_restart_id:   supervisor_restart_id.to_owned(),
+                supervisor_restart_id: supervisor_restart_id.to_owned(),
             },
             None,
             Some(&record.task_id),
@@ -760,19 +761,21 @@ pub fn reconcile_after_supervisor_restart(
                     .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
             );
             report.transition_failed += 1;
-            report.outcomes.push(AutoResumeOutcome::SkippedTransitionFailed {
-                task_id:       record.task_id.clone(),
-                initiative_id: record.initiative_id.clone(),
-                reason:        format!("audit_emit_failed: {e}"),
-            });
+            report
+                .outcomes
+                .push(AutoResumeOutcome::SkippedTransitionFailed {
+                    task_id: record.task_id.clone(),
+                    initiative_id: record.initiative_id.clone(),
+                    reason: format!("audit_emit_failed: {e}"),
+                });
             continue;
         }
 
         report.resumed += 1;
         report.outcomes.push(AutoResumeOutcome::Resumed {
-            task_id:                 record.task_id.clone(),
-            initiative_id:           record.initiative_id.clone(),
-            prior_state:             record.prior_state.clone(),
+            task_id: record.task_id.clone(),
+            initiative_id: record.initiative_id.clone(),
+            prior_state: record.prior_state.clone(),
             witness_count_preserved,
         });
     }
@@ -781,8 +784,7 @@ pub fn reconcile_after_supervisor_restart(
         "{{\"level\":\"info\",\"step\":\"supervisor_auto_resume\",\
          \"action\":\"complete\",\"resumed\":{},\"quarantined\":{},\
          \"pre_existing_block\":{},\"transition_failed\":{}}}",
-        report.resumed, report.quarantined,
-        report.pre_existing_block, report.transition_failed,
+        report.resumed, report.quarantined, report.pre_existing_block, report.transition_failed,
     );
 
     report
@@ -841,18 +843,16 @@ fn terminal_task_states_sql() -> String {
 /// `IntegrationMergeAttemptDiscardReason::CrashRecovery.as_sql_str()`.
 /// A future variant rename forces a compile error here, not silent
 /// SQL drift.
-fn reconcile_integration_merge_attempts(
-    store: &Store,
-) -> IntegrationMergeReconciliationReport {
+fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconciliationReport {
     let mut report = IntegrationMergeReconciliationReport::default();
 
     let mut conn = store.lock_sync();
-    let now      = unix_now_secs();
+    let now = unix_now_secs();
 
-    let awaiting   = IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str();
-    let passed     = IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str();
-    let discarded  = IntegrationMergeAttemptState::DiscardedCrashRecovery.as_sql_str();
-    let crash_rsn  = IntegrationMergeAttemptDiscardReason::CrashRecovery.as_sql_str();
+    let awaiting = IntegrationMergeAttemptState::AwaitingPreMergeVerifiers.as_sql_str();
+    let passed = IntegrationMergeAttemptState::PreMergeVerifiersPassed.as_sql_str();
+    let discarded = IntegrationMergeAttemptState::DiscardedCrashRecovery.as_sql_str();
+    let crash_rsn = IntegrationMergeAttemptDiscardReason::CrashRecovery.as_sql_str();
 
     let tx = match conn.transaction() {
         Ok(t) => t,
@@ -956,37 +956,37 @@ fn reconcile_integration_merge_attempts(
 pub enum GitApplyRecoveryOutcome {
     /// Case A — Phase 2 was re-applied successfully.
     Repaired {
-        initiative_id:    String,
-        commit_sha:       String,
-        previous_sha:     Option<String>,
-        target_ref:       String,
+        initiative_id: String,
+        commit_sha: String,
+        previous_sha: Option<String>,
+        target_ref: String,
     },
     /// Case B — `target_ref` was already at `commit_sha`; only the
     /// pending flag needed to clear.
     Verified {
         initiative_id: String,
-        commit_sha:    String,
-        target_ref:    String,
+        commit_sha: String,
+        target_ref: String,
     },
     /// Case C — unrecoverable inconsistency. Flag intentionally LEFT
     /// SET so the kernel keeps rejecting new merges for this
     /// initiative until an operator intervenes.
     Inconsistent {
         initiative_id: String,
-        db_sha:        String,
-        git_sha:       String,
-        target_ref:    String,
-        reason:        String,
+        db_sha: String,
+        git_sha: String,
+        target_ref: String,
+        reason: String,
     },
 }
 
 /// Aggregate report of a single recovery sweep.
 #[derive(Debug, Clone, Default)]
 pub struct GitApplyRecoveryResult {
-    pub repaired:     usize,
-    pub verified:     usize,
+    pub repaired: usize,
+    pub verified: usize,
     pub inconsistent: usize,
-    pub outcomes:     Vec<GitApplyRecoveryOutcome>,
+    pub outcomes: Vec<GitApplyRecoveryOutcome>,
 }
 
 /// Run the boot-time `git_apply_pending` recovery (Cases A/B/C from
@@ -1010,10 +1010,10 @@ pub struct GitApplyRecoveryResult {
 /// queries the same flag before deleting (the GC implementation
 /// lives in `crate::push` / `kernel-lifecycle.md §10.5.3`).
 pub fn reconcile_git_apply_pending(
-    store:     &Store,
-    audit:     &dyn raxis_audit_tools::AuditSink,
+    store: &Store,
+    audit: &dyn raxis_audit_tools::AuditSink,
     audit_dir: &Path,
-    data_dir:  &Path,
+    data_dir: &Path,
 ) -> GitApplyRecoveryResult {
     let mut report = GitApplyRecoveryResult::default();
 
@@ -1053,12 +1053,11 @@ pub fn reconcile_git_apply_pending(
     let main_repo_root = data_dir.join("repositories").join("main");
 
     for initiative_id in pending_ids {
-        let outcome = recover_one_initiative(
-            store, audit, audit_dir, &main_repo_root, &initiative_id,
-        );
+        let outcome =
+            recover_one_initiative(store, audit, audit_dir, &main_repo_root, &initiative_id);
         match &outcome {
-            GitApplyRecoveryOutcome::Repaired { .. }     => report.repaired     += 1,
-            GitApplyRecoveryOutcome::Verified { .. }     => report.verified     += 1,
+            GitApplyRecoveryOutcome::Repaired { .. } => report.repaired += 1,
+            GitApplyRecoveryOutcome::Verified { .. } => report.verified += 1,
             GitApplyRecoveryOutcome::Inconsistent { .. } => report.inconsistent += 1,
         }
         report.outcomes.push(outcome);
@@ -1078,11 +1077,11 @@ pub fn reconcile_git_apply_pending(
 /// stay isolated from each other (a Case-C outcome on one
 /// initiative does not abort the sweep for siblings).
 fn recover_one_initiative(
-    store:          &Store,
-    audit:          &dyn raxis_audit_tools::AuditSink,
-    audit_dir:      &Path,
+    store: &Store,
+    audit: &dyn raxis_audit_tools::AuditSink,
+    audit_dir: &Path,
     main_repo_root: &Path,
-    initiative_id:  &str,
+    initiative_id: &str,
 ) -> GitApplyRecoveryOutcome {
     // 1. Find the most recent IntegrationMergeCompleted event for
     //    this initiative. The audit reader walks the chain from
@@ -1095,9 +1094,9 @@ fn recover_one_initiative(
             emit_inconsistent(audit, initiative_id, "", "", "", &reason);
             return GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
-                db_sha:        String::new(),
-                git_sha:       String::new(),
-                target_ref:    String::new(),
+                db_sha: String::new(),
+                git_sha: String::new(),
+                target_ref: String::new(),
                 reason,
             };
         }
@@ -1106,15 +1105,15 @@ fn recover_one_initiative(
             emit_inconsistent(audit, initiative_id, "", "", "", &reason);
             return GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
-                db_sha:        String::new(),
-                git_sha:       String::new(),
-                target_ref:    String::new(),
+                db_sha: String::new(),
+                git_sha: String::new(),
+                target_ref: String::new(),
                 reason,
             };
         }
     };
 
-    let db_sha     = last_merge.commit_sha;
+    let db_sha = last_merge.commit_sha;
     let target_ref = last_merge.target_ref;
 
     if target_ref.is_empty() {
@@ -1128,8 +1127,8 @@ fn recover_one_initiative(
         return GitApplyRecoveryOutcome::Inconsistent {
             initiative_id: initiative_id.to_owned(),
             db_sha,
-            git_sha:       String::new(),
-            target_ref:    String::new(),
+            git_sha: String::new(),
+            target_ref: String::new(),
             reason,
         };
     }
@@ -1140,12 +1139,15 @@ fn recover_one_initiative(
     let git_sha_opt = match raxis_domain_git::current_target_ref_oid(main_repo_root, &target_ref) {
         Ok(opt) => opt,
         Err(e) => {
-            let reason = format!("main repo at {} could not be read: {e}", main_repo_root.display());
+            let reason = format!(
+                "main repo at {} could not be read: {e}",
+                main_repo_root.display()
+            );
             emit_inconsistent(audit, initiative_id, &db_sha, "", &target_ref, &reason);
             return GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
                 db_sha,
-                git_sha:       String::new(),
+                git_sha: String::new(),
                 target_ref,
                 reason,
             };
@@ -1159,7 +1161,14 @@ fn recover_one_initiative(
         // succeeded; only Phase 3 was missed. Just clear the flag.
         if let Err(e) = clear_pending_under_lock(store, initiative_id) {
             let reason = format!("Case B clear_git_apply_pending failed: {e}");
-            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            emit_inconsistent(
+                audit,
+                initiative_id,
+                &db_sha,
+                &git_sha,
+                &target_ref,
+                &reason,
+            );
             return GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
                 db_sha,
@@ -1171,7 +1180,7 @@ fn recover_one_initiative(
         emit_verified(audit, initiative_id, &db_sha, &target_ref);
         return GitApplyRecoveryOutcome::Verified {
             initiative_id: initiative_id.to_owned(),
-            commit_sha:    db_sha,
+            commit_sha: db_sha,
             target_ref,
         };
     }
@@ -1185,7 +1194,14 @@ fn recover_one_initiative(
         Some(p) => p,
         None => {
             let reason = "orchestrator_worktree_missing".to_owned();
-            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            emit_inconsistent(
+                audit,
+                initiative_id,
+                &db_sha,
+                &git_sha,
+                &target_ref,
+                &reason,
+            );
             return GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
                 db_sha,
@@ -1198,7 +1214,14 @@ fn recover_one_initiative(
 
     if !worktree_path.exists() {
         let reason = "orchestrator_worktree_missing".to_owned();
-        emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+        emit_inconsistent(
+            audit,
+            initiative_id,
+            &db_sha,
+            &git_sha,
+            &target_ref,
+            &reason,
+        );
         return GitApplyRecoveryOutcome::Inconsistent {
             initiative_id: initiative_id.to_owned(),
             db_sha,
@@ -1215,14 +1238,24 @@ fn recover_one_initiative(
     // the ref does not yet have db_sha reachable is the genuine
     // Case-C "orchestrator_worktree_unreachable_commit" case.
     match raxis_domain_git::commit_merge_to_target_ref(
-        main_repo_root, &worktree_path, &db_sha, &target_ref,
+        main_repo_root,
+        &worktree_path,
+        &db_sha,
+        &target_ref,
     ) {
         Ok(advance) => {
             if let Err(e) = clear_pending_under_lock(store, initiative_id) {
                 let reason = format!(
                     "Case A re-applied Phase 2 successfully but clear_git_apply_pending failed: {e}",
                 );
-                emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+                emit_inconsistent(
+                    audit,
+                    initiative_id,
+                    &db_sha,
+                    &git_sha,
+                    &target_ref,
+                    &reason,
+                );
                 return GitApplyRecoveryOutcome::Inconsistent {
                     initiative_id: initiative_id.to_owned(),
                     db_sha,
@@ -1234,14 +1267,21 @@ fn recover_one_initiative(
             emit_repaired(audit, initiative_id, &db_sha, &git_sha, &target_ref);
             GitApplyRecoveryOutcome::Repaired {
                 initiative_id: initiative_id.to_owned(),
-                commit_sha:    db_sha,
-                previous_sha:  advance.previous_sha,
+                commit_sha: db_sha,
+                previous_sha: advance.previous_sha,
                 target_ref,
             }
         }
         Err(_e) => {
             let reason = "orchestrator_worktree_unreachable_commit".to_owned();
-            emit_inconsistent(audit, initiative_id, &db_sha, &git_sha, &target_ref, &reason);
+            emit_inconsistent(
+                audit,
+                initiative_id,
+                &db_sha,
+                &git_sha,
+                &target_ref,
+                &reason,
+            );
             GitApplyRecoveryOutcome::Inconsistent {
                 initiative_id: initiative_id.to_owned(),
                 db_sha,
@@ -1264,7 +1304,7 @@ struct LastIntegrationMerge {
 /// `IntegrationMergeCompleted` event for `initiative_id`. Returns
 /// `Ok(None)` if none found (Case C).
 fn find_last_integration_merge(
-    audit_dir:     &Path,
+    audit_dir: &Path,
     initiative_id: &str,
 ) -> Result<Option<LastIntegrationMerge>, raxis_audit_tools::reader::ChainReadError> {
     let reader = raxis_audit_tools::reader::ChainReader::open(audit_dir)?;
@@ -1272,7 +1312,7 @@ fn find_last_integration_merge(
 
     for record in reader.records() {
         let record = match record {
-            Ok(r)  => r,
+            Ok(r) => r,
             Err(_) => continue, // skip malformed lines; they are surfaced
                                 // by the dedicated chain-walker, not here
         };
@@ -1284,28 +1324,35 @@ fn find_last_integration_merge(
         }
         let parsed = match record.parsed_value.as_ref() {
             Some(v) => v,
-            None    => continue,
+            None => continue,
         };
         let payload = match parsed.get("payload") {
             Some(p) => p,
-            None    => continue,
+            None => continue,
         };
         let commit_sha = match payload.get("commit_sha").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None    => continue,
+            None => continue,
         };
         let session_id = match payload.get("session_id").and_then(|v| v.as_str()) {
             Some(s) => s.to_owned(),
-            None    => continue,
+            None => continue,
         };
-        let target_ref = payload.get("target_ref")
+        let target_ref = payload
+            .get("target_ref")
             .and_then(|v| v.as_str())
             .unwrap_or_default()
             .to_owned();
-        let entry = LastIntegrationMerge { commit_sha, session_id, target_ref };
+        let entry = LastIntegrationMerge {
+            commit_sha,
+            session_id,
+            target_ref,
+        };
         match best.as_ref() {
             Some((seq, _)) if *seq >= record.seq => {}
-            _ => { best = Some((record.seq, entry)); }
+            _ => {
+                best = Some((record.seq, entry));
+            }
         }
     }
 
@@ -1316,14 +1363,17 @@ fn find_last_integration_merge(
 /// `None` when the row is missing or the column is NULL.
 fn worktree_for_session(store: &Store, session_id: &str) -> Option<std::path::PathBuf> {
     let conn = store.lock_sync();
-    let path: Option<String> = conn.query_row(
-        &format!(
-            "SELECT worktree_root FROM {} WHERE session_id = ?1",
-            raxis_store::Table::Sessions.as_str(),
-        ),
-        rusqlite::params![session_id],
-        |r| r.get::<_, Option<String>>(0),
-    ).ok().flatten();
+    let path: Option<String> = conn
+        .query_row(
+            &format!(
+                "SELECT worktree_root FROM {} WHERE session_id = ?1",
+                raxis_store::Table::Sessions.as_str(),
+            ),
+            rusqlite::params![session_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .ok()
+        .flatten();
     path.map(std::path::PathBuf::from)
 }
 
@@ -1336,20 +1386,22 @@ fn clear_pending_under_lock(store: &Store, initiative_id: &str) -> Result<usize,
 }
 
 fn emit_repaired(
-    audit:           &dyn raxis_audit_tools::AuditSink,
-    initiative_id:   &str,
-    db_sha:          &str,
+    audit: &dyn raxis_audit_tools::AuditSink,
+    initiative_id: &str,
+    db_sha: &str,
     previous_git_sha: &str,
-    target_ref:      &str,
+    target_ref: &str,
 ) {
     let _ = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyRepaired {
-            initiative_id:    initiative_id.to_owned(),
-            db_sha:           db_sha.to_owned(),
+            initiative_id: initiative_id.to_owned(),
+            db_sha: db_sha.to_owned(),
             previous_git_sha: previous_git_sha.to_owned(),
-            target_ref:       target_ref.to_owned(),
+            target_ref: target_ref.to_owned(),
         },
-        None, None, Some(initiative_id),
+        None,
+        None,
+        Some(initiative_id),
     );
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyRepaired\",\
@@ -1359,18 +1411,20 @@ fn emit_repaired(
 }
 
 fn emit_verified(
-    audit:         &dyn raxis_audit_tools::AuditSink,
+    audit: &dyn raxis_audit_tools::AuditSink,
     initiative_id: &str,
-    sha:           &str,
-    target_ref:    &str,
+    sha: &str,
+    target_ref: &str,
 ) {
     let _ = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyVerified {
             initiative_id: initiative_id.to_owned(),
-            sha:           sha.to_owned(),
-            target_ref:    target_ref.to_owned(),
+            sha: sha.to_owned(),
+            target_ref: target_ref.to_owned(),
         },
-        None, None, Some(initiative_id),
+        None,
+        None,
+        Some(initiative_id),
     );
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyVerified\",\
@@ -1380,22 +1434,24 @@ fn emit_verified(
 }
 
 fn emit_inconsistent(
-    audit:         &dyn raxis_audit_tools::AuditSink,
+    audit: &dyn raxis_audit_tools::AuditSink,
     initiative_id: &str,
-    db_sha:        &str,
-    git_sha:       &str,
-    target_ref:    &str,
-    reason:        &str,
+    db_sha: &str,
+    git_sha: &str,
+    target_ref: &str,
+    reason: &str,
 ) {
     let _ = audit.emit(
         raxis_audit_tools::AuditEventKind::GitStateInconsistent {
             initiative_id: initiative_id.to_owned(),
-            db_sha:        db_sha.to_owned(),
-            git_sha:       git_sha.to_owned(),
-            target_ref:    target_ref.to_owned(),
-            reason:        reason.to_owned(),
+            db_sha: db_sha.to_owned(),
+            git_sha: git_sha.to_owned(),
+            target_ref: target_ref.to_owned(),
+            reason: reason.to_owned(),
         },
-        None, None, Some(initiative_id),
+        None,
+        None,
+        Some(initiative_id),
     );
     eprintln!(
         "{{\"level\":\"warn\",\"event\":\"GitStateInconsistent\",\
@@ -1432,7 +1488,8 @@ mod tests {
                  VALUES ('init-recon', ?1, '{{}}', 'deadbeef', ?2)"
             ),
             rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
 
         for (task_id, state) in task_states {
             conn.execute(
@@ -1443,7 +1500,8 @@ mod tests {
                      VALUES (?1, 'init-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)"
                 ),
                 rusqlite::params![task_id, state.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -1460,7 +1518,8 @@ mod tests {
                  VALUES (?1, ?2, 'tests_pass', 'evalsha', 'tokhash', ?3, ?4, 0)"
             ),
             rusqlite::params![run_id, task_id, now, now + 3600],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn task_state(store: &Store, task_id: &str) -> String {
@@ -1469,7 +1528,8 @@ mod tests {
             &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn token_consumed(store: &Store, run_id: &str) -> i64 {
@@ -1478,58 +1538,74 @@ mod tests {
             &format!("SELECT consumed FROM {VERIFIER_RUN_TOKENS} WHERE verifier_run_id=?1"),
             rusqlite::params![run_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
     fn reconcile_sweeps_only_non_terminal_tasks() {
         let store = Store::open_in_memory().unwrap();
-        seed_in_flight_tasks(&store, &[
-            ("t-running",    TaskState::Running),
-            ("t-admitted",   TaskState::Admitted),
-            ("t-gates",      TaskState::GatesPending),
-            ("t-already",    TaskState::BlockedRecoveryPending),
-            ("t-completed",  TaskState::Completed),
-            ("t-failed",     TaskState::Failed),
-            ("t-aborted",    TaskState::Aborted),
-            ("t-cancelled",  TaskState::Cancelled),
-        ]);
+        seed_in_flight_tasks(
+            &store,
+            &[
+                ("t-running", TaskState::Running),
+                ("t-admitted", TaskState::Admitted),
+                ("t-gates", TaskState::GatesPending),
+                ("t-already", TaskState::BlockedRecoveryPending),
+                ("t-completed", TaskState::Completed),
+                ("t-failed", TaskState::Failed),
+                ("t-aborted", TaskState::Aborted),
+                ("t-cancelled", TaskState::Cancelled),
+            ],
+        );
 
         let report = reconcile_tasks(&store);
         // 4 non-terminal tasks should sweep; 4 terminal tasks should not.
         assert_eq!(report.swept_tasks, 4);
 
         for tid in ["t-running", "t-admitted", "t-gates", "t-already"] {
-            assert_eq!(task_state(&store, tid), "BlockedRecoveryPending",
-                       "{tid} should have been swept");
+            assert_eq!(
+                task_state(&store, tid),
+                "BlockedRecoveryPending",
+                "{tid} should have been swept"
+            );
         }
         for (tid, expected) in [
             ("t-completed", "Completed"),
-            ("t-failed",    "Failed"),
-            ("t-aborted",   "Aborted"),
+            ("t-failed", "Failed"),
+            ("t-aborted", "Aborted"),
             ("t-cancelled", "Cancelled"),
         ] {
-            assert_eq!(task_state(&store, tid), expected,
-                       "{tid} must NOT change state");
+            assert_eq!(
+                task_state(&store, tid),
+                expected,
+                "{tid} must NOT change state"
+            );
         }
     }
 
     #[test]
     fn reconcile_expires_only_live_tokens_for_swept_tasks() {
         let store = Store::open_in_memory().unwrap();
-        seed_in_flight_tasks(&store, &[
-            ("t-running",   TaskState::Running),
-            ("t-completed", TaskState::Completed),
-        ]);
+        seed_in_flight_tasks(
+            &store,
+            &[
+                ("t-running", TaskState::Running),
+                ("t-completed", TaskState::Completed),
+            ],
+        );
         // Two tokens: one for the running task (will sweep) and one for
         // the completed task (must NOT be touched).
-        seed_live_token(&store, "tok-running",   "t-running");
+        seed_live_token(&store, "tok-running", "t-running");
         seed_live_token(&store, "tok-completed", "t-completed");
 
         let report = reconcile_tasks(&store);
         assert_eq!(report.swept_tasks, 1);
-        assert_eq!(report.expired_tokens, 1, "only running task's token should expire");
-        assert_eq!(token_consumed(&store, "tok-running"),   1);
+        assert_eq!(
+            report.expired_tokens, 1,
+            "only running task's token should expire"
+        );
+        assert_eq!(token_consumed(&store, "tok-running"), 1);
         assert_eq!(token_consumed(&store, "tok-completed"), 0);
     }
 
@@ -1537,9 +1613,7 @@ mod tests {
     fn reconcile_is_idempotent() {
         // Running reconcile twice must not change state on the second run.
         let store = Store::open_in_memory().unwrap();
-        seed_in_flight_tasks(&store, &[
-            ("t-running", TaskState::Running),
-        ]);
+        seed_in_flight_tasks(&store, &[("t-running", TaskState::Running)]);
         seed_live_token(&store, "tok", "t-running");
 
         let r1 = reconcile_tasks(&store);
@@ -1551,16 +1625,17 @@ mod tests {
         // BlockedRecoveryPending") the bulk UPDATE re-fires its rows.
         // The token, however, is now consumed=1 and won't be touched.
         let r2 = reconcile_tasks(&store);
-        assert_eq!(r2.swept_tasks, 1, "BlockedRecoveryPending re-sweeps idempotently");
+        assert_eq!(
+            r2.swept_tasks, 1,
+            "BlockedRecoveryPending re-sweeps idempotently"
+        );
         assert_eq!(r2.expired_tokens, 0, "no live tokens left to expire");
     }
 
     #[test]
     fn reconcile_with_no_in_flight_tasks_is_a_noop() {
         let store = Store::open_in_memory().unwrap();
-        seed_in_flight_tasks(&store, &[
-            ("t-completed", TaskState::Completed),
-        ]);
+        seed_in_flight_tasks(&store, &[("t-completed", TaskState::Completed)]);
 
         let report = reconcile_tasks(&store);
         assert_eq!(report.swept_tasks, 0);
@@ -1606,7 +1681,8 @@ mod tests {
                  VALUES ('init-recon-imerge', ?1, '{{}}', 'deadbeef', ?2)"
             ),
             rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
 
         conn.execute(
             &format!(
@@ -1626,7 +1702,8 @@ mod tests {
                 now,
                 finalized_at,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         id.to_string()
     }
 
@@ -1636,29 +1713,28 @@ mod tests {
             &format!("SELECT state FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1"),
             rusqlite::params![id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn imerge_discard_reason(store: &Store, id: &str) -> Option<String> {
         let conn = store.lock_sync();
         conn.query_row(
-            &format!(
-                "SELECT discard_reason FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",
-            ),
+            &format!("SELECT discard_reason FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",),
             rusqlite::params![id],
             |r| r.get::<_, Option<String>>(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn imerge_finalized_at(store: &Store, id: &str) -> Option<i64> {
         let conn = store.lock_sync();
         conn.query_row(
-            &format!(
-                "SELECT finalized_at FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",
-            ),
+            &format!("SELECT finalized_at FROM {INTEGRATION_MERGE_ATTEMPTS} WHERE id=?1",),
             rusqlite::params![id],
             |r| r.get::<_, Option<i64>>(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// A row in `AwaitingPreMergeVerifiers` (Check 5d.1 inserted, no
@@ -1679,7 +1755,10 @@ mod tests {
         let report = reconcile_integration_merge_attempts(&store);
         assert_eq!(report.folded_attempts, 1, "the one open row must fold");
 
-        assert_eq!(imerge_state(&store, "imerge-await"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_state(&store, "imerge-await"),
+            "DiscardedCrashRecovery"
+        );
         assert_eq!(
             imerge_discard_reason(&store, "imerge-await").as_deref(),
             Some("crash_recovery"),
@@ -1709,7 +1788,10 @@ mod tests {
         let report = reconcile_integration_merge_attempts(&store);
         assert_eq!(report.folded_attempts, 1);
 
-        assert_eq!(imerge_state(&store, "imerge-pass"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_state(&store, "imerge-pass"),
+            "DiscardedCrashRecovery"
+        );
         assert_eq!(
             imerge_discard_reason(&store, "imerge-pass").as_deref(),
             Some("crash_recovery"),
@@ -1759,25 +1841,39 @@ mod tests {
         );
 
         let report = reconcile_integration_merge_attempts(&store);
-        assert_eq!(report.folded_attempts, 0,
-            "no terminal rows should be folded a second time");
+        assert_eq!(
+            report.folded_attempts, 0,
+            "no terminal rows should be folded a second time"
+        );
 
-        assert_eq!(imerge_state(&store, "imerge-completed"), "CompletedAdvanceApplied");
+        assert_eq!(
+            imerge_state(&store, "imerge-completed"),
+            "CompletedAdvanceApplied"
+        );
         assert_eq!(imerge_discard_reason(&store, "imerge-completed"), None);
 
-        assert_eq!(imerge_state(&store, "imerge-blocked"), "BlockedByPreMergeVerifier");
+        assert_eq!(
+            imerge_state(&store, "imerge-blocked"),
+            "BlockedByPreMergeVerifier"
+        );
         assert_eq!(
             imerge_discard_reason(&store, "imerge-blocked").as_deref(),
             Some("verifier_blocked"),
         );
 
-        assert_eq!(imerge_state(&store, "imerge-discarded-cand"), "DiscardedCandidateOnly");
+        assert_eq!(
+            imerge_state(&store, "imerge-discarded-cand"),
+            "DiscardedCandidateOnly"
+        );
         assert_eq!(
             imerge_discard_reason(&store, "imerge-discarded-cand").as_deref(),
             Some("candidate_computation_failed"),
         );
 
-        assert_eq!(imerge_state(&store, "imerge-prior-crash"), "DiscardedCrashRecovery");
+        assert_eq!(
+            imerge_state(&store, "imerge-prior-crash"),
+            "DiscardedCrashRecovery"
+        );
         assert_eq!(
             imerge_discard_reason(&store, "imerge-prior-crash").as_deref(),
             Some("crash_recovery"),
@@ -1810,8 +1906,10 @@ mod tests {
         assert_eq!(r1.folded_attempts, 2);
 
         let r2 = reconcile_integration_merge_attempts(&store);
-        assert_eq!(r2.folded_attempts, 0,
-            "second pass must be a no-op (rows are already terminal)");
+        assert_eq!(
+            r2.folded_attempts, 0,
+            "second pass must be a no-op (rows are already terminal)"
+        );
     }
 
     /// Mixed seed: the sweep folds open rows AND leaves terminal rows
@@ -1843,8 +1941,14 @@ mod tests {
         let r = reconcile_integration_merge_attempts(&store);
         assert_eq!(r.folded_attempts, 1, "exactly one open row must fold");
 
-        assert_eq!(imerge_state(&store, "imerge-await"), "DiscardedCrashRecovery");
-        assert_eq!(imerge_state(&store, "imerge-completed"), "CompletedAdvanceApplied");
+        assert_eq!(
+            imerge_state(&store, "imerge-await"),
+            "DiscardedCrashRecovery"
+        );
+        assert_eq!(
+            imerge_state(&store, "imerge-completed"),
+            "CompletedAdvanceApplied"
+        );
     }
 
     /// Empty store: the sweep returns zero folded attempts and never
@@ -1922,10 +2026,7 @@ mod tests {
         // Regression guard: pre-fix code defaulted seq to 1 and reported a
         // misleading "wrong genesis" error instead of "field missing".
         let tmp = TempDir::new().unwrap();
-        write_segment(
-            tmp.path(),
-            "{\"event_kind\":\"GenesisRecord\"}\n",
-        );
+        write_segment(tmp.path(), "{\"event_kind\":\"GenesisRecord\"}\n");
         let result = verify_audit_chain(tmp.path());
         assert_chain_broken(result, "missing required `seq`");
     }
@@ -1941,10 +2042,7 @@ mod tests {
     #[test]
     fn verify_audit_chain_rejects_wrong_event_kind() {
         let tmp = TempDir::new().unwrap();
-        write_segment(
-            tmp.path(),
-            "{\"seq\":0,\"event_kind\":\"SomethingElse\"}\n",
-        );
+        write_segment(tmp.path(), "{\"seq\":0,\"event_kind\":\"SomethingElse\"}\n");
         let result = verify_audit_chain(tmp.path());
         assert_chain_broken(result, "not the genesis record");
     }
@@ -1952,10 +2050,7 @@ mod tests {
     #[test]
     fn verify_audit_chain_rejects_nonzero_seq() {
         let tmp = TempDir::new().unwrap();
-        write_segment(
-            tmp.path(),
-            "{\"seq\":7,\"event_kind\":\"GenesisRecord\"}\n",
-        );
+        write_segment(tmp.path(), "{\"seq\":7,\"event_kind\":\"GenesisRecord\"}\n");
         let result = verify_audit_chain(tmp.path());
         assert_chain_broken(result, "not the genesis record");
     }
@@ -2007,7 +2102,7 @@ mod audit_chain_integration {
     /// Returns the records on success so the caller can also assert
     /// per-record fields.
     fn assert_chain_unbroken(dir: &AuditDir) -> Vec<serde_json::Value> {
-        let raw     = std::fs::read_to_string(dir.segment_path()).unwrap();
+        let raw = std::fs::read_to_string(dir.segment_path()).unwrap();
         let records = dir.read_records();
         let lines: Vec<&str> = raw.lines().collect();
         assert_eq!(records.len(), lines.len(), "record count vs line count");
@@ -2022,7 +2117,8 @@ mod audit_chain_integration {
                 sha256_hex(format!("{}\n", lines[i - 1]).as_bytes())
             };
             assert_eq!(
-                prev, expected,
+                prev,
+                expected,
                 "record {i} prev_sha256 must equal SHA-256 of line {}",
                 i.saturating_sub(1),
             );
@@ -2038,7 +2134,7 @@ mod audit_chain_integration {
         // Production setup the kernel itself runs on every boot:
         //   bootstrap writes GenesisRecord, AuditWriter appends events,
         //   verify_audit_chain reads the segment back at startup.
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info: GenesisInfo = dir.write_genesis_record();
 
         // Append three real events through the production writer,
@@ -2056,8 +2152,10 @@ mod audit_chain_integration {
 
         // And the production verifier MUST accept the segment.
         let result = verify_audit_chain(dir.path());
-        assert!(matches!(result, Ok(true)),
-            "verify_audit_chain rejected a production-shape chain: {result:?}");
+        assert!(
+            matches!(result, Ok(true)),
+            "verify_audit_chain rejected a production-shape chain: {result:?}"
+        );
     }
 
     #[test]
@@ -2066,13 +2164,13 @@ mod audit_chain_integration {
         // kernel uses in `HandlerContext`. If the trait coercion or
         // the FileAuditSink mutex ever stops yielding identical bytes
         // to the bare AuditWriter, this test breaks.
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         // Open a writer resuming from genesis, wrap in a FileAuditSink,
         // emit through the trait — same production path the kernel uses.
         let writer = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
-        let sink   = raxis_audit_tools::FileAuditSink::new(writer);
+        let sink = raxis_audit_tools::FileAuditSink::new(writer);
         let dyn_sink: std::sync::Arc<dyn AuditSink> = std::sync::Arc::new(sink);
 
         for i in 0..2 {
@@ -2092,7 +2190,7 @@ mod audit_chain_integration {
         // different writers — the bootstrap-side raw write vs the
         // production AuditWriter — and they MUST agree on the canonical
         // line bytes the SHA-256 is computed from).
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
@@ -2197,7 +2295,7 @@ mod audit_chain_integration {
 
     #[test]
     fn full_chain_links_correctly_across_genesis_plus_n_events() {
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
@@ -2220,7 +2318,7 @@ mod audit_chain_integration {
         // Write genesis + 3 events, then corrupt a byte inside event #2.
         // The chain walk MUST detect the break (event #3's prev_sha256
         // no longer matches the SHA-256 of the corrupted line).
-        let dir  = AuditDir::new();
+        let dir = AuditDir::new();
         let info = dir.write_genesis_record();
 
         let mut w = dir.open_writer_resuming_after(1, &info.raw_line_sha256);
@@ -2245,11 +2343,10 @@ mod audit_chain_integration {
 
         // Re-read and walk the chain manually — record 3's prev_sha256
         // MUST no longer match SHA-256 of the corrupted record-2 line.
-        let raw       = std::fs::read_to_string(dir.segment_path()).unwrap();
+        let raw = std::fs::read_to_string(dir.segment_path()).unwrap();
         let lines2: Vec<&str> = raw.lines().collect();
         let actual_prev_in_rec3 = serde_json::from_str::<serde_json::Value>(lines2[3])
-            .expect("rec3 must still parse — only its predecessor changed")
-            ["prev_sha256"]
+            .expect("rec3 must still parse — only its predecessor changed")["prev_sha256"]
             .as_str()
             .unwrap()
             .to_owned();
@@ -2280,7 +2377,7 @@ mod disk_store_integration {
     /// but operates on a `DiskStore` so the writes hit the WAL.
     fn seed_in_flight(disk: &DiskStore, task_states: &[(&str, TaskState)]) {
         let conn = disk.store().lock_sync();
-        let now  = unix_now_secs();
+        let now = unix_now_secs();
 
         conn.execute(
             &format!(
@@ -2290,7 +2387,8 @@ mod disk_store_integration {
                  VALUES ('init-disk-recon', ?1, '{{}}', 'deadbeef', ?2)"
             ),
             rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
 
         for (task_id, state) in task_states {
             conn.execute(
@@ -2301,7 +2399,8 @@ mod disk_store_integration {
                      VALUES (?1, 'init-disk-recon', 'default', ?2, 'kernel', 1, ?3, ?3, 0)"
                 ),
                 rusqlite::params![task_id, state.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -2311,7 +2410,8 @@ mod disk_store_integration {
             &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -2332,12 +2432,13 @@ mod disk_store_integration {
                      VALUES ('wal-probe', ?1, '{{}}', 'deadbeef', 0)"
                 ),
                 rusqlite::params![InitiativeState::Executing.as_sql_str()],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let db_path = disk.db_path();
-        let wal     = db_path.with_extension("db-wal");
-        let shm     = db_path.with_extension("db-shm");
+        let wal = db_path.with_extension("db-wal");
+        let shm = db_path.with_extension("db-shm");
 
         assert!(db_path.exists(), "main DB file must exist");
         assert!(
@@ -2356,10 +2457,13 @@ mod disk_store_integration {
         // (kernel-store.md §2.5.1). `:memory:` cannot test this — its
         // contents vanish on connection close.
         let mut disk = DiskStore::new();
-        seed_in_flight(&disk, &[
-            ("t-pre-crash-1", TaskState::Running),
-            ("t-pre-crash-2", TaskState::Admitted),
-        ]);
+        seed_in_flight(
+            &disk,
+            &[
+                ("t-pre-crash-1", TaskState::Running),
+                ("t-pre-crash-2", TaskState::Admitted),
+            ],
+        );
 
         // "Crash" the kernel: drop the connection. WAL gets checkpointed.
         disk.close();
@@ -2383,11 +2487,14 @@ mod disk_store_integration {
         // and it's not exercised by any existing test (all reconcile
         // tests use `:memory:` which discards state on close).
         let mut disk = DiskStore::new();
-        seed_in_flight(&disk, &[
-            ("t-running",   TaskState::Running),
-            ("t-admitted",  TaskState::Admitted),
-            ("t-completed", TaskState::Completed),
-        ]);
+        seed_in_flight(
+            &disk,
+            &[
+                ("t-running", TaskState::Running),
+                ("t-admitted", TaskState::Admitted),
+                ("t-completed", TaskState::Completed),
+            ],
+        );
 
         // Restart cycle.
         disk.close();
@@ -2395,10 +2502,18 @@ mod disk_store_integration {
 
         // Run reconcile against the persisted state.
         let report = reconcile_tasks(disk.store());
-        assert_eq!(report.swept_tasks, 2,
-            "2 non-terminal tasks should have been swept after restart");
-        assert_eq!(task_state_disk(&disk, "t-running"),   "BlockedRecoveryPending");
-        assert_eq!(task_state_disk(&disk, "t-admitted"),  "BlockedRecoveryPending");
+        assert_eq!(
+            report.swept_tasks, 2,
+            "2 non-terminal tasks should have been swept after restart"
+        );
+        assert_eq!(
+            task_state_disk(&disk, "t-running"),
+            "BlockedRecoveryPending"
+        );
+        assert_eq!(
+            task_state_disk(&disk, "t-admitted"),
+            "BlockedRecoveryPending"
+        );
         assert_eq!(task_state_disk(&disk, "t-completed"), "Completed");
     }
 
@@ -2417,13 +2532,19 @@ mod disk_store_integration {
         disk.reopen();
 
         // After restart, the row is still BlockedRecoveryPending on disk.
-        assert_eq!(task_state_disk(&disk, "t-running"), "BlockedRecoveryPending");
+        assert_eq!(
+            task_state_disk(&disk, "t-running"),
+            "BlockedRecoveryPending"
+        );
 
         // The bulk UPDATE re-fires (matches the in-memory test
         // `reconcile_is_idempotent`'s contract — already-blocked rows
         // are still in the WHERE-NOT-IN-terminal set).
         let r2 = reconcile_tasks(disk.store());
-        assert_eq!(r2.swept_tasks, 1, "BlockedRecoveryPending re-sweeps idempotently after restart");
+        assert_eq!(
+            r2.swept_tasks, 1,
+            "BlockedRecoveryPending re-sweeps idempotently after restart"
+        );
     }
 
     #[test]
@@ -2476,7 +2597,9 @@ mod git_apply_recovery_integration {
     use super::*;
     use std::process::Command;
 
-    use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink, AuditWriterError, FileAuditSink};
+    use raxis_audit_tools::{
+        AuditEvent, AuditEventKind, AuditSink, AuditWriterError, FileAuditSink,
+    };
     use raxis_test_support::{AuditDir, DiskStore};
 
     const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
@@ -2508,7 +2631,9 @@ mod git_apply_recovery_integration {
         s
     }
 
-    fn fixture_repos(data_dir: &Path) -> Option<(std::path::PathBuf, std::path::PathBuf, String, String)> {
+    fn fixture_repos(
+        data_dir: &Path,
+    ) -> Option<(std::path::PathBuf, std::path::PathBuf, String, String)> {
         if !git_available() {
             return None;
         }
@@ -2522,20 +2647,32 @@ mod git_apply_recovery_integration {
         std::fs::write(main.join("README.md"), "v1\n").unwrap();
         run_git(&["add", "README.md"], &main);
         run_git(&["commit", "-q", "-m", "initial"], &main);
-        let base = String::from_utf8(run_git(&["rev-parse", "HEAD"], &main).stdout).unwrap()
-            .trim().to_owned();
+        let base = String::from_utf8(run_git(&["rev-parse", "HEAD"], &main).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
 
         let orch = data_dir.join("worktrees").join("orchestrator-1");
         std::fs::create_dir_all(orch.parent().unwrap()).unwrap();
-        run_git(&["clone", "-q", main.to_str().unwrap(), orch.to_str().unwrap()], data_dir);
+        run_git(
+            &[
+                "clone",
+                "-q",
+                main.to_str().unwrap(),
+                orch.to_str().unwrap(),
+            ],
+            data_dir,
+        );
         run_git(&["config", "user.name", "RAXIS Test"], &orch);
         run_git(&["config", "user.email", "test@raxis.local"], &orch);
         run_git(&["config", "commit.gpgsign", "false"], &orch);
         std::fs::write(orch.join("README.md"), "v1\nv2\n").unwrap();
         run_git(&["add", "README.md"], &orch);
         run_git(&["commit", "-q", "-m", "merge: add v2"], &orch);
-        let merge = String::from_utf8(run_git(&["rev-parse", "HEAD"], &orch).stdout).unwrap()
-            .trim().to_owned();
+        let merge = String::from_utf8(run_git(&["rev-parse", "HEAD"], &orch).stdout)
+            .unwrap()
+            .trim()
+            .to_owned();
 
         Some((main, orch, base, merge))
     }
@@ -2557,14 +2694,11 @@ mod git_apply_recovery_integration {
                  VALUES (?1, 'Executing', '{{}}', 'deadbeef', 1700000000, 1)"
             ),
             rusqlite::params![initiative_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn seed_session_with_worktree(
-        disk:          &DiskStore,
-        session_id:    &str,
-        worktree_path: &Path,
-    ) {
+    fn seed_session_with_worktree(disk: &DiskStore, session_id: &str, worktree_path: &Path) {
         let conn = disk.store().lock_sync();
         conn.execute(
             &format!(
@@ -2578,47 +2712,48 @@ mod git_apply_recovery_integration {
                 format!("tok-{session_id}"),
                 worktree_path.display().to_string(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn pending_flag(disk: &DiskStore, initiative_id: &str) -> i64 {
         let conn = disk.store().lock_sync();
         conn.query_row(
-            &format!(
-                "SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"
-            ),
+            &format!("SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"),
             rusqlite::params![initiative_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // ── Audit-event helpers ─────────────────────────────────────────────
 
     fn write_audit_with_merge(
-        audit_dir:     &AuditDir,
+        audit_dir: &AuditDir,
         initiative_id: &str,
-        session_id:    &str,
-        commit_sha:    &str,
-        previous_sha:  &str,
-        target_ref:    &str,
+        session_id: &str,
+        commit_sha: &str,
+        previous_sha: &str,
+        target_ref: &str,
     ) {
-        let info   = audit_dir.write_genesis_record();
+        let info = audit_dir.write_genesis_record();
         let writer = audit_dir.open_writer_resuming_after(1, &info.raw_line_sha256);
-        let sink   = FileAuditSink::new(writer);
+        let sink = FileAuditSink::new(writer);
         sink.emit(
             AuditEventKind::IntegrationMergeCompleted {
-                initiative_id:     initiative_id.into(),
-                session_id:        session_id.into(),
-                commit_sha:        commit_sha.into(),
-                previous_sha:      previous_sha.into(),
+                initiative_id: initiative_id.into(),
+                session_id: session_id.into(),
+                commit_sha: commit_sha.into(),
+                previous_sha: previous_sha.into(),
                 operator_assisted: false,
-                escalation_id:     None,
-                target_ref:        target_ref.into(),
+                escalation_id: None,
+                target_ref: target_ref.into(),
             },
             Some(session_id),
             None,
             Some(initiative_id),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// In-memory audit sink for asserting the typed events recovery
@@ -2631,24 +2766,24 @@ mod git_apply_recovery_integration {
     impl AuditSink for CapturingSink {
         fn emit(
             &self,
-            kind:          AuditEventKind,
-            session_id:    Option<&str>,
-            task_id:       Option<&str>,
+            kind: AuditEventKind,
+            session_id: Option<&str>,
+            task_id: Option<&str>,
             initiative_id: Option<&str>,
         ) -> Result<AuditEvent, AuditWriterError> {
             let event_kind_str = kind.as_str().to_owned();
             let payload = serde_json::to_value(&kind).expect("event must serialize");
             self.events.lock().unwrap().push(kind);
             Ok(AuditEvent {
-                seq:            0,
-                event_id:       uuid::Uuid::nil(),
-                event_kind:     event_kind_str,
-                session_id:     session_id.map(str::to_owned),
-                task_id:        task_id.map(str::to_owned),
-                initiative_id:  initiative_id.map(str::to_owned),
+                seq: 0,
+                event_id: uuid::Uuid::nil(),
+                event_kind: event_kind_str,
+                session_id: session_id.map(str::to_owned),
+                task_id: task_id.map(str::to_owned),
+                initiative_id: initiative_id.map(str::to_owned),
                 payload,
-                emitted_at:     0,
-                prev_sha256:    String::new(),
+                emitted_at: 0,
+                prev_sha256: String::new(),
             })
         }
     }
@@ -2668,12 +2803,11 @@ mod git_apply_recovery_integration {
         audit_dir.write_genesis_record();
         let sink = CapturingSink::default();
 
-        let report = reconcile_git_apply_pending(
-            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
-        );
+        let report =
+            reconcile_git_apply_pending(disk.store(), &sink, audit_dir.path(), disk.data_dir());
 
-        assert_eq!(report.repaired,     0);
-        assert_eq!(report.verified,     0);
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.verified, 0);
         assert_eq!(report.inconsistent, 0);
         assert!(report.outcomes.is_empty());
         assert!(sink.captured().is_empty());
@@ -2687,8 +2821,8 @@ mod git_apply_recovery_integration {
         }
         let disk = DiskStore::new();
         let audit_dir = AuditDir::new();
-        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
-            .expect("fixture must succeed when git is available");
+        let (main, orch, base, merge) =
+            fixture_repos(disk.data_dir()).expect("fixture must succeed when git is available");
         // Pre-advance main to the merge sha — the Case-B precondition
         // (Phase 2 fully succeeded; only Phase 3 missed across the crash).
         raxis_domain_git::commit_merge_to_target_ref(&main, &orch, &merge, "refs/heads/main")
@@ -2696,22 +2830,32 @@ mod git_apply_recovery_integration {
         assert_eq!(current_main_sha(&main), merge);
 
         let initiative_id = "init-case-b";
-        let session_id    = "sess-orch-b";
+        let session_id = "sess-orch-b";
         seed_initiative_pending(&disk, initiative_id);
         seed_session_with_worktree(&disk, session_id, &orch);
-        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
-
-        let sink = CapturingSink::default();
-        let report = reconcile_git_apply_pending(
-            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        write_audit_with_merge(
+            &audit_dir,
+            initiative_id,
+            session_id,
+            &merge,
+            &base,
+            "refs/heads/main",
         );
 
-        assert_eq!(report.repaired,     0);
-        assert_eq!(report.verified,     1);
+        let sink = CapturingSink::default();
+        let report =
+            reconcile_git_apply_pending(disk.store(), &sink, audit_dir.path(), disk.data_dir());
+
+        assert_eq!(report.repaired, 0);
+        assert_eq!(report.verified, 1);
         assert_eq!(report.inconsistent, 0);
         match &report.outcomes[0] {
-            GitApplyRecoveryOutcome::Verified { initiative_id: iid, commit_sha, target_ref } => {
-                assert_eq!(iid,        initiative_id);
+            GitApplyRecoveryOutcome::Verified {
+                initiative_id: iid,
+                commit_sha,
+                target_ref,
+            } => {
+                assert_eq!(iid, initiative_id);
                 assert_eq!(commit_sha, &merge);
                 assert_eq!(target_ref, "refs/heads/main");
             }
@@ -2722,9 +2866,13 @@ mod git_apply_recovery_integration {
         let captured = sink.captured();
         assert_eq!(captured.len(), 1);
         match &captured[0] {
-            AuditEventKind::GitConsistencyVerified { initiative_id: iid, sha, target_ref } => {
-                assert_eq!(iid,        initiative_id);
-                assert_eq!(sha,        &merge);
+            AuditEventKind::GitConsistencyVerified {
+                initiative_id: iid,
+                sha,
+                target_ref,
+            } => {
+                assert_eq!(iid, initiative_id);
+                assert_eq!(sha, &merge);
                 assert_eq!(target_ref, "refs/heads/main");
             }
             other => panic!("expected GitConsistencyVerified, got {other:?}"),
@@ -2739,48 +2887,65 @@ mod git_apply_recovery_integration {
         }
         let disk = DiskStore::new();
         let audit_dir = AuditDir::new();
-        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
-            .expect("fixture must succeed when git is available");
+        let (main, orch, base, merge) =
+            fixture_repos(disk.data_dir()).expect("fixture must succeed when git is available");
         // INTENTIONALLY do NOT pre-advance main — the Case-A precondition
         // (Phase 1 SQLite committed, Phase 2 host-side advance never ran).
         assert_eq!(current_main_sha(&main), base);
 
         let initiative_id = "init-case-a";
-        let session_id    = "sess-orch-a";
+        let session_id = "sess-orch-a";
         seed_initiative_pending(&disk, initiative_id);
         seed_session_with_worktree(&disk, session_id, &orch);
-        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
-
-        let sink = CapturingSink::default();
-        let report = reconcile_git_apply_pending(
-            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
+        write_audit_with_merge(
+            &audit_dir,
+            initiative_id,
+            session_id,
+            &merge,
+            &base,
+            "refs/heads/main",
         );
 
-        assert_eq!(report.repaired,     1);
-        assert_eq!(report.verified,     0);
+        let sink = CapturingSink::default();
+        let report =
+            reconcile_git_apply_pending(disk.store(), &sink, audit_dir.path(), disk.data_dir());
+
+        assert_eq!(report.repaired, 1);
+        assert_eq!(report.verified, 0);
         assert_eq!(report.inconsistent, 0);
         match &report.outcomes[0] {
-            GitApplyRecoveryOutcome::Repaired { initiative_id: iid, commit_sha, target_ref, .. } => {
-                assert_eq!(iid,        initiative_id);
+            GitApplyRecoveryOutcome::Repaired {
+                initiative_id: iid,
+                commit_sha,
+                target_ref,
+                ..
+            } => {
+                assert_eq!(iid, initiative_id);
                 assert_eq!(commit_sha, &merge);
                 assert_eq!(target_ref, "refs/heads/main");
             }
             other => panic!("expected Repaired, got {other:?}"),
         }
-        assert_eq!(current_main_sha(&main), merge,
-            "Case A MUST advance refs/heads/main to db_sha");
+        assert_eq!(
+            current_main_sha(&main),
+            merge,
+            "Case A MUST advance refs/heads/main to db_sha"
+        );
         assert_eq!(pending_flag(&disk, initiative_id), 0);
 
         let captured = sink.captured();
         assert_eq!(captured.len(), 1);
         match &captured[0] {
             AuditEventKind::GitConsistencyRepaired {
-                initiative_id: iid, db_sha, previous_git_sha, target_ref,
+                initiative_id: iid,
+                db_sha,
+                previous_git_sha,
+                target_ref,
             } => {
-                assert_eq!(iid,              initiative_id);
-                assert_eq!(db_sha,           &merge);
+                assert_eq!(iid, initiative_id);
+                assert_eq!(db_sha, &merge);
                 assert_eq!(previous_git_sha, &base);
-                assert_eq!(target_ref,       "refs/heads/main");
+                assert_eq!(target_ref, "refs/heads/main");
             }
             other => panic!("expected GitConsistencyRepaired, got {other:?}"),
         }
@@ -2794,35 +2959,52 @@ mod git_apply_recovery_integration {
         }
         let disk = DiskStore::new();
         let audit_dir = AuditDir::new();
-        let (main, _orch, base, merge) = fixture_repos(disk.data_dir())
-            .expect("fixture must succeed when git is available");
+        let (main, _orch, base, merge) =
+            fixture_repos(disk.data_dir()).expect("fixture must succeed when git is available");
 
         let initiative_id = "init-case-c-missing";
-        let session_id    = "sess-orch-c-missing";
+        let session_id = "sess-orch-c-missing";
         seed_initiative_pending(&disk, initiative_id);
         // Point at a worktree path that does not exist on disk.
         let bogus = disk.data_dir().join("worktrees").join("never-existed");
         seed_session_with_worktree(&disk, session_id, &bogus);
-        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+        write_audit_with_merge(
+            &audit_dir,
+            initiative_id,
+            session_id,
+            &merge,
+            &base,
+            "refs/heads/main",
+        );
 
         let sink = CapturingSink::default();
-        let report = reconcile_git_apply_pending(
-            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
-        );
+        let report =
+            reconcile_git_apply_pending(disk.store(), &sink, audit_dir.path(), disk.data_dir());
 
         assert_eq!(report.inconsistent, 1);
         match &report.outcomes[0] {
-            GitApplyRecoveryOutcome::Inconsistent { initiative_id: iid, reason, target_ref, .. } => {
-                assert_eq!(iid,        initiative_id);
+            GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: iid,
+                reason,
+                target_ref,
+                ..
+            } => {
+                assert_eq!(iid, initiative_id);
                 assert_eq!(target_ref, "refs/heads/main");
-                assert_eq!(reason,     "orchestrator_worktree_missing");
+                assert_eq!(reason, "orchestrator_worktree_missing");
             }
             other => panic!("expected Inconsistent, got {other:?}"),
         }
-        assert_eq!(pending_flag(&disk, initiative_id), 1,
-            "Case C MUST leave the flag set so subsequent merges keep rejecting");
-        assert_eq!(current_main_sha(&main), base,
-            "Case C MUST NOT advance refs/heads/main");
+        assert_eq!(
+            pending_flag(&disk, initiative_id),
+            1,
+            "Case C MUST leave the flag set so subsequent merges keep rejecting"
+        );
+        assert_eq!(
+            current_main_sha(&main),
+            base,
+            "Case C MUST NOT advance refs/heads/main"
+        );
     }
 
     #[test]
@@ -2834,14 +3016,17 @@ mod git_apply_recovery_integration {
         seed_initiative_pending(&disk, initiative_id);
 
         let sink = CapturingSink::default();
-        let report = reconcile_git_apply_pending(
-            disk.store(), &sink, audit_dir.path(), disk.data_dir(),
-        );
+        let report =
+            reconcile_git_apply_pending(disk.store(), &sink, audit_dir.path(), disk.data_dir());
 
         assert_eq!(report.inconsistent, 1);
         match &report.outcomes[0] {
-            GitApplyRecoveryOutcome::Inconsistent { initiative_id: iid, reason, .. } => {
-                assert_eq!(iid,    initiative_id);
+            GitApplyRecoveryOutcome::Inconsistent {
+                initiative_id: iid,
+                reason,
+                ..
+            } => {
+                assert_eq!(iid, initiative_id);
                 assert_eq!(reason, "audit_record_missing");
             }
             other => panic!("expected Inconsistent, got {other:?}"),
@@ -2857,30 +3042,35 @@ mod git_apply_recovery_integration {
         }
         let disk = DiskStore::new();
         let audit_dir = AuditDir::new();
-        let (main, orch, base, merge) = fixture_repos(disk.data_dir())
-            .expect("fixture must succeed when git is available");
+        let (main, orch, base, merge) =
+            fixture_repos(disk.data_dir()).expect("fixture must succeed when git is available");
         raxis_domain_git::commit_merge_to_target_ref(&main, &orch, &merge, "refs/heads/main")
             .unwrap();
 
         let initiative_id = "init-idempotent";
-        let session_id    = "sess-orch-idem";
+        let session_id = "sess-orch-idem";
         seed_initiative_pending(&disk, initiative_id);
         seed_session_with_worktree(&disk, session_id, &orch);
-        write_audit_with_merge(&audit_dir, initiative_id, session_id, &merge, &base, "refs/heads/main");
+        write_audit_with_merge(
+            &audit_dir,
+            initiative_id,
+            session_id,
+            &merge,
+            &base,
+            "refs/heads/main",
+        );
 
         let sink1 = CapturingSink::default();
-        let r1 = reconcile_git_apply_pending(
-            disk.store(), &sink1, audit_dir.path(), disk.data_dir(),
-        );
+        let r1 =
+            reconcile_git_apply_pending(disk.store(), &sink1, audit_dir.path(), disk.data_dir());
         assert_eq!(r1.verified, 1);
         assert_eq!(pending_flag(&disk, initiative_id), 0);
 
         let sink2 = CapturingSink::default();
-        let r2 = reconcile_git_apply_pending(
-            disk.store(), &sink2, audit_dir.path(), disk.data_dir(),
-        );
-        assert_eq!(r2.verified,     0);
-        assert_eq!(r2.repaired,     0);
+        let r2 =
+            reconcile_git_apply_pending(disk.store(), &sink2, audit_dir.path(), disk.data_dir());
+        assert_eq!(r2.verified, 0);
+        assert_eq!(r2.repaired, 0);
         assert_eq!(r2.inconsistent, 0);
         assert!(sink2.captured().is_empty());
     }
@@ -2922,15 +3112,11 @@ mod supervisor_auto_resume_witness {
                  VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
             ),
             rusqlite::params![initiative_id, InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn seed_task(
-        store:         &Store,
-        task_id:       &str,
-        initiative_id: &str,
-        state:         TaskState,
-    ) {
+    fn seed_task(store: &Store, task_id: &str, initiative_id: &str, state: TaskState) {
         let conn = store.lock_sync();
         let now = unix_now_secs();
         conn.execute(
@@ -2941,7 +3127,8 @@ mod supervisor_auto_resume_witness {
                  VALUES (?1, ?2, 'default', ?3, 'kernel', 1, ?4, ?4, 0)"
             ),
             rusqlite::params![task_id, initiative_id, state.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// Insert one `initiative_quarantines` row so the auto-resume
@@ -2958,7 +3145,8 @@ mod supervisor_auto_resume_witness {
                  VALUES (?1, ?2, 'op-fp', 'forensic hold', NULL)"
             ),
             rusqlite::params![initiative_id, now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn task_state(store: &Store, task_id: &str) -> String {
@@ -2967,7 +3155,8 @@ mod supervisor_auto_resume_witness {
             &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Witness — `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01`.
@@ -3008,12 +3197,22 @@ mod supervisor_auto_resume_witness {
         seed_initiative(&store, "init-gates");
         seed_initiative(&store, "init-quarantine");
 
-        seed_task(&store, "t-running-1",   "init-resume",     TaskState::Running);
-        seed_task(&store, "t-running-2",   "init-resume",     TaskState::Running);
-        seed_task(&store, "t-running-3",   "init-resume",     TaskState::Running);
-        seed_task(&store, "t-already-brp", "init-resume",     TaskState::BlockedRecoveryPending);
-        seed_task(&store, "t-gates",       "init-gates",      TaskState::GatesPending);
-        seed_task(&store, "t-quarantined", "init-quarantine", TaskState::Running);
+        seed_task(&store, "t-running-1", "init-resume", TaskState::Running);
+        seed_task(&store, "t-running-2", "init-resume", TaskState::Running);
+        seed_task(&store, "t-running-3", "init-resume", TaskState::Running);
+        seed_task(
+            &store,
+            "t-already-brp",
+            "init-resume",
+            TaskState::BlockedRecoveryPending,
+        );
+        seed_task(&store, "t-gates", "init-gates", TaskState::GatesPending);
+        seed_task(
+            &store,
+            "t-quarantined",
+            "init-quarantine",
+            TaskState::Running,
+        );
 
         quarantine_initiative(&store, "init-quarantine");
 
@@ -3021,34 +3220,51 @@ mod supervisor_auto_resume_witness {
         // INV check 1: SELECT-then-UPDATE inside one transaction. All 6
         // non-terminal rows (including the pre-existing BRP) appear in
         // `swept_tasks_detail` with their pre-sweep state.
-        assert_eq!(report.swept_tasks_detail.len(), 6,
-            "all 6 non-terminal tasks must be captured");
+        assert_eq!(
+            report.swept_tasks_detail.len(),
+            6,
+            "all 6 non-terminal tasks must be captured"
+        );
         // The bulk UPDATE only counts rows whose state CHANGED — the
         // pre-existing BRP row's state didn't change (it was already
         // BRP). SQLite `UPDATE` counts every row matched by the WHERE
         // clause regardless, so we expect 6 here too.
-        assert_eq!(report.swept_tasks, 6,
-            "bulk UPDATE touches all 6 non-terminal rows");
+        assert_eq!(
+            report.swept_tasks, 6,
+            "bulk UPDATE touches all 6 non-terminal rows"
+        );
 
         let prior_state_for = |task_id: &str| -> Option<String> {
-            report.swept_tasks_detail.iter()
+            report
+                .swept_tasks_detail
+                .iter()
                 .find(|r| r.task_id == task_id)
                 .map(|r| r.prior_state.clone())
         };
-        assert_eq!(prior_state_for("t-running-1"),   Some("Running".into()));
-        assert_eq!(prior_state_for("t-running-2"),   Some("Running".into()));
-        assert_eq!(prior_state_for("t-running-3"),   Some("Running".into()));
-        assert_eq!(prior_state_for("t-already-brp"), Some("BlockedRecoveryPending".into()));
-        assert_eq!(prior_state_for("t-gates"),       Some("GatesPending".into()));
+        assert_eq!(prior_state_for("t-running-1"), Some("Running".into()));
+        assert_eq!(prior_state_for("t-running-2"), Some("Running".into()));
+        assert_eq!(prior_state_for("t-running-3"), Some("Running".into()));
+        assert_eq!(
+            prior_state_for("t-already-brp"),
+            Some("BlockedRecoveryPending".into())
+        );
+        assert_eq!(prior_state_for("t-gates"), Some("GatesPending".into()));
         assert_eq!(prior_state_for("t-quarantined"), Some("Running".into()));
 
         // After the sweep, every captured row is at BRP in the table.
         for tid in [
-            "t-running-1", "t-running-2", "t-running-3",
-            "t-already-brp", "t-gates", "t-quarantined",
+            "t-running-1",
+            "t-running-2",
+            "t-running-3",
+            "t-already-brp",
+            "t-gates",
+            "t-quarantined",
         ] {
-            assert_eq!(task_state(&store, tid), "BlockedRecoveryPending",
-                "{tid} must be at BRP after reconcile sweep");
+            assert_eq!(
+                task_state(&store, tid),
+                "BlockedRecoveryPending",
+                "{tid} must be at BRP after reconcile sweep"
+            );
         }
 
         let sink = FakeAuditSink::new();
@@ -3061,70 +3277,105 @@ mod supervisor_auto_resume_witness {
         );
 
         // INV check 2: outcome counters match the invariant partition.
-        assert_eq!(resume_report.resumed,            4,
-            "3 Running + 1 GatesPending must auto-resume");
-        assert_eq!(resume_report.pre_existing_block, 1,
-            "the pre-existing BRP task must be preserved");
-        assert_eq!(resume_report.quarantined,        1,
-            "the quarantined-initiative task must be preserved");
-        assert_eq!(resume_report.transition_failed,  0,
-            "no transition failures expected on a clean fixture");
-        assert_eq!(resume_report.outcomes.len(),     6,
-            "every input record must produce one outcome");
+        assert_eq!(
+            resume_report.resumed, 4,
+            "3 Running + 1 GatesPending must auto-resume"
+        );
+        assert_eq!(
+            resume_report.pre_existing_block, 1,
+            "the pre-existing BRP task must be preserved"
+        );
+        assert_eq!(
+            resume_report.quarantined, 1,
+            "the quarantined-initiative task must be preserved"
+        );
+        assert_eq!(
+            resume_report.transition_failed, 0,
+            "no transition failures expected on a clean fixture"
+        );
+        assert_eq!(
+            resume_report.outcomes.len(),
+            6,
+            "every input record must produce one outcome"
+        );
         assert_eq!(resume_report.supervisor_restart_id, restart_id);
 
         // INV check 3: Resumed tasks are now Admitted.
         for tid in ["t-running-1", "t-running-2", "t-running-3", "t-gates"] {
-            assert_eq!(task_state(&store, tid), "Admitted",
-                "{tid} must be re-admitted after supervisor auto-resume");
+            assert_eq!(
+                task_state(&store, tid),
+                "Admitted",
+                "{tid} must be re-admitted after supervisor auto-resume"
+            );
         }
         // INV check 4: Skipped tasks remain at BRP.
         for tid in ["t-already-brp", "t-quarantined"] {
-            assert_eq!(task_state(&store, tid), "BlockedRecoveryPending",
-                "{tid} must remain at BRP (skipped by auto-resume)");
+            assert_eq!(
+                task_state(&store, tid),
+                "BlockedRecoveryPending",
+                "{tid} must remain at BRP (skipped by auto-resume)"
+            );
         }
 
         // INV check 5: emitted audit events — one per Resumed,
         // ZERO for Skipped (operator-quarantined + pre-existing-BRP
         // skip silently per the invariant statement).
         let events = sink.events();
-        assert_eq!(events.len(), 4,
-            "skipped tasks must NOT emit TaskAutoResumed*; resumed tasks emit exactly one each");
+        assert_eq!(
+            events.len(),
+            4,
+            "skipped tasks must NOT emit TaskAutoResumed*; resumed tasks emit exactly one each"
+        );
 
         // INV check 6: every event carries a faithful prior_state +
         // a SHARED supervisor_restart_id.
-        let mut by_task: std::collections::HashMap<String, (String, String, u32)>
-            = std::collections::HashMap::new();
+        let mut by_task: std::collections::HashMap<String, (String, String, u32)> =
+            std::collections::HashMap::new();
         for ev in &events {
             match &ev.kind {
                 AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
-                    task_id, initiative_id, prior_state,
-                    witness_count_preserved, supervisor_restart_id,
+                    task_id,
+                    initiative_id,
+                    prior_state,
+                    witness_count_preserved,
+                    supervisor_restart_id,
                 } => {
-                    assert_eq!(supervisor_restart_id, restart_id,
-                        "all events from one restart must share supervisor_restart_id");
+                    assert_eq!(
+                        supervisor_restart_id, restart_id,
+                        "all events from one restart must share supervisor_restart_id"
+                    );
                     by_task.insert(
                         task_id.clone(),
-                        (initiative_id.clone(), prior_state.clone(), *witness_count_preserved),
+                        (
+                            initiative_id.clone(),
+                            prior_state.clone(),
+                            *witness_count_preserved,
+                        ),
                     );
                 }
                 other => panic!("unexpected event in auto-resume sweep: {other:?}"),
             }
         }
-        let (init, prior, w) = by_task.get("t-running-1").expect("t-running-1 event missing");
-        assert_eq!(init,  "init-resume");
+        let (init, prior, w) = by_task
+            .get("t-running-1")
+            .expect("t-running-1 event missing");
+        assert_eq!(init, "init-resume");
         assert_eq!(prior, "Running");
-        assert_eq!(*w,    0, "no witnesses seeded → preserved count = 0");
+        assert_eq!(*w, 0, "no witnesses seeded → preserved count = 0");
         let (init, prior, _) = by_task.get("t-gates").expect("t-gates event missing");
-        assert_eq!(init,  "init-gates");
+        assert_eq!(init, "init-gates");
         assert_eq!(prior, "GatesPending",
             "the GatesPending → Admitted auto-resume MUST surface the original GatesPending state on the audit event");
 
         // No event for the skipped tasks.
-        assert!(!by_task.contains_key("t-already-brp"),
-            "pre-existing BRP must NOT emit TaskAutoResumed*");
-        assert!(!by_task.contains_key("t-quarantined"),
-            "quarantined-initiative task must NOT emit TaskAutoResumed*");
+        assert!(
+            !by_task.contains_key("t-already-brp"),
+            "pre-existing BRP must NOT emit TaskAutoResumed*"
+        );
+        assert!(
+            !by_task.contains_key("t-quarantined"),
+            "quarantined-initiative task must NOT emit TaskAutoResumed*"
+        );
     }
 
     /// Empty input → no-op (the supervisor restarted but the recovery
@@ -3134,13 +3385,12 @@ mod supervisor_auto_resume_witness {
     fn auto_resume_is_a_noop_when_recovery_sweep_was_empty() {
         let store = Store::open_in_memory().unwrap();
         let sink = FakeAuditSink::new();
-        let report = reconcile_after_supervisor_restart(
-            &store, &sink, &[], "supervisor-restart-empty-1",
-        );
-        assert_eq!(report.resumed,            0);
-        assert_eq!(report.quarantined,        0);
+        let report =
+            reconcile_after_supervisor_restart(&store, &sink, &[], "supervisor-restart-empty-1");
+        assert_eq!(report.resumed, 0);
+        assert_eq!(report.quarantined, 0);
         assert_eq!(report.pre_existing_block, 0);
-        assert_eq!(report.transition_failed,  0);
+        assert_eq!(report.transition_failed, 0);
         assert!(report.outcomes.is_empty());
         assert!(sink.events().is_empty());
     }

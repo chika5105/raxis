@@ -60,20 +60,19 @@ use tokio::sync::oneshot;
 /// fake clock without touching `SystemTime`. Production callers pass
 /// `raxis_types::unix_now_secs() as i64`.
 pub(super) fn sweep_once(
-    store:           &Store,
-    plan_signing:    &PlanSigningSection,
-    now_unix_secs:   i64,
+    store: &Store,
+    plan_signing: &PlanSigningSection,
+    now_unix_secs: i64,
 ) -> Result<usize, rusqlite::Error> {
     let live_window_secs = plan_signing.nonce_live_window_secs();
     let cutoff_unix_secs = now_unix_secs.saturating_sub(live_window_secs as i64);
 
     let mut conn = store.lock_sync();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let n = raxis_store::sweep_expired_nonces(&tx, cutoff_unix_secs)
-        .map_err(|e| match e {
-            raxis_store::PlanBundleStoreError::Sqlite(s) => s,
-            other => rusqlite::Error::ToSqlConversionFailure(Box::new(other)),
-        })?;
+    let n = raxis_store::sweep_expired_nonces(&tx, cutoff_unix_secs).map_err(|e| match e {
+        raxis_store::PlanBundleStoreError::Sqlite(s) => s,
+        other => rusqlite::Error::ToSqlConversionFailure(Box::new(other)),
+    })?;
     tx.commit()?;
     Ok(n)
 }
@@ -120,8 +119,8 @@ pub(super) fn sweep_once(
 /// this size), so the cost of one `spawn_blocking` per tick is
 /// negligible.
 pub async fn run_loop(
-    store:    Arc<Store>,
-    policy:   Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
+    store: Arc<Store>,
+    policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
     mut shutdown: oneshot::Receiver<()>,
 ) {
     // Read the initial cadence from the policy snapshot at boot. We
@@ -209,9 +208,7 @@ mod tests {
     use super::*;
 
     use raxis_store::record_nonce;
-    use raxis_types::{
-        BundleNonce, BundleSha256, PlanBundleNonceOutcome,
-    };
+    use raxis_types::{BundleNonce, BundleSha256, PlanBundleNonceOutcome};
 
     /// Produce an empty `Store` with all migrations applied.
     ///
@@ -230,12 +227,8 @@ mod tests {
     /// directly without populating the bundle byte store first.
     /// This keeps the test focused on sweep behaviour, not bundle
     /// construction.
-    fn seed_admitted_nonce(
-        store: &Store,
-        seed:  u8,
-        first_seen_at_unix_secs: i64,
-    ) {
-        let nonce  = BundleNonce::new([seed; 16]);
+    fn seed_admitted_nonce(store: &Store, seed: u8, first_seen_at_unix_secs: i64) {
+        let nonce = BundleNonce::new([seed; 16]);
         let sha256 = BundleSha256::new([seed; 32]);
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
@@ -247,27 +240,28 @@ mod tests {
             first_seen_at_unix_secs,
             PlanBundleNonceOutcome::Admitted,
             Some("init-X"),
-        ).unwrap();
+        )
+        .unwrap();
         tx.commit().unwrap();
     }
 
     /// Count rows in `plan_bundle_nonces_seen`.
     fn nonce_row_count(store: &Store) -> i64 {
         let conn = store.lock_sync();
-        conn.query_row(
-            "SELECT COUNT(*) FROM plan_bundle_nonces_seen",
-            [], |r| r.get(0),
-        ).unwrap()
+        conn.query_row("SELECT COUNT(*) FROM plan_bundle_nonces_seen", [], |r| {
+            r.get(0)
+        })
+        .unwrap()
     }
 
     #[test]
     fn sweep_once_deletes_only_rows_older_than_live_window() {
         let store = fresh_store();
         let plan_signing = PlanSigningSection {
-            max_plan_bundle_age_secs:    3600,
-            max_clock_skew_secs:         60,
-            nonce_retention_grace_secs:  300,
-            nonce_sweep_interval_secs:   60,
+            max_plan_bundle_age_secs: 3600,
+            max_clock_skew_secs: 60,
+            nonce_retention_grace_secs: 300,
+            nonce_sweep_interval_secs: 60,
             accept_unfresh_v2_0_bundles: false,
         };
         let live_window = plan_signing.nonce_live_window_secs() as i64;
@@ -303,7 +297,11 @@ mod tests {
 
         let n1 = sweep_once(&store, &plan_signing, now).unwrap();
         let n2 = sweep_once(&store, &plan_signing, now).unwrap();
-        assert_eq!((n1, n2), (0, 0), "sweep on fresh rows must be a no-op twice over");
+        assert_eq!(
+            (n1, n2),
+            (0, 0),
+            "sweep on fresh rows must be a no-op twice over"
+        );
         assert_eq!(nonce_row_count(&store), 3);
     }
 
@@ -324,16 +322,16 @@ mod tests {
         // makes the inequality explicit).
         let store = fresh_store();
         let plan_signing = PlanSigningSection {
-            max_plan_bundle_age_secs:    100,
-            max_clock_skew_secs:         10,
-            nonce_retention_grace_secs:  5,
-            nonce_sweep_interval_secs:   10,
+            max_plan_bundle_age_secs: 100,
+            max_clock_skew_secs: 10,
+            nonce_retention_grace_secs: 5,
+            nonce_sweep_interval_secs: 10,
             accept_unfresh_v2_0_bundles: false,
         };
         let live_window = plan_signing.nonce_live_window_secs() as i64;
         let now: i64 = 1_000_000;
 
-        seed_admitted_nonce(&store, 1, now - live_window);     // boundary, kept
+        seed_admitted_nonce(&store, 1, now - live_window); // boundary, kept
         seed_admitted_nonce(&store, 2, now - live_window - 1); // stale
         let n = sweep_once(&store, &plan_signing, now).unwrap();
         assert_eq!(n, 1);
@@ -366,14 +364,17 @@ mod tests {
         let store_for_seed = Arc::clone(&store);
         tokio::task::spawn_blocking(move || {
             seed_admitted_nonce(&store_for_seed, 0xAA, 1_000_000_000);
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         let store_for_count = Arc::clone(&store);
         let initial = tokio::task::spawn_blocking(move || nonce_row_count(&store_for_count))
-            .await.unwrap();
+            .await
+            .unwrap();
         assert_eq!(initial, 1);
 
         let (shutdown_tx, mut shutdown_rx) = oneshot::channel::<()>();
-        let store_for_loop   = Arc::clone(&store);
+        let store_for_loop = Arc::clone(&store);
         let signing_for_loop = plan_signing.clone();
         let handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_millis(50));
@@ -400,8 +401,11 @@ mod tests {
 
         let store_for_post = Arc::clone(&store);
         let post = tokio::task::spawn_blocking(move || nonce_row_count(&store_for_post))
-            .await.unwrap();
-        assert_eq!(post, 0,
-            "stale row must be reaped after at least one cadence tick");
+            .await
+            .unwrap();
+        assert_eq!(
+            post, 0,
+            "stale row must be reaped after at least one cadence tick"
+        );
     }
 }

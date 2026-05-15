@@ -22,14 +22,15 @@ pub struct ChallengeResponse {
 }
 
 /// `GET /api/auth/challenge` — mint a fresh challenge.
-pub async fn challenge<D>(
-    State(state): State<AppState<D>>,
-) -> ApiResult<Json<ChallengeResponse>>
+pub async fn challenge<D>(State(state): State<AppState<D>>) -> ApiResult<Json<ChallengeResponse>>
 where
     D: crate::data::DashboardData,
 {
     let (challenge, expires_at) = state.auth.challenges.mint()?;
-    Ok(Json(ChallengeResponse { challenge, expires_at }))
+    Ok(Json(ChallengeResponse {
+        challenge,
+        expires_at,
+    }))
 }
 
 /// Request body for `POST /api/auth/verify`.
@@ -69,17 +70,24 @@ where
 {
     // 1. Validate hex shapes up front to avoid a slow path that
     //    runs Ed25519 verify on garbage.
-    let challenge_bytes = hex::decode(&req.challenge)
-        .map_err(|_| ApiError::BadRequest { detail: "challenge: not hex".into() })?;
-    let pubkey_bytes = hex::decode(&req.public_key)
-        .map_err(|_| ApiError::BadRequest { detail: "public_key: not hex".into() })?;
-    let sig_bytes = hex::decode(&req.signature)
-        .map_err(|_| ApiError::BadRequest { detail: "signature: not hex".into() })?;
+    let challenge_bytes = hex::decode(&req.challenge).map_err(|_| ApiError::BadRequest {
+        detail: "challenge: not hex".into(),
+    })?;
+    let pubkey_bytes = hex::decode(&req.public_key).map_err(|_| ApiError::BadRequest {
+        detail: "public_key: not hex".into(),
+    })?;
+    let sig_bytes = hex::decode(&req.signature).map_err(|_| ApiError::BadRequest {
+        detail: "signature: not hex".into(),
+    })?;
     if pubkey_bytes.len() != 32 {
-        return Err(ApiError::BadRequest { detail: "public_key: not 32 bytes".into() });
+        return Err(ApiError::BadRequest {
+            detail: "public_key: not 32 bytes".into(),
+        });
     }
     if sig_bytes.len() != 64 {
-        return Err(ApiError::BadRequest { detail: "signature: not 64 bytes".into() });
+        return Err(ApiError::BadRequest {
+            detail: "signature: not 64 bytes".into(),
+        });
     }
 
     // 2. Consume the challenge (replay-protected) BEFORE the
@@ -96,13 +104,25 @@ where
     let fingerprint = operator_fingerprint(&pubkey_bytes);
 
     // 5. Resolve roles via the data layer.
-    let resolution = state.data.lookup_operator_roles(&fingerprint)
+    let resolution = state
+        .data
+        .lookup_operator_roles(&fingerprint)
         .ok_or(ApiError::UnknownOperator)?;
-    let role_strings: Vec<String> = resolution.roles.iter()
-        .map(|r| r.as_str().to_owned()).collect();
+    let role_strings: Vec<String> = resolution
+        .roles
+        .iter()
+        .map(|r| r.as_str().to_owned())
+        .collect();
 
     // 6. Mint the JWT.
-    let MintedJwt { token, jti: _, expires_at, claims: _ } = state.auth.jwt
+    let MintedJwt {
+        token,
+        jti: _,
+        expires_at,
+        claims: _,
+    } = state
+        .auth
+        .jwt
         .mint(&fingerprint, &resolution.display_name, role_strings.clone())?;
 
     Ok(Json(VerifyResponse {
@@ -136,7 +156,10 @@ where
     // expired). Otherwise a malicious client could fill the
     // revocation set with random strings.
     let claims = state.auth.jwt.verify(&req.token)?;
-    state.auth.revocations.revoke(JwtSigner::digest(&req.token), claims.exp);
+    state
+        .auth
+        .revocations
+        .revoke(JwtSigner::digest(&req.token), claims.exp);
     Ok(Json(serde_json::json!({
         "revoked_at": now_secs(),
         "operator_id": claims.fingerprint,

@@ -100,59 +100,51 @@ impl DispatchError {
 /// unparseable upstream of this function, the runtime loop is
 /// responsible for assembling its own error response.
 pub async fn handle_fetch_request(
-    request:        GatewayMessage,
+    request: GatewayMessage,
     expected_token: &str,
-    policy_view:    Option<&PolicyView>,
-    backend:        &dyn Backend,
+    policy_view: Option<&PolicyView>,
+    backend: &dyn Backend,
 ) -> GatewayMessage {
-    let (
-        fetch_id,
-        gateway_token,
-        fetch_kind,
-        url,
-        method,
-        headers,
-        body_bytes,
-        timeout_ms,
-    ) = match request {
-        GatewayMessage::FetchRequest {
-            gateway_token,
-            fetch_id,
-            fetch_kind,
-            url,
-            method,
-            headers,
-            body_bytes,
-            timeout_ms,
-            ..
-        } => (
-            fetch_id,
-            gateway_token,
-            fetch_kind,
-            url,
-            method,
-            headers,
-            body_bytes,
-            timeout_ms,
-        ),
-        // Caller invariant: only `FetchRequest` ever lands here. If
-        // it does not, that is a runtime-loop bug — surface it as
-        // `Upstream` (which projects to "NetworkError" on the wire)
-        // so an operator sees a clear envelope while the kernel-side
-        // log carries the variant name for diagnosis.
-        other => {
-            return error_response(
-                Uuid::nil(),
-                DispatchError::Backend(BackendError::Upstream {
-                    reason: format!(
-                        "handle_fetch_request received non-FetchRequest variant: \
+    let (fetch_id, gateway_token, fetch_kind, url, method, headers, body_bytes, timeout_ms) =
+        match request {
+            GatewayMessage::FetchRequest {
+                gateway_token,
+                fetch_id,
+                fetch_kind,
+                url,
+                method,
+                headers,
+                body_bytes,
+                timeout_ms,
+                ..
+            } => (
+                fetch_id,
+                gateway_token,
+                fetch_kind,
+                url,
+                method,
+                headers,
+                body_bytes,
+                timeout_ms,
+            ),
+            // Caller invariant: only `FetchRequest` ever lands here. If
+            // it does not, that is a runtime-loop bug — surface it as
+            // `Upstream` (which projects to "NetworkError" on the wire)
+            // so an operator sees a clear envelope while the kernel-side
+            // log carries the variant name for diagnosis.
+            other => {
+                return error_response(
+                    Uuid::nil(),
+                    DispatchError::Backend(BackendError::Upstream {
+                        reason: format!(
+                            "handle_fetch_request received non-FetchRequest variant: \
                          {}",
-                        std::any::type_name_of_val(&other),
-                    ),
-                }),
-            );
-        }
-    };
+                            std::any::type_name_of_val(&other),
+                        ),
+                    }),
+                );
+            }
+        };
 
     match dispatch(
         fetch_id,
@@ -178,17 +170,17 @@ pub async fn handle_fetch_request(
 /// `FetchResponse` or the first dispatch error encountered.
 #[allow(clippy::too_many_arguments)]
 async fn dispatch(
-    fetch_id:       Uuid,
-    got_token:      &str,
+    fetch_id: Uuid,
+    got_token: &str,
     expected_token: &str,
-    fetch_kind:     FetchKind,
-    url:            &str,
-    method:         &str,
-    headers:        &[(String, String)],
-    body_bytes:     &[u8],
-    timeout_ms:     u32,
-    policy_view:    Option<&PolicyView>,
-    backend:        &dyn Backend,
+    fetch_kind: FetchKind,
+    url: &str,
+    method: &str,
+    headers: &[(String, String)],
+    body_bytes: &[u8],
+    timeout_ms: u32,
+    policy_view: Option<&PolicyView>,
+    backend: &dyn Backend,
 ) -> Result<GatewayMessage, DispatchError> {
     // 1. Token check FIRST — refuses to do any further work for a
     //    sender we cannot authenticate.
@@ -221,11 +213,12 @@ async fn dispatch(
         // there means it must succeed here — but we keep a defensive
         // branch so a future change to `is_url_allowed` can't silently
         // remove the host check.
-        DispatchError::DomainNotAllowed { host: "<unparsed>".to_owned() }
+        DispatchError::DomainNotAllowed {
+            host: "<unparsed>".to_owned(),
+        }
     })?;
-    let provider = provider_for_host(view, &host).ok_or_else(|| {
-        DispatchError::UnknownProviderForHost { host: host.clone() }
-    })?;
+    let provider = provider_for_host(view, &host)
+        .ok_or_else(|| DispatchError::UnknownProviderForHost { host: host.clone() })?;
 
     // 5. Timeout cap by fetch kind.
     let provider_cap_ms = match fetch_kind {
@@ -327,7 +320,11 @@ fn host_of_url(url: &str) -> Option<String> {
     let after_scheme = url.split_once("://")?.1;
     let host_with_path = after_scheme.split('/').next()?;
     let host = host_with_path.split(':').next()?;
-    if host.is_empty() { None } else { Some(host.to_owned()) }
+    if host.is_empty() {
+        None
+    } else {
+        Some(host.to_owned())
+    }
 }
 
 /// Map a URL host to the matching `ProviderEntryView`, if any.
@@ -365,8 +362,8 @@ mod tests {
     // dev-dep-only crate) so it can never reach a release binary.
     // See `gateway/src/backend.rs` module header for the discipline
     // rationale (philosophy.md §1.6 / `RealClock` ↔ `FakeClock`).
-    use raxis_test_support::MockBackend;
     use crate::policy_view::{PolicyView, ProviderCredentials};
+    use raxis_test_support::MockBackend;
     use std::collections::HashMap;
 
     const EXPECTED_TOKEN: &str = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
@@ -434,15 +431,20 @@ mod tests {
             &'a self,
             req: BackendRequest<'a>,
         ) -> std::pin::Pin<
-            Box<dyn std::future::Future<Output = Result<raxis_gateway_substrate::BackendResponse, BackendError>> + Send + 'a>,
+            Box<
+                dyn std::future::Future<
+                        Output = Result<raxis_gateway_substrate::BackendResponse, BackendError>,
+                    > + Send
+                    + 'a,
+            >,
         > {
             *self.seen_stream_idle.lock().unwrap() = Some(req.stream_idle_timeout);
             Box::pin(async move {
                 Ok(raxis_gateway_substrate::BackendResponse {
                     status_code: 200,
-                    headers:     vec![],
-                    body:        b"{}".to_vec(),
-                    latency_ms:  1,
+                    headers: vec![],
+                    body: b"{}".to_vec(),
+                    latency_ms: 1,
                 })
             })
         }
@@ -453,15 +455,19 @@ mod tests {
     /// providers (Claude / GPT-4) detect a stalled provider quickly.
     #[tokio::test]
     async fn inference_uses_30s_default_when_provider_has_no_override() {
-        let view    = view_with_anthropic();
+        let view = view_with_anthropic();
         let backend = CapturingBackend::default();
-        let req     = ok_request(
+        let req = ok_request(
             "https://api.anthropic.com/v1/messages",
             30_000,
             FetchKind::Inference,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+        let observed = backend
+            .seen_stream_idle
+            .lock()
+            .unwrap()
+            .clone()
             .expect("backend must have been called");
         assert_eq!(
             observed,
@@ -481,13 +487,17 @@ mod tests {
         p.stream_idle_timeout_ms = Some(120_000);
 
         let backend = CapturingBackend::default();
-        let req     = ok_request(
+        let req = ok_request(
             "https://api.anthropic.com/v1/messages",
             30_000,
             FetchKind::Inference,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+        let observed = backend
+            .seen_stream_idle
+            .lock()
+            .unwrap()
+            .clone()
             .expect("backend must have been called");
         assert_eq!(
             observed,
@@ -508,13 +518,17 @@ mod tests {
         p.stream_idle_timeout_ms = Some(60_000);
 
         let backend = CapturingBackend::default();
-        let req     = ok_request(
+        let req = ok_request(
             "https://api.anthropic.com/v1/messages",
             5_000,
             FetchKind::DataFetch,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend.seen_stream_idle.lock().unwrap().clone()
+        let observed = backend
+            .seen_stream_idle
+            .lock()
+            .unwrap()
+            .clone()
             .expect("backend must have been called");
         // After the outer `expect` the value type is `Option<Duration>`;
         // `None` means "no per-chunk idle deadline attached".
@@ -528,10 +542,19 @@ mod tests {
     async fn happy_path_returns_fetch_response_with_mock_body() {
         let view = view_with_anthropic();
         let backend = MockBackend::default();
-        let req = ok_request("https://api.anthropic.com/v1/messages", 30_000, FetchKind::Inference);
+        let req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            30_000,
+            FetchKind::Inference,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         match resp {
-            GatewayMessage::FetchResponse { status_code, body_bytes, error, .. } => {
+            GatewayMessage::FetchResponse {
+                status_code,
+                body_bytes,
+                error,
+                ..
+            } => {
                 assert_eq!(status_code, Some(200));
                 assert!(body_bytes.is_some());
                 assert!(error.is_none());
@@ -544,9 +567,14 @@ mod tests {
     async fn token_mismatch_returns_invalid_token_error_string() {
         let view = view_with_anthropic();
         let backend = MockBackend::default();
-        let mut req = ok_request("https://api.anthropic.com/v1/messages", 30_000, FetchKind::Inference);
+        let mut req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            30_000,
+            FetchKind::Inference,
+        );
         if let GatewayMessage::FetchRequest { gateway_token, .. } = &mut req {
-            *gateway_token = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
+            *gateway_token =
+                "deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef".to_owned();
         }
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "InvalidToken");
@@ -556,7 +584,11 @@ mod tests {
     async fn unallowed_domain_returns_domain_not_allowed_error() {
         let view = view_with_anthropic();
         let backend = MockBackend::default();
-        let req = ok_request("https://evil.example.com/exfiltrate", 1000, FetchKind::DataFetch);
+        let req = ok_request(
+            "https://evil.example.com/exfiltrate",
+            1000,
+            FetchKind::DataFetch,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "DomainNotAllowed");
     }
@@ -568,7 +600,11 @@ mod tests {
         let mut view = view_with_anthropic();
         view.egress_patterns.push("*.unknown-vendor.io".to_owned());
         let backend = MockBackend::default();
-        let req = ok_request("https://api.unknown-vendor.io/v1/x", 1000, FetchKind::DataFetch);
+        let req = ok_request(
+            "https://api.unknown-vendor.io/v1/x",
+            1000,
+            FetchKind::DataFetch,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "UnknownProviderForHost");
     }
@@ -578,7 +614,11 @@ mod tests {
         let view = view_with_anthropic();
         let backend = MockBackend::default();
         // Inference cap is 30000 ms — request 30001 ms.
-        let req = ok_request("https://api.anthropic.com/v1/messages", 30_001, FetchKind::Inference);
+        let req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            30_001,
+            FetchKind::Inference,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "TimeoutExceeded");
     }
@@ -594,7 +634,11 @@ mod tests {
         let mut providers = HashMap::new();
         providers.insert("anthropic-prod".to_owned(), tiny);
         let view = PolicyView { providers, ..view };
-        let req = ok_request("https://api.anthropic.com/v1/messages", 1000, FetchKind::Inference);
+        let req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            1000,
+            FetchKind::Inference,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "ResponseTooLarge");
     }
@@ -603,7 +647,11 @@ mod tests {
     async fn backend_timeout_maps_to_timeout_exceeded_string() {
         let view = view_with_anthropic();
         let backend = MockBackend::always_timeout(Duration::from_millis(100));
-        let req = ok_request("https://api.anthropic.com/v1/messages", 100, FetchKind::DataFetch);
+        let req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            100,
+            FetchKind::DataFetch,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
         assert_error_string(&resp, "TimeoutExceeded");
     }
@@ -611,20 +659,36 @@ mod tests {
     #[tokio::test]
     async fn missing_policy_view_returns_policy_reload_failed() {
         let backend = MockBackend::default();
-        let req = ok_request("https://api.anthropic.com/v1/messages", 1000, FetchKind::Inference);
+        let req = ok_request(
+            "https://api.anthropic.com/v1/messages",
+            1000,
+            FetchKind::Inference,
+        );
         let resp = handle_fetch_request(req, EXPECTED_TOKEN, None, &backend).await;
         assert_error_string(&resp, "PolicyReloadFailed");
     }
 
     fn assert_error_string(resp: &GatewayMessage, expected: &str) {
         match resp {
-            GatewayMessage::FetchResponse { error, status_code, body_bytes, .. } => {
-                assert_eq!(error.as_deref(), Some(expected),
-                    "error should be {expected}; full response: {resp:?}");
-                assert!(status_code.is_none(),
-                    "error responses must have status_code = None");
-                assert!(body_bytes.is_none(),
-                    "error responses must have body_bytes = None");
+            GatewayMessage::FetchResponse {
+                error,
+                status_code,
+                body_bytes,
+                ..
+            } => {
+                assert_eq!(
+                    error.as_deref(),
+                    Some(expected),
+                    "error should be {expected}; full response: {resp:?}"
+                );
+                assert!(
+                    status_code.is_none(),
+                    "error responses must have status_code = None"
+                );
+                assert!(
+                    body_bytes.is_none(),
+                    "error responses must have body_bytes = None"
+                );
             }
             other => panic!("expected FetchResponse, got {other:?}"),
         }

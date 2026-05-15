@@ -108,31 +108,31 @@ pub struct MsgHeader {
     /// is `message_length - 16`).
     pub message_length: i32,
     /// Sender-chosen request ID.
-    pub request_id:     i32,
+    pub request_id: i32,
     /// `request_id` of the request being replied to (0 on requests).
-    pub response_to:    i32,
+    pub response_to: i32,
     /// Op code (2013 = `OP_MSG`).
-    pub op_code:        i32,
+    pub op_code: i32,
 }
 
 impl MsgHeader {
     /// Decode 16 header bytes off the wire.
     pub fn parse(buf: [u8; 16]) -> Self {
         Self {
-            message_length: i32::from_le_bytes([buf[0],  buf[1],  buf[2],  buf[3]]),
-            request_id:     i32::from_le_bytes([buf[4],  buf[5],  buf[6],  buf[7]]),
-            response_to:    i32::from_le_bytes([buf[8],  buf[9],  buf[10], buf[11]]),
-            op_code:        i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
+            message_length: i32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]),
+            request_id: i32::from_le_bytes([buf[4], buf[5], buf[6], buf[7]]),
+            response_to: i32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]),
+            op_code: i32::from_le_bytes([buf[12], buf[13], buf[14], buf[15]]),
         }
     }
 
     /// Encode this header into 16 wire bytes.
     pub fn encode(&self) -> [u8; 16] {
         let mut out = [0u8; 16];
-        out[..4]  .copy_from_slice(&self.message_length.to_le_bytes());
-        out[4..8] .copy_from_slice(&self.request_id    .to_le_bytes());
-        out[8..12].copy_from_slice(&self.response_to   .to_le_bytes());
-        out[12..] .copy_from_slice(&self.op_code       .to_le_bytes());
+        out[..4].copy_from_slice(&self.message_length.to_le_bytes());
+        out[4..8].copy_from_slice(&self.request_id.to_le_bytes());
+        out[8..12].copy_from_slice(&self.response_to.to_le_bytes());
+        out[12..].copy_from_slice(&self.op_code.to_le_bytes());
         out
     }
 }
@@ -144,7 +144,9 @@ impl MsgHeader {
 /// to the first kind-0 section, parse its BSON header, and read
 /// the first element's name.
 pub fn first_command_name(body: &[u8]) -> Option<String> {
-    if body.len() < 4 { return None; }
+    if body.len() < 4 {
+        return None;
+    }
     let mut i = 4; // skip flag_bits
     while i < body.len() {
         let kind = body[i];
@@ -155,11 +157,14 @@ pub fn first_command_name(body: &[u8]) -> Option<String> {
         } else if kind == 1 {
             // Document sequence: int32 size + cstring identifier +
             // BSON docs. Skip whole section.
-            if i + 4 > body.len() { return None; }
-            let section_size = i32::from_le_bytes([
-                body[i], body[i+1], body[i+2], body[i+3],
-            ]) as usize;
-            if section_size < 4 || i + section_size > body.len() { return None; }
+            if i + 4 > body.len() {
+                return None;
+            }
+            let section_size =
+                i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
+            if section_size < 4 || i + section_size > body.len() {
+                return None;
+            }
             i += section_size;
         } else {
             // Unknown section kind; bail.
@@ -176,11 +181,17 @@ pub fn first_command_name(body: &[u8]) -> Option<String> {
 /// to terminate the field name. Returns `None` on a malformed doc
 /// or the (rare) case where the doc is empty.
 pub fn first_bson_field_name(doc: &[u8]) -> Option<String> {
-    if doc.len() < 5 { return None; }
+    if doc.len() < 5 {
+        return None;
+    }
     let total = i32::from_le_bytes([doc[0], doc[1], doc[2], doc[3]]) as usize;
-    if total < 5 || total > doc.len() { return None; }
+    if total < 5 || total > doc.len() {
+        return None;
+    }
     let body = &doc[4..total];
-    if body.is_empty() || body[0] == 0x00 { return None; }
+    if body.is_empty() || body[0] == 0x00 {
+        return None;
+    }
     // Skip type byte.
     let after_type = &body[1..];
     let nul = after_type.iter().position(|&b| b == 0)?;
@@ -210,14 +221,18 @@ pub fn first_bson_field_name(doc: &[u8]) -> Option<String> {
 ///   [document returnFieldsSelector] // optional, ignored
 /// ```
 pub fn parse_op_query_command(body: &[u8]) -> Option<(String, String)> {
-    if body.len() < 4 + 1 + 4 + 4 + 5 { return None; }
+    if body.len() < 4 + 1 + 4 + 4 + 5 {
+        return None;
+    }
     let mut i = 4; // skip flags
-    // fullCollectionName cstring.
+                   // fullCollectionName cstring.
     let nul = body[i..].iter().position(|&b| b == 0)?;
     let coll = String::from_utf8_lossy(&body[i..i + nul]).into_owned();
     i += nul + 1;
     // numberToSkip + numberToReturn.
-    if i + 8 > body.len() { return None; }
+    if i + 8 > body.len() {
+        return None;
+    }
     i += 8;
     // Query BSON doc starts at i.
     let cmd = first_bson_field_name(&body[i..])?;
@@ -244,14 +259,17 @@ pub fn build_op_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) -> Vec
                  + 4 /* startingFrom */
                  + 4 /* numberReturned */
                  + bson_doc.len();
-    let total    = HEADER_LEN + body_len;
-    let mut out  = Vec::with_capacity(total);
-    out.extend_from_slice(&MsgHeader {
-        message_length: total as i32,
-        request_id,
-        response_to,
-        op_code: OP_REPLY,
-    }.encode());
+    let total = HEADER_LEN + body_len;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(
+        &MsgHeader {
+            message_length: total as i32,
+            request_id,
+            response_to,
+            op_code: OP_REPLY,
+        }
+        .encode(),
+    );
     // responseFlags = 8 (AwaitCapable). Pymongo accepts 0 as well;
     // the canonical mongod sets `AwaitCapable` for legacy `find` /
     // `getMore` cursor compatibility. For a hello reply either is
@@ -268,14 +286,17 @@ pub fn build_op_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) -> Vec
 /// carrying `bson_doc` as its body.
 pub fn build_op_msg_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) -> Vec<u8> {
     let body_len = 4 /* flag_bits */ + 1 /* kind */ + bson_doc.len();
-    let total    = HEADER_LEN + body_len;
-    let mut out  = Vec::with_capacity(total);
-    out.extend_from_slice(&MsgHeader {
-        message_length: total as i32,
-        request_id,
-        response_to,
-        op_code: OP_MSG,
-    }.encode());
+    let total = HEADER_LEN + body_len;
+    let mut out = Vec::with_capacity(total);
+    out.extend_from_slice(
+        &MsgHeader {
+            message_length: total as i32,
+            request_id,
+            response_to,
+            op_code: OP_MSG,
+        }
+        .encode(),
+    );
     out.extend_from_slice(&0u32.to_le_bytes()); // flag_bits = 0
     out.push(0); // section kind 0
     out.extend_from_slice(bson_doc);
@@ -286,14 +307,14 @@ pub fn build_op_msg_reply(request_id: i32, response_to: i32, bson_doc: &[u8]) ->
 // BSON encoding helpers — exactly the types the V2 replies need.
 // ---------------------------------------------------------------------------
 
-const BSON_DOUBLE: u8  = 0x01;
-const BSON_STRING: u8  = 0x02;
-const BSON_DOC:    u8  = 0x03;
-const BSON_ARRAY:  u8  = 0x04;
-const BSON_BIN:    u8  = 0x05;
-const BSON_BOOL:   u8  = 0x08;
-const BSON_INT32:  u8  = 0x10;
-const BSON_INT64:  u8  = 0x12;
+const BSON_DOUBLE: u8 = 0x01;
+const BSON_STRING: u8 = 0x02;
+const BSON_DOC: u8 = 0x03;
+const BSON_ARRAY: u8 = 0x04;
+const BSON_BIN: u8 = 0x05;
+const BSON_BOOL: u8 = 0x08;
+const BSON_INT32: u8 = 0x10;
+const BSON_INT64: u8 = 0x12;
 
 /// In-progress BSON document builder.
 #[derive(Debug, Default)]
@@ -303,7 +324,9 @@ pub struct BsonBuilder {
 
 impl BsonBuilder {
     /// Empty builder.
-    pub fn new() -> Self { Self::default() }
+    pub fn new() -> Self {
+        Self::default()
+    }
 
     /// `{ key: value(f64) }`.
     pub fn double(mut self, key: &str, val: f64) -> Self {
@@ -406,9 +429,14 @@ mod tests {
 
     #[test]
     fn header_round_trip() {
-        let h = MsgHeader { message_length: 256, request_id: 7, response_to: 3, op_code: OP_MSG };
+        let h = MsgHeader {
+            message_length: 256,
+            request_id: 7,
+            response_to: 3,
+            op_code: OP_MSG,
+        };
         let bytes = h.encode();
-        let back  = MsgHeader::parse(bytes);
+        let back = MsgHeader::parse(bytes);
         assert_eq!(h, back);
     }
 
@@ -453,18 +481,18 @@ mod tests {
         let mut body = Vec::new();
         body.extend_from_slice(&0i32.to_le_bytes()); // flags = 0
         body.extend_from_slice(b"admin.$cmd\0");
-        body.extend_from_slice(&0i32.to_le_bytes());   // skip = 0
+        body.extend_from_slice(&0i32.to_le_bytes()); // skip = 0
         body.extend_from_slice(&(-1i32).to_le_bytes()); // return = -1
-        // Query doc: { ismaster: 1, helloOk: true }
+                                                        // Query doc: { ismaster: 1, helloOk: true }
         let q = BsonBuilder::new()
             .int32("ismaster", 1)
-            .bool ("helloOk",  true)
+            .bool("helloOk", true)
             .finish();
         body.extend_from_slice(&q);
 
         let (coll, cmd) = parse_op_query_command(&body).expect("parse");
         assert_eq!(coll, "admin.$cmd");
-        assert_eq!(cmd,  "ismaster");
+        assert_eq!(cmd, "ismaster");
     }
 
     /// Regression test for live-e2e iter33: `build_op_reply` MUST
@@ -476,14 +504,15 @@ mod tests {
         let q = BsonBuilder::new().double("ok", 1.0).finish();
         let frame = build_op_reply(1234, 42, &q);
         // Header op_code at bytes 12..16.
-        let op = i32::from_le_bytes([
-            frame[12], frame[13], frame[14], frame[15],
-        ]);
+        let op = i32::from_le_bytes([frame[12], frame[13], frame[14], frame[15]]);
         assert_eq!(op, OP_REPLY);
         // numberReturned at body offset 4+8+4 = 16 → frame
         // offset 16 + 16 = 32.
         let n = i32::from_le_bytes([
-            frame[16 + 16], frame[16 + 17], frame[16 + 18], frame[16 + 19],
+            frame[16 + 16],
+            frame[16 + 17],
+            frame[16 + 18],
+            frame[16 + 19],
         ]);
         assert_eq!(n, 1);
     }
@@ -497,8 +526,7 @@ mod tests {
         assert_eq!(&doc[5..7], b"ok");
         assert_eq!(doc[7], 0);
         let val = f64::from_le_bytes([
-            doc[8], doc[9], doc[10], doc[11],
-            doc[12], doc[13], doc[14], doc[15],
+            doc[8], doc[9], doc[10], doc[11], doc[12], doc[13], doc[14], doc[15],
         ]);
         assert_eq!(val, 1.0);
         assert_eq!(doc[16], 0); // terminator

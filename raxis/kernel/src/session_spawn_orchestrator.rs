@@ -69,14 +69,12 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use raxis_egress_admission::{EgressAllowlist, PolicyAdmissionService};
-use raxis_types::clock::unix_now_secs;
-use raxis_isolation::{
-    EgressTier, ImageBody, ImageSignature, SessionToken, VerifiedImage, VmSpec,
-};
+use raxis_isolation::{EgressTier, ImageBody, ImageSignature, SessionToken, VerifiedImage, VmSpec};
 use raxis_session_spawn::{
     SessionSpawnService, SpawnError, SpawnHandle, SpawnRequest, TerminationReport,
 };
 use raxis_store::Store;
+use raxis_types::clock::unix_now_secs;
 use thiserror::Error;
 
 use crate::initiatives::lifecycle as kernel_lifecycle;
@@ -170,7 +168,7 @@ pub enum OrchestratorSpawnError {
 pub struct OrchestratorSpawnContext {
     /// Install dir from which the canonical Orchestrator image is
     /// resolved (e.g. `/usr/local/share/raxis`).
-    pub install_dir:    PathBuf,
+    pub install_dir: PathBuf,
     /// Kernel version string used to build the canonical image
     /// filename (e.g. `"v2.0.0"`). Pinned per
     /// `system-requirements.md §1`.
@@ -180,14 +178,14 @@ pub struct OrchestratorSpawnContext {
     /// other VMs, so the budget is small.
     pub vcpu_count: u32,
     /// Memory ceiling in MiB. Same rationale as `vcpu_count`.
-    pub mem_mib:    u32,
+    pub mem_mib: u32,
     /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
     /// UDS socket path stamped into the guest env at spawn so
     /// `raxis-planner-core::run_role_session` can connect back via
     /// `RAXIS_KERNEL_PLANNER_SOCKET`. `None` ⇒ the env var is not
     /// stamped (live-mode planner contract is not populated;
     /// matches the V2.3 scaffold path).
-    pub data_dir:   Option<PathBuf>,
+    pub data_dir: Option<PathBuf>,
     /// V2 `elastic-vm-scaling.md §4.4` — per-role rolling window
     /// of recent utilisation samples. Consulted at spawn time so a
     /// run of consistently under-used Orchestrator sessions biases
@@ -238,10 +236,10 @@ impl OrchestratorSpawnContext {
             // boot via the `[isolation] orchestrator_mem_mib` policy
             // key (when those keys land — for now this is the only
             // path).
-            mem_mib:    1024,
-            data_dir:   None,
+            mem_mib: 1024,
+            data_dir: None,
             scale_down_history: Arc::new(crate::elastic::ScaleDownHistory::new()),
-            rate_limiter:       Arc::new(crate::elastic::ScalingRateLimiter::new()),
+            rate_limiter: Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -269,10 +267,7 @@ impl OrchestratorSpawnContext {
 
     /// Builder: share an externally-owned rate limiter. See
     /// [`with_scale_down_history`](Self::with_scale_down_history).
-    pub fn with_rate_limiter(
-        mut self,
-        rl: Arc<crate::elastic::ScalingRateLimiter>,
-    ) -> Self {
+    pub fn with_rate_limiter(mut self, rl: Arc<crate::elastic::ScalingRateLimiter>) -> Self {
         self.rate_limiter = rl;
         self
     }
@@ -325,10 +320,10 @@ pub trait OrchestratorSpawn: Send + Sync {
     /// hard error.
     fn spawn_for_initiative<'a>(
         &'a self,
-        session_id:       &'a str,
-        initiative_id:    &'a str,
+        session_id: &'a str,
+        initiative_id: &'a str,
         egress_allowlist: EgressAllowlist,
-        task_prompt:      String,
+        task_prompt: String,
     ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>;
 
     /// Tear down a previously-spawned Orchestrator VM. Idempotent:
@@ -338,7 +333,7 @@ pub trait OrchestratorSpawn: Send + Sync {
     fn terminate_orchestrator<'a>(
         &'a self,
         session_id: &'a str,
-        grace:      std::time::Duration,
+        grace: std::time::Duration,
     ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>>;
 }
 
@@ -355,34 +350,41 @@ pub trait OrchestratorSpawn: Send + Sync {
 /// `ArcSwap` (V2 §2.5 token-cap stamping). Constructed once at
 /// `main.rs` boot and cloned into `HandlerContext`.
 pub struct LiveOrchestratorSpawn {
-    ctx:           OrchestratorSpawnContext,
-    service:       Arc<SessionSpawnService>,
-    store:         Arc<Store>,
+    ctx: OrchestratorSpawnContext,
+    service: Arc<SessionSpawnService>,
+    store: Arc<Store>,
     plan_registry: Arc<crate::initiatives::PlanRegistry>,
-    policy:        Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
+    policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
 }
 
 impl LiveOrchestratorSpawn {
     /// Construct the production impl.
     pub fn new(
-        ctx:           OrchestratorSpawnContext,
-        service:       Arc<SessionSpawnService>,
-        store:         Arc<Store>,
+        ctx: OrchestratorSpawnContext,
+        service: Arc<SessionSpawnService>,
+        store: Arc<Store>,
         plan_registry: Arc<crate::initiatives::PlanRegistry>,
-        policy:        Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
+        policy: Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>,
     ) -> Self {
-        Self { ctx, service, store, plan_registry, policy }
+        Self {
+            ctx,
+            service,
+            store,
+            plan_registry,
+            policy,
+        }
     }
 }
 
 impl OrchestratorSpawn for LiveOrchestratorSpawn {
     fn spawn_for_initiative<'a>(
         &'a self,
-        session_id:       &'a str,
-        initiative_id:    &'a str,
+        session_id: &'a str,
+        initiative_id: &'a str,
         egress_allowlist: EgressAllowlist,
-        task_prompt:      String,
-    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
+        task_prompt: String,
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>
+    {
         Box::pin(async move {
             // V2 `v2_extended_gaps.md §2.5` — read the live policy
             // snapshot once at the spawn boundary so token caps
@@ -406,8 +408,9 @@ impl OrchestratorSpawn for LiveOrchestratorSpawn {
     fn terminate_orchestrator<'a>(
         &'a self,
         session_id: &'a str,
-        grace:      std::time::Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>> {
+        grace: std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>>
+    {
         Box::pin(async move {
             terminate_orchestrator(session_id, grace, Arc::clone(&self.service)).await
         })
@@ -439,7 +442,7 @@ pub struct NoopOrchestratorSpawn {
     /// lets V2 `v2_extended_gaps.md §1.1` tests assert that the
     /// activation handler propagated the operator-authored seed
     /// prompt verbatim to the spawn callsite.
-    spawn_calls:     std::sync::Mutex<Vec<(String, String, String)>>,
+    spawn_calls: std::sync::Mutex<Vec<(String, String, String)>>,
     /// Sequence of `session_id`s the kernel asked to terminate.
     terminate_calls: std::sync::Mutex<Vec<String>>,
 }
@@ -449,7 +452,7 @@ impl NoopOrchestratorSpawn {
     /// Construct a fresh fake.
     pub fn new() -> Self {
         Self {
-            spawn_calls:     std::sync::Mutex::new(Vec::new()),
+            spawn_calls: std::sync::Mutex::new(Vec::new()),
             terminate_calls: std::sync::Mutex::new(Vec::new()),
         }
     }
@@ -461,12 +464,18 @@ impl NoopOrchestratorSpawn {
     /// `v2_extended_gaps.md §1.1` propagated the operator-authored
     /// seed prompt unchanged to the spawn boundary.
     pub fn spawn_calls(&self) -> Vec<(String, String, String)> {
-        self.spawn_calls.lock().expect("spawn_calls poisoned").clone()
+        self.spawn_calls
+            .lock()
+            .expect("spawn_calls poisoned")
+            .clone()
     }
 
     /// Snapshot of session ids the kernel has asked to terminate.
     pub fn terminate_calls(&self) -> Vec<String> {
-        self.terminate_calls.lock().expect("terminate_calls poisoned").clone()
+        self.terminate_calls
+            .lock()
+            .expect("terminate_calls poisoned")
+            .clone()
     }
 }
 
@@ -481,12 +490,13 @@ impl Default for NoopOrchestratorSpawn {
 impl OrchestratorSpawn for NoopOrchestratorSpawn {
     fn spawn_for_initiative<'a>(
         &'a self,
-        session_id:        &'a str,
-        initiative_id:     &'a str,
+        session_id: &'a str,
+        initiative_id: &'a str,
         _egress_allowlist: EgressAllowlist,
-        task_prompt:       String,
-    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>> {
-        let session_owned    = session_id.to_owned();
+        task_prompt: String,
+    ) -> Pin<Box<dyn Future<Output = Result<SpawnHandle, OrchestratorSpawnError>> + Send + 'a>>
+    {
+        let session_owned = session_id.to_owned();
         let initiative_owned = initiative_id.to_owned();
         Box::pin(async move {
             self.spawn_calls
@@ -494,9 +504,9 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
                 .expect("spawn_calls poisoned")
                 .push((session_owned.clone(), initiative_owned, task_prompt));
             Ok(SpawnHandle {
-                session_id:         session_owned,
-                vsock_cid:          None,
-                loopback_env:       BTreeMap::new(),
+                session_id: session_owned,
+                vsock_cid: None,
+                loopback_env: BTreeMap::new(),
                 // Placeholder; tests that assert on this value should
                 // wire `LiveOrchestratorSpawn` against a real
                 // substrate instead.
@@ -505,7 +515,7 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
                 // production bridging path (`drive_planner_stream`)
                 // is exercised by the live-e2e harness, not by
                 // unit tests against this fake.
-                kernel_ipc_stream:  None,
+                kernel_ipc_stream: None,
             })
         })
     }
@@ -513,8 +523,9 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
     fn terminate_orchestrator<'a>(
         &'a self,
         session_id: &'a str,
-        _grace:     std::time::Duration,
-    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>> {
+        _grace: std::time::Duration,
+    ) -> Pin<Box<dyn Future<Output = Result<TerminationReport, OrchestratorSpawnError>> + Send + 'a>>
+    {
         let session_owned = session_id.to_owned();
         Box::pin(async move {
             self.terminate_calls
@@ -522,10 +533,11 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
                 .expect("terminate_calls poisoned")
                 .push(session_owned.clone());
             Ok(TerminationReport {
-                session_id:                session_owned,
-                exit_status:               raxis_isolation::ExitStatus::GracefulExit { code: 0 },
-                credential_proxy_shutdown:
-                    raxis_credential_proxy_manager::ShutdownReport { stopped: Vec::new() },
+                session_id: session_owned,
+                exit_status: raxis_isolation::ExitStatus::GracefulExit { code: 0 },
+                credential_proxy_shutdown: raxis_credential_proxy_manager::ShutdownReport {
+                    stopped: Vec::new(),
+                },
             })
         })
     }
@@ -538,15 +550,15 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
 // ---------------------------------------------------------------------------
 
 async fn spawn_orchestrator_for_initiative(
-    spawn_ctx:        &OrchestratorSpawnContext,
-    session_id:       &str,
-    initiative_id:    &str,
+    spawn_ctx: &OrchestratorSpawnContext,
+    session_id: &str,
+    initiative_id: &str,
     egress_allowlist: EgressAllowlist,
-    task_prompt:      String,
-    service:          Arc<SessionSpawnService>,
-    store:            &Arc<Store>,
-    plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
-    policy:           &raxis_policy::PolicyBundle,
+    task_prompt: String,
+    service: Arc<SessionSpawnService>,
+    store: &Arc<Store>,
+    plan_registry: &Arc<crate::initiatives::PlanRegistry>,
+    policy: &raxis_policy::PolicyBundle,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
     // ── Step 1: locate canonical orchestrator image. ─────────────
     // We don't re-verify the digest here; the boot-time preflight
@@ -558,9 +570,7 @@ async fn spawn_orchestrator_for_initiative(
         &spawn_ctx.kernel_version,
     );
     if !image_path.exists() {
-        return Err(OrchestratorSpawnError::OrchestratorImageMissing {
-            path: image_path,
-        });
+        return Err(OrchestratorSpawnError::OrchestratorImageMissing { path: image_path });
     }
     // V2 SCHEMA_VERSION=3 — load the rootfs shape (EROFS vs.
     // initramfs cpio.gz) from the signed manifest. The substrate
@@ -577,13 +587,13 @@ async fn spawn_orchestrator_for_initiative(
             &spawn_ctx.kernel_version,
         );
     let verified_image = VerifiedImage {
-        kind:      image_kind,
-        body:      ImageBody::Path(image_path),
+        kind: image_kind,
+        body: ImageBody::Path(image_path),
         // The signature is verified at the kernel boot-time preflight
         // by digest; we hand a placeholder here for the trait contract
         // and the substrate's `spawn` impl re-verifies the digest.
         signature: ImageSignature(Vec::new()),
-        image_id:  format!(
+        image_id: format!(
             "raxis-orchestrator-core-{kernel_version}",
             kernel_version = spawn_ctx.kernel_version,
         ),
@@ -625,15 +635,13 @@ async fn spawn_orchestrator_for_initiative(
     // through the uniform path for forward compat with sessions
     // that gain credentials in V3.
     let token_read_fut = {
-        let store_for_read      = Arc::clone(store);
+        let store_for_read = Arc::clone(store);
         let session_id_for_read = session_id.to_owned();
         tokio::task::spawn_blocking(move || -> Result<_, String> {
             let conn = store_for_read.lock_sync();
-            let creds = kernel_lifecycle::read_task_credential_proxies_in_tx(
-                &conn,
-                &session_id_for_read,
-            )
-            .map_err(|e| e.to_string())?;
+            let creds =
+                kernel_lifecycle::read_task_credential_proxies_in_tx(&conn, &session_id_for_read)
+                    .map_err(|e| e.to_string())?;
             let token: String = conn
                 .query_row(
                     "SELECT session_token FROM sessions WHERE session_id = ?1",
@@ -641,9 +649,7 @@ async fn spawn_orchestrator_for_initiative(
                     |row| row.get(0),
                 )
                 .map_err(|e| {
-                    format!(
-                        "session row missing for session_id {session_id_for_read}: {e}",
-                    )
+                    format!("session row missing for session_id {session_id_for_read}: {e}",)
                 })?;
             Ok((creds, token))
         })
@@ -662,13 +668,12 @@ async fn spawn_orchestrator_for_initiative(
     // per-initiative (no per-task crash counter), so `attempt = 1` is
     // the only legal value here — progressive scaling never fires for
     // orchestrator spawns.
-    let planner_max_turns_resolved =
-        resolve_planner_max_turns_for(None, policy.gateway(), 1);
+    let planner_max_turns_resolved = resolve_planner_max_turns_for(None, policy.gateway(), 1);
     let ksb_fut = {
-        let store_for_ksb     = Arc::clone(store);
-        let registry_for_ksb  = Arc::clone(plan_registry);
-        let initiative_owned  = initiative_id.to_owned();
-        let session_owned     = session_id.to_owned();
+        let store_for_ksb = Arc::clone(store);
+        let registry_for_ksb = Arc::clone(plan_registry);
+        let initiative_owned = initiative_id.to_owned();
+        let session_owned = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
@@ -676,18 +681,18 @@ async fn spawn_orchestrator_for_initiative(
                 &registry_for_ksb,
                 &crate::initiatives::ksb_assembly::KsbInputs {
                     initiative_id: &initiative_owned,
-                    task_id:       None,
-                    role:          crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
-                    token_budget_remaining:        0,
-                    wallclock_budget_remaining_s:  0,
-                    credential_ports:              Vec::new(),
+                    task_id: None,
+                    role: crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
+                    token_budget_remaining: 0,
+                    wallclock_budget_remaining_s: 0,
+                    credential_ports: Vec::new(),
                     // Slice C — capabilities envelope identity. The
                     // orchestrator session_id is the row this spawn
                     // path is provisioning against and is stamped
                     // verbatim into `capabilities.session.session_id`.
-                    session_id:                    &session_owned,
-                    planner_max_turns:             planner_max_turns_resolved.effective,
-                    max_turns_scaling:             planner_max_turns_resolved.into(),
+                    session_id: &session_owned,
+                    planner_max_turns: planner_max_turns_resolved.effective,
+                    max_turns_scaling: planner_max_turns_resolved.into(),
                 },
             )
         })
@@ -721,11 +726,14 @@ async fn spawn_orchestrator_for_initiative(
     let data_dir = spawn_ctx
         .data_dir
         .as_ref()
-        .ok_or_else(|| OrchestratorSpawnError::StoreRead(
-            "OrchestratorSpawnContext is missing data_dir; \
+        .ok_or_else(|| {
+            OrchestratorSpawnError::StoreRead(
+                "OrchestratorSpawnContext is missing data_dir; \
              worktree provisioning requires <data_dir>/repositories/main \
-             to exist (boot wires data_dir via `with_data_dir`)".to_owned(),
-        ))?
+             to exist (boot wires data_dir via `with_data_dir`)"
+                    .to_owned(),
+            )
+        })?
         .clone();
     let target_ref = plan_registry
         .orchestrator(initiative_id)
@@ -744,12 +752,16 @@ async fn spawn_orchestrator_for_initiative(
         )
     })
     .await
-    .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
-        "orchestrator worktree provisioning task join failed: {e}",
-    )))?
-    .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
-        "orchestrator worktree provisioning failed: {e}",
-    )))?;
+    .map_err(|e| {
+        OrchestratorSpawnError::StoreRead(format!(
+            "orchestrator worktree provisioning task join failed: {e}",
+        ))
+    })?
+    .map_err(|e| {
+        OrchestratorSpawnError::StoreRead(
+            format!("orchestrator worktree provisioning failed: {e}",),
+        )
+    })?;
 
     // Persist the anchor onto the orchestrator session row so
     // the kernel-side IntegrationMerge handler reads
@@ -764,8 +776,8 @@ async fn spawn_orchestrator_for_initiative(
         let store_for_update = Arc::clone(store);
         let session_id_for_update = session_id.to_owned();
         let worktree_root_str = anchor.worktree_root.display().to_string();
-        let base_sha_str      = anchor.base_sha.clone();
-        let tracking_ref_str  = anchor.base_tracking_ref.clone();
+        let base_sha_str = anchor.base_sha.clone();
+        let tracking_ref_str = anchor.base_tracking_ref.clone();
         tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
             let conn = store_for_update.lock_sync();
             conn.execute(
@@ -784,12 +796,14 @@ async fn spawn_orchestrator_for_initiative(
             Ok(())
         })
         .await
-        .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
-            "orchestrator session row update task join failed: {e}",
-        )))?
-        .map_err(|e| OrchestratorSpawnError::StoreRead(format!(
-            "UPDATE sessions worktree_root failed: {e}",
-        )))?;
+        .map_err(|e| {
+            OrchestratorSpawnError::StoreRead(format!(
+                "orchestrator session row update task join failed: {e}",
+            ))
+        })?
+        .map_err(|e| {
+            OrchestratorSpawnError::StoreRead(format!("UPDATE sessions worktree_root failed: {e}",))
+        })?;
     }
 
     // ── Step 3: build the spawn spec. ────────────────────────────
@@ -895,20 +909,17 @@ async fn spawn_orchestrator_for_initiative(
     // proceeds with a fallback snapshot so a transient SQLite lock
     // contention does not block initiative activation; the absence
     // of the live KSB is logged here so an operator can correlate.
-    let ksb_snapshot = ksb_join
-        .ok()
-        .and_then(|r| r.ok())
-        .unwrap_or_else(|| {
-            eprintln!(
-                "{{\"level\":\"warn\",\"event\":\"orchestrator_ksb_assembly_fallback\",\
+    let ksb_snapshot = ksb_join.ok().and_then(|r| r.ok()).unwrap_or_else(|| {
+        eprintln!(
+            "{{\"level\":\"warn\",\"event\":\"orchestrator_ksb_assembly_fallback\",\
                  \"initiative_id\":\"{initiative_id}\",\"session_id\":\"{session_id}\"}}",
-            );
-            crate::initiatives::ksb_assembly::fallback_snapshot(
-                initiative_id,
-                None,
-                crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
-            )
-        });
+        );
+        crate::initiatives::ksb_assembly::fallback_snapshot(
+            initiative_id,
+            None,
+            crate::initiatives::ksb_assembly::KsbRole::Orchestrator,
+        )
+    });
     let ksb_json = serde_json::to_string(&ksb_snapshot)
         .expect("KsbSnapshot is Serialize-derived; serialization cannot fail");
     // Prefer the virtiofs sidecar channel (small `RAXIS_PLANNER_KSB_PATH`
@@ -955,8 +966,8 @@ async fn spawn_orchestrator_for_initiative(
         }
     };
     let vm_spec = VmSpec {
-        vcpu_count:        spawn_ctx.vcpu_count,
-        mem_mib:           spawn_ctx.mem_mib,
+        vcpu_count: spawn_ctx.vcpu_count,
+        mem_mib: spawn_ctx.mem_mib,
         // Orchestrator runs in `EgressTier::None` (no NIC, no
         // host-network access). Per the user-clarified invariant
         // and `kernel-mediated-egress.md`: "the Orchestrator has
@@ -967,10 +978,10 @@ async fn spawn_orchestrator_for_initiative(
         // every model client supports the
         // `KernelMediatedHttpFetch` substrate via the
         // `with_http_fetch` constructor.
-        egress_tier:       EgressTier::None,
-        cgroup_quota:      None,
-        boot_args:         Vec::new(),
-        entrypoint_argv:   vec![
+        egress_tier: EgressTier::None,
+        cgroup_quota: None,
+        boot_args: Vec::new(),
+        entrypoint_argv: vec![
             "/usr/local/bin/raxis-orchestrator".to_owned(),
             "--initiative-id".to_owned(),
             initiative_id.to_owned(),
@@ -981,9 +992,9 @@ async fn spawn_orchestrator_for_initiative(
         // `lifecycle::approve_plan` (see Step 2 above) — same
         // 64-char hex value the kernel-mediated egress handler
         // re-validates on every `IpcMessage::PlannerFetchRequest`.
-        session_token:     SessionToken(session_token_db.clone()),
-        vsock_cid:         None,
-        virtio_fs_mounts:  Vec::new(),
+        session_token: SessionToken(session_token_db.clone()),
+        vsock_cid: None,
+        virtio_fs_mounts: Vec::new(),
         // Host-canonical Linux kernel binary. The microVM substrates
         // (AVF, Firecracker) hand this to their boot loaders. The
         // SubprocessIsolation substrate ignores the field per the
@@ -1008,9 +1019,9 @@ async fn spawn_orchestrator_for_initiative(
     // main at merge time, which keeps the agent / kernel views
     // coherent under prompt-injection-class anomalies.
     let orch_mount = raxis_isolation::WorkspaceMount {
-        host_path:    anchor.worktree_root.clone(),
-        guest_path:   raxis_worktree_staging::GUEST_WORKSPACE_PATH.to_owned(),
-        mode:         raxis_isolation::MountMode::ReadWrite,
+        host_path: anchor.worktree_root.clone(),
+        guest_path: raxis_worktree_staging::GUEST_WORKSPACE_PATH.to_owned(),
+        mode: raxis_isolation::MountMode::ReadWrite,
         content_hash: None,
     };
     let mut workspace_mounts = vec![orch_mount];
@@ -1048,20 +1059,16 @@ async fn spawn_orchestrator_for_initiative(
     // Successful spawns still emit `SessionVmSpawned` from inside
     // `SessionSpawnService::spawn_session` (unchanged).
     let proto = SpawnRequestProto {
-        session_id:       session_id.to_owned(),
-        task_id:          None, // orchestrator: no `[[tasks]]` row
-        initiative_id:    initiative_id.to_owned(),
-        image:            verified_image,
+        session_id: session_id.to_owned(),
+        task_id: None, // orchestrator: no `[[tasks]]` row
+        initiative_id: initiative_id.to_owned(),
+        image: verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
         egress_allowlist,
     };
-    let handle = spawn_with_transient_retry(
-        &service,
-        policy.elastic(),
-        proto,
-    ).await?;
+    let handle = spawn_with_transient_retry(&service, policy.elastic(), proto).await?;
 
     // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
     //
@@ -1090,7 +1097,9 @@ async fn spawn_orchestrator_for_initiative(
                  \"session_id\":\"{session_id}\",\"error\":\"{e}\"}}",
             );
         }
-        spawn_ctx.scale_down_history.clear(crate::elastic::RoleKey::Orchestrator);
+        spawn_ctx
+            .scale_down_history
+            .clear(crate::elastic::RoleKey::Orchestrator);
     }
 
     Ok(handle)
@@ -1116,31 +1125,33 @@ async fn spawn_orchestrator_for_initiative(
 /// logic.
 #[allow(clippy::too_many_arguments)]
 fn maybe_apply_scale_down(
-    vm_spec:          VmSpec,
-    role:             crate::elastic::RoleKey,
-    history:          &Arc<crate::elastic::ScaleDownHistory>,
-    rate_limiter:     &Arc<crate::elastic::ScalingRateLimiter>,
-    elastic:          &raxis_policy::ElasticConfig,
-    audit:            &Arc<dyn raxis_audit_tools::AuditSink>,
-    session_id:       &str,
-    task_id:          Option<&str>,
-    initiative_id:    &str,
-    plan:             &crate::elastic::PlanElasticOverrides,
+    vm_spec: VmSpec,
+    role: crate::elastic::RoleKey,
+    history: &Arc<crate::elastic::ScaleDownHistory>,
+    rate_limiter: &Arc<crate::elastic::ScalingRateLimiter>,
+    elastic: &raxis_policy::ElasticConfig,
+    audit: &Arc<dyn raxis_audit_tools::AuditSink>,
+    session_id: &str,
+    task_id: Option<&str>,
+    initiative_id: &str,
+    plan: &crate::elastic::PlanElasticOverrides,
 ) -> (VmSpec, Option<(u32, u32, u32, u32, String)>) {
     match crate::elastic::decide_scale_down(&vm_spec, elastic, plan, history.as_ref(), role) {
         crate::elastic::ScaleDecision::Apply {
-            new_spec, prev_vcpus, new_vcpus,
-            prev_memory_mb, new_memory_mb, reason, ..
+            new_spec,
+            prev_vcpus,
+            new_vcpus,
+            prev_memory_mb,
+            new_memory_mb,
+            reason,
+            ..
         } => {
             // §5 rate-limit gate — INV-ELASTIC-04 soft deferral.
             // `clock::unix_now_secs()` returns `i64` (audit-chain
             // canon), the rate limiter takes `u64`. Unix seconds
             // are always positive, so saturating cast is safe.
             let now = unix_now_secs().max(0) as u64;
-            match rate_limiter.try_admit(
-                now,
-                elastic.max_concurrent_scaling_events_per_minute,
-            ) {
+            match rate_limiter.try_admit(now, elastic.max_concurrent_scaling_events_per_minute) {
                 crate::elastic::RateLimitDecision::Admit => (
                     new_spec,
                     Some((prev_vcpus, prev_memory_mb, new_vcpus, new_memory_mb, reason)),
@@ -1216,10 +1227,10 @@ fn maybe_apply_scale_down(
 /// file-sweep regression guard in
 /// `kernel/tests/concrete_reason_sweep.rs::no_umbrella_reason_in_kernel_or_dashboard_emit_sites`.
 pub(crate) fn build_worker_post_exit_failure_reason(
-    role_str:         &str,
-    exit_notice:      Option<&raxis_types::PlannerExitOutcome>,
+    role_str: &str,
+    exit_notice: Option<&raxis_types::PlannerExitOutcome>,
     dispatch_err_str: Option<&str>,
-    last_activity:    Option<&crate::session_activity::SessionActivity>,
+    last_activity: Option<&crate::session_activity::SessionActivity>,
 ) -> String {
     use raxis_types::PlannerExitOutcome;
     // 1) Concrete structured exit notice from the planner.
@@ -1263,9 +1274,7 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     //    concretely (no multi-option umbrella —
     //    `INV-FAILURE-REASON-CONCRETE-01`).
     if let Some(activity) = last_activity {
-        return crate::session_activity::render_clean_exit_with_activity(
-            role_str, activity,
-        );
+        return crate::session_activity::render_clean_exit_with_activity(role_str, activity);
     }
     // 4) Concrete final fallback — the planner exited via clean
     //    EOF without shipping a `PlannerExitNotice` AND without
@@ -1303,7 +1312,8 @@ pub fn spawn_planner_dispatcher(
             stream,
             Arc::clone(&ctx),
             Some(session_id.to_string()),
-        ).await;
+        )
+        .await;
         // INV-FAILURE-REASON-MANDATORY-01 + INV-FAILURE-REASON-CONCRETE-01:
         // capture two distinct signals from `drive_planner_stream` so
         // the Mode-B premature-exit synthesis below can produce a
@@ -1336,17 +1346,14 @@ pub fn spawn_planner_dispatcher(
         //      driver's exit-notice emit). The synthesiser
         //      surfaces THAT gap concretely rather than the
         //      umbrella.
-        let dispatch_err_for_post_exit: Option<String> = dispatch_result
-            .as_ref()
-            .err()
-            .map(|e| {
-                let s = e.to_string();
-                if s.len() > 1024 {
-                    format!("{}…(truncated)", &s[..1024])
-                } else {
-                    s
-                }
-            });
+        let dispatch_err_for_post_exit: Option<String> = dispatch_result.as_ref().err().map(|e| {
+            let s = e.to_string();
+            if s.len() > 1024 {
+                format!("{}…(truncated)", &s[..1024])
+            } else {
+                s
+            }
+        });
         let exit_notice_for_post_exit: Option<raxis_types::PlannerExitOutcome> = dispatch_result
             .as_ref()
             .ok()
@@ -1395,10 +1402,7 @@ pub fn spawn_planner_dispatcher(
             conn.execute(
                 "UPDATE sessions SET revoked = 1, revoked_at = ?1 \
                   WHERE session_id = ?2 AND revoked = 0",
-                rusqlite::params![
-                    raxis_types::clock::unix_now_secs(),
-                    session_for_revoke,
-                ],
+                rusqlite::params![raxis_types::clock::unix_now_secs(), session_for_revoke,],
             )
         })
         .await;
@@ -1410,8 +1414,8 @@ pub fn spawn_planner_dispatcher(
                      \"session_id\":\"{session_id}\"}}",
                 );
             }
-            Ok(Ok(_))   => { /* already revoked — no-op, see comment above. */ }
-            Ok(Err(e))  => eprintln!(
+            Ok(Ok(_)) => { /* already revoked — no-op, see comment above. */ }
+            Ok(Err(e)) => eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"planner_session_revoke_failed\",\
                  \"session_id\":\"{session_id}\",\"error\":\"{err}\"}}",
                 err = e,
@@ -1565,7 +1569,7 @@ pub fn spawn_planner_dispatcher(
         let store_for_post_exit = Arc::clone(&ctx.store);
         let session_for_post_exit = session_id.clone();
         let dispatch_err_for_synth = dispatch_err_for_post_exit.clone();
-        let exit_notice_for_synth  = exit_notice_for_post_exit.clone();
+        let exit_notice_for_synth = exit_notice_for_post_exit.clone();
         // INV-FAILURE-REASON-CONCRETE-01 (P2 ladder slot): clone
         // the activity tracker handle so the spawn_blocking body
         // can `take` the per-session breadcrumb when neither a
@@ -1574,370 +1578,360 @@ pub fn spawn_planner_dispatcher(
         // the entry so a re-spawned session under the same id
         // starts with a clean slate.
         let session_activity_for_post_exit = Arc::clone(&ctx.session_activity);
-        let preflight = tokio::task::spawn_blocking(
-            move || -> Option<PostExitAction> {
-                use raxis_store::Table;
-                let mut conn = store_for_post_exit.lock_sync();
-                let row: Option<(String, String)> = conn
+        let preflight = tokio::task::spawn_blocking(move || -> Option<PostExitAction> {
+            use raxis_store::Table;
+            let mut conn = store_for_post_exit.lock_sync();
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    &format!(
+                        "SELECT session_agent_type, COALESCE(initiative_id, '') \
+                               FROM {sessions} WHERE session_id = ?1",
+                        sessions = Table::Sessions.as_str(),
+                    ),
+                    rusqlite::params![&session_for_post_exit],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+            let (agent_type, session_initiative_id) = row?;
+            // Mode A (Orchestrator) requires `sessions.initiative_id` to
+            // be populated — the orchestrator-spawn path always sets it.
+            // Mode B (Executor/Reviewer), however, must NOT depend on
+            // `sessions.initiative_id`: the executor-spawn path does
+            // not currently populate the column, so the canonical
+            // source of truth for the initiative binding of a worker
+            // session is the `subtask_activations.initiative_id`
+            // column on the row that holds this session_id (the
+            // schema enforces `Active` rows always carry a non-null
+            // `session_id`, and the row is created by the same
+            // `activate_subtask` transaction that booted the VM).
+            // Without this distinction Mode B never fires for the
+            // realistic-scenario executors (iter27 reproduced the
+            // exact iter15/iter20 deadlock — 4 sessions revoked,
+            // 0 `worker_post_exit_respawn_trigger` events,
+            // kernel CPU 0% with `Active` activation rows stranded).
+            if agent_type == raxis_types::SessionAgentType::Orchestrator.as_sql_str() {
+                let initiative_id = session_initiative_id;
+                if initiative_id.is_empty() {
+                    return None;
+                }
+                // ── Mode A: Orchestrator post-exit respawn. ──
+                let pending_exists: bool = conn
                     .query_row(
                         &format!(
-                            "SELECT session_agent_type, COALESCE(initiative_id, '') \
-                               FROM {sessions} WHERE session_id = ?1",
-                            sessions = Table::Sessions.as_str(),
-                        ),
-                        rusqlite::params![&session_for_post_exit],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                    )
-                    .ok();
-                let (agent_type, session_initiative_id) = row?;
-                // Mode A (Orchestrator) requires `sessions.initiative_id` to
-                // be populated — the orchestrator-spawn path always sets it.
-                // Mode B (Executor/Reviewer), however, must NOT depend on
-                // `sessions.initiative_id`: the executor-spawn path does
-                // not currently populate the column, so the canonical
-                // source of truth for the initiative binding of a worker
-                // session is the `subtask_activations.initiative_id`
-                // column on the row that holds this session_id (the
-                // schema enforces `Active` rows always carry a non-null
-                // `session_id`, and the row is created by the same
-                // `activate_subtask` transaction that booted the VM).
-                // Without this distinction Mode B never fires for the
-                // realistic-scenario executors (iter27 reproduced the
-                // exact iter15/iter20 deadlock — 4 sessions revoked,
-                // 0 `worker_post_exit_respawn_trigger` events,
-                // kernel CPU 0% with `Active` activation rows stranded).
-                if agent_type
-                    == raxis_types::SessionAgentType::Orchestrator.as_sql_str()
-                {
-                    let initiative_id = session_initiative_id;
-                    if initiative_id.is_empty() {
-                        return None;
-                    }
-                    // ── Mode A: Orchestrator post-exit respawn. ──
-                    let pending_exists: bool = conn
-                        .query_row(
-                            &format!(
-                                "SELECT 1 FROM {sa} \
+                            "SELECT 1 FROM {sa} \
                                    WHERE initiative_id   = ?1 \
                                      AND activation_state = 'PendingActivation' \
                                    LIMIT 1",
-                                sa = Table::SubtaskActivations.as_str(),
-                            ),
-                            rusqlite::params![&initiative_id],
-                            |_| Ok(true),
-                        )
-                        .unwrap_or(false);
-                    let active_exists: bool = conn
-                        .query_row(
-                            &format!(
-                                "SELECT 1 FROM {sa} \
+                            sa = Table::SubtaskActivations.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                let active_exists: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT 1 FROM {sa} \
                                    WHERE initiative_id   = ?1 \
                                      AND activation_state = 'Active' \
                                    LIMIT 1",
-                                sa = Table::SubtaskActivations.as_str(),
-                            ),
-                            rusqlite::params![&initiative_id],
-                            |_| Ok(true),
-                        )
-                        .unwrap_or(false);
-                    // INV-RESPAWN-STORM: only respawn from post-exit hook
-                    // when there is at least one PendingActivation AND
-                    // NO Active worker. An Active worker's terminal
-                    // intent (CompleteTask / SubmitReview / ReportFailure)
-                    // will trigger an EarlyResponse respawn anyway, and
-                    // letting both paths fire ends up in a respawn-storm
-                    // when an LLM session keeps emitting rejected
-                    // ActivateSubTask intents (live e2e iter 7 reproduced
-                    // ~30 respawns in 90s with the unconditional version).
-                    if pending_exists && !active_exists {
-                        return Some(PostExitAction::OrchestratorRespawn { initiative_id });
-                    }
-                    // ── Mode A+: stranded-initiative respawn.
-                    //
-                    // INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01.
-                    //
-                    // Iter54-N reproduced this wedge on the realistic
-                    // scenario's `lint-runner` Round-2 path. After
-                    // `max_crash_retries=3` retries all exhausted (each
-                    // burned the executor's `max_turns` ceiling), the
-                    // orchestrator had no admissible RetrySubTask /
-                    // ActivateSubTask left and emitted a non-terminal
-                    // `StructuredOutput { kind: "diagnostic_flag" }`,
-                    // then went idle (planner-boot-error: "dispatch
-                    // loop terminated with Idle"). With Mode A's narrow
-                    // `pending_exists && !active_exists` predicate, the
-                    // post-exit hook short-circuits — there is no
-                    // PendingActivation row because the kernel rejected
-                    // every further RetrySubTask at the ceiling and the
-                    // orchestrator never produced a fresh activation.
-                    // The kernel went silent for the rest of the test
-                    // wall-clock, the harness could not observe a
-                    // terminal initiative state, and SIGTERM was the
-                    // only way out.
-                    //
-                    // Mode A+: when the initiative is still in a
-                    // non-terminal state (Executing / PendingApproval /
-                    // AwaitingApproval / Approved) AND there is neither
-                    // Active worker nor PendingActivation, the
-                    // orchestrator is the ONLY agent that can move the
-                    // initiative toward terminality (ReportFailure on a
-                    // Failed task, IntegrationMerge once the DAG is
-                    // satisfied, or AbortInitiative). Respawn it. The
-                    // `orch_respawn_ceiling::increment_no_progress_count_in_tx`
-                    // counter (max 3) inside `respawn_orchestrator_for_initiative`
-                    // is the storm guard — if the LLM keeps emitting
-                    // non-terminal intents (no FSM transition resets
-                    // the counter), the third respawn auto-fails the
-                    // initiative with `orchestrator_respawn_ceiling_exceeded`
-                    // and the harness observes Failed instead of hanging.
-                    // `Executing` is the only initiative state where the
-                    // orchestrator owns terminality. `Draft` / `ApprovedPlan`
-                    // wait on operator approval, `Blocked` waits on operator
-                    // unblock, and the three terminal states (`Completed` /
-                    // `Failed` / `Aborted`) are by definition done — we
-                    // must not respawn into a terminal initiative
-                    // (`InitiativeState` enum in `crates/types/src/fsm.rs`).
-                    let initiative_executing: bool = conn
-                        .query_row(
-                            &format!(
-                                "SELECT 1 FROM {init} \
+                            sa = Table::SubtaskActivations.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                // INV-RESPAWN-STORM: only respawn from post-exit hook
+                // when there is at least one PendingActivation AND
+                // NO Active worker. An Active worker's terminal
+                // intent (CompleteTask / SubmitReview / ReportFailure)
+                // will trigger an EarlyResponse respawn anyway, and
+                // letting both paths fire ends up in a respawn-storm
+                // when an LLM session keeps emitting rejected
+                // ActivateSubTask intents (live e2e iter 7 reproduced
+                // ~30 respawns in 90s with the unconditional version).
+                if pending_exists && !active_exists {
+                    return Some(PostExitAction::OrchestratorRespawn { initiative_id });
+                }
+                // ── Mode A+: stranded-initiative respawn.
+                //
+                // INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01.
+                //
+                // Iter54-N reproduced this wedge on the realistic
+                // scenario's `lint-runner` Round-2 path. After
+                // `max_crash_retries=3` retries all exhausted (each
+                // burned the executor's `max_turns` ceiling), the
+                // orchestrator had no admissible RetrySubTask /
+                // ActivateSubTask left and emitted a non-terminal
+                // `StructuredOutput { kind: "diagnostic_flag" }`,
+                // then went idle (planner-boot-error: "dispatch
+                // loop terminated with Idle"). With Mode A's narrow
+                // `pending_exists && !active_exists` predicate, the
+                // post-exit hook short-circuits — there is no
+                // PendingActivation row because the kernel rejected
+                // every further RetrySubTask at the ceiling and the
+                // orchestrator never produced a fresh activation.
+                // The kernel went silent for the rest of the test
+                // wall-clock, the harness could not observe a
+                // terminal initiative state, and SIGTERM was the
+                // only way out.
+                //
+                // Mode A+: when the initiative is still in a
+                // non-terminal state (Executing / PendingApproval /
+                // AwaitingApproval / Approved) AND there is neither
+                // Active worker nor PendingActivation, the
+                // orchestrator is the ONLY agent that can move the
+                // initiative toward terminality (ReportFailure on a
+                // Failed task, IntegrationMerge once the DAG is
+                // satisfied, or AbortInitiative). Respawn it. The
+                // `orch_respawn_ceiling::increment_no_progress_count_in_tx`
+                // counter (max 3) inside `respawn_orchestrator_for_initiative`
+                // is the storm guard — if the LLM keeps emitting
+                // non-terminal intents (no FSM transition resets
+                // the counter), the third respawn auto-fails the
+                // initiative with `orchestrator_respawn_ceiling_exceeded`
+                // and the harness observes Failed instead of hanging.
+                // `Executing` is the only initiative state where the
+                // orchestrator owns terminality. `Draft` / `ApprovedPlan`
+                // wait on operator approval, `Blocked` waits on operator
+                // unblock, and the three terminal states (`Completed` /
+                // `Failed` / `Aborted`) are by definition done — we
+                // must not respawn into a terminal initiative
+                // (`InitiativeState` enum in `crates/types/src/fsm.rs`).
+                let initiative_executing: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT 1 FROM {init} \
                                    WHERE initiative_id = ?1 \
                                      AND state = 'Executing' \
                                    LIMIT 1",
-                                init = Table::Initiatives.as_str(),
-                            ),
-                            rusqlite::params![&initiative_id],
-                            |_| Ok(true),
-                        )
-                        .unwrap_or(false);
-                    if initiative_executing && !pending_exists && !active_exists {
-                        eprintln!(
-                            "{{\"level\":\"info\",\
+                            init = Table::Initiatives.as_str(),
+                        ),
+                        rusqlite::params![&initiative_id],
+                        |_| Ok(true),
+                    )
+                    .unwrap_or(false);
+                if initiative_executing && !pending_exists && !active_exists {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
                              \"event\":\"orchestrator_stranded_initiative_respawn_trigger\",\
                              \"initiative_id\":\"{initiative_id}\",\
                              \"session_id\":\"{session_id}\",\
                              \"invariant\":\"INV-ORCH-STRANDED-INITIATIVE-RESPAWN-01\"}}",
-                            session_id   = session_for_post_exit,
-                            initiative_id = initiative_id,
-                        );
-                        return Some(PostExitAction::OrchestratorRespawn { initiative_id });
-                    }
-                    return None;
+                        session_id = session_for_post_exit,
+                        initiative_id = initiative_id,
+                    );
+                    return Some(PostExitAction::OrchestratorRespawn { initiative_id });
                 }
+                return None;
+            }
 
-                // ── Mode B: worker (Executor/Reviewer) premature-exit
-                //    failure synthesis. ─────────────────────────────
-                let is_executor = agent_type
-                    == raxis_types::SessionAgentType::Executor.as_sql_str();
-                let is_reviewer = agent_type
-                    == raxis_types::SessionAgentType::Reviewer.as_sql_str();
-                if !(is_executor || is_reviewer) {
-                    // Unknown agent type — defensively skip rather than
-                    // risk synthesising a transition on an unsupported
-                    // session class.
-                    return None;
-                }
-                // Find the Active activation row bound to THIS session
-                // (not just any active row on the initiative — a
-                // sibling executor on the same initiative is its own
-                // story). The activation row is also the canonical
-                // source of truth for the worker's initiative binding
-                // — `sessions.initiative_id` is empty on executor /
-                // reviewer rows by current spawn-path convention, but
-                // the activation row's `initiative_id` is NOT NULL by
-                // schema and was set in the same transaction that
-                // booted the VM.
-                let row: Option<(String, String)> = conn
-                    .query_row(
-                        &format!(
-                            "SELECT task_id, initiative_id FROM {sa} \
+            // ── Mode B: worker (Executor/Reviewer) premature-exit
+            //    failure synthesis. ─────────────────────────────
+            let is_executor = agent_type == raxis_types::SessionAgentType::Executor.as_sql_str();
+            let is_reviewer = agent_type == raxis_types::SessionAgentType::Reviewer.as_sql_str();
+            if !(is_executor || is_reviewer) {
+                // Unknown agent type — defensively skip rather than
+                // risk synthesising a transition on an unsupported
+                // session class.
+                return None;
+            }
+            // Find the Active activation row bound to THIS session
+            // (not just any active row on the initiative — a
+            // sibling executor on the same initiative is its own
+            // story). The activation row is also the canonical
+            // source of truth for the worker's initiative binding
+            // — `sessions.initiative_id` is empty on executor /
+            // reviewer rows by current spawn-path convention, but
+            // the activation row's `initiative_id` is NOT NULL by
+            // schema and was set in the same transaction that
+            // booted the VM.
+            let row: Option<(String, String)> = conn
+                .query_row(
+                    &format!(
+                        "SELECT task_id, initiative_id FROM {sa} \
                                WHERE session_id      = ?1 \
                                  AND activation_state = 'Active' \
                                LIMIT 1",
-                            sa = Table::SubtaskActivations.as_str(),
-                        ),
-                        rusqlite::params![&session_for_post_exit],
-                        |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
-                    )
-                    .ok();
-                let (task_id, initiative_id) = row?;
-                let task_state_str: String = conn
-                    .query_row(
-                        &format!(
-                            "SELECT state FROM {tasks} WHERE task_id = ?1",
-                            tasks = Table::Tasks.as_str(),
-                        ),
-                        rusqlite::params![&task_id],
-                        |r| r.get::<_, String>(0),
-                    )
-                    .ok()?;
-                let task_state = raxis_types::TaskState::from_sql_str(&task_state_str)?;
-                if !matches!(
-                    task_state,
-                    raxis_types::TaskState::Admitted | raxis_types::TaskState::Running
-                ) {
-                    // Terminal — EarlyResponse already drove the FSM
-                    // through its terminal transition.
-                    return None;
-                }
+                        sa = Table::SubtaskActivations.as_str(),
+                    ),
+                    rusqlite::params![&session_for_post_exit],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .ok();
+            let (task_id, initiative_id) = row?;
+            let task_state_str: String = conn
+                .query_row(
+                    &format!(
+                        "SELECT state FROM {tasks} WHERE task_id = ?1",
+                        tasks = Table::Tasks.as_str(),
+                    ),
+                    rusqlite::params![&task_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .ok()?;
+            let task_state = raxis_types::TaskState::from_sql_str(&task_state_str)?;
+            if !matches!(
+                task_state,
+                raxis_types::TaskState::Admitted | raxis_types::TaskState::Running
+            ) {
+                // Terminal — EarlyResponse already drove the FSM
+                // through its terminal transition.
+                return None;
+            }
 
-                // Perform the synthetic Failed transition in a single
-                // SQLite transaction so the bump + FSM walk + activation-
-                // row close commit atomically. Matches the
-                // `handle_report_failure` shape verbatim.
-                use crate::initiatives::task_transitions::{
-                    transition_task_in_tx, TransitionActor,
-                };
-                let tx = match conn.transaction() {
-                    Ok(t) => t,
-                    Err(e) => {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\
+            // Perform the synthetic Failed transition in a single
+            // SQLite transaction so the bump + FSM walk + activation-
+            // row close commit atomically. Matches the
+            // `handle_report_failure` shape verbatim.
+            use crate::initiatives::task_transitions::{transition_task_in_tx, TransitionActor};
+            let tx = match conn.transaction() {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
                              \"event\":\"worker_post_exit_synth_tx_open_failed\",\
                              \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
                              \"error\":\"{err}\"}}",
-                            sid = &session_for_post_exit,
-                            tid = &task_id,
-                            err = e,
-                        );
-                        return None;
-                    }
-                };
-                if matches!(task_state, raxis_types::TaskState::Admitted) {
-                    if let Err(e) = transition_task_in_tx(
-                        &tx,
-                        &task_id,
-                        raxis_types::TaskState::Running,
-                        None,
-                        TransitionActor::Kernel,
-                    ) {
-                        eprintln!(
-                            "{{\"level\":\"warn\",\
-                             \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
-                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                             \"error\":\"{err}\"}}",
-                            sid = &session_for_post_exit,
-                            tid = &task_id,
-                            err = e,
-                        );
-                        return None;
-                    }
-                }
-                // V2 §Step 12 crash-retry bump — must land BEFORE the
-                // Failed cascade closes the activation row.
-                if let Err(e) = crate::handlers::intent::bump_executor_crash_retry_count_in_tx(
-                    &tx,
-                    &task_id,
-                ) {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\
-                         \"event\":\"worker_post_exit_synth_crash_bump_failed\",\
-                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
-                         \"error\":\"{err}\"}}",
                         sid = &session_for_post_exit,
                         tid = &task_id,
                         err = e,
                     );
-                    // Continue: the FSM transition is the structural
-                    // unstall; a missed counter increment is forensic.
+                    return None;
                 }
-                // INV-FAILURE-REASON-MANDATORY-01 +
-                // INV-FAILURE-REASON-CONCRETE-01: produce a CONCRETE
-                // operator-facing failure reason, never the generic
-                // multi-option umbrella. Source-of-truth priority:
-                //
-                //   1. **`exit_notice_for_synth`** — the
-                //      structured `PlannerExitOutcome` shipped by
-                //      the planner immediately before EOF. When
-                //      present this is ALWAYS the most accurate
-                //      reason (`MaxTurnsReached { used, limit }`,
-                //      `MaxTokensReached { which, used, limit }`,
-                //      etc.). `format_concrete_reason` returns
-                //      `None` only for the `CleanCompletion`
-                //      variant — in which case Mode-B synthesis
-                //      should not run at all (a `CleanCompletion`
-                //      notice means a terminal intent already
-                //      fired and the EarlyResponse cascade
-                //      already drove the FSM); the synthesiser
-                //      treats `None` as a structural anomaly and
-                //      surfaces a concrete description of THAT.
-                //
-                //   2. **`dispatch_err_for_synth`** — the
-                //      transport-level error from
-                //      `drive_planner_stream` (planner-boot-error,
-                //      transport EOF reason, codec failure). Used
-                //      when no exit notice arrived AND the kernel
-                //      side saw a stream-level failure.
-                //
-                //   3. **Concrete fallback** — neither signal is
-                //      available (the planner exited via clean
-                //      EOF without sending a notice, which most
-                //      likely means the process was killed before
-                //      the driver's exit-notice emit could fire —
-                //      SIGKILL / OOM / panic mid-loop). The
-                //      fallback string NAMES that gap explicitly
-                //      so the operator does not have to infer it
-                //      from the absence of forensic context.
-                let role_str = if is_executor { "executor" } else { "reviewer" };
-                // INV-FAILURE-REASON-CONCRETE-01 P2 fallback:
-                // consume the activity breadcrumb (if any) so
-                // the synthesiser can name the last-seen intent
-                // when neither a `PlannerExitNotice` (P3) nor a
-                // dispatch-stream error (P1) is available.
-                let last_activity = session_activity_for_post_exit
-                    .take(&session_for_post_exit);
-                let justification = build_worker_post_exit_failure_reason(
-                    role_str,
-                    exit_notice_for_synth.as_ref(),
-                    dispatch_err_for_synth.as_deref(),
-                    last_activity.as_ref(),
-                );
+            };
+            if matches!(task_state, raxis_types::TaskState::Admitted) {
                 if let Err(e) = transition_task_in_tx(
                     &tx,
                     &task_id,
-                    raxis_types::TaskState::Failed,
-                    Some(justification.as_str()),
+                    raxis_types::TaskState::Running,
+                    None,
                     TransitionActor::Kernel,
                 ) {
                     eprintln!(
                         "{{\"level\":\"warn\",\
+                             \"event\":\"worker_post_exit_synth_admitted_to_running_failed\",\
+                             \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                             \"error\":\"{err}\"}}",
+                        sid = &session_for_post_exit,
+                        tid = &task_id,
+                        err = e,
+                    );
+                    return None;
+                }
+            }
+            // V2 §Step 12 crash-retry bump — must land BEFORE the
+            // Failed cascade closes the activation row.
+            if let Err(e) =
+                crate::handlers::intent::bump_executor_crash_retry_count_in_tx(&tx, &task_id)
+            {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                         \"event\":\"worker_post_exit_synth_crash_bump_failed\",\
+                         \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
+                         \"error\":\"{err}\"}}",
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    err = e,
+                );
+                // Continue: the FSM transition is the structural
+                // unstall; a missed counter increment is forensic.
+            }
+            // INV-FAILURE-REASON-MANDATORY-01 +
+            // INV-FAILURE-REASON-CONCRETE-01: produce a CONCRETE
+            // operator-facing failure reason, never the generic
+            // multi-option umbrella. Source-of-truth priority:
+            //
+            //   1. **`exit_notice_for_synth`** — the
+            //      structured `PlannerExitOutcome` shipped by
+            //      the planner immediately before EOF. When
+            //      present this is ALWAYS the most accurate
+            //      reason (`MaxTurnsReached { used, limit }`,
+            //      `MaxTokensReached { which, used, limit }`,
+            //      etc.). `format_concrete_reason` returns
+            //      `None` only for the `CleanCompletion`
+            //      variant — in which case Mode-B synthesis
+            //      should not run at all (a `CleanCompletion`
+            //      notice means a terminal intent already
+            //      fired and the EarlyResponse cascade
+            //      already drove the FSM); the synthesiser
+            //      treats `None` as a structural anomaly and
+            //      surfaces a concrete description of THAT.
+            //
+            //   2. **`dispatch_err_for_synth`** — the
+            //      transport-level error from
+            //      `drive_planner_stream` (planner-boot-error,
+            //      transport EOF reason, codec failure). Used
+            //      when no exit notice arrived AND the kernel
+            //      side saw a stream-level failure.
+            //
+            //   3. **Concrete fallback** — neither signal is
+            //      available (the planner exited via clean
+            //      EOF without sending a notice, which most
+            //      likely means the process was killed before
+            //      the driver's exit-notice emit could fire —
+            //      SIGKILL / OOM / panic mid-loop). The
+            //      fallback string NAMES that gap explicitly
+            //      so the operator does not have to infer it
+            //      from the absence of forensic context.
+            let role_str = if is_executor { "executor" } else { "reviewer" };
+            // INV-FAILURE-REASON-CONCRETE-01 P2 fallback:
+            // consume the activity breadcrumb (if any) so
+            // the synthesiser can name the last-seen intent
+            // when neither a `PlannerExitNotice` (P3) nor a
+            // dispatch-stream error (P1) is available.
+            let last_activity = session_activity_for_post_exit.take(&session_for_post_exit);
+            let justification = build_worker_post_exit_failure_reason(
+                role_str,
+                exit_notice_for_synth.as_ref(),
+                dispatch_err_for_synth.as_deref(),
+                last_activity.as_ref(),
+            );
+            if let Err(e) = transition_task_in_tx(
+                &tx,
+                &task_id,
+                raxis_types::TaskState::Failed,
+                Some(justification.as_str()),
+                TransitionActor::Kernel,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
                          \"event\":\"worker_post_exit_synth_failed_transition_failed\",\
                          \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
                          \"error\":\"{err}\"}}",
-                        sid = &session_for_post_exit,
-                        tid = &task_id,
-                        err = e,
-                    );
-                    return None;
-                }
-                if let Err(e) = tx.commit() {
-                    eprintln!(
-                        "{{\"level\":\"warn\",\
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    err = e,
+                );
+                return None;
+            }
+            if let Err(e) = tx.commit() {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
                          \"event\":\"worker_post_exit_synth_commit_failed\",\
                          \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
                          \"error\":\"{err}\"}}",
-                        sid = &session_for_post_exit,
-                        tid = &task_id,
-                        err = e,
-                    );
-                    return None;
-                }
-                eprintln!(
-                    "{{\"level\":\"info\",\
+                    sid = &session_for_post_exit,
+                    tid = &task_id,
+                    err = e,
+                );
+                return None;
+            }
+            eprintln!(
+                "{{\"level\":\"info\",\
                      \"event\":\"TaskFailedOnWorkerPrematureExit\",\
                      \"session_id\":\"{sid}\",\"task_id\":\"{tid}\",\
                      \"role\":\"{role}\"}}",
-                    sid = &session_for_post_exit,
-                    tid = &task_id,
-                    role = if is_executor { "executor" } else { "reviewer" },
-                );
-                Some(PostExitAction::WorkerFailureRespawn {
-                    initiative_id,
-                    task_id,
-                    role: if is_executor { "executor" } else { "reviewer" },
-                })
-            },
-        )
+                sid = &session_for_post_exit,
+                tid = &task_id,
+                role = if is_executor { "executor" } else { "reviewer" },
+            );
+            Some(PostExitAction::WorkerFailureRespawn {
+                initiative_id,
+                task_id,
+                role: if is_executor { "executor" } else { "reviewer" },
+            })
+        })
         .await;
 
         match preflight {
@@ -2008,8 +2002,8 @@ enum PostExitAction {
     /// (`"executor"` / `"reviewer"`).
     WorkerFailureRespawn {
         initiative_id: String,
-        task_id:       String,
-        role:          &'static str,
+        task_id: String,
+        role: &'static str,
     },
 }
 
@@ -2022,8 +2016,8 @@ enum PostExitAction {
 /// `SpawnError::SessionNotActive` which the bridge surfaces verbatim.
 async fn terminate_orchestrator(
     session_id: &str,
-    grace:      std::time::Duration,
-    service:    Arc<SessionSpawnService>,
+    grace: std::time::Duration,
+    service: Arc<SessionSpawnService>,
 ) -> Result<TerminationReport, OrchestratorSpawnError> {
     Ok(service.terminate_session(session_id, grace).await?)
 }
@@ -2082,7 +2076,7 @@ async fn terminate_orchestrator(
 /// when the precondition checks elected to skip, and never panics.
 pub async fn respawn_orchestrator_for_initiative(
     initiative_id: &str,
-    ctx:           Arc<crate::ipc::context::HandlerContext>,
+    ctx: Arc<crate::ipc::context::HandlerContext>,
 ) -> Option<String> {
     use raxis_store::Table;
     use raxis_types::SessionAgentType;
@@ -2095,47 +2089,52 @@ pub async fn respawn_orchestrator_for_initiative(
     //    spawn a doomed orchestrator) but keeping the read in one
     //    transaction makes the preflight log unambiguous.
     let store_for_check = Arc::clone(&ctx.store);
-    let init_for_check  = initiative_id.to_owned();
-    let preflight = tokio::task::spawn_blocking(move || -> Result<(bool, bool), rusqlite::Error> {
-        let conn = store_for_check.lock_sync();
-        let is_executing: bool = conn.query_row(
-            &format!(
-                "SELECT state = 'Executing' FROM {init} WHERE initiative_id = ?1",
-                init = Table::Initiatives.as_str(),
-            ),
-            rusqlite::params![&init_for_check],
-            |r| r.get::<_, i64>(0).map(|v| v != 0),
-        ).unwrap_or(false);
+    let init_for_check = initiative_id.to_owned();
+    let preflight =
+        tokio::task::spawn_blocking(move || -> Result<(bool, bool), rusqlite::Error> {
+            let conn = store_for_check.lock_sync();
+            let is_executing: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT state = 'Executing' FROM {init} WHERE initiative_id = ?1",
+                        init = Table::Initiatives.as_str(),
+                    ),
+                    rusqlite::params![&init_for_check],
+                    |r| r.get::<_, i64>(0).map(|v| v != 0),
+                )
+                .unwrap_or(false);
 
-        // An orchestrator is "live" if there's a row with
-        // session_agent_type='Orchestrator', initiative_id=this,
-        // revoked=0, AND expires_at > now. Migration 18 stamps
-        // `initiative_id` on coordinator rows so the lookup is O(1)
-        // against the supporting index.
-        let now = unix_now_secs();
-        let active_orchestrator: bool = conn.query_row(
-            &format!(
-                "SELECT 1 FROM {sessions}
+            // An orchestrator is "live" if there's a row with
+            // session_agent_type='Orchestrator', initiative_id=this,
+            // revoked=0, AND expires_at > now. Migration 18 stamps
+            // `initiative_id` on coordinator rows so the lookup is O(1)
+            // against the supporting index.
+            let now = unix_now_secs();
+            let active_orchestrator: bool = conn
+                .query_row(
+                    &format!(
+                        "SELECT 1 FROM {sessions}
                   WHERE initiative_id     = ?1
                     AND session_agent_type = ?2
                     AND revoked            = 0
                     AND expires_at         > ?3
                   LIMIT 1",
-                sessions = Table::Sessions.as_str(),
-            ),
-            rusqlite::params![
-                &init_for_check,
-                SessionAgentType::Orchestrator.as_sql_str(),
-                now,
-            ],
-            |_| Ok(true),
-        ).unwrap_or(false);
-        Ok((is_executing, active_orchestrator))
-    })
-    .await
-    .ok()
-    .and_then(Result::ok)
-    .unwrap_or((false, false));
+                        sessions = Table::Sessions.as_str(),
+                    ),
+                    rusqlite::params![
+                        &init_for_check,
+                        SessionAgentType::Orchestrator.as_sql_str(),
+                        now,
+                    ],
+                    |_| Ok(true),
+                )
+                .unwrap_or(false);
+            Ok((is_executing, active_orchestrator))
+        })
+        .await
+        .ok()
+        .and_then(Result::ok)
+        .unwrap_or((false, false));
 
     let (is_executing, active_orchestrator) = preflight;
     if !is_executing {
@@ -2173,17 +2172,10 @@ pub async fn respawn_orchestrator_for_initiative(
     // operator-actionable surface lands before the terminal-state
     // marker. A crash between either pair leaves the store internally
     // consistent — both rolled back, never half-applied.
-    let policy_epoch_for_escalation: i64 = ctx
-        .policy
-        .load_full()
-        .epoch() as i64;
-    let escalation_timeout_secs = ctx
-        .policy
-        .load_full()
-        .escalation_timeout()
-        .as_secs() as i64;
-    let store_for_ceiling   = Arc::clone(&ctx.store);
-    let init_for_ceiling    = initiative_id.to_owned();
+    let policy_epoch_for_escalation: i64 = ctx.policy.load_full().epoch() as i64;
+    let escalation_timeout_secs = ctx.policy.load_full().escalation_timeout().as_secs() as i64;
+    let store_for_ceiling = Arc::clone(&ctx.store);
+    let init_for_ceiling = initiative_id.to_owned();
     let ceiling_outcome = tokio::task::spawn_blocking(move || -> Result<
         Option<(crate::orch_respawn_ceiling::CeilingOutcome, Option<String>)>,
         rusqlite::Error,
@@ -2327,7 +2319,8 @@ pub async fn respawn_orchestrator_for_initiative(
             return None;
         }
         Some(crate::orch_respawn_ceiling::CeilingOutcome::Exceeded {
-            count_after_increment, max_attempts,
+            count_after_increment,
+            max_attempts,
         }) => {
             eprintln!(
                 "{{\"level\":\"error\",\
@@ -2348,7 +2341,7 @@ pub async fn respawn_orchestrator_for_initiative(
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::OrchestratorRespawnCeilingExceeded {
                     initiative_id: initiative_id.to_owned(),
-                    attempts:      count_after_increment,
+                    attempts: count_after_increment,
                     max_attempts,
                 },
                 None,
@@ -2430,49 +2423,50 @@ pub async fn respawn_orchestrator_for_initiative(
     //    fresh lineage tree per decision-cycle, mirroring
     //    `auto_spawn_orchestrator_session_in_tx`).
     let store_for_insert = Arc::clone(&ctx.store);
-    let init_for_insert  = initiative_id.to_owned();
-    let new_session = tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
-        use raxis_types::SessionId;
+    let init_for_insert = initiative_id.to_owned();
+    let new_session =
+        tokio::task::spawn_blocking(move || -> Result<Option<String>, rusqlite::Error> {
+            use raxis_types::SessionId;
 
-        let session_id_s = SessionId::new_v4().as_str().to_owned();
-        let lineage_id   = uuid::Uuid::new_v4().to_string();
-        let session_token = match raxis_crypto::token::generate_session_token() {
-            Ok(t)  => t,
-            Err(_) => return Ok(None),
-        };
-        let now_secs   = unix_now_secs();
-        let expires_at = now_secs + 86_400;
+            let session_id_s = SessionId::new_v4().as_str().to_owned();
+            let lineage_id = uuid::Uuid::new_v4().to_string();
+            let session_token = match raxis_crypto::token::generate_session_token() {
+                Ok(t) => t,
+                Err(_) => return Ok(None),
+            };
+            let now_secs = unix_now_secs();
+            let expires_at = now_secs + 86_400;
 
-        let conn = store_for_insert.lock_sync();
-        conn.execute(
-            &format!(
-                "INSERT INTO {sessions} (
+            let conn = store_for_insert.lock_sync();
+            conn.execute(
+                &format!(
+                    "INSERT INTO {sessions} (
                     session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
                     lineage_id, fetch_quota, created_at, expires_at, revoked,
                     session_agent_type, can_delegate, initiative_id
                  ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,1,?13)",
-                sessions = Table::Sessions.as_str(),
-            ),
-            rusqlite::params![
-                session_id_s,
-                "Planner",
-                session_token,
-                0i64,
-                Option::<String>::None,
-                Option::<String>::None,
-                Option::<String>::None,
-                lineage_id,
-                1000i64,
-                now_secs,
-                expires_at,
-                SessionAgentType::Orchestrator.as_sql_str(),
-                init_for_insert,
-            ],
-        )?;
-        Ok(Some(session_id_s))
-    })
-    .await;
+                    sessions = Table::Sessions.as_str(),
+                ),
+                rusqlite::params![
+                    session_id_s,
+                    "Planner",
+                    session_token,
+                    0i64,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    Option::<String>::None,
+                    lineage_id,
+                    1000i64,
+                    now_secs,
+                    expires_at,
+                    SessionAgentType::Orchestrator.as_sql_str(),
+                    init_for_insert,
+                ],
+            )?;
+            Ok(Some(session_id_s))
+        })
+        .await;
 
     let new_session_id = match new_session {
         Ok(Ok(Some(id))) => id,
@@ -2517,7 +2511,7 @@ pub async fn respawn_orchestrator_for_initiative(
     // without an explicit `[egress]` entry.
     let allowlist = raxis_egress_admission::EgressAllowlist {
         exact_hosts: policy_snapshot.effective_egress_domains(),
-        patterns:    policy_snapshot.effective_egress_patterns(),
+        patterns: policy_snapshot.effective_egress_patterns(),
         credential_proxy_real_targets: Default::default(),
     };
 
@@ -2538,7 +2532,7 @@ pub async fn respawn_orchestrator_for_initiative(
                  \"session_id\":\"{session_id}\",\
                  \"kernel_ipc_bridged\":{bridged}}}",
                 session_id = handle.session_id,
-                bridged    = handle.kernel_ipc_stream.is_some(),
+                bridged = handle.kernel_ipc_stream.is_some(),
             );
             // Same dispatcher wiring as the approve_plan boot path —
             // the substrate-surrendered IPC stream needs a tokio
@@ -2554,7 +2548,7 @@ pub async fn respawn_orchestrator_for_initiative(
                  \"session_id\":\"{session_id}\",\
                  \"stage\":\"substrate_spawn\",\"error\":\"{err}\"}}",
                 session_id = new_session_id,
-                err        = e,
+                err = e,
             );
             None
         }
@@ -2631,16 +2625,13 @@ struct MetaSidecar {
 /// existing meta dir; each file write is a fresh truncate so a
 /// retried spawn always observes the latest projection.
 fn provision_meta_sidecar(
-    data_dir:    Option<&Path>,
-    session_id:  &str,
-    ksb_json:    Option<&str>,
+    data_dir: Option<&Path>,
+    session_id: &str,
+    ksb_json: Option<&str>,
     task_prompt: Option<&str>,
 ) -> Option<MetaSidecar> {
     let data_dir = data_dir?;
-    let meta_dir = data_dir
-        .join("guests")
-        .join(session_id)
-        .join("meta");
+    let meta_dir = data_dir.join("guests").join(session_id).join("meta");
     if let Err(e) = std::fs::create_dir_all(&meta_dir) {
         eprintln!(
             "{{\"level\":\"warn\",\"event\":\"planner_meta_sidecar_mkdir_failed\",\
@@ -2664,7 +2655,7 @@ fn provision_meta_sidecar(
         ksb_guest_path = Some(format!(
             "{mount}/{file}",
             mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
-            file  = raxis_ksb::PLANNER_KSB_FILE_NAME,
+            file = raxis_ksb::PLANNER_KSB_FILE_NAME,
         ));
     }
 
@@ -2682,14 +2673,14 @@ fn provision_meta_sidecar(
         task_prompt_guest_path = Some(format!(
             "{mount}/{file}",
             mount = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
-            file  = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
+            file = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
         ));
     }
 
     let mount = raxis_isolation::WorkspaceMount {
-        host_path:    meta_dir,
-        guest_path:   raxis_ksb::PLANNER_KSB_GUEST_MOUNT.to_owned(),
-        mode:         raxis_isolation::MountMode::ReadOnly,
+        host_path: meta_dir,
+        guest_path: raxis_ksb::PLANNER_KSB_GUEST_MOUNT.to_owned(),
+        mode: raxis_isolation::MountMode::ReadOnly,
         content_hash: None,
     };
     Some(MetaSidecar {
@@ -2711,20 +2702,24 @@ fn provision_meta_sidecar(
 /// Used on the orchestrator path where the env table is freshly
 /// allocated and there is no caller-supplied override to defer to.
 fn populate_token_cap_env(
-    env:  &mut BTreeMap<String, String>,
+    env: &mut BTreeMap<String, String>,
     caps: Option<&raxis_policy::TokenCapsSection>,
 ) {
     use raxis_types::planner_env::{
-        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
-        PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
         PLANNER_MAX_TOKENS_TOTAL_ENV,
     };
-    let Some(caps) = caps else { return; };
+    let Some(caps) = caps else {
+        return;
+    };
     if let Some(n) = caps.max_input_tokens_per_session {
         env.insert(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV.to_owned(), n.to_string());
     }
     if let Some(n) = caps.max_output_tokens_per_session {
-        env.insert(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV.to_owned(), n.to_string());
+        env.insert(
+            PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV.to_owned(),
+            n.to_string(),
+        );
     }
     if let Some(n) = caps.max_total_tokens_per_session {
         env.insert(PLANNER_MAX_TOKENS_TOTAL_ENV.to_owned(), n.to_string());
@@ -2736,15 +2731,16 @@ fn populate_token_cap_env(
 /// wins over the policy default. Used on the executor path where
 /// `extra_env` is the caller's BTreeMap.
 fn populate_token_cap_env_or_insert(
-    env:  &mut BTreeMap<String, String>,
+    env: &mut BTreeMap<String, String>,
     caps: Option<&raxis_policy::TokenCapsSection>,
 ) {
     use raxis_types::planner_env::{
-        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
-        PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+        PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
         PLANNER_MAX_TOKENS_TOTAL_ENV,
     };
-    let Some(caps) = caps else { return; };
+    let Some(caps) = caps else {
+        return;
+    };
     if let Some(n) = caps.max_input_tokens_per_session {
         env.entry(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV.to_owned())
             .or_insert_with(|| n.to_string());
@@ -2779,14 +2775,14 @@ fn populate_token_cap_env_or_insert(
 /// task.
 pub(crate) fn resolve_planner_max_turns_base_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway:     Option<&raxis_policy::GatewaySection>,
+    gateway: Option<&raxis_policy::GatewaySection>,
 ) -> (u32, &'static str) {
     let policy_default = gateway.and_then(|g| g.planner_max_turns_default);
     match task_fields {
         Some(tf) => tf.effective_max_turns(policy_default),
-        None     => match policy_default {
+        None => match policy_default {
             Some(d) => (d, "policy"),
-            None    => (
+            None => (
                 crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
                 "compiled-default",
             ),
@@ -2809,8 +2805,7 @@ pub const DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING: u32 = 240;
 /// [`DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING`]. When set to a valid
 /// `u32` at kernel boot, the resolver clamps against that value
 /// instead of the compiled default.
-pub const RAXIS_PLANNER_MAX_TURNS_HARD_CEILING_ENV: &str =
-    "RAXIS_PLANNER_MAX_TURNS_HARD_CEILING";
+pub const RAXIS_PLANNER_MAX_TURNS_HARD_CEILING_ENV: &str = "RAXIS_PLANNER_MAX_TURNS_HARD_CEILING";
 
 /// V3 — read the progressive-scaling hard ceiling from the runtime
 /// env, falling back to the compiled default. Best-effort: a missing
@@ -2839,8 +2834,8 @@ pub(crate) fn resolve_planner_max_turns_hard_ceiling() -> u32 {
 /// `max_turns` (see [`resolve_planner_max_turns_base_for`]).
 pub(crate) fn resolve_planner_max_turns_step_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway:     Option<&raxis_policy::GatewaySection>,
-    base:        u32,
+    gateway: Option<&raxis_policy::GatewaySection>,
+    base: u32,
 ) -> (u32, &'static str) {
     if let Some(s) = task_fields.and_then(|tf| tf.max_turns_step) {
         return (s, "task");
@@ -2877,23 +2872,23 @@ fn derive_default_max_turns_step(base: u32) -> u32 {
 pub struct ResolvedPlannerMaxTurns {
     /// Effective per-session budget for THIS attempt
     /// (`min(base + (attempt - 1) * step, hard_ceiling)`).
-    pub effective:    u32,
+    pub effective: u32,
     /// Resolved base (per-task → per-policy → compiled default).
-    pub base:         u32,
+    pub base: u32,
     /// Resolved step (per-task → per-policy → derived default).
-    pub step:         u32,
+    pub step: u32,
     /// 1-based attempt index (`crash_retry_count + 1`).
-    pub attempt:      u32,
+    pub attempt: u32,
     /// Runtime hard ceiling clamp (default 240, env-overridable).
     pub hard_ceiling: u32,
     /// Stable label naming the **base** resolution arm verbatim
     /// (`"task"` / `"policy"` / `"compiled-default"`). Used by the
     /// `PlannerMaxTurnsResolved` structured-log line for operator
     /// grep parity with `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.
-    pub base_source:  &'static str,
+    pub base_source: &'static str,
     /// Stable label naming the **step** resolution arm verbatim
     /// (`"task"` / `"policy"` / `"derived-default"`).
-    pub step_source:  &'static str,
+    pub step_source: &'static str,
 }
 
 /// V3 — project a kernel-resolved `ResolvedPlannerMaxTurns` onto the
@@ -2905,10 +2900,10 @@ pub struct ResolvedPlannerMaxTurns {
 impl From<ResolvedPlannerMaxTurns> for raxis_ksb::MaxTurnsScalingView {
     fn from(r: ResolvedPlannerMaxTurns) -> Self {
         raxis_ksb::MaxTurnsScalingView {
-            max_turns_attempt:       r.attempt,
-            max_turns_base:          r.base,
-            max_turns_step:          r.step,
-            max_turns_hard_ceiling:  r.hard_ceiling,
+            max_turns_attempt: r.attempt,
+            max_turns_base: r.base,
+            max_turns_step: r.step,
+            max_turns_hard_ceiling: r.hard_ceiling,
         }
     }
 }
@@ -2933,17 +2928,14 @@ impl From<ResolvedPlannerMaxTurns> for raxis_ksb::MaxTurnsScalingView {
 /// truth for the resolution).
 pub(crate) fn resolve_planner_max_turns_for(
     task_fields: Option<&crate::initiatives::TaskPlanFields>,
-    gateway:     Option<&raxis_policy::GatewaySection>,
-    attempt:     u32,
+    gateway: Option<&raxis_policy::GatewaySection>,
+    attempt: u32,
 ) -> ResolvedPlannerMaxTurns {
-    let (base, base_source) =
-        resolve_planner_max_turns_base_for(task_fields, gateway);
-    let (step, step_source) =
-        resolve_planner_max_turns_step_for(task_fields, gateway, base);
+    let (base, base_source) = resolve_planner_max_turns_base_for(task_fields, gateway);
+    let (step, step_source) = resolve_planner_max_turns_step_for(task_fields, gateway, base);
     let hard_ceiling = resolve_planner_max_turns_hard_ceiling();
     let attempt_idx = attempt.max(1);
-    let scaled = base
-        .saturating_add(step.saturating_mul(attempt_idx.saturating_sub(1)));
+    let scaled = base.saturating_add(step.saturating_mul(attempt_idx.saturating_sub(1)));
     let effective = scaled.min(hard_ceiling);
     ResolvedPlannerMaxTurns {
         effective,
@@ -2974,19 +2966,17 @@ pub(crate) fn resolve_planner_max_turns_for(
 /// allocated; uses unconditional `insert` so a stray pre-existing
 /// value cannot mask the kernel-resolved one.
 fn populate_planner_max_turns_env(
-    env:             &mut BTreeMap<String, String>,
-    resolved:        ResolvedPlannerMaxTurns,
+    env: &mut BTreeMap<String, String>,
+    resolved: ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
-    session_id:      &str,
-    initiative_id:   &str,
+    session_id: &str,
+    initiative_id: &str,
 ) {
     env.insert(
         raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned(),
         resolved.effective.to_string(),
     );
-    log_planner_max_turns_resolved(
-        resolved, task_id_for_log, session_id, initiative_id,
-    );
+    log_planner_max_turns_resolved(resolved, task_id_for_log, session_id, initiative_id);
 }
 
 /// `entry().or_insert` variant of [`populate_planner_max_turns_env`].
@@ -2996,18 +2986,16 @@ fn populate_planner_max_turns_env(
 /// actually stamped the env (i.e. there was no prior override),
 /// matching the semantics of the token-cap `_or_insert` helpers.
 fn populate_planner_max_turns_env_or_insert(
-    env:             &mut BTreeMap<String, String>,
-    resolved:        ResolvedPlannerMaxTurns,
+    env: &mut BTreeMap<String, String>,
+    resolved: ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
-    session_id:      &str,
-    initiative_id:   &str,
+    session_id: &str,
+    initiative_id: &str,
 ) {
     let key = raxis_types::planner_env::PLANNER_MAX_TURNS_ENV.to_owned();
     if let std::collections::btree_map::Entry::Vacant(slot) = env.entry(key) {
         slot.insert(resolved.effective.to_string());
-        log_planner_max_turns_resolved(
-            resolved, task_id_for_log, session_id, initiative_id,
-        );
+        log_planner_max_turns_resolved(resolved, task_id_for_log, session_id, initiative_id);
     }
 }
 
@@ -3023,19 +3011,17 @@ fn populate_planner_max_turns_env_or_insert(
 /// here is non-fatal — the worst case is a budget regression, not a
 /// security regression, and the kernel still spawns the VM with the
 /// base ceiling.
-pub(crate) fn read_crash_retry_count_for_task(
-    conn:    &rusqlite::Connection,
-    task_id: &str,
-) -> u32 {
+pub(crate) fn read_crash_retry_count_for_task(conn: &rusqlite::Connection, task_id: &str) -> u32 {
     use rusqlite::OptionalExtension;
     let sql = "SELECT crash_retry_count FROM subtask_activations \
                WHERE task_id = ?1 ORDER BY created_at DESC LIMIT 1";
-    match conn.query_row(sql, rusqlite::params![task_id], |r| r.get::<_, i64>(0))
+    match conn
+        .query_row(sql, rusqlite::params![task_id], |r| r.get::<_, i64>(0))
         .optional()
     {
         Ok(Some(n)) => u32::try_from(n).unwrap_or(0),
-        Ok(None)    => 0,
-        Err(e)      => {
+        Ok(None) => 0,
+        Err(e) => {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"crash_retry_count_read_failed\",\
                  \"task_id\":\"{task_id}\",\"error\":\"{e}\"}}",
@@ -3053,10 +3039,10 @@ pub(crate) fn read_crash_retry_count_for_task(
 /// best-effort discipline as the existing
 /// `SessionVmFailedFinal` / `SessionVmRespawnAttempted` emits.
 fn maybe_emit_planner_max_turns_scaled_audit(
-    service:       &Arc<SessionSpawnService>,
-    resolved:      ResolvedPlannerMaxTurns,
-    session_id:    &str,
-    task_id:       Option<&str>,
+    service: &Arc<SessionSpawnService>,
+    resolved: ResolvedPlannerMaxTurns,
+    session_id: &str,
+    task_id: Option<&str>,
     initiative_id: &str,
 ) {
     if resolved.attempt <= 1 {
@@ -3078,14 +3064,14 @@ fn maybe_emit_planner_max_turns_scaled_audit(
     };
     if let Err(e) = service.audit().emit(
         raxis_audit_tools::AuditEventKind::PlannerMaxTurnsProgressivelyScaled {
-            task_id:      task_id.to_owned(),
-            attempt:      resolved.attempt,
-            base:         resolved.base,
-            step:         resolved.step,
-            effective:    resolved.effective,
+            task_id: task_id.to_owned(),
+            attempt: resolved.attempt,
+            base: resolved.base,
+            step: resolved.step,
+            effective: resolved.effective,
             hard_ceiling: resolved.hard_ceiling,
-            source:       resolved.base_source.to_owned(),
-            step_source:  resolved.step_source.to_owned(),
+            source: resolved.base_source.to_owned(),
+            step_source: resolved.step_source.to_owned(),
         },
         Some(session_id),
         Some(task_id),
@@ -3106,10 +3092,10 @@ fn maybe_emit_planner_max_turns_scaled_audit(
 /// + `source = …` lexemes; the new `attempt` / `base` / `step` /
 /// `effective` / `hard_ceiling` fields are additive.
 fn log_planner_max_turns_resolved(
-    resolved:        ResolvedPlannerMaxTurns,
+    resolved: ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
-    session_id:      &str,
-    initiative_id:   &str,
+    session_id: &str,
+    initiative_id: &str,
 ) {
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"PlannerMaxTurnsResolved\",\
@@ -3138,13 +3124,15 @@ fn log_planner_max_turns_resolved(
 /// invocation; opting in requires both keys to be present
 /// (validated at policy load).
 fn populate_sleep_cap_env(
-    env:  &mut BTreeMap<String, String>,
+    env: &mut BTreeMap<String, String>,
     caps: Option<&raxis_policy::SleepCapsSection>,
 ) {
     use raxis_types::planner_env::{
         PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
     };
-    let Some(caps) = caps else { return; };
+    let Some(caps) = caps else {
+        return;
+    };
     env.insert(
         PLANNER_MAX_SLEEP_PER_CALL_ENV.to_owned(),
         caps.max_seconds_per_call.to_string(),
@@ -3159,13 +3147,15 @@ fn populate_sleep_cap_env(
 /// executor path where the caller-supplied env may already declare
 /// overrides (test rewiring).
 fn populate_sleep_cap_env_or_insert(
-    env:  &mut BTreeMap<String, String>,
+    env: &mut BTreeMap<String, String>,
     caps: Option<&raxis_policy::SleepCapsSection>,
 ) {
     use raxis_types::planner_env::{
         PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
     };
-    let Some(caps) = caps else { return; };
+    let Some(caps) = caps else {
+        return;
+    };
     env.entry(PLANNER_MAX_SLEEP_PER_CALL_ENV.to_owned())
         .or_insert_with(|| caps.max_seconds_per_call.to_string());
     env.entry(PLANNER_MAX_SLEEP_CUMULATIVE_ENV.to_owned())
@@ -3216,25 +3206,25 @@ fn populate_sleep_cap_env_or_insert(
 /// duplicating the spawn-request construction shape.
 pub struct SpawnRequestProto {
     /// Stable per-session identifier minted by the kernel.
-    pub session_id:        String,
+    pub session_id: String,
     /// Owning task id (`None` for the canonical Orchestrator
     /// session, which has no `[[tasks]]` row).
-    pub task_id:           Option<String>,
+    pub task_id: Option<String>,
     /// Owning initiative id.
-    pub initiative_id:     String,
+    pub initiative_id: String,
     /// Verified image bytes the substrate boots.
-    pub image:             VerifiedImage,
+    pub image: VerifiedImage,
     /// Mounts the substrate exposes to the guest.
-    pub workspace_mounts:  Vec<raxis_isolation::WorkspaceMount>,
+    pub workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
     /// Resource envelope + boot args. The dynamic-resource-
     /// adjustment path mutates `vcpu_count` / `mem_mib` via the
     /// `crate::elastic::build_scaled_vm_spec` chokepoint.
-    pub vm_spec:           VmSpec,
+    pub vm_spec: VmSpec,
     /// Credential decls the spawn service rehydrates per attempt.
-    pub credentials:       Vec<raxis_plan_credentials::TaskCredentialDecl>,
+    pub credentials: Vec<raxis_plan_credentials::TaskCredentialDecl>,
     /// Egress allowlist — cloned per attempt to construct a fresh
     /// per-spawn `PolicyAdmissionService`.
-    pub egress_allowlist:  EgressAllowlist,
+    pub egress_allowlist: EgressAllowlist,
 }
 
 impl SpawnRequestProto {
@@ -3244,16 +3234,14 @@ impl SpawnRequestProto {
     /// across attempts.
     pub fn build_request(&self) -> SpawnRequest {
         SpawnRequest {
-            session_id:        self.session_id.clone(),
-            task_id:           self.task_id.clone(),
-            initiative_id:     self.initiative_id.clone(),
-            image:             self.image.clone(),
-            workspace_mounts:  self.workspace_mounts.clone(),
-            vm_spec:           self.vm_spec.clone(),
-            credentials:       self.credentials.clone(),
-            admission_service: Box::new(PolicyAdmissionService::new(
-                self.egress_allowlist.clone(),
-            )),
+            session_id: self.session_id.clone(),
+            task_id: self.task_id.clone(),
+            initiative_id: self.initiative_id.clone(),
+            image: self.image.clone(),
+            workspace_mounts: self.workspace_mounts.clone(),
+            vm_spec: self.vm_spec.clone(),
+            credentials: self.credentials.clone(),
+            admission_service: Box::new(PolicyAdmissionService::new(self.egress_allowlist.clone())),
         }
     }
 }
@@ -3329,15 +3317,15 @@ fn compute_backoff_ms(initial_ms: u32, max_ms: u32, attempt: u32) -> u32 {
 /// to the caller verbatim so operator dashboards see the substrate
 /// reason rather than an audit-disk-full surrogate.
 async fn spawn_with_transient_retry(
-    service:       &SessionSpawnService,
-    elastic:       &raxis_policy::ElasticConfig,
-    proto:         SpawnRequestProto,
+    service: &SessionSpawnService,
+    elastic: &raxis_policy::ElasticConfig,
+    proto: SpawnRequestProto,
 ) -> Result<SpawnHandle, SpawnError> {
     use raxis_audit_tools::AuditEventKind;
 
-    let max_attempts            = elastic.transient_retry_max_attempts;
-    let initial_backoff_ms      = elastic.transient_retry_initial_backoff_ms;
-    let max_backoff_ms          = elastic.transient_retry_max_backoff_ms;
+    let max_attempts = elastic.transient_retry_max_attempts;
+    let initial_backoff_ms = elastic.transient_retry_initial_backoff_ms;
+    let max_backoff_ms = elastic.transient_retry_max_backoff_ms;
 
     // 1-indexed attempt counter for the audit projection. Attempt 0
     // is the original spawn (the one that just failed when we land
@@ -3349,7 +3337,7 @@ async fn spawn_with_transient_retry(
         match service.spawn_session(req).await {
             Ok(handle) => return Ok(handle),
             Err(err) => {
-                let class      = classify_spawn_error(&err);
+                let class = classify_spawn_error(&err);
                 let prev_reason = err.to_string();
 
                 // Permanent ⇒ short-circuit. INV-ELASTIC-02.
@@ -3357,12 +3345,12 @@ async fn spawn_with_transient_retry(
                     let total_attempts = retry_attempt.saturating_add(1);
                     if let Err(e) = service.audit().emit(
                         AuditEventKind::SessionVmFailedFinal {
-                            session_id:    proto.session_id.clone(),
-                            task_id:       proto.task_id.clone(),
+                            session_id: proto.session_id.clone(),
+                            task_id: proto.task_id.clone(),
                             initiative_id: proto.initiative_id.clone(),
                             total_attempts,
                             failure_class: class.as_str().to_owned(),
-                            final_reason:  prev_reason.clone(),
+                            final_reason: prev_reason.clone(),
                         },
                         Some(&proto.session_id),
                         proto.task_id.as_deref(),
@@ -3388,12 +3376,12 @@ async fn spawn_with_transient_retry(
                     let total_attempts = retry_attempt.saturating_add(1);
                     if let Err(e) = service.audit().emit(
                         AuditEventKind::SessionVmFailedFinal {
-                            session_id:    proto.session_id.clone(),
-                            task_id:       proto.task_id.clone(),
+                            session_id: proto.session_id.clone(),
+                            task_id: proto.task_id.clone(),
                             initiative_id: proto.initiative_id.clone(),
                             total_attempts,
                             failure_class: class.as_str().to_owned(),
-                            final_reason:  prev_reason.clone(),
+                            final_reason: prev_reason.clone(),
                         },
                         Some(&proto.session_id),
                         proto.task_id.as_deref(),
@@ -3413,20 +3401,17 @@ async fn spawn_with_transient_retry(
                 // audit event is 1-indexed (the first retry is
                 // attempt = 1).
                 let next_attempt = retry_attempt.saturating_add(1);
-                let backoff_ms   = compute_backoff_ms(
-                    initial_backoff_ms,
-                    max_backoff_ms,
-                    next_attempt,
-                );
+                let backoff_ms =
+                    compute_backoff_ms(initial_backoff_ms, max_backoff_ms, next_attempt);
 
                 if let Err(e) = service.audit().emit(
                     AuditEventKind::SessionVmRespawnAttempted {
-                        session_id:      proto.session_id.clone(),
-                        task_id:         proto.task_id.clone(),
-                        initiative_id:   proto.initiative_id.clone(),
-                        attempt:         next_attempt,
+                        session_id: proto.session_id.clone(),
+                        task_id: proto.task_id.clone(),
+                        initiative_id: proto.initiative_id.clone(),
+                        attempt: next_attempt,
                         max_attempts,
-                        failure_class:   class.as_str().to_owned(),
+                        failure_class: class.as_str().to_owned(),
                         previous_reason: prev_reason.clone(),
                         backoff_ms,
                     },
@@ -3451,10 +3436,10 @@ async fn spawn_with_transient_retry(
                 // shape so dashboards can join on either label.
                 if let Some(hub) = service.observability_hub() {
                     let image_kind_str = match proto.image.kind {
-                        raxis_isolation::ImageKind::RootfsErofs         => "rootfs_erofs",
+                        raxis_isolation::ImageKind::RootfsErofs => "rootfs_erofs",
                         raxis_isolation::ImageKind::RootfsInitramfsCpio => "rootfs_initramfs_cpio",
-                        raxis_isolation::ImageKind::EnclaveSigStruct    => "enclave_sigstruct",
-                        raxis_isolation::ImageKind::WasmModule          => "wasm_module",
+                        raxis_isolation::ImageKind::EnclaveSigStruct => "enclave_sigstruct",
+                        raxis_isolation::ImageKind::WasmModule => "wasm_module",
                     };
                     crate::observability::record_isolation_respawn_attempted(
                         hub.as_ref(),
@@ -3476,10 +3461,7 @@ async fn spawn_with_transient_retry(
                     reason = prev_reason.replace('"', "\\\""),
                 );
 
-                tokio::time::sleep(std::time::Duration::from_millis(
-                    backoff_ms as u64,
-                ))
-                .await;
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms as u64)).await;
 
                 retry_attempt = next_attempt;
             }
@@ -3578,26 +3560,23 @@ pub enum RespawnWithLargerOutcome {
 /// re-evaluates the trigger.
 #[allow(clippy::too_many_arguments)]
 pub async fn respawn_with_larger_resources(
-    service:           Arc<SessionSpawnService>,
-    elastic:           &raxis_policy::ElasticConfig,
-    rate_limiter:      &Arc<crate::elastic::ScalingRateLimiter>,
-    prev_session_id:   &str,
-    drain_grace:       std::time::Duration,
-    new_proto:         SpawnRequestProto,
-    direction:         crate::elastic::ScaleDirection,
-    prev_vcpus:        u32,
-    new_vcpus:         u32,
-    prev_memory_mb:    u32,
-    new_memory_mb:     u32,
-    reason:            &str,
+    service: Arc<SessionSpawnService>,
+    elastic: &raxis_policy::ElasticConfig,
+    rate_limiter: &Arc<crate::elastic::ScalingRateLimiter>,
+    prev_session_id: &str,
+    drain_grace: std::time::Duration,
+    new_proto: SpawnRequestProto,
+    direction: crate::elastic::ScaleDirection,
+    prev_vcpus: u32,
+    new_vcpus: u32,
+    prev_memory_mb: u32,
+    new_memory_mb: u32,
+    reason: &str,
 ) -> RespawnWithLargerOutcome {
     // ── Step 0: §5 rate-limit gate. INV-ELASTIC-04 soft event. ──
     // See sibling call-site comment: `i64`→`u64` saturating cast.
     let now = unix_now_secs().max(0) as u64;
-    match rate_limiter.try_admit(
-        now,
-        elastic.max_concurrent_scaling_events_per_minute,
-    ) {
+    match rate_limiter.try_admit(now, elastic.max_concurrent_scaling_events_per_minute) {
         crate::elastic::RateLimitDecision::Admit => {}
         crate::elastic::RateLimitDecision::Defer => {
             if let Err(e) = crate::elastic::emit_scale_deferred_audit(
@@ -3676,7 +3655,7 @@ pub async fn respawn_with_larger_resources(
     //    scaling decision.
     match spawn_with_transient_retry(&service, elastic, new_proto).await {
         Ok(handle) => RespawnWithLargerOutcome::Ok(handle),
-        Err(err)   => RespawnWithLargerOutcome::SpawnFailed(err),
+        Err(err) => RespawnWithLargerOutcome::SpawnFailed(err),
     }
 }
 
@@ -3694,14 +3673,14 @@ mod retry_tests {
     #[test]
     fn compute_backoff_grows_exponentially() {
         // initial = 100ms, max = 4000ms.
-        assert_eq!(compute_backoff_ms(100, 4_000, 1),  100);
-        assert_eq!(compute_backoff_ms(100, 4_000, 2),  200);
-        assert_eq!(compute_backoff_ms(100, 4_000, 3),  400);
-        assert_eq!(compute_backoff_ms(100, 4_000, 4),  800);
-        assert_eq!(compute_backoff_ms(100, 4_000, 5),  1_600);
-        assert_eq!(compute_backoff_ms(100, 4_000, 6),  3_200);
+        assert_eq!(compute_backoff_ms(100, 4_000, 1), 100);
+        assert_eq!(compute_backoff_ms(100, 4_000, 2), 200);
+        assert_eq!(compute_backoff_ms(100, 4_000, 3), 400);
+        assert_eq!(compute_backoff_ms(100, 4_000, 4), 800);
+        assert_eq!(compute_backoff_ms(100, 4_000, 5), 1_600);
+        assert_eq!(compute_backoff_ms(100, 4_000, 6), 3_200);
         // Clamped:
-        assert_eq!(compute_backoff_ms(100, 4_000, 7),  4_000);
+        assert_eq!(compute_backoff_ms(100, 4_000, 7), 4_000);
         assert_eq!(compute_backoff_ms(100, 4_000, 30), 4_000);
     }
 
@@ -3718,16 +3697,15 @@ mod retry_tests {
         // u32::MAX initial + a long retry chain MUST NOT panic; the
         // clamp keeps the result inside the policy ceiling.
         let initial = u32::MAX;
-        let max     = 5_000;
+        let max = 5_000;
         assert_eq!(compute_backoff_ms(initial, max, 31), max);
         assert_eq!(compute_backoff_ms(initial, max, 64), max);
     }
 
     #[test]
     fn classify_spawn_isolation_spawn_uses_isolation_classify() {
-        let transient = SpawnError::IsolationSpawn(
-            IsolationError::SpawnFailed("noisy neighbour".into()),
-        );
+        let transient =
+            SpawnError::IsolationSpawn(IsolationError::SpawnFailed("noisy neighbour".into()));
         assert_eq!(
             classify_spawn_error(&transient),
             IsolationFailureClass::Transient,
@@ -3771,7 +3749,7 @@ mod retry_tests {
 pub struct ExecutorSpawnContext {
     /// Install dir from which the Executor-starter / Reviewer-core
     /// canonical images are resolved.
-    pub install_dir:    PathBuf,
+    pub install_dir: PathBuf,
     /// Kernel version pinned per `system-requirements.md §1`.
     pub kernel_version: String,
     /// Default Executor VM resource budget.
@@ -3781,14 +3759,14 @@ pub struct ExecutorSpawnContext {
     /// policy keys land.
     pub executor_vcpu_count: u32,
     /// Memory ceiling in MiB for Executor VMs.
-    pub executor_mem_mib:    u32,
+    pub executor_mem_mib: u32,
     /// Default Reviewer VM resource budget — Reviewers run pure-
     /// static `ripgrep` / `read_file` workflows so the budget is
     /// smaller than the Executor's. Matches `planner-harness.md
     /// §4.2 Pure-Static Reviewer`.
     pub reviewer_vcpu_count: u32,
     /// Memory ceiling in MiB for Reviewer VMs.
-    pub reviewer_mem_mib:    u32,
+    pub reviewer_mem_mib: u32,
     /// V2_GAPS §B1 — kernel data-dir, used to derive the planner
     /// UDS socket path stamped into the guest env so
     /// `raxis-planner-core::run_role_session` can connect back via
@@ -3852,16 +3830,16 @@ impl ExecutorSpawnContext {
             // EROFS images skip the unpacker entirely (the rootfs is a
             // virtio-blk drive), so the production budget remains the
             // 1 GiB documented in `host-capacity.md §4.1`.
-            executor_mem_mib:    6 * 1024,
+            executor_mem_mib: 6 * 1024,
             reviewer_vcpu_count: 1,
             // The dev-host reviewer-core initramfs cpio.gz is ~5 MiB
             // on disk and decompresses to ~127 MiB in tmpfs (planner
             // binary only, no toolchain). 1 GiB covers the image plus
             // the reviewer's static-analysis working set.
-            reviewer_mem_mib:    1024,
-            data_dir:            None,
-            scale_down_history:  Arc::new(crate::elastic::ScaleDownHistory::new()),
-            rate_limiter:        Arc::new(crate::elastic::ScalingRateLimiter::new()),
+            reviewer_mem_mib: 1024,
+            data_dir: None,
+            scale_down_history: Arc::new(crate::elastic::ScaleDownHistory::new()),
+            rate_limiter: Arc::new(crate::elastic::ScalingRateLimiter::new()),
         }
     }
 
@@ -3884,10 +3862,7 @@ impl ExecutorSpawnContext {
 
     /// Builder: share an externally-owned rate limiter. See
     /// [`OrchestratorSpawnContext::with_rate_limiter`].
-    pub fn with_rate_limiter(
-        mut self,
-        rl: Arc<crate::elastic::ScalingRateLimiter>,
-    ) -> Self {
+    pub fn with_rate_limiter(mut self, rl: Arc<crate::elastic::ScalingRateLimiter>) -> Self {
         self.rate_limiter = rl;
         self
     }
@@ -3966,18 +3941,18 @@ pub enum ExecutorAgentKind {
 /// see `specs/v2/airgap-architecture.md`.)
 #[allow(clippy::too_many_arguments)]
 pub async fn spawn_executor_for_task(
-    spawn_ctx:        &ExecutorSpawnContext,
-    agent_kind:       ExecutorAgentKind,
-    session_id:       &str,
-    task_id:          &str,
-    initiative_id:    &str,
+    spawn_ctx: &ExecutorSpawnContext,
+    agent_kind: ExecutorAgentKind,
+    session_id: &str,
+    task_id: &str,
+    initiative_id: &str,
     egress_allowlist: EgressAllowlist,
     mut workspace_mounts: Vec<raxis_isolation::WorkspaceMount>,
-    extra_env:        BTreeMap<String, String>,
-    service:          Arc<SessionSpawnService>,
-    plan_registry:    &Arc<crate::initiatives::PlanRegistry>,
-    store:            &Arc<Store>,
-    policy:           &raxis_policy::PolicyBundle,
+    extra_env: BTreeMap<String, String>,
+    service: Arc<SessionSpawnService>,
+    plan_registry: &Arc<crate::initiatives::PlanRegistry>,
+    store: &Arc<Store>,
+    policy: &raxis_policy::PolicyBundle,
     // V2.5 §13 — operator-published `[[vm_images]]` override.
     // When `Some`, the spawn path uses this image instead of the
     // canonical Executor-starter / Reviewer-core. The activation
@@ -3990,7 +3965,7 @@ pub async fn spawn_executor_for_task(
     // `INV-PLANNER-HARNESS-02`); this function still enforces
     // that defensively to avoid a regression upstream from
     // booting a non-canonical Reviewer.
-    image_override:   Option<VerifiedImage>,
+    image_override: Option<VerifiedImage>,
 ) -> Result<SpawnHandle, OrchestratorSpawnError> {
     // ── Step 1: resolve image path for the agent. ─────────────────
     //
@@ -4001,14 +3976,16 @@ pub async fn spawn_executor_for_task(
     // structurally forbidden per `INV-PLANNER-HARNESS-02`).
     let verified_image = if let Some(override_img) = image_override {
         if matches!(agent_kind, ExecutorAgentKind::Reviewer) {
-            return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(format!(
-                "reviewer task `{task_id}` received an operator-published \
+            return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(
+                format!(
+                    "reviewer task `{task_id}` received an operator-published \
                  vm_image override `{image_id}`; the Reviewer image is \
                  kernel-canonical (INV-PLANNER-HARNESS-02). The plan-side \
                  validator should have rejected this; failing closed at \
                  spawn time.",
-                image_id = override_img.image_id,
-            ))));
+                    image_id = override_img.image_id,
+                ),
+            )));
         }
         override_img
     } else {
@@ -4064,8 +4041,8 @@ pub async fn spawn_executor_for_task(
                 &spawn_ctx.kernel_version,
             );
         VerifiedImage {
-            kind:      image_kind,
-            body:      ImageBody::Path(image_path),
+            kind: image_kind,
+            body: ImageBody::Path(image_path),
             signature: ImageSignature(Vec::new()),
             image_id,
         }
@@ -4098,11 +4075,9 @@ pub async fn spawn_executor_for_task(
     let (credentials, session_token_db) =
         tokio::task::spawn_blocking(move || -> Result<_, String> {
             let conn = store_for_read.lock_sync();
-            let creds = kernel_lifecycle::read_task_credential_proxies_in_tx(
-                &conn,
-                &task_id_for_read,
-            )
-            .map_err(|e| e.to_string())?;
+            let creds =
+                kernel_lifecycle::read_task_credential_proxies_in_tx(&conn, &task_id_for_read)
+                    .map_err(|e| e.to_string())?;
             let token: String = conn
                 .query_row(
                     "SELECT session_token FROM sessions WHERE session_id = ?1",
@@ -4110,9 +4085,7 @@ pub async fn spawn_executor_for_task(
                     |row| row.get(0),
                 )
                 .map_err(|e| {
-                    format!(
-                        "session row missing for session_id {session_id_for_read}: {e}",
-                    )
+                    format!("session row missing for session_id {session_id_for_read}: {e}",)
                 })?;
             Ok((creds, token))
         })
@@ -4128,12 +4101,14 @@ pub async fn spawn_executor_for_task(
     // future plan-validator regression cannot silently boot a
     // Reviewer with credential bindings.
     if matches!(agent_kind, ExecutorAgentKind::Reviewer) && !credentials.is_empty() {
-        return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(format!(
-            "reviewer task `{task_id}` has {n} credential decl(s); \
+        return Err(OrchestratorSpawnError::Substrate(SpawnError::Audit(
+            format!(
+                "reviewer task `{task_id}` has {n} credential decl(s); \
              the Pure-Static Reviewer image cannot consume credentials \
              (planner-harness.md §INV-PLANNER-HARNESS-02)",
-            n = credentials.len(),
-        ))));
+                n = credentials.len(),
+            ),
+        )));
     }
 
     // ── Step 3: build the spawn spec. ────────────────────────────
@@ -4221,7 +4196,7 @@ pub async fn spawn_executor_for_task(
     };
     let crash_retry_count_for_attempt = {
         let store_for_read = Arc::clone(store);
-        let task_id_owned  = task_id.to_owned();
+        let task_id_owned = task_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_read.lock_sync();
             read_crash_retry_count_for_task(&*conn, &task_id_owned)
@@ -4262,11 +4237,11 @@ pub async fn spawn_executor_for_task(
         ExecutorAgentKind::Reviewer => crate::initiatives::ksb_assembly::KsbRole::Reviewer,
     };
     let ksb_snapshot = {
-        let store_for_ksb     = Arc::clone(store);
-        let registry_for_ksb  = Arc::clone(plan_registry);
-        let initiative_owned  = initiative_id.to_owned();
-        let task_owned        = task_id.to_owned();
-        let session_owned     = session_id.to_owned();
+        let store_for_ksb = Arc::clone(store);
+        let registry_for_ksb = Arc::clone(plan_registry);
+        let initiative_owned = initiative_id.to_owned();
+        let task_owned = task_id.to_owned();
+        let session_owned = session_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
@@ -4274,17 +4249,17 @@ pub async fn spawn_executor_for_task(
                 &registry_for_ksb,
                 &crate::initiatives::ksb_assembly::KsbInputs {
                     initiative_id: &initiative_owned,
-                    task_id:       Some(&task_owned),
+                    task_id: Some(&task_owned),
                     role,
-                    token_budget_remaining:        0,
-                    wallclock_budget_remaining_s:  0,
-                    credential_ports:              Vec::new(),
+                    token_budget_remaining: 0,
+                    wallclock_budget_remaining_s: 0,
+                    credential_ports: Vec::new(),
                     // Slice C — stamp the executor / reviewer
                     // session id (already minted at this call
                     // site) into the capabilities envelope.
-                    session_id:                    &session_owned,
-                    planner_max_turns:             planner_max_turns_resolved.effective,
-                    max_turns_scaling:             planner_max_turns_resolved.into(),
+                    session_id: &session_owned,
+                    planner_max_turns: planner_max_turns_resolved.effective,
+                    max_turns_scaling: planner_max_turns_resolved.into(),
                 },
             )
         })
@@ -4297,11 +4272,7 @@ pub async fn spawn_executor_for_task(
                  \"initiative_id\":\"{initiative_id}\",\"task_id\":\"{task_id}\",\
                  \"session_id\":\"{session_id}\"}}",
             );
-            crate::initiatives::ksb_assembly::fallback_snapshot(
-                initiative_id,
-                Some(task_id),
-                role,
-            )
+            crate::initiatives::ksb_assembly::fallback_snapshot(initiative_id, Some(task_id), role)
         })
     };
     let ksb_json = serde_json::to_string(&ksb_snapshot)
@@ -4324,8 +4295,7 @@ pub async fn spawn_executor_for_task(
     //
     // Falls back to the legacy inline channels when no `data_dir`
     // is available (in-process subprocess-isolation tests).
-    let task_prompt_for_sidecar =
-        env.remove(PLANNER_TASK_PROMPT_ENV);
+    let task_prompt_for_sidecar = env.remove(PLANNER_TASK_PROMPT_ENV);
     let meta_sidecar = provision_meta_sidecar(
         spawn_ctx.data_dir.as_deref(),
         session_id,
@@ -4363,8 +4333,8 @@ pub async fn spawn_executor_for_task(
         vcpu_count,
         mem_mib,
         egress_tier,
-        cgroup_quota:      None,
-        boot_args:         Vec::new(),
+        cgroup_quota: None,
+        boot_args: Vec::new(),
         entrypoint_argv,
         // Per-session token; the substrate stamps it into the
         // guest env under `RAXIS_SESSION_TOKEN`. Sourced from the
@@ -4372,9 +4342,9 @@ pub async fn spawn_executor_for_task(
         // activation handler — same 64-char hex value the kernel-
         // mediated egress handler revalidates on every
         // `IpcMessage::PlannerFetchRequest`. INV-IPC-AUTH-01.
-        session_token:     SessionToken(session_token_db.clone()),
-        vsock_cid:         None,
-        virtio_fs_mounts:  Vec::new(),
+        session_token: SessionToken(session_token_db.clone()),
+        vsock_cid: None,
+        virtio_fs_mounts: Vec::new(),
         // Same host-canonical kernel binary as the orchestrator path.
         // SubprocessIsolation ignores; AVF/Firecracker hand it to
         // their boot loaders.
@@ -4398,11 +4368,7 @@ pub async fn spawn_executor_for_task(
         ExecutorAgentKind::Executor => crate::elastic::RoleKey::Executor,
         ExecutorAgentKind::Reviewer => crate::elastic::RoleKey::Reviewer,
     };
-    let plan_overrides = plan_elastic_overrides_for_task(
-        plan_registry,
-        initiative_id,
-        task_id,
-    );
+    let plan_overrides = plan_elastic_overrides_for_task(plan_registry, initiative_id, task_id);
     let (vm_spec, scale_down_decision) = maybe_apply_scale_down(
         vm_spec,
         role,
@@ -4425,20 +4391,16 @@ pub async fn spawn_executor_for_task(
     // bounded by `policy.[elastic].transient_retry_max_attempts`,
     // permanent failures short-circuit to `SessionVmFailedFinal`.
     let proto = SpawnRequestProto {
-        session_id:       session_id.to_owned(),
-        task_id:          Some(task_id.to_owned()),
-        initiative_id:    initiative_id.to_owned(),
-        image:            verified_image,
+        session_id: session_id.to_owned(),
+        task_id: Some(task_id.to_owned()),
+        initiative_id: initiative_id.to_owned(),
+        image: verified_image,
         workspace_mounts,
         vm_spec,
         credentials,
         egress_allowlist,
     };
-    let handle = spawn_with_transient_retry(
-        &service,
-        policy.elastic(),
-        proto,
-    ).await?;
+    let handle = spawn_with_transient_retry(&service, policy.elastic(), proto).await?;
 
     // ── Step 5: emit SessionVmScaleEvent on a successful down-bias.
     //
@@ -4483,18 +4445,18 @@ pub async fn spawn_executor_for_task(
 /// default produces no plan-level narrowing, so the policy
 /// ceiling alone governs the spawn.
 fn plan_elastic_overrides_for_task(
-    registry:      &Arc<crate::initiatives::PlanRegistry>,
+    registry: &Arc<crate::initiatives::PlanRegistry>,
     initiative_id: &str,
-    task_id:       &str,
+    task_id: &str,
 ) -> crate::elastic::PlanElasticOverrides {
     let key = crate::initiatives::TaskKey::new(initiative_id, task_id);
     match registry.get(&key) {
         Some(fields) => crate::elastic::PlanElasticOverrides {
-            elastic:        fields.elastic,
-            min_vcpus:      fields.min_vcpus,
-            max_vcpus:      fields.max_vcpus,
-            min_memory_mb:  fields.min_memory_mb,
-            max_memory_mb:  fields.max_memory_mb,
+            elastic: fields.elastic,
+            min_vcpus: fields.min_vcpus,
+            max_vcpus: fields.max_vcpus,
+            min_memory_mb: fields.min_memory_mb,
+            max_memory_mb: fields.max_memory_mb,
         },
         None => crate::elastic::PlanElasticOverrides::default(),
     }
@@ -4613,7 +4575,7 @@ mod tests {
         // blocking pool — same pattern the kernel intent handlers
         // use (`run_phase_a`-style spawn_blocking wrap).
         let session = session_id.to_owned();
-        let init    = initiative_id.to_owned();
+        let init = initiative_id.to_owned();
         tokio::task::spawn_blocking(move || {
             insert_orchestrator_session_row_blocking(&store, &session, &init);
         })
@@ -4633,8 +4595,8 @@ mod tests {
         let token = raxis_crypto::token::generate_session_token()
             .expect("test session token generation must succeed");
         let lineage = uuid::Uuid::new_v4().to_string();
-        let now      = unix_now_secs();
-        let expires  = now + 3600;
+        let now = unix_now_secs();
+        let expires = now + 3600;
         let conn = store.lock_sync();
         // FK guard: `sessions.initiative_id REFERENCES
         // initiatives(initiative_id)` (Migration 18); insert the
@@ -4651,11 +4613,7 @@ mod tests {
                  ) VALUES (?1, 'Executing', '[]', ?2, ?3, ?3)",
                 init = Table::Initiatives.as_str(),
             ),
-            rusqlite::params![
-                initiative_id,
-                hex::encode([0u8; 32]),
-                now,
-            ],
+            rusqlite::params![initiative_id, hex::encode([0u8; 32]), now,],
         );
         conn.execute(
             &format!(
@@ -4694,9 +4652,7 @@ mod tests {
     /// keeping these spawn-trait round-trips focused on the trait
     /// surface rather than token-cap stamping (which has its own
     /// dedicated unit tests on `populate_token_cap_env`).
-    fn test_policy_arcswap()
-        -> Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>>
-    {
+    fn test_policy_arcswap() -> Arc<arc_swap::ArcSwap<raxis_policy::PolicyBundle>> {
         Arc::new(arc_swap::ArcSwap::from_pointee(
             raxis_policy::PolicyBundle::for_tests_with_operators(vec![]),
         ))
@@ -4711,18 +4667,14 @@ mod tests {
         //    SubprocessIsolation + real CredentialProxyManager. ──
         let creds_dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(
-            raxis_credentials_file::FileCredentialBackend::open_without_uid_check(
-                creds_dir.path(),
-            ),
+            raxis_credentials_file::FileCredentialBackend::open_without_uid_check(creds_dir.path()),
         );
         let audit = Arc::new(FakeAuditSink::new());
         let proxy_manager = Arc::new(CredentialProxyManager::new(
             Arc::clone(&backend) as _,
             Arc::clone(&audit) as _,
         ));
-        let isolation = Arc::new(
-            SubprocessIsolation::new("kernel-orchestrator-bridge").unwrap(),
-        );
+        let isolation = Arc::new(SubprocessIsolation::new("kernel-orchestrator-bridge").unwrap());
         let service = Arc::new(SessionSpawnService::new(
             isolation as _,
             Arc::clone(&proxy_manager),
@@ -4731,9 +4683,7 @@ mod tests {
 
         // ── Real SQLite store. ─────────────────────────────────
         let store_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            raxis_store::Store::open(&store_dir.path().join("test.db")).unwrap(),
-        );
+        let store = Arc::new(raxis_store::Store::open(&store_dir.path().join("test.db")).unwrap());
 
         // ── Real install dir with a fake canonical image. ─────
         let install = tempfile::tempdir().unwrap();
@@ -4754,11 +4704,9 @@ mod tests {
         let data_dir = tempfile::tempdir().unwrap();
         bootstrap_source_repo(data_dir.path(), "main");
 
-        let spawn_ctx = OrchestratorSpawnContext::new(
-            install.path().to_path_buf(),
-            kernel_version.to_owned(),
-        )
-        .with_data_dir(data_dir.path().to_path_buf());
+        let spawn_ctx =
+            OrchestratorSpawnContext::new(install.path().to_path_buf(), kernel_version.to_owned())
+                .with_data_dir(data_dir.path().to_path_buf());
 
         let allowlist = EgressAllowlist {
             exact_hosts: vec!["api.anthropic.com".into()],
@@ -4775,30 +4723,22 @@ mod tests {
         // (`auto_spawn_orchestrator_session_in_tx`) inserts this row
         // BEFORE calling `spawn_for_initiative`; the test reproduces
         // that ordering.
-        insert_orchestrator_session_row(
-            Arc::clone(&store),
-            session_id,
-            initiative_id,
-        )
-        .await;
+        insert_orchestrator_session_row(Arc::clone(&store), session_id, initiative_id).await;
 
         // Drive the production trait impl exactly as `handle_approve_plan` does.
-        let live: Arc<dyn OrchestratorSpawn> = Arc::new(
-            LiveOrchestratorSpawn::new(
-                spawn_ctx,
-                Arc::clone(&service),
-                Arc::clone(&store),
-                Arc::new(crate::initiatives::PlanRegistry::new()),
-                test_policy_arcswap(),
-            )
-        );
+        let live: Arc<dyn OrchestratorSpawn> = Arc::new(LiveOrchestratorSpawn::new(
+            spawn_ctx,
+            Arc::clone(&service),
+            Arc::clone(&store),
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            test_policy_arcswap(),
+        ));
         let handle = live
             .spawn_for_initiative(
                 session_id,
                 initiative_id,
                 allowlist,
-                "fixture: drive the orchestrator agent for round-trip test"
-                    .to_owned(),
+                "fixture: drive the orchestrator agent for round-trip test".to_owned(),
             )
             .await
             .expect("orchestrator spawn");
@@ -4818,11 +4758,15 @@ mod tests {
         // ── Audit chain: paired SessionVmSpawned / SessionVmExited. ──
         let events = audit.events();
         let saw_spawn = events.iter().any(|e| match &e.kind {
-            AuditEventKind::SessionVmSpawned { session_id: sid, .. } => sid == session_id,
+            AuditEventKind::SessionVmSpawned {
+                session_id: sid, ..
+            } => sid == session_id,
             _ => false,
         });
         let saw_exit = events.iter().any(|e| match &e.kind {
-            AuditEventKind::SessionVmExited { session_id: sid, .. } => sid == session_id,
+            AuditEventKind::SessionVmExited {
+                session_id: sid, ..
+            } => sid == session_id,
             _ => false,
         });
         assert!(
@@ -4830,10 +4774,7 @@ mod tests {
             "expected SessionVmSpawned for {session_id}; events: {:?}",
             events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
         );
-        assert!(
-            saw_exit,
-            "expected SessionVmExited for {session_id}",
-        );
+        assert!(saw_exit, "expected SessionVmExited for {session_id}",);
     }
 
     #[tokio::test]
@@ -4851,44 +4792,34 @@ mod tests {
 
         let creds_dir = tempfile::tempdir().unwrap();
         let backend = Arc::new(
-            raxis_credentials_file::FileCredentialBackend::open_without_uid_check(
-                creds_dir.path(),
-            ),
+            raxis_credentials_file::FileCredentialBackend::open_without_uid_check(creds_dir.path()),
         );
         let audit = Arc::new(FakeAuditSink::new());
         let proxy_manager = Arc::new(CredentialProxyManager::new(
             Arc::clone(&backend) as _,
             Arc::clone(&audit) as _,
         ));
-        let isolation = Arc::new(
-            SubprocessIsolation::new("kernel-orch-missing-image").unwrap(),
-        );
+        let isolation = Arc::new(SubprocessIsolation::new("kernel-orch-missing-image").unwrap());
         let service = Arc::new(SessionSpawnService::new(
             isolation as _,
             Arc::clone(&proxy_manager),
             Arc::clone(&audit) as _,
         ));
         let store_dir = tempfile::tempdir().unwrap();
-        let store = Arc::new(
-            raxis_store::Store::open(&store_dir.path().join("test.db")).unwrap(),
-        );
+        let store = Arc::new(raxis_store::Store::open(&store_dir.path().join("test.db")).unwrap());
 
         // Empty install dir — image is intentionally missing.
         let install = tempfile::tempdir().unwrap();
-        let spawn_ctx = OrchestratorSpawnContext::new(
-            install.path().to_path_buf(),
-            "v2-missing".to_owned(),
-        );
+        let spawn_ctx =
+            OrchestratorSpawnContext::new(install.path().to_path_buf(), "v2-missing".to_owned());
 
-        let live: Arc<dyn OrchestratorSpawn> = Arc::new(
-            LiveOrchestratorSpawn::new(
-                spawn_ctx,
-                service,
-                store,
-                Arc::new(crate::initiatives::PlanRegistry::new()),
-                test_policy_arcswap(),
-            ),
-        );
+        let live: Arc<dyn OrchestratorSpawn> = Arc::new(LiveOrchestratorSpawn::new(
+            spawn_ctx,
+            service,
+            store,
+            Arc::new(crate::initiatives::PlanRegistry::new()),
+            test_policy_arcswap(),
+        ));
         let err = live
             .spawn_for_initiative(
                 "sess-missing-1",
@@ -5031,34 +4962,43 @@ mod tests {
             Some("operator-prompt-bytes"),
         )
         .expect("sidecar provisioning succeeds against a real tempdir");
-        let host_meta = dir.path()
-            .join("guests")
-            .join(session_id)
-            .join("meta");
+        let host_meta = dir.path().join("guests").join(session_id).join("meta");
         assert_eq!(s.mount.host_path, host_meta);
         assert_eq!(s.mount.guest_path, raxis_ksb::PLANNER_KSB_GUEST_MOUNT);
         assert!(matches!(s.mount.mode, raxis_isolation::MountMode::ReadOnly));
 
         let ksb_file = host_meta.join(raxis_ksb::PLANNER_KSB_FILE_NAME);
         let prompt_file = host_meta.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME);
-        assert_eq!(std::fs::read_to_string(&ksb_file).unwrap(), "{\"version\":1}");
-        assert_eq!(std::fs::read_to_string(&prompt_file).unwrap(), "operator-prompt-bytes");
+        assert_eq!(
+            std::fs::read_to_string(&ksb_file).unwrap(),
+            "{\"version\":1}"
+        );
+        assert_eq!(
+            std::fs::read_to_string(&prompt_file).unwrap(),
+            "operator-prompt-bytes"
+        );
 
         assert_eq!(
             s.ksb_guest_path.as_deref(),
-            Some(format!(
-                "{m}/{f}",
-                m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
-                f = raxis_ksb::PLANNER_KSB_FILE_NAME,
-            ).as_str()),
+            Some(
+                format!(
+                    "{m}/{f}",
+                    m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+                    f = raxis_ksb::PLANNER_KSB_FILE_NAME,
+                )
+                .as_str()
+            ),
         );
         assert_eq!(
             s.task_prompt_guest_path.as_deref(),
-            Some(format!(
-                "{m}/{f}",
-                m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
-                f = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
-            ).as_str()),
+            Some(
+                format!(
+                    "{m}/{f}",
+                    m = raxis_ksb::PLANNER_KSB_GUEST_MOUNT,
+                    f = raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME,
+                )
+                .as_str()
+            ),
         );
     }
 
@@ -5078,11 +5018,14 @@ mod tests {
         .expect("sidecar provisioning succeeds with prompt-only");
         assert!(s.ksb_guest_path.is_none());
         assert!(s.task_prompt_guest_path.is_some());
-        let host_meta = dir.path()
+        let host_meta = dir
+            .path()
             .join("guests")
             .join("session-prompt-only")
             .join("meta");
-        assert!(host_meta.join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME).exists());
+        assert!(host_meta
+            .join(raxis_ksb::PLANNER_TASK_PROMPT_FILE_NAME)
+            .exists());
         assert!(!host_meta.join(raxis_ksb::PLANNER_KSB_FILE_NAME).exists());
     }
 
@@ -5092,12 +5035,7 @@ mod tests {
     /// expect the legacy inline env channels to keep working.
     #[test]
     fn provision_meta_sidecar_returns_none_without_data_dir() {
-        let s = provision_meta_sidecar(
-            None,
-            "session-none",
-            Some("ignored"),
-            Some("ignored"),
-        );
+        let s = provision_meta_sidecar(None, "session-none", Some("ignored"), Some("ignored"));
         assert!(s.is_none());
     }
 
@@ -5117,12 +5055,12 @@ mod tests {
     /// reads only `planner_max_turns_default`.
     fn gateway_with_default(d: Option<u32>) -> raxis_policy::GatewaySection {
         raxis_policy::GatewaySection {
-            binary_path:                     "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs:              5,
-            respawn_backoff_ms:              1000,
-            max_consecutive_respawns:        5,
-            planner_max_turns_default:       d,
-            planner_max_turns_step_default:  None,
+            binary_path: "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs: 5,
+            respawn_backoff_ms: 1000,
+            max_consecutive_respawns: 5,
+            planner_max_turns_default: d,
+            planner_max_turns_step_default: None,
         }
     }
 
@@ -5130,16 +5068,16 @@ mod tests {
     /// `planner_max_turns_default` AND the
     /// `planner_max_turns_step_default` knobs varying.
     fn gateway_with_default_and_step(
-        d:     Option<u32>,
-        step:  Option<u32>,
+        d: Option<u32>,
+        step: Option<u32>,
     ) -> raxis_policy::GatewaySection {
         raxis_policy::GatewaySection {
-            binary_path:                     "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs:              5,
-            respawn_backoff_ms:              1000,
-            max_consecutive_respawns:        5,
-            planner_max_turns_default:       d,
-            planner_max_turns_step_default:  step,
+            binary_path: "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs: 5,
+            respawn_backoff_ms: 1000,
+            max_consecutive_respawns: 5,
+            planner_max_turns_default: d,
+            planner_max_turns_step_default: step,
         }
     }
 
@@ -5156,13 +5094,17 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_per_task_wins_over_policy() {
         let task = task_with_max_turns(Some(7));
-        let gw   = gateway_with_default(Some(42));
+        let gw = gateway_with_default(Some(42));
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        assert_eq!(r.effective, 7,
-            "per-task `max_turns = Some(7)` MUST win over policy default 42");
+        assert_eq!(
+            r.effective, 7,
+            "per-task `max_turns = Some(7)` MUST win over policy default 42"
+        );
         assert_eq!(r.base, 7);
-        assert_eq!(r.base_source, "task",
-            "resolver MUST label the per-task arm `task` for log parity");
+        assert_eq!(
+            r.base_source, "task",
+            "resolver MUST label the per-task arm `task` for log parity"
+        );
     }
 
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 2: `None` on the
@@ -5171,13 +5113,17 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_policy_wins_over_compiled() {
         let task = task_with_max_turns(None);
-        let gw   = gateway_with_default(Some(42));
+        let gw = gateway_with_default(Some(42));
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        assert_eq!(r.effective, 42,
-            "policy default 42 MUST win when per-task is None");
+        assert_eq!(
+            r.effective, 42,
+            "policy default 42 MUST win when per-task is None"
+        );
         assert_eq!(r.base, 42);
-        assert_eq!(r.base_source, "policy",
-            "resolver MUST label the policy arm `policy` for log parity");
+        assert_eq!(
+            r.base_source, "policy",
+            "resolver MUST label the policy arm `policy` for log parity"
+        );
     }
 
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 3: both `None` ⇒
@@ -5186,15 +5132,17 @@ mod tests {
     #[test]
     fn inv_planner_max_turns_precedence_01_compiled_default_when_both_absent() {
         let task = task_with_max_turns(None);
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
         assert_eq!(
             r.effective,
             crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS,
             "both arms None ⇒ compiled fallback DEFAULT_PLANNER_MAX_TURNS",
         );
-        assert_eq!(r.base_source, "compiled-default",
-            "resolver MUST label the compiled-fallback arm `compiled-default`");
+        assert_eq!(
+            r.base_source, "compiled-default",
+            "resolver MUST label the compiled-fallback arm `compiled-default`"
+        );
     }
 
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` orchestrator-spawn
@@ -5210,8 +5158,10 @@ mod tests {
         let gw_with_policy = gateway_with_default(Some(33));
         let r = resolve_planner_max_turns_for(None, Some(&gw_with_policy), 1);
         assert_eq!(r.effective, 33);
-        assert_eq!(r.base_source, "policy",
-            "orchestrator-spawn path MUST label `policy` when task_fields=None and policy is Some");
+        assert_eq!(
+            r.base_source, "policy",
+            "orchestrator-spawn path MUST label `policy` when task_fields=None and policy is Some"
+        );
 
         // No policy ⇒ compiled fallback.
         let gw_no_policy = gateway_with_default(None);
@@ -5246,11 +5196,11 @@ mod tests {
     // ─────────────────────────────────────────────────────────────────
 
     fn task_with_max_turns_and_step(
-        c:    Option<u32>,
+        c: Option<u32>,
         step: Option<u32>,
     ) -> crate::initiatives::TaskPlanFields {
         let mut tf = crate::initiatives::TaskPlanFields::default();
-        tf.max_turns      = c;
+        tf.max_turns = c;
         tf.max_turns_step = step;
         tf
     }
@@ -5261,10 +5211,12 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_attempt_1_equals_base() {
         let task = task_with_max_turns_and_step(Some(30), Some(30));
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
-        assert_eq!(r.effective, 30,
-            "attempt = 1 MUST return base unchanged; got {r:?}");
+        assert_eq!(
+            r.effective, 30,
+            "attempt = 1 MUST return base unchanged; got {r:?}"
+        );
         assert_eq!(r.attempt, 1);
         assert_eq!(r.base, 30);
         assert_eq!(r.step, 30);
@@ -5275,7 +5227,7 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_base_30_step_30_three_attempts() {
         let task = task_with_max_turns_and_step(Some(30), Some(30));
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
         let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
         let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
@@ -5289,7 +5241,7 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_clamps_at_hard_ceiling() {
         let task = task_with_max_turns_and_step(Some(100), Some(100));
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let r1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
         let r2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
         let r3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
@@ -5297,8 +5249,10 @@ mod tests {
         let r5 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 5);
         assert_eq!(r1.effective, 100);
         assert_eq!(r2.effective, 200);
-        assert_eq!(r3.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING,
-            "attempt 3 (base+2*step=300) MUST clamp at compiled ceiling 240");
+        assert_eq!(
+            r3.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING,
+            "attempt 3 (base+2*step=300) MUST clamp at compiled ceiling 240"
+        );
         assert_eq!(r4.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
         assert_eq!(r5.effective, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
         assert_eq!(r3.hard_ceiling, DEFAULT_PLANNER_MAX_TURNS_HARD_CEILING);
@@ -5310,12 +5264,14 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_derived_step_default() {
         let task = task_with_max_turns_and_step(Some(50), None);
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let a1 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 1);
         let a2 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
         let a3 = resolve_planner_max_turns_for(Some(&task), Some(&gw), 3);
-        assert_eq!(a1.step, 25,
-            "base=50 ⇒ derived step max(round_up_to_5(25), 10) = 25");
+        assert_eq!(
+            a1.step, 25,
+            "base=50 ⇒ derived step max(round_up_to_5(25), 10) = 25"
+        );
         assert_eq!(a1.step_source, "derived-default");
         assert_eq!(a1.effective, 50);
         assert_eq!(a2.effective, 75);
@@ -5327,10 +5283,12 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_derived_step_min_10() {
         let task = task_with_max_turns_and_step(Some(5), None);
-        let gw   = gateway_with_default(None);
+        let gw = gateway_with_default(None);
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        assert_eq!(r.step, 10,
-            "base=5 ⇒ derived step max(round_up_to_5(2), 10) = 10");
+        assert_eq!(
+            r.step, 10,
+            "base=5 ⇒ derived step max(round_up_to_5(2), 10) = 10"
+        );
         assert_eq!(r.effective, 15, "attempt 2 ⇒ 5 + 10 = 15");
     }
 
@@ -5338,8 +5296,11 @@ mod tests {
     /// `round_up_to_5(11) = 15`.
     #[test]
     fn inv_progressive_max_turns_derived_step_rounds_up_to_5() {
-        assert_eq!(derive_default_max_turns_step(22), 15,
-            "round_up_to_5(22/2=11) = 15");
+        assert_eq!(
+            derive_default_max_turns_step(22),
+            15,
+            "round_up_to_5(22/2=11) = 15"
+        );
         assert_eq!(derive_default_max_turns_step(50), 25);
         assert_eq!(derive_default_max_turns_step(100), 50);
         // base=101 → 101/2=50 (integer division), round_up_to_5(50) = 50.
@@ -5353,10 +5314,12 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_policy_step_default_wins_over_derived() {
         let task = task_with_max_turns_and_step(Some(40), None);
-        let gw   = gateway_with_default_and_step(None, Some(7));
+        let gw = gateway_with_default_and_step(None, Some(7));
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        assert_eq!(r.step, 7,
-            "policy `planner_max_turns_step_default = Some(7)` MUST win over derived default");
+        assert_eq!(
+            r.step, 7,
+            "policy `planner_max_turns_step_default = Some(7)` MUST win over derived default"
+        );
         assert_eq!(r.step_source, "policy");
         assert_eq!(r.effective, 47, "attempt 2 ⇒ 40 + 7 = 47");
     }
@@ -5365,10 +5328,12 @@ mod tests {
     #[test]
     fn inv_progressive_max_turns_per_task_step_wins_over_policy() {
         let task = task_with_max_turns_and_step(Some(40), Some(3));
-        let gw   = gateway_with_default_and_step(None, Some(7));
+        let gw = gateway_with_default_and_step(None, Some(7));
         let r = resolve_planner_max_turns_for(Some(&task), Some(&gw), 2);
-        assert_eq!(r.step, 3,
-            "per-task `max_turns_step = Some(3)` MUST win over policy default 7");
+        assert_eq!(
+            r.step, 3,
+            "per-task `max_turns_step = Some(3)` MUST win over policy default 7"
+        );
         assert_eq!(r.step_source, "task");
         assert_eq!(r.effective, 43);
     }
@@ -5452,12 +5417,18 @@ mod concrete_reason_tests {
     /// quote `used`/`limit`, and lead with the role.
     #[test]
     fn concrete_reason_max_turns_reached() {
-        let o = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
+        let o = PlannerExitOutcome::MaxTurnsReached {
+            used: 60,
+            limit: 60,
+        };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
         assert!(!s.is_empty());
         assert_no_forbidden(&s);
         assert!(s.contains("max_turns"), "must name max_turns; got {s:?}");
-        assert!(s.contains("60 used / 60 limit"), "must quote used/limit; got {s:?}");
+        assert!(
+            s.contains("60 used / 60 limit"),
+            "must quote used/limit; got {s:?}"
+        );
         assert!(s.starts_with("executor"), "must lead with role; got {s:?}");
     }
 
@@ -5467,14 +5438,17 @@ mod concrete_reason_tests {
     fn concrete_reason_max_tokens_reached() {
         let o = PlannerExitOutcome::MaxTokensReached {
             which: "input".to_string(),
-            used:  150_000,
+            used: 150_000,
             limit: 100_000,
         };
         let s = build_worker_post_exit_failure_reason("reviewer", Some(&o), None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("max_tokens"), "must name max_tokens; got {s:?}");
         assert!(s.contains("input"), "must name the axis; got {s:?}");
-        assert!(s.contains("150000 used / 100000 limit"), "must quote used/limit; got {s:?}");
+        assert!(
+            s.contains("150000 used / 100000 limit"),
+            "must quote used/limit; got {s:?}"
+        );
     }
 
     /// `IdleNoTerminalIntent` — surfaced reason MUST mention
@@ -5482,22 +5456,33 @@ mod concrete_reason_tests {
     /// chosen.
     #[test]
     fn concrete_reason_idle_no_terminal_intent() {
-        let o = PlannerExitOutcome::IdleNoTerminalIntent { final_text_len: 1024 };
+        let o = PlannerExitOutcome::IdleNoTerminalIntent {
+            final_text_len: 1024,
+        };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("end_turn"), "must mention end_turn; got {s:?}");
-        assert!(s.contains("task_complete"), "must name the missing terminal tool; got {s:?}");
+        assert!(
+            s.contains("task_complete"),
+            "must name the missing terminal tool; got {s:?}"
+        );
     }
 
     /// `ToolErrorBudgetExhausted` — surfaced reason MUST name the
     /// `tool-error` budget and quote counters.
     #[test]
     fn concrete_reason_tool_error_budget_exhausted() {
-        let o = PlannerExitOutcome::ToolErrorBudgetExhausted { errors: 5, budget: 5 };
+        let o = PlannerExitOutcome::ToolErrorBudgetExhausted {
+            errors: 5,
+            budget: 5,
+        };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
         assert_no_forbidden(&s);
         assert!(s.contains("tool-error"), "must name tool-error; got {s:?}");
-        assert!(s.contains("5 errors / 5 budget"), "must quote counters; got {s:?}");
+        assert!(
+            s.contains("5 errors / 5 budget"),
+            "must quote counters; got {s:?}"
+        );
     }
 
     /// `ExplicitGiveUp` — surfaced reason MUST inline the verbatim
@@ -5506,10 +5491,15 @@ mod concrete_reason_tests {
     #[test]
     fn concrete_reason_explicit_give_up() {
         let driver_err = "sidecar env var RAXIS_PLANNER_SIDECAR_ENDPOINT missing";
-        let o = PlannerExitOutcome::ExplicitGiveUp { reason: driver_err.to_string() };
+        let o = PlannerExitOutcome::ExplicitGiveUp {
+            reason: driver_err.to_string(),
+        };
         let s = build_worker_post_exit_failure_reason("orchestrator", Some(&o), None, None);
         assert_no_forbidden(&s);
-        assert!(s.contains("driver gave up"), "must name the give-up; got {s:?}");
+        assert!(
+            s.contains("driver gave up"),
+            "must name the give-up; got {s:?}"
+        );
         assert!(
             s.contains(driver_err),
             "must inline the driver-error chain verbatim; got {s:?}"
@@ -5525,7 +5515,10 @@ mod concrete_reason_tests {
         };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
         assert_no_forbidden(&s);
-        assert!(s.contains("exit-notice"), "must name the notice variant; got {s:?}");
+        assert!(
+            s.contains("exit-notice"),
+            "must name the notice variant; got {s:?}"
+        );
         assert!(
             s.contains("planner-vNEXT::DispatchOutcome::FutureVariant"),
             "must inline the verbatim detail; got {s:?}"
@@ -5544,7 +5537,10 @@ mod concrete_reason_tests {
         };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
         assert_no_forbidden(&s);
-        assert!(s.contains("CleanCompletion"), "must name the anomaly; got {s:?}");
+        assert!(
+            s.contains("CleanCompletion"),
+            "must name the anomaly; got {s:?}"
+        );
         assert!(
             s.contains("kernel-side scheduling bug"),
             "must classify it as a kernel-side bug; got {s:?}"
@@ -5563,7 +5559,10 @@ mod concrete_reason_tests {
             None,
         );
         assert_no_forbidden(&s);
-        assert!(s.contains("stream-level failure"), "must name the stream failure; got {s:?}");
+        assert!(
+            s.contains("stream-level failure"),
+            "must name the stream failure; got {s:?}"
+        );
         assert!(
             s.contains("planner-boot-error: RAXIS_MODEL_ID unresolved"),
             "must inline the dispatch error verbatim; got {s:?}"
@@ -5580,10 +5579,19 @@ mod concrete_reason_tests {
     fn concrete_reason_no_notice_no_dispatch_no_activity_fallback() {
         let s = build_worker_post_exit_failure_reason("executor", None, None, None);
         assert_no_forbidden(&s);
-        assert!(s.contains("PlannerExitNotice"), "must name the missing notice; got {s:?}");
-        assert!(s.contains("planner-boot"),      "must name the boot-failure surface; got {s:?}");
-        assert!(s.contains("OOM"),               "must name OOM; got {s:?}");
-        assert!(s.contains("panic"),             "must name the panic-backtrace pointer; got {s:?}");
+        assert!(
+            s.contains("PlannerExitNotice"),
+            "must name the missing notice; got {s:?}"
+        );
+        assert!(
+            s.contains("planner-boot"),
+            "must name the boot-failure surface; got {s:?}"
+        );
+        assert!(s.contains("OOM"), "must name OOM; got {s:?}");
+        assert!(
+            s.contains("panic"),
+            "must name the panic-backtrace pointer; got {s:?}"
+        );
     }
 
     // SWEEP-IGNORE-BEGIN
@@ -5600,19 +5608,23 @@ mod concrete_reason_tests {
         use crate::session_activity::{LastIntentOutcome, SessionActivity};
         use raxis_types::IntentKind;
         let activity = SessionActivity {
-            last_intent_kind:    IntentKind::StructuredOutput,
-            last_intent_seq:     7,
+            last_intent_kind: IntentKind::StructuredOutput,
+            last_intent_seq: 7,
             last_intent_outcome: LastIntentOutcome::Accepted,
-            recorded_at_unix:    1_715_694_342_i64,
+            recorded_at_unix: 1_715_694_342_i64,
         };
-        let s = build_worker_post_exit_failure_reason(
-            "executor", None, None, Some(&activity),
-        );
+        let s = build_worker_post_exit_failure_reason("executor", None, None, Some(&activity));
         assert_no_forbidden(&s);
-        assert!(s.contains("StructuredOutput"),  "must inline the intent kind; got {s:?}");
-        assert!(s.contains("#7"),                "must inline the seq; got {s:?}");
-        assert!(s.contains("Accepted"),          "must inline the outcome; got {s:?}");
-        assert!(s.contains("unix=1715694342"),   "must inline the timestamp; got {s:?}");
+        assert!(
+            s.contains("StructuredOutput"),
+            "must inline the intent kind; got {s:?}"
+        );
+        assert!(s.contains("#7"), "must inline the seq; got {s:?}");
+        assert!(s.contains("Accepted"), "must inline the outcome; got {s:?}");
+        assert!(
+            s.contains("unix=1715694342"),
+            "must inline the timestamp; got {s:?}"
+        );
         assert!(
             s.contains("PlannerExitNotice"),
             "must NAME the missing-notice gap concretely; got {s:?}"
@@ -5625,8 +5637,14 @@ mod concrete_reason_tests {
     /// doesn't silently break the dashboard parser.
     #[test]
     fn used_limit_rendering_stable() {
-        let o = PlannerExitOutcome::MaxTurnsReached { used: 42, limit: 100 };
+        let o = PlannerExitOutcome::MaxTurnsReached {
+            used: 42,
+            limit: 100,
+        };
         let s = build_worker_post_exit_failure_reason("executor", Some(&o), None, None);
-        assert!(s.contains("42 used / 100 limit"), "must render `n used / m limit`; got {s:?}");
+        assert!(
+            s.contains("42 used / 100 limit"),
+            "must render `n used / m limit`; got {s:?}"
+        );
     }
 }

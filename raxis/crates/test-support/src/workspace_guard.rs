@@ -67,12 +67,10 @@ fn workspace_root() -> PathBuf {
 
 /// Read a TOML file or panic with a locator-rich message.
 fn read_toml(path: &Path) -> toml::Value {
-    let text = fs::read_to_string(path).unwrap_or_else(|e| {
-        panic!("workspace_guard: cannot read {}: {e}", path.display())
-    });
-    toml::from_str(&text).unwrap_or_else(|e| {
-        panic!("workspace_guard: cannot parse {}: {e}", path.display())
-    })
+    let text = fs::read_to_string(path)
+        .unwrap_or_else(|e| panic!("workspace_guard: cannot read {}: {e}", path.display()));
+    toml::from_str(&text)
+        .unwrap_or_else(|e| panic!("workspace_guard: cannot parse {}: {e}", path.display()))
 }
 
 /// Returns the list of every `[dependencies.<name>]`-style block name
@@ -282,9 +280,11 @@ mod helper_tests {
 
     #[test]
     fn collect_dep_names_returns_empty_on_missing_section() {
-        let m = parse(r#"[package]
+        let m = parse(
+            r#"[package]
 name = "x"
-version = "0.1.0""#);
+version = "0.1.0""#,
+        );
         assert!(collect_dep_names(&m, &["dependencies"]).is_empty());
         assert!(collect_dep_names(&m, &["build-dependencies"]).is_empty());
         assert!(collect_dep_names(&m, &["workspace", "dependencies"]).is_empty());
@@ -331,10 +331,14 @@ version = "0.1.0""#);
     fn workspace_root_locator_finds_a_real_workspace_toml() {
         let root = workspace_root();
         let cargo_toml = root.join("Cargo.toml");
-        assert!(cargo_toml.is_file(),
-            "workspace_root() returned {root:?} which has no Cargo.toml");
+        assert!(
+            cargo_toml.is_file(),
+            "workspace_root() returned {root:?} which has no Cargo.toml"
+        );
         let parsed = read_toml(&cargo_toml);
-        assert!(parsed.get("workspace").is_some(),
-            "workspace_root() returned a Cargo.toml without [workspace]");
+        assert!(
+            parsed.get("workspace").is_some(),
+            "workspace_root() returned a Cargo.toml without [workspace]"
+        );
     }
 }

@@ -42,9 +42,7 @@ use raxis_dashboard::config::DashboardConfig;
 use raxis_policy::{OperatorEntry, PolicyBundle};
 use raxis_store::Store;
 use raxis_test_support::stub_cert_for_pubkey;
-use raxis_types::{
-    BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle,
-};
+use raxis_types::{BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle};
 use rusqlite::{params, TransactionBehavior};
 
 /// Spin up a fresh on-disk data dir with `kernel.db` migrated and
@@ -52,7 +50,7 @@ use rusqlite::{params, TransactionBehavior};
 /// lifetime outlives the caller's reads.
 fn fresh_data_dir() -> (tempfile::TempDir, Arc<Store>) {
     let tmp = tempfile::tempdir().expect("tempdir");
-    let dd  = tmp.path();
+    let dd = tmp.path();
     std::fs::create_dir_all(dd.join("audit")).unwrap();
     write_genesis_segment(&dd.join("audit"), &[0xC1u8; 32], &[0u8; 64], 1_700_000_000)
         .expect("write_genesis_segment");
@@ -66,14 +64,14 @@ fn fresh_data_dir() -> (tempfile::TempDir, Arc<Store>) {
 /// expects for JWT-issued bearer tokens.
 fn policy_with_operator(op_pk: [u8; 32]) -> Arc<ArcSwap<PolicyBundle>> {
     use sha2::Digest;
-    let pubkey_hex  = hex::encode(op_pk);
+    let pubkey_hex = hex::encode(op_pk);
     let fingerprint = hex::encode(&sha2::Sha256::digest(op_pk)[..16]);
     let bundle = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
         pubkey_fingerprint: fingerprint,
-        display_name:       "alice".into(),
-        pubkey_hex:         pubkey_hex.clone(),
-        permitted_ops:      Vec::new(),
-        cert:               stub_cert_for_pubkey(pubkey_hex),
+        display_name: "alice".into(),
+        pubkey_hex: pubkey_hex.clone(),
+        permitted_ops: Vec::new(),
+        cert: stub_cert_for_pubkey(pubkey_hex),
         force_misconfig_bypass: false,
     }]);
     Arc::new(ArcSwap::from_pointee(bundle))
@@ -86,18 +84,22 @@ fn policy_with_operator(op_pk: [u8; 32]) -> Arc<ArcSwap<PolicyBundle>> {
 /// crate is `pub(crate)`-shy and a test-only helper would creep
 /// into the public surface.
 async fn obtain_token(
-    base:    &str,
-    client:  &reqwest::Client,
+    base: &str,
+    client: &reqwest::Client,
     signing: &SigningKey,
-    pk:      [u8; 32],
+    pk: [u8; 32],
 ) -> String {
     use reqwest::header::CONTENT_TYPE;
     use serde_json::json;
 
     let chal: serde_json::Value = client
         .get(format!("{base}/api/auth/challenge"))
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     let challenge_hex = chal["challenge"].as_str().unwrap().to_owned();
     let sig = signing.sign(&hex::decode(&challenge_hex).unwrap());
     let body = json!({
@@ -109,8 +111,12 @@ async fn obtain_token(
         .post(format!("{base}/api/auth/verify"))
         .header(CONTENT_TYPE, "application/json")
         .body(body.to_string())
-        .send().await.unwrap()
-        .json().await.unwrap();
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
     verify["token"].as_str().unwrap().to_owned()
 }
 
@@ -118,16 +124,16 @@ async fn obtain_token(
 /// header so the V1 lookup path resolves to `plan_bytes`. Mirrors
 /// the kernel's pre-V2 admission write set.
 async fn seed_v1_initiative(
-    store:               &Store,
-    initiative_id:       &str,
-    state:               &str,
-    approved_at_unix:    Option<i64>,
-    plan_bytes:          &[u8],
+    store: &Store,
+    initiative_id: &str,
+    state: &str,
+    approved_at_unix: Option<i64>,
+    plan_bytes: &[u8],
     signed_by_fingerprint: &str,
-    stored_at_unix:      i64,
+    stored_at_unix: i64,
 ) {
     let conn = store.lock().await;
-    let initiatives          = raxis_store::Table::Initiatives.as_str();
+    let initiatives = raxis_store::Table::Initiatives.as_str();
     let signed_plan_artifacts = raxis_store::Table::SignedPlanArtifacts.as_str();
 
     conn.execute(
@@ -138,7 +144,8 @@ async fn seed_v1_initiative(
              VALUES (?1, ?2, '{{}}', 'sha-bytes', 1700000000, ?3)"
         ),
         params![initiative_id, state, approved_at_unix],
-    ).unwrap();
+    )
+    .unwrap();
     conn.execute(
         &format!(
             "INSERT INTO {signed_plan_artifacts} \
@@ -146,8 +153,14 @@ async fn seed_v1_initiative(
                   signed_by_fingerprint) \
              VALUES (?1, ?2, X'00', ?3, ?4)"
         ),
-        params![initiative_id, plan_bytes, stored_at_unix, signed_by_fingerprint],
-    ).unwrap();
+        params![
+            initiative_id,
+            plan_bytes,
+            stored_at_unix,
+            signed_by_fingerprint
+        ],
+    )
+    .unwrap();
 }
 
 /// Insert one `initiatives` row whose `plan_bundle_sha256` points
@@ -155,16 +168,16 @@ async fn seed_v1_initiative(
 /// at `artifact_seq=0`. Mirrors the V2 admission write set
 /// described in `plan-bundle-sealing.md §8.1 step 12`.
 async fn seed_v2_1_initiative(
-    store:                &Store,
-    initiative_id:        &str,
-    approved_at_unix:     Option<i64>,
-    plan_bytes:           &[u8],
-    bundle_sha256:        BundleSha256,
+    store: &Store,
+    initiative_id: &str,
+    approved_at_unix: Option<i64>,
+    plan_bytes: &[u8],
+    bundle_sha256: BundleSha256,
     plan_artifact_sha256: BundleSha256,
-    bundle_nonce:         BundleNonce,
-    signed_by:            OperatorFingerprint,
-    sealed_at_unix:       u64,
-    signed_at_unix:       u64,
+    bundle_nonce: BundleNonce,
+    signed_by: OperatorFingerprint,
+    sealed_at_unix: u64,
+    signed_at_unix: u64,
 ) {
     let bundle = PlanBundle::new_v2_1(
         sealed_at_unix,
@@ -172,21 +185,27 @@ async fn seed_v2_1_initiative(
         bundle_nonce,
         "witness-plan".to_owned(),
         vec![BundleArtifact {
-            name:   "plan.toml".to_owned(),
-            bytes:  plan_bytes.to_vec(),
+            name: "plan.toml".to_owned(),
+            bytes: plan_bytes.to_vec(),
             sha256: plan_artifact_sha256,
         }],
     );
 
     let mut conn = store.lock().await;
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+    let tx = conn
+        .transaction_with_behavior(TransactionBehavior::Immediate)
+        .unwrap();
     raxis_store::plan_bundles::insert_bundle(
-        &tx, &bundle_sha256, b"canonical-bundle-bytes",
-        &[0xCDu8; 64], &signed_by, &bundle, sealed_at_unix as i64,
-    ).unwrap();
-    raxis_store::plan_bundles::insert_artifacts(
-        &tx, &bundle_sha256, &bundle.artifacts,
-    ).unwrap();
+        &tx,
+        &bundle_sha256,
+        b"canonical-bundle-bytes",
+        &[0xCDu8; 64],
+        &signed_by,
+        &bundle,
+        sealed_at_unix as i64,
+    )
+    .unwrap();
+    raxis_store::plan_bundles::insert_artifacts(&tx, &bundle_sha256, &bundle.artifacts).unwrap();
     let initiatives = raxis_store::Table::Initiatives.as_str();
     tx.execute(
         &format!(
@@ -202,7 +221,8 @@ async fn seed_v2_1_initiative(
             approved_at_unix,
             bundle_sha256.as_bytes().as_slice(),
         ],
-    ).unwrap();
+    )
+    .unwrap();
     tx.commit().unwrap();
 }
 
@@ -219,7 +239,8 @@ async fn seed_orphan_initiative(store: &Store, initiative_id: &str) {
              VALUES (?1, 'Draft', '{{}}', 'sha-orphan', 1700000000)"
         ),
         params![initiative_id],
-    ).unwrap();
+    )
+    .unwrap();
 }
 
 // ───────────────────────────────────────────────────────────────
@@ -235,8 +256,8 @@ async fn plan_endpoint_returns_v1_signed_bytes_byte_for_byte_with_cache_header()
     // Sign the policy with a known operator key for the JWT
     // handshake.
     let signing = SigningKey::from_bytes(&[0x71u8; 32]);
-    let pk      = signing.verifying_key().to_bytes();
-    let policy  = policy_with_operator(pk);
+    let pk = signing.verifying_key().to_bytes();
+    let policy = policy_with_operator(pk);
 
     // Byte-precise plan body — embed bytes a re-serializer
     // would naturally re-format (trailing whitespace + comment +
@@ -256,7 +277,8 @@ async fn plan_endpoint_returns_v1_signed_bytes_byte_for_byte_with_cache_header()
         plan_bytes,
         "abcd1234abcd1234abcd1234abcd1234",
         1_700_000_400,
-    ).await;
+    )
+    .await;
 
     let cfg = DashboardConfig {
         enabled: true,
@@ -272,16 +294,20 @@ async fn plan_endpoint_returns_v1_signed_bytes_byte_for_byte_with_cache_header()
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
         None,
-    ).await.expect("start_dashboard");
+    )
+    .await
+    .expect("start_dashboard");
 
-    let base   = format!("http://{}", handle.local_addr());
+    let base = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
-    let token  = obtain_token(&base, &client, &signing, pk).await;
+    let token = obtain_token(&base, &client, &signing, pk).await;
 
     let resp = client
         .get(format!("{base}/api/initiatives/init-v1/plan"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
 
     assert_eq!(resp.status().as_u16(), 200, "happy path must 200");
 
@@ -290,10 +316,13 @@ async fn plan_endpoint_returns_v1_signed_bytes_byte_for_byte_with_cache_header()
         .headers()
         .get("cache-control")
         .expect("cache-control header present")
-        .to_str().unwrap()
+        .to_str()
+        .unwrap()
         .to_owned();
-    assert_eq!(cc, "private, max-age=60",
-        "approved plans must carry the 60s private cache header");
+    assert_eq!(
+        cc, "private, max-age=60",
+        "approved plans must carry the 60s private cache header"
+    );
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["initiative_id"], "init-v1");
@@ -328,8 +357,8 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
     let (tmp, store) = fresh_data_dir();
 
     let signing = SigningKey::from_bytes(&[0x72u8; 32]);
-    let pk      = signing.verifying_key().to_bytes();
-    let policy  = policy_with_operator(pk);
+    let pk = signing.verifying_key().to_bytes();
+    let policy = policy_with_operator(pk);
 
     // Compute a real SHA-256 of the plan bytes so the wire
     // metadata round-trip is realistic. The bundle_sha256 is a
@@ -342,9 +371,9 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
         h.update(plan_bytes);
         BundleSha256::new(h.finalize().into())
     };
-    let bundle_sha   = BundleSha256::new([0xB1u8; 32]);
+    let bundle_sha = BundleSha256::new([0xB1u8; 32]);
     let bundle_nonce = BundleNonce::new([0x42u8; 16]);
-    let signer_fp    = OperatorFingerprint::new([0x55u8; 8]);
+    let signer_fp = OperatorFingerprint::new([0x55u8; 8]);
 
     seed_v2_1_initiative(
         &store,
@@ -357,7 +386,8 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
         signer_fp,
         1_700_000_700u64, // sealed_at
         1_700_000_690u64, // signed_at (envelope)
-    ).await;
+    )
+    .await;
 
     let cfg = DashboardConfig {
         enabled: true,
@@ -373,16 +403,20 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
         None,
-    ).await.expect("start_dashboard");
+    )
+    .await
+    .expect("start_dashboard");
 
-    let base   = format!("http://{}", handle.local_addr());
+    let base = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
-    let token  = obtain_token(&base, &client, &signing, pk).await;
+    let token = obtain_token(&base, &client, &signing, pk).await;
 
     let resp = client
         .get(format!("{base}/api/initiatives/init-v2/plan"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
     let body: serde_json::Value = resp.json().await.unwrap();
 
@@ -393,13 +427,16 @@ async fn plan_endpoint_returns_v2_1_bundle_bytes_with_bundle_sha_metadata() {
     // signed_at envelope timestamp (preferred over sealed_at when
     // both are present — see KernelDashboardData::get_initiative_plan).
     assert_eq!(body["bundle_sha256"], hex::encode(bundle_sha.as_bytes()));
-    assert_eq!(body["plan_sha256"],   hex::encode(plan_sha.as_bytes()));
+    assert_eq!(body["plan_sha256"], hex::encode(plan_sha.as_bytes()));
     assert_eq!(body["submitted_at_unix"], 1_700_000_690);
-    assert_eq!(body["submitted_by"],      hex::encode(signer_fp.as_bytes()));
+    assert_eq!(body["submitted_by"], hex::encode(signer_fp.as_bytes()));
 
     let wire_toml = body["submitted_toml"].as_str().unwrap();
-    assert_eq!(wire_toml.as_bytes(), plan_bytes,
-        "V2.1 path MUST surface plan_bundle_artifacts.artifact_bytes verbatim");
+    assert_eq!(
+        wire_toml.as_bytes(),
+        plan_bytes,
+        "V2.1 path MUST surface plan_bundle_artifacts.artifact_bytes verbatim"
+    );
 
     handle.shutdown().await.unwrap();
 }
@@ -411,8 +448,8 @@ async fn plan_endpoint_disambiguates_404_from_410() {
     let (tmp, store) = fresh_data_dir();
 
     let signing = SigningKey::from_bytes(&[0x73u8; 32]);
-    let pk      = signing.verifying_key().to_bytes();
-    let policy  = policy_with_operator(pk);
+    let pk = signing.verifying_key().to_bytes();
+    let policy = policy_with_operator(pk);
 
     seed_orphan_initiative(&store, "init-orphan").await;
 
@@ -430,18 +467,25 @@ async fn plan_endpoint_disambiguates_404_from_410() {
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
         None,
-    ).await.expect("start_dashboard");
-    let base   = format!("http://{}", handle.local_addr());
+    )
+    .await
+    .expect("start_dashboard");
+    let base = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
-    let token  = obtain_token(&base, &client, &signing, pk).await;
+    let token = obtain_token(&base, &client, &signing, pk).await;
 
     // 1) Unknown initiative → 404.
     let resp_404 = client
         .get(format!("{base}/api/initiatives/init-does-not-exist/plan"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(resp_404.status().as_u16(), 404,
-        "unknown initiative must 404, never 5xx");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_404.status().as_u16(),
+        404,
+        "unknown initiative must 404, never 5xx"
+    );
     let body_404: serde_json::Value = resp_404.json().await.unwrap();
     assert_eq!(body_404["code"], "FAIL_DASHBOARD_NOT_FOUND");
 
@@ -449,9 +493,14 @@ async fn plan_endpoint_disambiguates_404_from_410() {
     let resp_410 = client
         .get(format!("{base}/api/initiatives/init-orphan/plan"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send().await.unwrap();
-    assert_eq!(resp_410.status().as_u16(), 410,
-        "initiative without sealed plan must 410, never 5xx");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_410.status().as_u16(),
+        410,
+        "initiative without sealed plan must 410, never 5xx"
+    );
     let body_410: serde_json::Value = resp_410.json().await.unwrap();
     assert_eq!(body_410["code"], "FAIL_DASHBOARD_GONE");
 
@@ -465,8 +514,8 @@ async fn plan_endpoint_emits_no_store_for_pending_drafts_and_requires_auth() {
     let (tmp, store) = fresh_data_dir();
 
     let signing = SigningKey::from_bytes(&[0x74u8; 32]);
-    let pk      = signing.verifying_key().to_bytes();
-    let policy  = policy_with_operator(pk);
+    let pk = signing.verifying_key().to_bytes();
+    let policy = policy_with_operator(pk);
 
     // A `Draft` initiative with a valid plan body (V1 path). Per
     // the route handler's PLAN_CACHE_CONTROL_VOLATILE branch the
@@ -481,7 +530,8 @@ async fn plan_endpoint_emits_no_store_for_pending_drafts_and_requires_auth() {
         plan_bytes,
         "feedfacefeedfacefeedfacefeedface",
         1_700_000_300,
-    ).await;
+    )
+    .await;
 
     let cfg = DashboardConfig {
         enabled: true,
@@ -497,9 +547,11 @@ async fn plan_endpoint_emits_no_store_for_pending_drafts_and_requires_auth() {
         tmp.path().join("policy/policy.toml"),
         1_700_000_000,
         None,
-    ).await.expect("start_dashboard");
+    )
+    .await
+    .expect("start_dashboard");
 
-    let base   = format!("http://{}", handle.local_addr());
+    let base = format!("http://{}", handle.local_addr());
     let client = reqwest::Client::new();
 
     // Anonymous → 401 (auth gate is shared with every other
@@ -507,20 +559,34 @@ async fn plan_endpoint_emits_no_store_for_pending_drafts_and_requires_auth() {
     // this route specifically).
     let resp_anon = client
         .get(format!("{base}/api/initiatives/init-draft/plan"))
-        .send().await.unwrap();
-    assert_eq!(resp_anon.status().as_u16(), 401,
-        "anonymous request must 401, not leak plan bytes");
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        resp_anon.status().as_u16(),
+        401,
+        "anonymous request must 401, not leak plan bytes"
+    );
 
     let token = obtain_token(&base, &client, &signing, pk).await;
     let resp = client
         .get(format!("{base}/api/initiatives/init-draft/plan"))
         .header(AUTHORIZATION, format!("Bearer {token}"))
-        .send().await.unwrap();
+        .send()
+        .await
+        .unwrap();
     assert_eq!(resp.status().as_u16(), 200);
-    let cc = resp.headers().get("cache-control").unwrap()
-        .to_str().unwrap().to_owned();
-    assert_eq!(cc, "private, no-store",
-        "Draft plans must NOT be browser-cached — bytes are still volatile");
+    let cc = resp
+        .headers()
+        .get("cache-control")
+        .unwrap()
+        .to_str()
+        .unwrap()
+        .to_owned();
+    assert_eq!(
+        cc, "private, no-store",
+        "Draft plans must NOT be browser-cached — bytes are still volatile"
+    );
 
     let body: serde_json::Value = resp.json().await.unwrap();
     assert_eq!(body["approval_status"], "pending");

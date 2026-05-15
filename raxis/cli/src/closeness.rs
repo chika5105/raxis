@@ -178,15 +178,11 @@ fn damerau_levenshtein(a: &str, b: &str) -> usize {
     for i in 1..=n {
         for j in 1..=m {
             let cost = if a[i - 1] == b[j - 1] { 0 } else { 1 };
-            let mut v = (dp[i - 1][j] + 1)             // deletion
-                .min(dp[i][j - 1] + 1)                  // insertion
-                .min(dp[i - 1][j - 1] + cost);          // substitution
-            if i > 1
-                && j > 1
-                && a[i - 1] == b[j - 2]
-                && a[i - 2] == b[j - 1]
-            {
-                v = v.min(dp[i - 2][j - 2] + 1);        // transposition
+            let mut v = (dp[i - 1][j] + 1) // deletion
+                .min(dp[i][j - 1] + 1) // insertion
+                .min(dp[i - 1][j - 1] + cost); // substitution
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                v = v.min(dp[i - 2][j - 2] + 1); // transposition
             }
             dp[i][j] = v;
         }
@@ -250,10 +246,7 @@ mod tests {
         // Three candidates start with "ce" — the function must keep
         // the dictionary's order rather than re-sorting alphabetically.
         let cands = ["cert", "cesium", "celery", "delegation"];
-        assert_eq!(
-            did_you_mean("ce", &cands),
-            vec!["cert", "cesium", "celery"],
-        );
+        assert_eq!(did_you_mean("ce", &cands), vec!["cert", "cesium", "celery"],);
     }
 
     #[test]
@@ -291,8 +284,13 @@ mod tests {
     #[test]
     fn did_you_mean_caps_at_max_suggestions() {
         let cands = [
-            "approve", "approved", "approver", "approves", "approveing",
-            "approvee", "approva",
+            "approve",
+            "approved",
+            "approver",
+            "approves",
+            "approveing",
+            "approvee",
+            "approva",
         ];
         let got = did_you_mean("approv", &cands);
         assert!(got.len() <= MAX_SUGGESTIONS);
@@ -360,21 +358,15 @@ mod tests {
 
     #[test]
     fn unknown_with_suggestion_appends_did_you_mean_when_match_found() {
-        let msg = unknown_with_suggestion(
-            "subcommand",
-            "ceert",
-            &["cert", "session", "delegation"],
-        );
+        let msg =
+            unknown_with_suggestion("subcommand", "ceert", &["cert", "session", "delegation"]);
         assert_eq!(msg, "unknown subcommand: \"ceert\". Did you mean `cert`?");
     }
 
     #[test]
     fn unknown_with_suggestion_omits_did_you_mean_when_nothing_is_close() {
-        let msg = unknown_with_suggestion(
-            "subcommand",
-            "xyzzy",
-            &["cert", "session", "delegation"],
-        );
+        let msg =
+            unknown_with_suggestion("subcommand", "xyzzy", &["cert", "session", "delegation"]);
         assert_eq!(msg, "unknown subcommand: \"xyzzy\"");
     }
 
@@ -383,7 +375,14 @@ mod tests {
         let msg = unknown_with_suggestion(
             "cert sub-command",
             "mintt",
-            &["mint", "mint-emergency", "show", "verify", "list", "install"],
+            &[
+                "mint",
+                "mint-emergency",
+                "show",
+                "verify",
+                "list",
+                "install",
+            ],
         );
         assert!(
             msg.starts_with("unknown cert sub-command: \"mintt\""),

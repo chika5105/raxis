@@ -79,10 +79,7 @@ fn install_writes_unit_file_to_user_path_with_binary_and_data_dir() {
     let out = run_in(
         &home,
         &data_dir,
-        &[
-            "kernel", "install",
-            "--binary", bin.to_str().unwrap(),
-        ],
+        &["kernel", "install", "--binary", bin.to_str().unwrap()],
     );
     assert!(
         out.status.success(),
@@ -94,8 +91,14 @@ fn install_writes_unit_file_to_user_path_with_binary_and_data_dir() {
     let unit = expected_unit_path(&home);
     assert!(unit.exists(), "unit file not at {}", unit.display());
     let body = std::fs::read_to_string(&unit).unwrap();
-    assert!(body.contains(bin.to_str().unwrap()), "body missing binary: {body}");
-    assert!(body.contains(data_dir.to_str().unwrap()), "body missing data_dir: {body}");
+    assert!(
+        body.contains(bin.to_str().unwrap()),
+        "body missing binary: {body}"
+    );
+    assert!(
+        body.contains(data_dir.to_str().unwrap()),
+        "body missing data_dir: {body}"
+    );
 }
 
 #[cfg(any(target_os = "linux", target_os = "macos"))]
@@ -122,22 +125,40 @@ fn install_refuses_to_overwrite_without_force_then_succeeds_with_force() {
         &data_dir,
         &["kernel", "install", "--binary", bin2.to_str().unwrap()],
     );
-    assert!(!out2.status.success(), "second install must refuse without --force");
+    assert!(
+        !out2.status.success(),
+        "second install must refuse without --force"
+    );
     let stderr = String::from_utf8_lossy(&out2.stderr);
-    assert!(stderr.contains("--force"), "stderr should mention --force: {stderr}");
+    assert!(
+        stderr.contains("--force"),
+        "stderr should mention --force: {stderr}"
+    );
 
     let unit = expected_unit_path(&home);
     let body_after = std::fs::read_to_string(&unit).unwrap();
-    assert!(body_after.contains(bin.to_str().unwrap()),
-        "second install must NOT have overwritten the unit file");
+    assert!(
+        body_after.contains(bin.to_str().unwrap()),
+        "second install must NOT have overwritten the unit file"
+    );
 
     // Now retry with --force.
     let out3 = run_in(
         &home,
         &data_dir,
-        &["kernel", "install", "--binary", bin2.to_str().unwrap(), "--force"],
+        &[
+            "kernel",
+            "install",
+            "--binary",
+            bin2.to_str().unwrap(),
+            "--force",
+        ],
     );
-    assert!(out3.status.success(), "stderr: {}", String::from_utf8_lossy(&out3.stderr));
+    assert!(
+        out3.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out3.stderr)
+    );
     let body_forced = std::fs::read_to_string(&unit).unwrap();
     assert!(
         body_forced.contains(bin2.to_str().unwrap()),
@@ -165,7 +186,11 @@ fn uninstall_removes_unit_file() {
     assert!(unit.exists());
 
     let out = run_in(&home, &data_dir, &["kernel", "uninstall"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     assert!(!unit.exists(), "unit file should be removed");
 }
 

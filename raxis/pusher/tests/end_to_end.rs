@@ -28,12 +28,12 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
+use raxis_observability::redact::attrs;
+use raxis_observability::ring::RingConfig;
 use raxis_observability::{
     HubConfig, MetricName, ObservabilityExporter, ObservabilityHub, RingFileExporter, SpanKind,
     SpanName,
 };
-use raxis_observability::ring::RingConfig;
-use raxis_observability::redact::attrs;
 use raxis_otel_pusher::config::PusherConfig;
 use raxis_otel_pusher::otlp::{OtlpClient, OtlpEndpoint, ResourceAttrs};
 use raxis_otel_pusher::retry::BackoffPolicy;
@@ -51,9 +51,9 @@ use tokio::sync::Mutex;
 /// with a configurable status code and records every body it
 /// receives.
 struct FakeCollector {
-    addr:    std::net::SocketAddr,
+    addr: std::net::SocketAddr,
     received: Arc<Mutex<Vec<Vec<u8>>>>,
-    handle:   tokio::task::JoinHandle<()>,
+    handle: tokio::task::JoinHandle<()>,
 }
 
 impl FakeCollector {
@@ -76,8 +76,8 @@ impl FakeCollector {
                     // Read until \r\n\r\n then read Content-Length
                     // bytes.
                     let mut header_buf = Vec::with_capacity(256);
-                    let mut body_buf   = Vec::new();
-                    let mut tmp        = [0u8; 1024];
+                    let mut body_buf = Vec::new();
+                    let mut tmp = [0u8; 1024];
                     let mut content_length: Option<usize> = None;
                     let mut header_done = false;
                     loop {
@@ -92,9 +92,8 @@ impl FakeCollector {
                                 header_done = true;
                                 let head = std::str::from_utf8(&header_buf[..idx]).unwrap_or("");
                                 for line in head.split("\r\n") {
-                                    if let Some(rest) = line
-                                        .to_ascii_lowercase()
-                                        .strip_prefix("content-length:")
+                                    if let Some(rest) =
+                                        line.to_ascii_lowercase().strip_prefix("content-length:")
                                     {
                                         content_length = rest.trim().parse().ok();
                                     }
@@ -123,7 +122,7 @@ impl FakeCollector {
                             400 => "Bad Request",
                             429 => "Too Many Requests",
                             503 => "Service Unavailable",
-                            _   => "Status",
+                            _ => "Status",
                         },
                     );
                     let _ = stream.write_all(resp.as_bytes()).await;
@@ -131,7 +130,11 @@ impl FakeCollector {
                 });
             }
         });
-        Self { addr, received, handle }
+        Self {
+            addr,
+            received,
+            handle,
+        }
     }
 
     async fn snapshot_bodies(&self) -> Vec<Vec<u8>> {
@@ -150,7 +153,9 @@ impl Drop for FakeCollector {
 }
 
 fn window_index(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    if needle.len() > haystack.len() { return None; }
+    if needle.len() > haystack.len() {
+        return None;
+    }
     haystack.windows(needle.len()).position(|w| w == needle)
 }
 
@@ -158,47 +163,47 @@ fn obs_config(endpoint: &str) -> ObservabilityConfig {
     ObservabilityConfig {
         enabled: true,
         ring: ObservabilityRingConfig {
-            dir:               String::new(),
+            dir: String::new(),
             segment_max_bytes: 1 * 1024 * 1024, // 1 MiB
-            max_total_bytes:   16 * 1024 * 1024,
-            max_queue_depth:   8192,
+            max_total_bytes: 16 * 1024 * 1024,
+            max_queue_depth: 8192,
         },
         traces: ObservabilityTracesConfig {
-            enabled:             true,
-            sample_rate:         1.0,
-            max_attrs_per_span:  32,
+            enabled: true,
+            sample_rate: 1.0,
+            max_attrs_per_span: 32,
             max_events_per_span: 16,
         },
         metrics: ObservabilityMetricsConfig {
-            enabled:           true,
-            export_interval:   Duration::from_secs(15),
+            enabled: true,
+            export_interval: Duration::from_secs(15),
             histogram_buckets: vec![1.0, 5.0, 10.0, 100.0],
         },
         resource: ObservabilityResourceConfig {
             service_name: "raxis-kernel".to_owned(),
-            environment:  "test".to_owned(),
-            extra:        BTreeMap::new(),
+            environment: "test".to_owned(),
+            extra: BTreeMap::new(),
         },
         pusher: Some(ObservabilityPusherConfig {
-            otlp_endpoint:       endpoint.to_owned(),
-            otlp_protocol:       "http".to_owned(),
-            otlp_compression:    "gzip".to_owned(),
+            otlp_endpoint: endpoint.to_owned(),
+            otlp_protocol: "http".to_owned(),
+            otlp_compression: "gzip".to_owned(),
             otlp_export_timeout: Duration::from_secs(2),
-            otlp_batch_size:     16,
+            otlp_batch_size: 16,
             otlp_flush_interval: Duration::from_millis(100),
-            otlp_max_inflight:   2,
-            backoff_initial:     Duration::from_millis(10),
-            backoff_max:         Duration::from_millis(50),
-            backoff_jitter:      0.0,
-            tls:                 ObservabilityPusherTlsConfig::default(),
-            headers:             BTreeMap::new(),
+            otlp_max_inflight: 2,
+            backoff_initial: Duration::from_millis(10),
+            backoff_max: Duration::from_millis(50),
+            backoff_jitter: 0.0,
+            tls: ObservabilityPusherTlsConfig::default(),
+            headers: BTreeMap::new(),
         }),
     }
 }
 
 fn build_pusher_pieces(
-    obs:           &ObservabilityConfig,
-    data_dir:      std::path::PathBuf,
+    obs: &ObservabilityConfig,
+    data_dir: std::path::PathBuf,
     kernel_version: &str,
 ) -> (PusherConfig, OtlpClient) {
     let pcfg = PusherConfig::build(obs, data_dir, kernel_version, 0).unwrap();
@@ -206,18 +211,19 @@ fn build_pusher_pieces(
         OtlpEndpoint::new(&pcfg.pusher.otlp_endpoint),
         pcfg.pusher.headers.clone(),
         BackoffPolicy {
-            initial:      pcfg.pusher.backoff_initial,
-            max:          pcfg.pusher.backoff_max,
-            jitter:       pcfg.pusher.backoff_jitter,
+            initial: pcfg.pusher.backoff_initial,
+            max: pcfg.pusher.backoff_max,
+            jitter: pcfg.pusher.backoff_jitter,
             max_attempts: 3, // keep tests fast
         },
         pcfg.export_timeout(),
         ResourceAttrs {
             service_name: pcfg.resource.service_name.clone(),
-            environment:  pcfg.resource.environment.clone(),
-            extra:        pcfg.resource.extra.clone(),
+            environment: pcfg.resource.environment.clone(),
+            extra: pcfg.resource.extra.clone(),
         },
-    ).unwrap();
+    )
+    .unwrap();
     (pcfg, client)
 }
 
@@ -226,34 +232,36 @@ fn build_pusher_pieces(
 /// `data_dir` that the kernel-side artifacts wrote into.
 fn emit_kernel_telemetry(data_dir: &std::path::Path, n: usize) {
     let hub_cfg = HubConfig {
-        enabled:             true,
-        max_queue_depth:     1024,
-        sample_rate:         1.0,
-        max_attrs_per_span:  16,
+        enabled: true,
+        max_queue_depth: 1024,
+        sample_rate: 1.0,
+        max_attrs_per_span: 16,
         max_events_per_span: 8,
-        histogram_buckets:   vec![1.0, 10.0, 100.0],
+        histogram_buckets: vec![1.0, 10.0, 100.0],
     };
     let exp = Arc::new(
         RingFileExporter::open(
             data_dir.join("observability"),
             RingConfig::default(),
             "0.1.0",
-        ).unwrap(),
+        )
+        .unwrap(),
     );
-    let hub = Arc::new(
-        ObservabilityHub::new(hub_cfg, exp.clone() as Arc<dyn ObservabilityExporter>),
-    );
+    let hub = Arc::new(ObservabilityHub::new(
+        hub_cfg,
+        exp.clone() as Arc<dyn ObservabilityExporter>,
+    ));
     for i in 0..n {
         let mut s = hub.start_span(SpanName::IntentAdmission, SpanKind::Server, None);
         s.set_attr("intent_kind", "CompleteTask");
-        s.set_attr("verdict",     if i % 2 == 0 { "Accepted" } else { "Rejected" });
-        s.set_attr("latency_ms",  (i as i64) * 10);
+        s.set_attr("verdict", if i % 2 == 0 { "Accepted" } else { "Rejected" });
+        s.set_attr("latency_ms", (i as i64) * 10);
         s.end();
         hub.record_counter(
             MetricName::IntentAdmissionTotal,
             attrs([
                 ("intent_kind", "CompleteTask"),
-                ("verdict",     if i % 2 == 0 { "Accepted" } else { "Rejected" }),
+                ("verdict", if i % 2 == 0 { "Accepted" } else { "Rejected" }),
             ]),
             1.0,
         );
@@ -284,12 +292,38 @@ async fn end_to_end_kernel_to_collector_happy_path() {
     }
 
     // 3. Assert at least 1 successful export per stream.
-    let span_oks = events.iter().filter(|e| matches!(e,
-        PusherEvent::ExportOk { stream: raxis_observability::protocol::Stream::Spans, .. })).count();
-    let metric_oks = events.iter().filter(|e| matches!(e,
-        PusherEvent::ExportOk { stream: raxis_observability::protocol::Stream::Metrics, .. })).count();
-    assert!(span_oks   >= 1, "at least one span batch shipped, got {span_oks}");
-    assert!(metric_oks >= 1, "at least one metric batch shipped, got {metric_oks}");
+    let span_oks = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                PusherEvent::ExportOk {
+                    stream: raxis_observability::protocol::Stream::Spans,
+                    ..
+                }
+            )
+        })
+        .count();
+    let metric_oks = events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                PusherEvent::ExportOk {
+                    stream: raxis_observability::protocol::Stream::Metrics,
+                    ..
+                }
+            )
+        })
+        .count();
+    assert!(
+        span_oks >= 1,
+        "at least one span batch shipped, got {span_oks}"
+    );
+    assert!(
+        metric_oks >= 1,
+        "at least one metric batch shipped, got {metric_oks}"
+    );
 
     // 4. Collector should have received non-empty bodies.
     let bodies = collector.snapshot_bodies().await;
@@ -319,8 +353,7 @@ async fn cursor_persists_and_resumes_at_offset() {
     }
     let cursor_path = tmp.path().join("observability/cursor.toml");
     assert!(cursor_path.exists(), "cursor must persist after run");
-    let initial_cursor =
-        std::fs::read_to_string(&cursor_path).unwrap();
+    let initial_cursor = std::fs::read_to_string(&cursor_path).unwrap();
     assert!(
         initial_cursor.contains("last_export_unix"),
         "cursor body: {initial_cursor}",
@@ -360,10 +393,22 @@ async fn http_5xx_retries_until_success() {
         all_events.extend(pusher.tick(true).await);
         tokio::time::sleep(Duration::from_millis(20)).await;
     }
-    let retries = all_events.iter().filter(|e| matches!(e, PusherEvent::ExportRetry { .. })).count();
-    let oks     = all_events.iter().filter(|e| matches!(e, PusherEvent::ExportOk { .. })).count();
-    assert!(retries >= 1, "expected at least one retry on 503, got events: {all_events:?}");
-    assert!(oks     >= 1, "expected at least one ok after retry, got events: {all_events:?}");
+    let retries = all_events
+        .iter()
+        .filter(|e| matches!(e, PusherEvent::ExportRetry { .. }))
+        .count();
+    let oks = all_events
+        .iter()
+        .filter(|e| matches!(e, PusherEvent::ExportOk { .. }))
+        .count();
+    assert!(
+        retries >= 1,
+        "expected at least one retry on 503, got events: {all_events:?}"
+    );
+    assert!(
+        oks >= 1,
+        "expected at least one ok after retry, got events: {all_events:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -382,10 +427,22 @@ async fn http_4xx_drops_immediately_no_retry() {
         events.extend(pusher.tick(true).await);
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    let drops   = events.iter().filter(|e| matches!(e, PusherEvent::ExportPermanentFailure { .. })).count();
-    let retries = events.iter().filter(|e| matches!(e, PusherEvent::ExportRetry { .. })).count();
-    assert!(drops   >= 1, "expected at least one permanent drop, got events: {events:?}");
-    assert_eq!(retries, 0, "4xx should NOT trigger retries; got: {events:?}");
+    let drops = events
+        .iter()
+        .filter(|e| matches!(e, PusherEvent::ExportPermanentFailure { .. }))
+        .count();
+    let retries = events
+        .iter()
+        .filter(|e| matches!(e, PusherEvent::ExportRetry { .. }))
+        .count();
+    assert!(
+        drops >= 1,
+        "expected at least one permanent drop, got events: {events:?}"
+    );
+    assert_eq!(
+        retries, 0,
+        "4xx should NOT trigger retries; got: {events:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -396,30 +453,31 @@ async fn segment_rotation_advances_pusher_to_next_segment() {
     // Force a low segment_max_bytes by using a custom RingConfig.
     {
         let hub_cfg = HubConfig {
-            enabled:             true,
-            max_queue_depth:     1024,
-            sample_rate:         1.0,
-            max_attrs_per_span:  16,
+            enabled: true,
+            max_queue_depth: 1024,
+            sample_rate: 1.0,
+            max_attrs_per_span: 16,
             max_events_per_span: 8,
-            histogram_buckets:   vec![1.0, 10.0, 100.0],
+            histogram_buckets: vec![1.0, 10.0, 100.0],
         };
         let ring_cfg = RingConfig {
             // Each frame is ~250 bytes; with this cap the kernel
             // forces a rotation after the first frame.
             segment_max_bytes: 256,
-            max_total_bytes:   64 * 1024,
+            max_total_bytes: 64 * 1024,
         };
         let exp = Arc::new(
             RingFileExporter::open(tmp.path().join("observability"), ring_cfg, "0.1.0").unwrap(),
         );
-        let hub = Arc::new(
-            ObservabilityHub::new(hub_cfg, exp.clone() as Arc<dyn ObservabilityExporter>),
-        );
+        let hub = Arc::new(ObservabilityHub::new(
+            hub_cfg,
+            exp.clone() as Arc<dyn ObservabilityExporter>,
+        ));
         for i in 0..4 {
             let mut s = hub.start_span(SpanName::IntentAdmission, SpanKind::Server, None);
             s.set_attr("intent_kind", "CompleteTask");
-            s.set_attr("verdict",     "Accepted");
-            s.set_attr("latency_ms",  i as i64);
+            s.set_attr("verdict", "Accepted");
+            s.set_attr("latency_ms", i as i64);
             s.end();
         }
         hub.flush();
@@ -428,7 +486,11 @@ async fn segment_rotation_advances_pusher_to_next_segment() {
     // The kernel should have written multiple segments; sanity check.
     let dir = tmp.path().join("observability/spans");
     let entries: Vec<_> = std::fs::read_dir(&dir).unwrap().collect();
-    assert!(entries.len() >= 2, "expected ≥2 segments after rotation; got {}", entries.len());
+    assert!(
+        entries.len() >= 2,
+        "expected ≥2 segments after rotation; got {}",
+        entries.len()
+    );
 
     let obs = obs_config(&collector.endpoint().await);
     let (cfg, client) = build_pusher_pieces(&obs, tmp.path().to_owned(), "0.1.0");
@@ -442,5 +504,8 @@ async fn segment_rotation_advances_pusher_to_next_segment() {
         .iter()
         .filter(|e| matches!(e, PusherEvent::SegmentAdvanced { .. }))
         .count();
-    assert!(advanced >= 1, "pusher should advance past at least one segment; events: {events:?}");
+    assert!(
+        advanced >= 1,
+        "pusher should advance past at least one segment; events: {events:?}"
+    );
 }

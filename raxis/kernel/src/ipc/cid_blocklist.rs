@@ -88,7 +88,9 @@ pub struct CidBlocklist {
 impl CidBlocklist {
     /// Create an empty blocklist.
     pub fn new() -> Self {
-        Self { inner: RwLock::new(FxHashSet::default()) }
+        Self {
+            inner: RwLock::new(FxHashSet::default()),
+        }
     }
 
     /// Add `cid` to the blocklist. Returns `Ok(true)` if the CID was
@@ -103,7 +105,9 @@ impl CidBlocklist {
         if matches!(cid, VMADDR_CID_HOST | VMADDR_CID_LOCAL | VMADDR_CID_ANY) {
             return Err(BlocklistInsertError::ReservedCid(cid));
         }
-        Ok(self.inner.write()
+        Ok(self
+            .inner
+            .write()
             .expect("CidBlocklist lock poisoned")
             .insert(cid))
     }
@@ -120,7 +124,8 @@ impl CidBlocklist {
     /// fresh blocklist between scenarios without rebuilding the
     /// surrounding kernel state.
     pub fn remove(&self, cid: u32) -> bool {
-        self.inner.write()
+        self.inner
+            .write()
             .expect("CidBlocklist lock poisoned")
             .remove(&cid)
     }
@@ -129,7 +134,8 @@ impl CidBlocklist {
     /// `accept()` before any byte is read off the socket. This is
     /// the hot path; it takes a read lock and runs in O(1).
     pub fn contains(&self, cid: u32) -> bool {
-        self.inner.read()
+        self.inner
+            .read()
             .expect("CidBlocklist lock poisoned")
             .contains(&cid)
     }
@@ -138,9 +144,7 @@ impl CidBlocklist {
     /// operator-side metrics surface and by tests pinning insert /
     /// remove arithmetic.
     pub fn len(&self) -> usize {
-        self.inner.read()
-            .expect("CidBlocklist lock poisoned")
-            .len()
+        self.inner.read().expect("CidBlocklist lock poisoned").len()
     }
 
     /// Empty-set predicate.
@@ -153,8 +157,7 @@ impl CidBlocklist {
     /// We deliberately do NOT expose iteration over the live set —
     /// callers that need a snapshot get one via `clear`.
     pub fn clear(&self) -> Vec<u32> {
-        let mut guard = self.inner.write()
-            .expect("CidBlocklist lock poisoned");
+        let mut guard = self.inner.write().expect("CidBlocklist lock poisoned");
         guard.drain().collect()
     }
 
@@ -163,7 +166,8 @@ impl CidBlocklist {
     /// Production code MUST go through `insert`.
     #[cfg(test)]
     pub(crate) fn insert_unchecked(&self, cid: u32) {
-        self.inner.write()
+        self.inner
+            .write()
             .expect("CidBlocklist lock poisoned")
             .insert(cid);
     }
@@ -197,7 +201,7 @@ mod tests {
         // `insert` unconditionally on every malformed-frame event, so
         // repeats must be harmless and observable.
         let bl = CidBlocklist::new();
-        assert_eq!(bl.insert(101), Ok(true),  "first insert is novel");
+        assert_eq!(bl.insert(101), Ok(true), "first insert is novel");
         assert_eq!(bl.insert(101), Ok(false), "second insert is a no-op");
         assert_eq!(bl.len(), 1);
     }
@@ -222,23 +226,31 @@ mod tests {
     #[test]
     fn insert_rejects_reserved_host_cid() {
         let bl = CidBlocklist::new();
-        let err = bl.insert(VMADDR_CID_HOST).expect_err("VMADDR_CID_HOST must be rejected");
+        let err = bl
+            .insert(VMADDR_CID_HOST)
+            .expect_err("VMADDR_CID_HOST must be rejected");
         assert!(matches!(err, BlocklistInsertError::ReservedCid(2)));
-        assert!(bl.is_empty(),
-                "rejection must NOT mutate the underlying set");
+        assert!(
+            bl.is_empty(),
+            "rejection must NOT mutate the underlying set"
+        );
     }
 
     #[test]
     fn insert_rejects_reserved_local_loopback_cid() {
         let bl = CidBlocklist::new();
-        let err = bl.insert(VMADDR_CID_LOCAL).expect_err("VMADDR_CID_LOCAL must be rejected");
+        let err = bl
+            .insert(VMADDR_CID_LOCAL)
+            .expect_err("VMADDR_CID_LOCAL must be rejected");
         assert!(matches!(err, BlocklistInsertError::ReservedCid(1)));
     }
 
     #[test]
     fn insert_rejects_wildcard_any_cid() {
         let bl = CidBlocklist::new();
-        let err = bl.insert(VMADDR_CID_ANY).expect_err("VMADDR_CID_ANY must be rejected");
+        let err = bl
+            .insert(VMADDR_CID_ANY)
+            .expect_err("VMADDR_CID_ANY must be rejected");
         assert!(matches!(err, BlocklistInsertError::ReservedCid(u32::MAX)));
     }
 

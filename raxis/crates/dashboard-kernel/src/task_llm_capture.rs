@@ -153,8 +153,8 @@ pub struct TaskCaptureConfig {
 impl Default for TaskCaptureConfig {
     fn default() -> Self {
         Self {
-            max_file_bytes:     4 * 1024 * 1024,
-            max_body_bytes:     256 * 1024,
+            max_file_bytes: 4 * 1024 * 1024,
+            max_body_bytes: 256 * 1024,
             broadcast_capacity: 64,
         }
     }
@@ -167,9 +167,9 @@ impl Default for TaskCaptureConfig {
 /// executor sessions for the same task can overlap) serialize
 /// at the file level without blocking on tokio's executor.
 struct TaskState {
-    file:      Mutex<File>,
+    file: Mutex<File>,
     file_size: Mutex<u64>,
-    sender:    broadcast::Sender<LlmTurnRecord>,
+    sender: broadcast::Sender<LlmTurnRecord>,
 }
 
 /// Process-wide per-task capture. Hold via `Arc` from both the
@@ -177,8 +177,8 @@ struct TaskState {
 /// (reader / subscriber).
 pub struct TaskLlmCapture {
     turns_dir: PathBuf,
-    cfg:       TaskCaptureConfig,
-    tasks:     Mutex<HashMap<String, Arc<TaskState>>>,
+    cfg: TaskCaptureConfig,
+    tasks: Mutex<HashMap<String, Arc<TaskState>>>,
 }
 
 impl TaskLlmCapture {
@@ -202,11 +202,7 @@ impl TaskLlmCapture {
     /// disk-full the broadcast still fires (live subscribers
     /// don't lose the event) and the function returns `Err` so
     /// the caller can decide whether to retry or surface.
-    pub fn append(
-        &self,
-        task_id: &str,
-        mut record: LlmTurnRecord,
-    ) -> std::io::Result<()> {
+    pub fn append(&self, task_id: &str, mut record: LlmTurnRecord) -> std::io::Result<()> {
         // Enforce per-record body cap BEFORE serializing so the
         // file ring can never balloon from a single response.
         let max = self.cfg.max_body_bytes;
@@ -224,9 +220,9 @@ impl TaskLlmCapture {
             }
             let extra_bytes = original_len - cut;
             record.body.truncate(cut);
-            record.body.push_str(&format!(
-                "\n<truncated {extra_bytes} bytes>"
-            ));
+            record
+                .body
+                .push_str(&format!("\n<truncated {extra_bytes} bytes>"));
             record.body_truncated = true;
         }
 
@@ -235,8 +231,7 @@ impl TaskLlmCapture {
         let _ = state.sender.send(record.clone());
 
         // Then persist.
-        let line = serde_json::to_string(&record)
-            .unwrap_or_else(|_| "{}".to_owned());
+        let line = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_owned());
         let bytes = line.as_bytes();
         let line_len = bytes.len() as u64 + 1; // +1 for newline
 
@@ -259,10 +254,11 @@ impl TaskLlmCapture {
     /// LLM call) — never an error.
     pub fn tail(&self, task_id: &str, n: usize) -> Vec<LlmTurnRecord> {
         let path = self.task_path(task_id);
-        let Ok(file) = File::open(&path) else { return Vec::new() };
+        let Ok(file) = File::open(&path) else {
+            return Vec::new();
+        };
         let reader = BufReader::new(file);
-        let mut lines: Vec<String> =
-            reader.lines().map_while(Result::ok).collect();
+        let mut lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
         if lines.len() > n {
             let cut = lines.len() - n;
             lines.drain(0..cut);
@@ -276,10 +272,7 @@ impl TaskLlmCapture {
     /// Subscribe to live records for a task. Returns `None`
     /// when no task state exists yet — callers that want lazy
     /// attach should call [`Self::ensure_task`] first.
-    pub fn subscribe(
-        &self,
-        task_id: &str,
-    ) -> Option<broadcast::Receiver<LlmTurnRecord>> {
+    pub fn subscribe(&self, task_id: &str) -> Option<broadcast::Receiver<LlmTurnRecord>> {
         let g = self.tasks.lock();
         g.get(task_id).map(|s| s.sender.subscribe())
     }
@@ -287,10 +280,7 @@ impl TaskLlmCapture {
     /// Allocate the task state if it does not already exist.
     /// Returns the broadcast sender for callers that want to
     /// hold a clone (e.g. the kernel's gateway pump).
-    pub fn ensure_task(
-        &self,
-        task_id: &str,
-    ) -> std::io::Result<broadcast::Sender<LlmTurnRecord>> {
+    pub fn ensure_task(&self, task_id: &str) -> std::io::Result<broadcast::Sender<LlmTurnRecord>> {
         let state = self.task_state(task_id)?;
         Ok(state.sender.clone())
     }
@@ -302,8 +292,7 @@ impl TaskLlmCapture {
         // for task ids so this is defence in depth.
         let safe: String = task_id
             .chars()
-            .filter(|c| c.is_ascii_alphanumeric()
-                || *c == '_' || *c == '.' || *c == '-')
+            .filter(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '.' || *c == '-')
             .collect();
         self.turns_dir.join(format!("{safe}.jsonl"))
     }
@@ -326,9 +315,9 @@ impl TaskLlmCapture {
         let size = file.metadata().map(|m| m.len()).unwrap_or(0);
         let (tx, _) = broadcast::channel(self.cfg.broadcast_capacity);
         let state = Arc::new(TaskState {
-            file:      Mutex::new(file),
+            file: Mutex::new(file),
             file_size: Mutex::new(size),
-            sender:    tx,
+            sender: tx,
         });
         let mut g = self.tasks.lock();
         Ok(g.entry(task_id.to_owned()).or_insert(state).clone())
@@ -337,11 +326,7 @@ impl TaskLlmCapture {
     /// Rewrite the task file keeping only the most recent 50 %
     /// of lines. Holds the file lock for the duration so no
     /// concurrent append slips in.
-    fn compact_locked(
-        &self,
-        task_id: &str,
-        state: &TaskState,
-    ) -> std::io::Result<()> {
+    fn compact_locked(&self, task_id: &str, state: &TaskState) -> std::io::Result<()> {
         let path = self.task_path(task_id);
         let lines: Vec<String> = {
             let mut f = state.file.lock();
@@ -382,15 +367,15 @@ mod tests {
     fn rec(at_ms: u64, body: &str) -> LlmTurnRecord {
         LlmTurnRecord {
             at_ms,
-            task_id:   "task-x".into(),
+            task_id: "task-x".into(),
             session_id: Some(format!("sess-{at_ms}")),
-            fetch_id:  format!("fetch-{at_ms}"),
+            fetch_id: format!("fetch-{at_ms}"),
             status_code: Some(200),
             latency_ms: 42,
-            body:      body.into(),
+            body: body.into(),
             body_truncated: false,
             original_body_bytes: body.len() as u64,
-            error:     None,
+            error: None,
         }
     }
 
@@ -431,7 +416,7 @@ mod tests {
     fn body_above_max_body_bytes_is_truncated_with_marker() {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = TaskCaptureConfig {
-            max_body_bytes:     32,
+            max_body_bytes: 32,
             ..TaskCaptureConfig::default()
         };
         let cap = TaskLlmCapture::new(tmp.path(), cfg).unwrap();
@@ -442,10 +427,16 @@ mod tests {
         let r = &tail[0];
         assert!(r.body_truncated, "body MUST be flagged truncated");
         assert_eq!(r.original_body_bytes, 1000);
-        assert!(r.body.contains("<truncated 968 bytes>"),
-            "body MUST carry truncation marker; got {:?}", r.body);
-        assert!(r.body.len() <= 32 + 64,
-            "truncated body MUST be near max_body_bytes; got {} bytes", r.body.len());
+        assert!(
+            r.body.contains("<truncated 968 bytes>"),
+            "body MUST carry truncation marker; got {:?}",
+            r.body
+        );
+        assert!(
+            r.body.len() <= 32 + 64,
+            "truncated body MUST be near max_body_bytes; got {} bytes",
+            r.body.len()
+        );
     }
 
     #[test]
@@ -462,12 +453,16 @@ mod tests {
         }
         let path = cap.task_path("task-z");
         let size = std::fs::metadata(&path).unwrap().len();
-        assert!(size <= 1024 + 512,
-            "file size {size} should stay near the cap (1024B); cap busted");
+        assert!(
+            size <= 1024 + 512,
+            "file size {size} should stay near the cap (1024B); cap busted"
+        );
         let tail = cap.tail("task-z", 100);
         assert!(!tail.is_empty(), "tail must not be empty after compaction");
-        assert!(tail.last().unwrap().at_ms >= 40,
-            "tail must include the most recent records");
+        assert!(
+            tail.last().unwrap().at_ms >= 40,
+            "tail must include the most recent records"
+        );
     }
 
     #[tokio::test]
@@ -504,8 +499,11 @@ mod tests {
         r3.session_id = Some("sess-exec-2".into());
         cap.append("task-shared", r3).unwrap();
         let tail = cap.tail("task-shared", 10);
-        assert_eq!(tail.len(), 3,
-            "all 3 records (across 3 VMs of the same task) MUST be in the file");
+        assert_eq!(
+            tail.len(),
+            3,
+            "all 3 records (across 3 VMs of the same task) MUST be in the file"
+        );
         assert_eq!(tail[0].session_id.as_deref(), Some("sess-orch"));
         assert_eq!(tail[2].session_id.as_deref(), Some("sess-exec-2"));
     }

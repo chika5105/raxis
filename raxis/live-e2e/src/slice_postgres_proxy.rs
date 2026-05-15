@@ -22,17 +22,17 @@
 //! emission. Real-upstream mode is what
 //! `cargo run -p raxis-live-e2e -- all` runs in CI.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_postgres::{
-    NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
+    restriction::Restrictions, NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -47,7 +47,7 @@ const DEFAULT_UPSTREAM_URL: &str =
     "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e";
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -64,16 +64,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -98,16 +107,17 @@ pub(crate) async fn run() -> Result<()> {
     };
 
     let backend = Arc::new(LiveBackend {
-        value:    upstream_url,
+        value: upstream_url,
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("live-e2e"),
-        consumer:        OwnedConsumer::new("credential_proxy", "live-e2e:postgres:0"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("credential_proxy", "live-e2e:postgres:0"),
+        restrictions: Restrictions::default(),
     };
-    let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
+    let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel))
+        .await
         .map_err(|e| anyhow!("PostgresProxy::bind: {e}"))?;
     let addr = proxy.local_addr()?;
     let stats = proxy.stats_handle();
@@ -118,10 +128,18 @@ pub(crate) async fn run() -> Result<()> {
     write_startup(&mut s).await?;
     let msgs = drain_until_ready(&mut s).await?;
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
-    if !tags.contains(&b'R') { return Err(anyhow!("no AuthenticationOk; tags={tags:?}")); }
-    if !tags.contains(&b'S') { return Err(anyhow!("no ParameterStatus; tags={tags:?}")); }
-    if !tags.contains(&b'K') { return Err(anyhow!("no BackendKeyData; tags={tags:?}")); }
-    if tags.last() != Some(&b'Z') { return Err(anyhow!("last frame must be 'Z'; tags={tags:?}")); }
+    if !tags.contains(&b'R') {
+        return Err(anyhow!("no AuthenticationOk; tags={tags:?}"));
+    }
+    if !tags.contains(&b'S') {
+        return Err(anyhow!("no ParameterStatus; tags={tags:?}"));
+    }
+    if !tags.contains(&b'K') {
+        return Err(anyhow!("no BackendKeyData; tags={tags:?}"));
+    }
+    if tags.last() != Some(&b'Z') {
+        return Err(anyhow!("last frame must be 'Z'; tags={tags:?}"));
+    }
     tracing::info!("slice postgres-proxy: handshake reached ReadyForQuery");
 
     // SELECT 1 — exercises the upstream-forwarding path against the
@@ -147,7 +165,8 @@ pub(crate) async fn run() -> Result<()> {
     let snap = stats.snapshot();
     if snap.queries_audited < 1 {
         return Err(anyhow!(
-            "expected ≥1 query audited, got {}", snap.queries_audited
+            "expected ≥1 query audited, got {}",
+            snap.queries_audited
         ));
     }
     if backend.resolves.load(Ordering::Relaxed) < 1 {
@@ -161,11 +180,11 @@ pub(crate) async fn run() -> Result<()> {
         ));
     }
     tracing::info!(
-        queries_audited    = snap.queries_audited,
-        queries_blocked    = snap.queries_blocked,
+        queries_audited = snap.queries_audited,
+        queries_blocked = snap.queries_blocked,
         upstream_succeeded = snap.upstream_connects_succeeded,
-        upstream_failed    = snap.upstream_connects_failed,
-        backend_resolves   = backend.resolves.load(Ordering::Relaxed),
+        upstream_failed = snap.upstream_connects_failed,
+        backend_resolves = backend.resolves.load(Ordering::Relaxed),
         "slice postgres-proxy: PASS",
     );
     Ok(())
@@ -175,7 +194,9 @@ async fn require_postgres_container() -> Result<()> {
     match tokio::time::timeout(
         Duration::from_secs(2),
         TcpStream::connect(POSTGRES_HOST_PORT),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "postgres container not reachable at {POSTGRES_HOST_PORT}: {e}\n\
@@ -222,7 +243,9 @@ async fn drain_until_ready(s: &mut TcpStream) -> Result<Vec<(u8, Vec<u8>)>> {
         let (t, b) = read_tagged_message(s).await?;
         let is_z = t == b'Z';
         acc.push((t, b));
-        if is_z { return Ok(acc); }
+        if is_z {
+            return Ok(acc);
+        }
     }
 }
 

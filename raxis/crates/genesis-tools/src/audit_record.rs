@@ -129,9 +129,9 @@ mod tests {
     fn fixed_inputs<'a>() -> GenesisAuditInputs<'a> {
         GenesisAuditInputs {
             authority_pubkey_fingerprint: "deadbeefdeadbeefdeadbeefdeadbeef",
-            nonce_bytes:                  &[0xC1u8; 64],
-            emitted_at_unix_secs:         1_700_000_000,
-            event_id:                     "00000000-0000-4000-8000-000000000000",
+            nonce_bytes: &[0xC1u8; 64],
+            emitted_at_unix_secs: 1_700_000_000,
+            event_id: "00000000-0000-4000-8000-000000000000",
         }
     }
 
@@ -143,8 +143,10 @@ mod tests {
         // line-by-line. Missing newline = subsequent appends would land on
         // the same line and corrupt the chain.
         let line = render_genesis_audit_record(fixed_inputs());
-        assert!(line.ends_with('\n'),
-            "genesis audit line must end with `\\n`, got {line:?}");
+        assert!(
+            line.ends_with('\n'),
+            "genesis audit line must end with `\\n`, got {line:?}"
+        );
     }
 
     #[test]
@@ -152,14 +154,21 @@ mod tests {
         // Pin the field set so a future emitter that drops or renames a
         // field surfaces here, not at the next kernel recovery.
         let line = render_genesis_audit_record(fixed_inputs());
-        let v: serde_json::Value = serde_json::from_str(line.trim_end())
-            .expect("line must be valid JSON");
+        let v: serde_json::Value =
+            serde_json::from_str(line.trim_end()).expect("line must be valid JSON");
         for required in [
-            "seq", "event_id", "event_kind", "prev_sha256",
-            "genesis_nonce", "authority_pubkey_fingerprint", "emitted_at",
+            "seq",
+            "event_id",
+            "event_kind",
+            "prev_sha256",
+            "genesis_nonce",
+            "authority_pubkey_fingerprint",
+            "emitted_at",
         ] {
-            assert!(v.get(required).is_some(),
-                "required field {required:?} missing from genesis record: {v:?}");
+            assert!(
+                v.get(required).is_some(),
+                "required field {required:?} missing from genesis record: {v:?}"
+            );
         }
     }
 
@@ -172,8 +181,11 @@ mod tests {
         let line = render_genesis_audit_record(fixed_inputs());
         let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         assert_eq!(v["seq"], serde_json::json!(0));
-        assert!(v["seq"].is_i64() || v["seq"].is_u64(),
-            "seq must be a JSON number, got {:?}", v["seq"]);
+        assert!(
+            v["seq"].is_i64() || v["seq"].is_u64(),
+            "seq must be a JSON number, got {:?}",
+            v["seq"]
+        );
     }
 
     #[test]
@@ -203,8 +215,10 @@ mod tests {
         let v: serde_json::Value = serde_json::from_str(line.trim_end()).unwrap();
         let nonce = v["genesis_nonce"].as_str().expect("nonce is string");
         assert_eq!(nonce.len(), 128, "genesis_nonce must be 128 hex chars");
-        assert!(nonce.chars().all(|c| c.is_ascii_hexdigit()),
-            "genesis_nonce must be lowercase hex");
+        assert!(
+            nonce.chars().all(|c| c.is_ascii_hexdigit()),
+            "genesis_nonce must be lowercase hex"
+        );
     }
 
     #[test]
@@ -216,8 +230,10 @@ mod tests {
             ..fixed_inputs()
         };
         let line = render_genesis_audit_record(inputs);
-        assert!(line.contains("feed1234feed1234feed1234feed1234"),
-            "fingerprint not found verbatim in: {line}");
+        assert!(
+            line.contains("feed1234feed1234feed1234feed1234"),
+            "fingerprint not found verbatim in: {line}"
+        );
     }
 
     #[test]

@@ -70,11 +70,17 @@ pub struct ToolOutput {
 impl ToolOutput {
     /// Construct a success output.
     pub fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: None }
+        Self {
+            content: content.into(),
+            is_error: None,
+        }
     }
     /// Construct a structured-error output.
     pub fn err(message: impl Into<String>) -> Self {
-        Self { content: message.into(), is_error: Some(true) }
+        Self {
+            content: message.into(),
+            is_error: Some(true),
+        }
     }
 }
 
@@ -96,7 +102,7 @@ pub enum ToolError {
     #[error("invalid tool input for {tool}: {reason}")]
     InvalidInput {
         /// Tool name the model invoked.
-        tool:   String,
+        tool: String,
         /// Human-readable schema-validation failure (surfaced to the
         /// model as a structured tool error so it can recover).
         reason: String,
@@ -108,7 +114,7 @@ pub enum ToolError {
     #[error("tool {tool} failed: {reason}")]
     Internal {
         /// Tool name that failed.
-        tool:   String,
+        tool: String,
         /// Human-readable reason (e.g. process spawn failure, IO error).
         reason: String,
     },
@@ -140,7 +146,7 @@ pub trait Tool: Send + Sync {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError>;
 
     /// Lift this tool into the Anthropic-shape `ToolSpec` the
@@ -150,8 +156,8 @@ pub trait Tool: Send + Sync {
     /// [`Tool::input_schema`].
     fn to_spec(&self) -> ToolSpec {
         ToolSpec {
-            name:         self.name().to_owned(),
-            description:  self.description().to_owned(),
+            name: self.name().to_owned(),
+            description: self.description().to_owned(),
             input_schema: self.input_schema(),
         }
     }
@@ -170,7 +176,7 @@ pub struct ToolContext {
     /// is bounded by this value. Long-running tools that exceed it
     /// surface a structured-error output rather than blocking the
     /// dispatch loop indefinitely.
-    pub deadline:       Option<Duration>,
+    pub deadline: Option<Duration>,
 }
 
 impl ToolContext {
@@ -179,7 +185,7 @@ impl ToolContext {
     pub fn for_workspace(workspace_root: impl Into<PathBuf>) -> Self {
         Self {
             workspace_root: workspace_root.into(),
-            deadline:       None,
+            deadline: None,
         }
     }
 }
@@ -266,12 +272,12 @@ impl ToolRegistry {
 /// from inside the workspace.
 pub fn resolve_workspace_path(
     workspace_root: &Path,
-    input_path:     &str,
+    input_path: &str,
 ) -> Result<PathBuf, ToolError> {
     let p = Path::new(input_path);
     if p.is_absolute() {
         return Err(ToolError::InvalidInput {
-            tool:   "<workspace-path>".to_owned(),
+            tool: "<workspace-path>".to_owned(),
             reason: format!(
                 "absolute path {input_path:?} not allowed; \
                  paths MUST be relative to the workspace root"
@@ -286,20 +292,16 @@ pub fn resolve_workspace_path(
         match c {
             std::path::Component::ParentDir => {
                 return Err(ToolError::InvalidInput {
-                    tool:   "<workspace-path>".to_owned(),
-                    reason: format!(
-                        "`..` segment in {input_path:?} not allowed"
-                    ),
+                    tool: "<workspace-path>".to_owned(),
+                    reason: format!("`..` segment in {input_path:?} not allowed"),
                 });
             }
             std::path::Component::CurDir => continue,
             std::path::Component::Normal(_) => continue,
             _ => {
                 return Err(ToolError::InvalidInput {
-                    tool:   "<workspace-path>".to_owned(),
-                    reason: format!(
-                        "unsupported path component in {input_path:?}"
-                    ),
+                    tool: "<workspace-path>".to_owned(),
+                    reason: format!("unsupported path component in {input_path:?}"),
                 });
             }
         }
@@ -320,7 +322,9 @@ pub struct ReadFileTool;
 
 #[async_trait::async_trait]
 impl Tool for ReadFileTool {
-    fn name(&self) -> &'static str { "read_file" }
+    fn name(&self) -> &'static str {
+        "read_file"
+    }
     fn description(&self) -> &'static str {
         "Read the contents of a file in the workspace. \
          The path argument is interpreted relative to the workspace \
@@ -342,39 +346,36 @@ impl Tool for ReadFileTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let path = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "read_file".to_owned(),
-                reason: "missing or non-string `path`".to_owned(),
-            }
-        })?;
-        let resolved = resolve_workspace_path(&ctx.workspace_root, path)
-            .map_err(|e| match e {
-                ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+        let path =
+            input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidInput {
                     tool: "read_file".to_owned(),
-                    reason,
-                },
-                other => other,
-            })?;
+                    reason: "missing or non-string `path`".to_owned(),
+                })?;
+        let resolved = resolve_workspace_path(&ctx.workspace_root, path).map_err(|e| match e {
+            ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+                tool: "read_file".to_owned(),
+                reason,
+            },
+            other => other,
+        })?;
         match tokio::fs::read(&resolved).await {
             Ok(bytes) => {
                 const MAX: usize = 1024 * 1024;
                 let body = if bytes.len() > MAX {
                     let mut s = String::from_utf8_lossy(&bytes[..MAX]).into_owned();
-                    s.push_str(&format!(
-                        "\n... <truncated {} bytes>", bytes.len() - MAX
-                    ));
+                    s.push_str(&format!("\n... <truncated {} bytes>", bytes.len() - MAX));
                     s
                 } else {
                     String::from_utf8_lossy(&bytes).into_owned()
                 };
                 Ok(ToolOutput::ok(body))
             }
-            Err(e) => Ok(ToolOutput::err(format!(
-                "read_file({path:?}) failed: {e}"
-            ))),
+            Err(e) => Ok(ToolOutput::err(format!("read_file({path:?}) failed: {e}"))),
         }
     }
 }
@@ -387,7 +388,9 @@ pub struct EditFileTool;
 
 #[async_trait::async_trait]
 impl Tool for EditFileTool {
-    fn name(&self) -> &'static str { "edit_file" }
+    fn name(&self) -> &'static str {
+        "edit_file"
+    }
     fn description(&self) -> &'static str {
         "Write the given UTF-8 `contents` to the workspace file at \
          `path` (creating parent directories as needed). Overwrites \
@@ -409,28 +412,30 @@ impl Tool for EditFileTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let path = input.get("path").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "edit_file".to_owned(),
-                reason: "missing or non-string `path`".to_owned(),
-            }
-        })?;
-        let contents = input.get("contents").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "edit_file".to_owned(),
-                reason: "missing or non-string `contents`".to_owned(),
-            }
-        })?;
-        let resolved = resolve_workspace_path(&ctx.workspace_root, path)
-            .map_err(|e| match e {
-                ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+        let path =
+            input
+                .get("path")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| ToolError::InvalidInput {
                     tool: "edit_file".to_owned(),
-                    reason,
-                },
-                other => other,
+                    reason: "missing or non-string `path`".to_owned(),
+                })?;
+        let contents = input
+            .get("contents")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "edit_file".to_owned(),
+                reason: "missing or non-string `contents`".to_owned(),
             })?;
+        let resolved = resolve_workspace_path(&ctx.workspace_root, path).map_err(|e| match e {
+            ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+                tool: "edit_file".to_owned(),
+                reason,
+            },
+            other => other,
+        })?;
         if let Some(parent) = resolved.parent() {
             if let Err(e) = tokio::fs::create_dir_all(parent).await {
                 return Ok(ToolOutput::err(format!(
@@ -440,9 +445,11 @@ impl Tool for EditFileTool {
         }
         let mut f = match tokio::fs::File::create(&resolved).await {
             Ok(f) => f,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "edit_file: open({resolved:?}) failed: {e}"
-            ))),
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "edit_file: open({resolved:?}) failed: {e}"
+                )))
+            }
         };
         if let Err(e) = f.write_all(contents.as_bytes()).await {
             return Ok(ToolOutput::err(format!(
@@ -455,7 +462,9 @@ impl Tool for EditFileTool {
             )));
         }
         Ok(ToolOutput::ok(format!(
-            "wrote {} bytes to {}", contents.len(), path
+            "wrote {} bytes to {}",
+            contents.len(),
+            path
         )))
     }
 }
@@ -472,7 +481,9 @@ pub struct BashTool;
 
 #[async_trait::async_trait]
 impl Tool for BashTool {
-    fn name(&self) -> &'static str { "bash" }
+    fn name(&self) -> &'static str {
+        "bash"
+    }
     fn description(&self) -> &'static str {
         "Run a bash command in the workspace. Returns stdout + \
          stderr (each capped at 64 KiB) and the exit code. Path \
@@ -493,14 +504,15 @@ impl Tool for BashTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let cmd = input.get("command").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "bash".to_owned(),
+        let cmd = input
+            .get("command")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "bash".to_owned(),
                 reason: "missing or non-string `command`".to_owned(),
-            }
-        })?;
+            })?;
         let child = match tokio::process::Command::new("bash")
             .arg("-lc")
             .arg(cmd)
@@ -510,20 +522,22 @@ impl Tool for BashTool {
             .stdin(std::process::Stdio::null())
             .spawn()
         {
-            Ok(c)  => c,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "bash: spawn failed: {e}"
-            ))),
+            Ok(c) => c,
+            Err(e) => return Ok(ToolOutput::err(format!("bash: spawn failed: {e}"))),
         };
         let timeout = ctx.deadline.unwrap_or(Duration::from_secs(120));
         let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(o))  => o,
-            Ok(Err(e)) => return Ok(ToolOutput::err(format!(
-                "bash: wait_with_output failed: {e}"
-            ))),
-            Err(_) => return Ok(ToolOutput::err(format!(
-                "bash: command timed out after {timeout:?}"
-            ))),
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Ok(ToolOutput::err(format!(
+                    "bash: wait_with_output failed: {e}"
+                )))
+            }
+            Err(_) => {
+                return Ok(ToolOutput::err(format!(
+                    "bash: command timed out after {timeout:?}"
+                )))
+            }
         };
         const CAP: usize = 64 * 1024;
         let cap = |b: &[u8]| -> String {
@@ -539,7 +553,11 @@ impl Tool for BashTool {
         };
         let body = format!(
             "exit_code: {code}\n----- stdout -----\n{stdout}\n----- stderr -----\n{stderr}",
-            code   = out.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
+            code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signalled>".to_owned()),
             stdout = cap(&out.stdout),
             stderr = cap(&out.stderr),
         );
@@ -549,7 +567,10 @@ impl Tool for BashTool {
             // Non-zero exit is a STRUCTURED tool error so the model
             // can recover; the audit chain still records the full
             // body via the dispatch loop.
-            Ok(ToolOutput { content: body, is_error: Some(true) })
+            Ok(ToolOutput {
+                content: body,
+                is_error: Some(true),
+            })
         }
     }
 }
@@ -564,7 +585,9 @@ pub struct GrepSearchTool;
 
 #[async_trait::async_trait]
 impl Tool for GrepSearchTool {
-    fn name(&self) -> &'static str { "grep_search" }
+    fn name(&self) -> &'static str {
+        "grep_search"
+    }
     fn description(&self) -> &'static str {
         "Run `grep -rn <pattern> [<path>]` over the workspace and \
          return matching lines. `path` defaults to the workspace \
@@ -590,23 +613,23 @@ impl Tool for GrepSearchTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let pattern = input.get("pattern").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "grep_search".to_owned(),
+        let pattern = input
+            .get("pattern")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "grep_search".to_owned(),
                 reason: "missing or non-string `pattern`".to_owned(),
-            }
-        })?;
-        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
-        let resolved = resolve_workspace_path(&ctx.workspace_root, path)
-            .map_err(|e| match e {
-                ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
-                    tool: "grep_search".to_owned(),
-                    reason,
-                },
-                other => other,
             })?;
+        let path = input.get("path").and_then(|v| v.as_str()).unwrap_or(".");
+        let resolved = resolve_workspace_path(&ctx.workspace_root, path).map_err(|e| match e {
+            ToolError::InvalidInput { reason, .. } => ToolError::InvalidInput {
+                tool: "grep_search".to_owned(),
+                reason,
+            },
+            other => other,
+        })?;
         let out = match tokio::process::Command::new("grep")
             .arg("-rn")
             .arg(pattern)
@@ -614,10 +637,8 @@ impl Tool for GrepSearchTool {
             .output()
             .await
         {
-            Ok(o)  => o,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "grep_search: spawn failed: {e}"
-            ))),
+            Ok(o) => o,
+            Err(e) => return Ok(ToolOutput::err(format!("grep_search: spawn failed: {e}"))),
         };
         // grep exit code 1 means "no match" — treat as success with
         // an empty body so the model doesn't think the tool errored.
@@ -640,9 +661,7 @@ impl Tool for GrepSearchTool {
                 "grep_search: exit {c}\n{}",
                 String::from_utf8_lossy(&out.stderr)
             ))),
-            None => Ok(ToolOutput::err(
-                "grep_search: signalled".to_owned(),
-            )),
+            None => Ok(ToolOutput::err("grep_search: signalled".to_owned())),
         }
     }
 }
@@ -656,7 +675,9 @@ pub struct GitCommitTool;
 
 #[async_trait::async_trait]
 impl Tool for GitCommitTool {
-    fn name(&self) -> &'static str { "git_commit" }
+    fn name(&self) -> &'static str {
+        "git_commit"
+    }
     fn description(&self) -> &'static str {
         "Stage all workspace changes (`git add -A`) and commit them \
          with the given message. Returns the new HEAD short SHA on \
@@ -679,14 +700,15 @@ impl Tool for GitCommitTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
-        let message = input.get("message").and_then(|v| v.as_str()).ok_or_else(|| {
-            ToolError::InvalidInput {
-                tool:   "git_commit".to_owned(),
+        let message = input
+            .get("message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| ToolError::InvalidInput {
+                tool: "git_commit".to_owned(),
                 reason: "missing or non-string `message`".to_owned(),
-            }
-        })?;
+            })?;
         // The cloned worktree has no `user.email` / `user.name` in
         // its `.git/config` (the gix `file://` clone copies refs +
         // HEAD but not user identity), and the AVF guest has no
@@ -702,9 +724,9 @@ impl Tool for GitCommitTool {
         // a `.invalid` TLD per RFC 2606 so the address can never
         // be confused with a real maintainer's mailbox.
         let git_env: &[(&str, &str)] = &[
-            ("GIT_AUTHOR_NAME",     "raxis-executor"),
-            ("GIT_AUTHOR_EMAIL",    "executor@raxis.invalid"),
-            ("GIT_COMMITTER_NAME",  "raxis-executor"),
+            ("GIT_AUTHOR_NAME", "raxis-executor"),
+            ("GIT_AUTHOR_EMAIL", "executor@raxis.invalid"),
+            ("GIT_COMMITTER_NAME", "raxis-executor"),
             ("GIT_COMMITTER_EMAIL", "executor@raxis.invalid"),
         ];
 
@@ -715,15 +737,20 @@ impl Tool for GitCommitTool {
             .output()
             .await
         {
-            Ok(o)  => o,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "git_commit: `git add -A` spawn failed: {e}"
-            ))),
+            Ok(o) => o,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "git_commit: `git add -A` spawn failed: {e}"
+                )))
+            }
         };
         if !add.status.success() {
             return Ok(ToolOutput::err(format!(
                 "git_commit: `git add -A` exit {}\n{}",
-                add.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
+                add.status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "<signalled>".to_owned()),
                 String::from_utf8_lossy(&add.stderr)
             )));
         }
@@ -734,15 +761,21 @@ impl Tool for GitCommitTool {
             .output()
             .await
         {
-            Ok(o)  => o,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "git_commit: `git commit` spawn failed: {e}"
-            ))),
+            Ok(o) => o,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "git_commit: `git commit` spawn failed: {e}"
+                )))
+            }
         };
         if !commit.status.success() {
             return Ok(ToolOutput::err(format!(
                 "git_commit: `git commit` exit {}\nstdout: {}\nstderr: {}",
-                commit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
+                commit
+                    .status
+                    .code()
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "<signalled>".to_owned()),
                 String::from_utf8_lossy(&commit.stdout),
                 String::from_utf8_lossy(&commit.stderr)
             )));
@@ -759,13 +792,16 @@ impl Tool for GitCommitTool {
             .output()
             .await
         {
-            Ok(o)  => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "git_commit: `git rev-parse` failed: {e}"
-            ))),
+            Ok(o) => String::from_utf8_lossy(&o.stdout).trim().to_owned(),
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "git_commit: `git rev-parse` failed: {e}"
+                )))
+            }
         };
         Ok(ToolOutput::ok(format!(
-            "committed: {sha}\n{}", String::from_utf8_lossy(&commit.stdout).trim()
+            "committed: {sha}\n{}",
+            String::from_utf8_lossy(&commit.stdout).trim()
         )))
     }
 }
@@ -805,8 +841,8 @@ pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
 /// model can recover; `Tool::execute` itself returns `Ok` in every
 /// case (matches the dispatch loop's error contract — see `BashTool`).
 pub struct SleepTool {
-    max_per_call_seconds:    u32,
-    max_cumulative_seconds:  u32,
+    max_per_call_seconds: u32,
+    max_cumulative_seconds: u32,
     cumulative_slept_seconds: Arc<std::sync::Mutex<u32>>,
 }
 
@@ -833,13 +869,18 @@ impl SleepTool {
     /// Snapshot the cumulative seconds slept so far. For tests +
     /// audit instrumentation.
     pub fn cumulative_slept_seconds(&self) -> u32 {
-        *self.cumulative_slept_seconds.lock().expect("sleep mutex poisoned")
+        *self
+            .cumulative_slept_seconds
+            .lock()
+            .expect("sleep mutex poisoned")
     }
 }
 
 #[async_trait::async_trait]
 impl Tool for SleepTool {
-    fn name(&self) -> &'static str { "sleep" }
+    fn name(&self) -> &'static str {
+        "sleep"
+    }
     fn description(&self) -> &'static str {
         "Pause execution for `seconds` seconds without consuming any \
          model inference turn. Use to wait for an external process \
@@ -872,7 +913,7 @@ impl Tool for SleepTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx:  &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         // Tool disabled → operator did not opt in.
         if self.max_per_call_seconds == 0 {
@@ -882,10 +923,11 @@ impl Tool for SleepTool {
                     .to_owned(),
             ));
         }
-        let seconds_raw = input.get("seconds")
+        let seconds_raw = input
+            .get("seconds")
             .and_then(|v| v.as_u64())
             .ok_or_else(|| ToolError::InvalidInput {
-                tool:   "sleep".to_owned(),
+                tool: "sleep".to_owned(),
                 reason: "missing or non-integer `seconds`".to_owned(),
             })?;
         // Clamp at u32::MAX to keep cast safe; the per-call gate
@@ -913,7 +955,9 @@ impl Tool for SleepTool {
         // The lock scope is intentionally tight to keep the await
         // outside it (Mutex is std::sync, not tokio).
         {
-            let mut cum = self.cumulative_slept_seconds.lock()
+            let mut cum = self
+                .cumulative_slept_seconds
+                .lock()
                 .expect("sleep mutex poisoned");
             let projected = cum.saturating_add(seconds);
             if projected > self.max_cumulative_seconds {
@@ -929,10 +973,12 @@ impl Tool for SleepTool {
         // model has its own text to anchor on for the next turn.
         let reason_suffix = match input.get("reason").and_then(|v| v.as_str()) {
             Some(r) if !r.trim().is_empty() => format!(" reason: {r}"),
-            _                               => String::new(),
+            _ => String::new(),
         };
         tokio::time::sleep(std::time::Duration::from_secs(seconds as u64)).await;
-        Ok(ToolOutput::ok(format!("slept_seconds: {seconds}{reason_suffix}")))
+        Ok(ToolOutput::ok(format!(
+            "slept_seconds: {seconds}{reason_suffix}"
+        )))
     }
 }
 
@@ -981,7 +1027,9 @@ impl StructuredOutputTool {
 
 #[async_trait::async_trait]
 impl Tool for StructuredOutputTool {
-    fn name(&self) -> &'static str { "structured_output" }
+    fn name(&self) -> &'static str {
+        "structured_output"
+    }
     fn description(&self) -> &'static str {
         "Emit a typed mid-session structured output to the kernel: \
          a progress report, a diagnostic flag, or a task summary. \
@@ -1070,27 +1118,27 @@ impl Tool for StructuredOutputTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx:  &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let payload = match parse_structured_output_input(input) {
-            Ok(p)  => p,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "FAIL_STRUCTURED_OUTPUT_INVALID: {e}"
-            ))),
+            Ok(p) => p,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "FAIL_STRUCTURED_OUTPUT_INVALID: {e}"
+                )))
+            }
         };
         // Stable variant tag for the model-facing OK message.
         let variant_tag = payload.variant_tag();
 
         match self.submitter.submit_structured_output(payload).await {
             Ok(resp) => match resp.outcome {
-                raxis_types::IntentOutcome::Accepted { .. } => Ok(ToolOutput::ok(
-                    format!("structured_output_emitted: kind={variant_tag}"),
+                raxis_types::IntentOutcome::Accepted { .. } => Ok(ToolOutput::ok(format!(
+                    "structured_output_emitted: kind={variant_tag}"
+                ))),
+                raxis_types::IntentOutcome::Rejected { error_code, .. } => Ok(ToolOutput::err(
+                    format!("kernel rejected structured_output: {error_code}"),
                 )),
-                raxis_types::IntentOutcome::Rejected { error_code, .. } => {
-                    Ok(ToolOutput::err(format!(
-                        "kernel rejected structured_output: {error_code}"
-                    )))
-                }
             },
             Err(e) => Ok(ToolOutput::err(format!(
                 "structured_output transport error: {e}"
@@ -1110,66 +1158,80 @@ fn parse_structured_output_input(
 ) -> Result<raxis_types::StructuredOutputKind, String> {
     use raxis_types::{DiagnosticSeverity, StructuredOutputKind};
 
-    let kind = v.get("kind")
+    let kind = v
+        .get("kind")
         .and_then(|k| k.as_str())
         .ok_or_else(|| "missing or non-string `kind`".to_owned())?;
     match kind {
         "progress_report" => {
-            let files_modified = v.get("files_modified")
-                .map(|f| serde_json::from_value::<Vec<String>>(f.clone())
-                    .map_err(|e| format!("`files_modified`: {e}")))
+            let files_modified = v
+                .get("files_modified")
+                .map(|f| {
+                    serde_json::from_value::<Vec<String>>(f.clone())
+                        .map_err(|e| format!("`files_modified`: {e}"))
+                })
                 .transpose()?
                 .unwrap_or_default();
-            let tests_passing = v.get("tests_passing")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as u32;
-            let tests_failing = v.get("tests_failing")
-                .and_then(|t| t.as_u64())
-                .unwrap_or(0) as u32;
-            let confidence = v.get("confidence")
-                .and_then(|c| c.as_f64())
-                .unwrap_or(0.0) as f32;
+            let tests_passing = v.get("tests_passing").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+            let tests_failing = v.get("tests_failing").and_then(|t| t.as_u64()).unwrap_or(0) as u32;
+            let confidence = v.get("confidence").and_then(|c| c.as_f64()).unwrap_or(0.0) as f32;
             Ok(StructuredOutputKind::ProgressReport {
-                files_modified, tests_passing, tests_failing, confidence,
+                files_modified,
+                tests_passing,
+                tests_failing,
+                confidence,
             })
         }
         "diagnostic_flag" => {
             let severity = match v.get("severity").and_then(|s| s.as_str()) {
-                Some("info")     => DiagnosticSeverity::Info,
-                Some("warning")  => DiagnosticSeverity::Warning,
+                Some("info") => DiagnosticSeverity::Info,
+                Some("warning") => DiagnosticSeverity::Warning,
                 Some("critical") => DiagnosticSeverity::Critical,
-                Some(other)      => return Err(format!(
-                    "unknown severity {other:?}; expected info/warning/critical"
-                )),
-                None             => return Err(
-                    "diagnostic_flag requires `severity`".to_owned()
-                ),
+                Some(other) => {
+                    return Err(format!(
+                        "unknown severity {other:?}; expected info/warning/critical"
+                    ))
+                }
+                None => return Err("diagnostic_flag requires `severity`".to_owned()),
             };
-            let message = v.get("message")
+            let message = v
+                .get("message")
                 .and_then(|m| m.as_str())
                 .ok_or_else(|| "diagnostic_flag requires `message`".to_owned())?
                 .to_owned();
-            let evidence = v.get("evidence")
+            let evidence = v
+                .get("evidence")
                 .and_then(|e| e.as_str())
                 .map(str::to_owned);
-            Ok(StructuredOutputKind::DiagnosticFlag { severity, message, evidence })
+            Ok(StructuredOutputKind::DiagnosticFlag {
+                severity,
+                message,
+                evidence,
+            })
         }
         "task_summary" => {
-            let commit_sha = v.get("commit_sha")
+            let commit_sha = v
+                .get("commit_sha")
                 .and_then(|s| s.as_str())
                 .ok_or_else(|| "task_summary requires `commit_sha`".to_owned())?
                 .to_owned();
-            let changed_paths = v.get("changed_paths")
-                .map(|p| serde_json::from_value::<Vec<String>>(p.clone())
-                    .map_err(|e| format!("`changed_paths`: {e}")))
+            let changed_paths = v
+                .get("changed_paths")
+                .map(|p| {
+                    serde_json::from_value::<Vec<String>>(p.clone())
+                        .map_err(|e| format!("`changed_paths`: {e}"))
+                })
                 .transpose()?
                 .unwrap_or_default();
-            let approach = v.get("approach")
+            let approach = v
+                .get("approach")
                 .and_then(|a| a.as_str())
                 .ok_or_else(|| "task_summary requires `approach`".to_owned())?
                 .to_owned();
             Ok(StructuredOutputKind::TaskSummary {
-                commit_sha, changed_paths, approach,
+                commit_sha,
+                changed_paths,
+                approach,
             })
         }
         other => Err(format!(
@@ -1205,7 +1267,9 @@ struct TaskCompleteTool;
 
 #[async_trait::async_trait]
 impl Tool for TaskCompleteTool {
-    fn name(&self) -> &'static str { "task_complete" }
+    fn name(&self) -> &'static str {
+        "task_complete"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — call this exactly once when you have committed \
          the changes that satisfy the task description. The session \
@@ -1231,7 +1295,7 @@ impl Tool for TaskCompleteTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("task_complete"))
     }
@@ -1243,7 +1307,9 @@ struct ReportFailureTool;
 
 #[async_trait::async_trait]
 impl Tool for ReportFailureTool {
-    fn name(&self) -> &'static str { "report_failure" }
+    fn name(&self) -> &'static str {
+        "report_failure"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — call this when you have determined you cannot \
          complete the task. Provide a one-paragraph `justification` \
@@ -1269,7 +1335,7 @@ impl Tool for ReportFailureTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("report_failure"))
     }
@@ -1283,7 +1349,9 @@ struct SingleCommitTool;
 
 #[async_trait::async_trait]
 impl Tool for SingleCommitTool {
-    fn name(&self) -> &'static str { "single_commit" }
+    fn name(&self) -> &'static str {
+        "single_commit"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — submit a single-commit advance from `base_sha` \
          to `head_sha`. Use this when you have a base/head pair to \
@@ -1315,7 +1383,7 @@ impl Tool for SingleCommitTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("single_commit"))
     }
@@ -1327,7 +1395,9 @@ struct SubmitReviewTool;
 
 #[async_trait::async_trait]
 impl Tool for SubmitReviewTool {
-    fn name(&self) -> &'static str { "submit_review" }
+    fn name(&self) -> &'static str {
+        "submit_review"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — submit your review verdict for the executor's \
          most-recent commit. `approved = true` means the commit \
@@ -1357,7 +1427,7 @@ impl Tool for SubmitReviewTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("submit_review"))
     }
@@ -1375,7 +1445,9 @@ struct ActivateSubtaskTool;
 
 #[async_trait::async_trait]
 impl Tool for ActivateSubtaskTool {
-    fn name(&self) -> &'static str { "activate_subtask" }
+    fn name(&self) -> &'static str {
+        "activate_subtask"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — activate one ready sub-task by its task id. \
          The valid ids are the `task_id` column of rows in the KSB \
@@ -1406,7 +1478,7 @@ impl Tool for ActivateSubtaskTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("activate_subtask"))
     }
@@ -1419,7 +1491,9 @@ struct RetrySubtaskTool;
 
 #[async_trait::async_trait]
 impl Tool for RetrySubtaskTool {
-    fn name(&self) -> &'static str { "retry_subtask" }
+    fn name(&self) -> &'static str {
+        "retry_subtask"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — first half of a TWO-INTENT retry. Inserts a \
          fresh `PendingActivation` row that supersedes the prior \
@@ -1460,7 +1534,7 @@ impl Tool for RetrySubtaskTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("retry_subtask"))
     }
@@ -1474,7 +1548,9 @@ struct IntegrationMergeTool;
 
 #[async_trait::async_trait]
 impl Tool for IntegrationMergeTool {
-    fn name(&self) -> &'static str { "integration_merge" }
+    fn name(&self) -> &'static str {
+        "integration_merge"
+    }
     fn description(&self) -> &'static str {
         "TERMINAL — fast-forward the initiative's `target_ref` from \
          `base_sha` to `head_sha`. Call this exactly once when EVERY \
@@ -1510,7 +1586,7 @@ impl Tool for IntegrationMergeTool {
     async fn execute(
         &self,
         _input: &serde_json::Value,
-        _ctx:   &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         Ok(ToolOutput::ok("integration_merge"))
     }
@@ -1608,8 +1684,8 @@ pub fn build_orchestrator_registry() -> ToolRegistry {
 /// and `RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS`). Includes the
 /// three executor terminal-tool declarations.
 pub fn build_executor_registry_with_sleep(
-    max_per_call_seconds:    u32,
-    max_cumulative_seconds:  u32,
+    max_per_call_seconds: u32,
+    max_cumulative_seconds: u32,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
@@ -1617,7 +1693,10 @@ pub fn build_executor_registry_with_sleep(
     r.register(Arc::new(BashTool));
     r.register(Arc::new(GrepSearchTool));
     r.register(Arc::new(GitCommitTool));
-    r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    r.register(Arc::new(SleepTool::new(
+        max_per_call_seconds,
+        max_cumulative_seconds,
+    )));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery (sleep
     // variant of the executor registry).
     r.register(Arc::new(VmCapabilitiesTool));
@@ -1632,13 +1711,16 @@ pub fn build_executor_registry_with_sleep(
 /// `sleep` tool wired to the operator-declared policy ceilings.
 /// Includes the three orchestrator terminal-tool declarations.
 pub fn build_orchestrator_registry_with_sleep(
-    max_per_call_seconds:    u32,
-    max_cumulative_seconds:  u32,
+    max_per_call_seconds: u32,
+    max_cumulative_seconds: u32,
 ) -> ToolRegistry {
     let mut r = ToolRegistry::new();
     r.register(Arc::new(ReadFileTool));
     r.register(Arc::new(GrepSearchTool));
-    r.register(Arc::new(SleepTool::new(max_per_call_seconds, max_cumulative_seconds)));
+    r.register(Arc::new(SleepTool::new(
+        max_per_call_seconds,
+        max_cumulative_seconds,
+    )));
     // V2 `INV-EXEC-DISCOVERY-01` — capability discovery.
     r.register(Arc::new(VmCapabilitiesTool));
     // Terminal-tool declarations (V2 §3.2 / planner-harness.md §14.3).
@@ -1658,13 +1740,11 @@ pub fn build_orchestrator_registry_with_sleep(
 /// keeps the registry constructors purely declarative — the
 /// dispatch loop never needs to know which tools require IPC.
 pub fn build_executor_registry_full(
-    max_per_call_seconds:   u32,
+    max_per_call_seconds: u32,
     max_cumulative_seconds: u32,
-    submitter:              Arc<crate::intent::IntentSubmitter>,
+    submitter: Arc<crate::intent::IntentSubmitter>,
 ) -> ToolRegistry {
-    let mut r = build_executor_registry_with_sleep(
-        max_per_call_seconds, max_cumulative_seconds,
-    );
+    let mut r = build_executor_registry_with_sleep(max_per_call_seconds, max_cumulative_seconds);
     r.register(Arc::new(StructuredOutputTool::new(submitter)));
     r
 }
@@ -1674,13 +1754,12 @@ pub fn build_executor_registry_full(
 /// session-scoped `IntentSubmitter`. Mirror of
 /// [`build_executor_registry_full`] for the orchestrator role.
 pub fn build_orchestrator_registry_full(
-    max_per_call_seconds:   u32,
+    max_per_call_seconds: u32,
     max_cumulative_seconds: u32,
-    submitter:              Arc<crate::intent::IntentSubmitter>,
+    submitter: Arc<crate::intent::IntentSubmitter>,
 ) -> ToolRegistry {
-    let mut r = build_orchestrator_registry_with_sleep(
-        max_per_call_seconds, max_cumulative_seconds,
-    );
+    let mut r =
+        build_orchestrator_registry_with_sleep(max_per_call_seconds, max_cumulative_seconds);
     r.register(Arc::new(StructuredOutputTool::new(submitter)));
     r
 }
@@ -1708,8 +1787,10 @@ mod tests {
         assert!(r.get("bash").is_some());
         // V2 §3.1 — Sleep is registered (disabled by default, opt-in
         // via `[budget.sleep_caps]`).
-        assert!(r.get("sleep").is_some(),
-            "executor registry MUST include the sleep tool (V2 §3.1)");
+        assert!(
+            r.get("sleep").is_some(),
+            "executor registry MUST include the sleep tool (V2 §3.1)"
+        );
     }
 
     #[test]
@@ -1717,17 +1798,25 @@ mod tests {
         // INV-PLANNER-HARNESS-04: reviewer MUST NOT have any
         // workspace-mutating tool.
         let r = build_reviewer_registry();
-        assert!(r.get("git_commit").is_none(),
-            "reviewer registry MUST NOT include git_commit");
-        assert!(r.get("edit_file").is_none(),
-            "reviewer registry MUST NOT include edit_file");
-        assert!(r.get("bash").is_none(),
-            "reviewer registry MUST NOT include bash");
+        assert!(
+            r.get("git_commit").is_none(),
+            "reviewer registry MUST NOT include git_commit"
+        );
+        assert!(
+            r.get("edit_file").is_none(),
+            "reviewer registry MUST NOT include edit_file"
+        );
+        assert!(
+            r.get("bash").is_none(),
+            "reviewer registry MUST NOT include bash"
+        );
         // V2 §3.1 — Pure-Static Reviewer never has Sleep
         // (INV-PLANNER-HARNESS-02; no external process to wait for).
-        assert!(r.get("sleep").is_none(),
+        assert!(
+            r.get("sleep").is_none(),
             "reviewer registry MUST NOT include the sleep tool \
-             (INV-PLANNER-HARNESS-02)");
+             (INV-PLANNER-HARNESS-02)"
+        );
         // Read-only tools ARE expected:
         assert!(r.get("read_file").is_some());
         assert!(r.get("grep_search").is_some());
@@ -1738,11 +1827,17 @@ mod tests {
     #[tokio::test]
     async fn sleep_zero_is_fast_path_no_charge() {
         let tool = SleepTool::new(60, 300);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = tool.execute(&serde_json::json!({"seconds": 0}), &ctx).await.unwrap();
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 0}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error.unwrap_or(false));
-        assert_eq!(tool.cumulative_slept_seconds(), 0,
-            "0-second sleep MUST NOT charge against cumulative budget");
+        assert_eq!(
+            tool.cumulative_slept_seconds(),
+            0,
+            "0-second sleep MUST NOT charge against cumulative budget"
+        );
     }
 
     /// `seconds > max_per_call` returns `FAIL_SLEEP_PER_CALL_EXCEEDED`
@@ -1750,31 +1845,55 @@ mod tests {
     #[tokio::test]
     async fn sleep_per_call_ceiling_rejects() {
         let tool = SleepTool::new(/*per_call*/ 5, /*cum*/ 60);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = tool.execute(&serde_json::json!({"seconds": 10}), &ctx).await.unwrap();
-        assert!(out.is_error.unwrap_or(false), "10s > 5s per-call ceiling MUST be rejected");
-        assert!(out.content.contains("FAIL_SLEEP_PER_CALL_EXCEEDED"),
-            "error must surface FAIL_SLEEP_PER_CALL_EXCEEDED, got: {}", out.content);
-        assert_eq!(tool.cumulative_slept_seconds(), 0,
-            "rejected call MUST NOT charge cumulative budget");
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 10}), &ctx)
+            .await
+            .unwrap();
+        assert!(
+            out.is_error.unwrap_or(false),
+            "10s > 5s per-call ceiling MUST be rejected"
+        );
+        assert!(
+            out.content.contains("FAIL_SLEEP_PER_CALL_EXCEEDED"),
+            "error must surface FAIL_SLEEP_PER_CALL_EXCEEDED, got: {}",
+            out.content
+        );
+        assert_eq!(
+            tool.cumulative_slept_seconds(),
+            0,
+            "rejected call MUST NOT charge cumulative budget"
+        );
     }
 
     /// Cumulative gate fires when `cumulative + seconds > max_cumulative`.
     #[tokio::test]
     async fn sleep_cumulative_ceiling_rejects() {
         let tool = SleepTool::new(/*per_call*/ 60, /*cum*/ 10);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
         // First 5s call: passes.
-        let out = tool.execute(&serde_json::json!({"seconds": 5}), &ctx).await.unwrap();
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 5}), &ctx)
+            .await
+            .unwrap();
         assert!(!out.is_error.unwrap_or(false));
         assert_eq!(tool.cumulative_slept_seconds(), 5);
         // Second 6s call: would push cumulative to 11 > 10. Reject.
-        let out = tool.execute(&serde_json::json!({"seconds": 6}), &ctx).await.unwrap();
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 6}), &ctx)
+            .await
+            .unwrap();
         assert!(out.is_error.unwrap_or(false));
-        assert!(out.content.contains("FAIL_SLEEP_BUDGET_EXCEEDED"),
-            "expected FAIL_SLEEP_BUDGET_EXCEEDED, got: {}", out.content);
-        assert_eq!(tool.cumulative_slept_seconds(), 5,
-            "rejected call MUST NOT charge cumulative budget");
+        assert!(
+            out.content.contains("FAIL_SLEEP_BUDGET_EXCEEDED"),
+            "expected FAIL_SLEEP_BUDGET_EXCEEDED, got: {}",
+            out.content
+        );
+        assert_eq!(
+            tool.cumulative_slept_seconds(),
+            5,
+            "rejected call MUST NOT charge cumulative budget"
+        );
     }
 
     /// `SleepTool::disabled()` refuses every invocation with
@@ -1782,11 +1901,17 @@ mod tests {
     #[tokio::test]
     async fn sleep_disabled_rejects_every_call() {
         let tool = SleepTool::disabled();
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = tool.execute(&serde_json::json!({"seconds": 1}), &ctx).await.unwrap();
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 1}), &ctx)
+            .await
+            .unwrap();
         assert!(out.is_error.unwrap_or(false));
-        assert!(out.content.contains("FAIL_SLEEP_DISABLED"),
-            "expected FAIL_SLEEP_DISABLED, got: {}", out.content);
+        assert!(
+            out.content.contains("FAIL_SLEEP_DISABLED"),
+            "expected FAIL_SLEEP_DISABLED, got: {}",
+            out.content
+        );
     }
 
     /// `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` is rejected even when
@@ -1799,11 +1924,17 @@ mod tests {
         // for this test ONLY to prove the hard ceiling fires before
         // the per-call ceiling.
         let tool = SleepTool::new(u32::MAX, u32::MAX);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = tool.execute(&serde_json::json!({"seconds": 9999}), &ctx).await.unwrap();
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool
+            .execute(&serde_json::json!({"seconds": 9999}), &ctx)
+            .await
+            .unwrap();
         assert!(out.is_error.unwrap_or(false));
-        assert!(out.content.contains("FAIL_SLEEP_HARD_MAX_EXCEEDED"),
-            "expected FAIL_SLEEP_HARD_MAX_EXCEEDED, got: {}", out.content);
+        assert!(
+            out.content.contains("FAIL_SLEEP_HARD_MAX_EXCEEDED"),
+            "expected FAIL_SLEEP_HARD_MAX_EXCEEDED, got: {}",
+            out.content
+        );
     }
 
     /// Multiple successful sleeps accumulate in the cumulative
@@ -1811,9 +1942,12 @@ mod tests {
     #[tokio::test]
     async fn sleep_cumulative_counter_tracks_successes() {
         let tool = SleepTool::new(/*per_call*/ 1, /*cum*/ 10);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
         for _ in 0..3 {
-            let out = tool.execute(&serde_json::json!({"seconds": 1}), &ctx).await.unwrap();
+            let out = tool
+                .execute(&serde_json::json!({"seconds": 1}), &ctx)
+                .await
+                .unwrap();
             assert!(!out.is_error.unwrap_or(false));
         }
         assert_eq!(tool.cumulative_slept_seconds(), 3);
@@ -1824,23 +1958,33 @@ mod tests {
     #[tokio::test]
     async fn sleep_reason_field_round_trips_into_response() {
         let tool = SleepTool::new(60, 300);
-        let ctx  = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
-        let out = tool.execute(
-            &serde_json::json!({"seconds": 1, "reason": "waiting for CI"}),
-            &ctx,
-        ).await.unwrap();
+        let ctx = ToolContext::for_workspace(std::path::PathBuf::from("/tmp"));
+        let out = tool
+            .execute(
+                &serde_json::json!({"seconds": 1, "reason": "waiting for CI"}),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert!(!out.is_error.unwrap_or(false));
-        assert!(out.content.contains("waiting for CI"),
-            "expected reason in response, got: {}", out.content);
+        assert!(
+            out.content.contains("waiting for CI"),
+            "expected reason in response, got: {}",
+            out.content
+        );
     }
 
     #[test]
     fn registry_role_asymmetry_orchestrator_excludes_write_tools() {
         let r = build_orchestrator_registry();
-        assert!(r.get("git_commit").is_none(),
-            "orchestrator registry MUST NOT include git_commit");
-        assert!(r.get("edit_file").is_none(),
-            "orchestrator registry MUST NOT include edit_file");
+        assert!(
+            r.get("git_commit").is_none(),
+            "orchestrator registry MUST NOT include git_commit"
+        );
+        assert!(
+            r.get("edit_file").is_none(),
+            "orchestrator registry MUST NOT include edit_file"
+        );
     }
 
     /// V2 §3.2 — the orchestrator's terminal tools MUST be declared
@@ -1854,12 +1998,18 @@ mod tests {
     #[test]
     fn orchestrator_registry_declares_dag_terminal_tools() {
         let r = build_orchestrator_registry();
-        assert!(r.get("activate_subtask").is_some(),
-            "orchestrator registry MUST declare `activate_subtask`");
-        assert!(r.get("retry_subtask").is_some(),
-            "orchestrator registry MUST declare `retry_subtask`");
-        assert!(r.get("integration_merge").is_some(),
-            "orchestrator registry MUST declare `integration_merge`");
+        assert!(
+            r.get("activate_subtask").is_some(),
+            "orchestrator registry MUST declare `activate_subtask`"
+        );
+        assert!(
+            r.get("retry_subtask").is_some(),
+            "orchestrator registry MUST declare `retry_subtask`"
+        );
+        assert!(
+            r.get("integration_merge").is_some(),
+            "orchestrator registry MUST declare `integration_merge`"
+        );
     }
 
     /// Same invariant for the `_with_sleep` variant — adding a
@@ -1876,12 +2026,18 @@ mod tests {
     #[test]
     fn executor_registry_declares_terminal_tools() {
         let r = build_executor_registry();
-        assert!(r.get("task_complete").is_some(),
-            "executor registry MUST declare `task_complete`");
-        assert!(r.get("report_failure").is_some(),
-            "executor registry MUST declare `report_failure`");
-        assert!(r.get("single_commit").is_some(),
-            "executor registry MUST declare `single_commit`");
+        assert!(
+            r.get("task_complete").is_some(),
+            "executor registry MUST declare `task_complete`"
+        );
+        assert!(
+            r.get("report_failure").is_some(),
+            "executor registry MUST declare `report_failure`"
+        );
+        assert!(
+            r.get("single_commit").is_some(),
+            "executor registry MUST declare `single_commit`"
+        );
     }
 
     /// Same invariant for the `_with_sleep` variant.
@@ -1897,8 +2053,10 @@ mod tests {
     #[test]
     fn reviewer_registry_declares_submit_review() {
         let r = build_reviewer_registry();
-        assert!(r.get("submit_review").is_some(),
-            "reviewer registry MUST declare `submit_review`");
+        assert!(
+            r.get("submit_review").is_some(),
+            "reviewer registry MUST declare `submit_review`"
+        );
     }
 
     /// V2 `INV-EXEC-DISCOVERY-01` — every role's registry MUST
@@ -1910,8 +2068,8 @@ mod tests {
     #[test]
     fn every_role_registry_includes_vm_capabilities() {
         for (label, r) in [
-            ("executor",     build_executor_registry()),
-            ("reviewer",     build_reviewer_registry()),
+            ("executor", build_executor_registry()),
+            ("reviewer", build_reviewer_registry()),
             ("orchestrator", build_orchestrator_registry()),
         ] {
             assert!(
@@ -1924,11 +2082,15 @@ mod tests {
         // the planner binaries use when the operator policy
         // declares `[budget.sleep_caps]`.
         assert!(
-            build_executor_registry_with_sleep(60, 300).get("vm_capabilities").is_some(),
+            build_executor_registry_with_sleep(60, 300)
+                .get("vm_capabilities")
+                .is_some(),
             "executor _with_sleep registry MUST include vm_capabilities",
         );
         assert!(
-            build_orchestrator_registry_with_sleep(60, 300).get("vm_capabilities").is_some(),
+            build_orchestrator_registry_with_sleep(60, 300)
+                .get("vm_capabilities")
+                .is_some(),
             "orchestrator _with_sleep registry MUST include vm_capabilities",
         );
     }
@@ -1966,25 +2128,27 @@ mod tests {
 
     #[tokio::test]
     async fn read_file_tool_returns_contents() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = ReadFileTool.execute(
-            &serde_json::json!({ "path": "hello.txt" }), &ctx,
-        ).await.unwrap();
+        let out = ReadFileTool
+            .execute(&serde_json::json!({ "path": "hello.txt" }), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
         assert_eq!(out.content, "hi from raxis");
     }
 
     #[tokio::test]
     async fn read_file_tool_rejects_path_escape() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
         // path-escape is rejected at validation time → InvalidInput
         // surfaces from execute() itself, NOT a structured tool
         // error (the model never reaches the path-escape branch).
-        let err = ReadFileTool.execute(
-            &serde_json::json!({ "path": "../../etc/passwd" }), &ctx,
-        ).await.unwrap_err();
+        let err = ReadFileTool
+            .execute(&serde_json::json!({ "path": "../../etc/passwd" }), &ctx)
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput { tool, reason } => {
                 assert_eq!(tool, "read_file");
@@ -1996,68 +2160,87 @@ mod tests {
 
     #[tokio::test]
     async fn edit_file_tool_writes_then_read_observes_new_contents() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = EditFileTool.execute(
-            &serde_json::json!({
-                "path":     "out/new.txt",
-                "contents": "fresh contents",
-            }), &ctx,
-        ).await.unwrap();
+        let out = EditFileTool
+            .execute(
+                &serde_json::json!({
+                    "path":     "out/new.txt",
+                    "contents": "fresh contents",
+                }),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
-        let read = ReadFileTool.execute(
-            &serde_json::json!({ "path": "out/new.txt" }), &ctx,
-        ).await.unwrap();
+        let read = ReadFileTool
+            .execute(&serde_json::json!({ "path": "out/new.txt" }), &ctx)
+            .await
+            .unwrap();
         assert_eq!(read.content, "fresh contents");
     }
 
     #[tokio::test]
     async fn bash_tool_runs_command_and_reports_exit_code() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = BashTool.execute(
-            &serde_json::json!({ "command": "echo planner-tools-bash-test" }),
-            &ctx,
-        ).await.unwrap();
-        assert_eq!(out.is_error, None,
-            "successful bash MUST NOT surface as a structured error");
-        assert!(out.content.contains("planner-tools-bash-test"),
-            "bash output should include stdout");
+        let out = BashTool
+            .execute(
+                &serde_json::json!({ "command": "echo planner-tools-bash-test" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            out.is_error, None,
+            "successful bash MUST NOT surface as a structured error"
+        );
+        assert!(
+            out.content.contains("planner-tools-bash-test"),
+            "bash output should include stdout"
+        );
         assert!(out.content.contains("exit_code: 0"));
     }
 
     #[tokio::test]
     async fn bash_tool_marks_failure_as_structured_error() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = BashTool.execute(
-            &serde_json::json!({ "command": "exit 7" }),
-            &ctx,
-        ).await.unwrap();
+        let out = BashTool
+            .execute(&serde_json::json!({ "command": "exit 7" }), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, Some(true));
         assert!(out.content.contains("exit_code: 7"));
     }
 
     #[tokio::test]
     async fn grep_search_tool_returns_matches() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = GrepSearchTool.execute(
-            &serde_json::json!({ "pattern": "raxis" }), &ctx,
-        ).await.unwrap();
+        let out = GrepSearchTool
+            .execute(&serde_json::json!({ "pattern": "raxis" }), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
-        assert!(out.content.contains("hi from raxis"),
-            "grep output: {}", out.content);
+        assert!(
+            out.content.contains("hi from raxis"),
+            "grep output: {}",
+            out.content
+        );
     }
 
     #[tokio::test]
     async fn grep_search_tool_no_match_returns_ok() {
-        let ws  = fixture_workspace();
+        let ws = fixture_workspace();
         let ctx = ToolContext::for_workspace(ws.path());
-        let out = GrepSearchTool.execute(
-            &serde_json::json!({ "pattern": "absolutely-no-such-string-12345" }),
-            &ctx,
-        ).await.unwrap();
+        let out = GrepSearchTool
+            .execute(
+                &serde_json::json!({ "pattern": "absolutely-no-such-string-12345" }),
+                &ctx,
+            )
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
         assert!(out.content.contains("<no matches for"));
     }
@@ -2068,9 +2251,11 @@ mod tests {
         let names: Vec<_> = r.iter().map(|t| t.name()).collect();
         let mut sorted = names.clone();
         sorted.sort();
-        assert_eq!(names, sorted,
+        assert_eq!(
+            names, sorted,
             "ToolRegistry::iter MUST be deterministic-sorted; \
-             dispatch loop and audit chain depend on it");
+             dispatch loop and audit chain depend on it"
+        );
     }
 
     #[test]
@@ -2102,8 +2287,10 @@ mod tests {
     #[test]
     fn reviewer_registry_never_includes_structured_output() {
         let r = build_reviewer_registry();
-        assert!(r.get("structured_output").is_none(),
-            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)");
+        assert!(
+            r.get("structured_output").is_none(),
+            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)"
+        );
     }
 
     /// `parse_structured_output_input` translates the model's
@@ -2124,7 +2311,10 @@ mod tests {
         let p = parse_structured_output_input(&v).unwrap();
         match p {
             raxis_types::StructuredOutputKind::ProgressReport {
-                files_modified, tests_passing, tests_failing, confidence,
+                files_modified,
+                tests_passing,
+                tests_failing,
+                confidence,
             } => {
                 assert_eq!(files_modified, vec!["a.rs", "b.rs"]);
                 assert_eq!(tests_passing, 3);
@@ -2147,7 +2337,9 @@ mod tests {
         assert_eq!(p.variant_tag(), "diagnostic_flag");
         match p {
             raxis_types::StructuredOutputKind::DiagnosticFlag {
-                severity, message, evidence,
+                severity,
+                message,
+                evidence,
             } => {
                 assert_eq!(severity, raxis_types::DiagnosticSeverity::Critical);
                 assert_eq!(message, "auth bypass!");
@@ -2168,7 +2360,9 @@ mod tests {
         let p = parse_structured_output_input(&v).unwrap();
         match p {
             raxis_types::StructuredOutputKind::TaskSummary {
-                commit_sha, changed_paths, approach,
+                commit_sha,
+                changed_paths,
+                approach,
             } => {
                 assert_eq!(commit_sha, "0".repeat(40));
                 assert_eq!(changed_paths, vec!["x.rs"]);
@@ -2182,8 +2376,10 @@ mod tests {
     fn parse_structured_output_rejects_unknown_kind() {
         let v = serde_json::json!({ "kind": "alien_kind" });
         let err = parse_structured_output_input(&v).unwrap_err();
-        assert!(err.contains("unknown structured_output kind"),
-            "error: {err}");
+        assert!(
+            err.contains("unknown structured_output kind"),
+            "error: {err}"
+        );
     }
 
     #[test]

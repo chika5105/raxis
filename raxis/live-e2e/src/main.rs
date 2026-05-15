@@ -184,11 +184,11 @@ mod slice_vm_capabilities;
 
 #[derive(Parser, Debug)]
 #[command(
-    name    = "raxis-live-e2e",
-    about   = "Real-object end-to-end suite for RAXIS",
+    name = "raxis-live-e2e",
+    about = "Real-object end-to-end suite for RAXIS",
     long_about = "Runs RAXIS subsystems against REAL upstream services.\n\
                   Never run by `cargo test`. Call a slice subcommand\n\
-                  to drive a specific surface.",
+                  to drive a specific surface."
 )]
 struct Cli {
     #[command(subcommand)]
@@ -399,75 +399,90 @@ fn default_env_file_path() -> PathBuf {
 
 async fn run(slice: &Slice, env: &env_file::EnvMap) -> Result<()> {
     match slice {
-        Slice::GatewayAnthropic           => slice_gateway_anthropic::run(env).await,
-        Slice::EgressEnforcement          => slice_egress_enforcement::run(env).await,
-        Slice::PostgresProxy              => slice_postgres_proxy::run().await,
-        Slice::PostgresProxyRestrictions  => slice_postgres_proxy_restrictions::run().await,
-        Slice::PostgresProxyTableAllowlists =>
-            slice_postgres_proxy_table_allowlists::run().await,
-        Slice::PostgresProxyMaxResultRows =>
-            slice_postgres_proxy_max_result_rows::run().await,
-        Slice::HttpProxyBearer            => slice_http_proxy_bearer::run(env).await,
-        Slice::HttpProxyRestrictions      => slice_http_proxy_restrictions::run(env).await,
-        Slice::SessionSpawn               => slice_session_spawn::run().await,
-        Slice::SmtpProxy                  => slice_smtp_proxy::run().await,
-        Slice::RedisProxy                 => slice_redis_proxy::run().await,
-        Slice::AwsProxy                   => slice_aws_proxy::run().await,
-        Slice::GcpProxy                   => slice_gcp_proxy::run().await,
-        Slice::AzureProxy                 => slice_azure_proxy::run().await,
-        Slice::AwsProxyRealEndpoint       => slice_aws_proxy_real_endpoint::run().await,
-        Slice::GcpProxyRealEndpoint       => slice_gcp_proxy_real_endpoint::run().await,
-        Slice::AzureProxyRealEndpoint     => slice_azure_proxy_real_endpoint::run().await,
-        Slice::MysqlProxy                 => slice_mysql_proxy::run().await,
-        Slice::MssqlProxy                 => slice_mssql_proxy::run().await,
-        Slice::MongodbProxy               => slice_mongodb_proxy::run().await,
-        Slice::MongodbProxyCollectionAllowlists =>
-            slice_mongodb_proxy_collection_allowlists::run().await,
-        Slice::VmCapabilities             => slice_vm_capabilities::run().await,
-        Slice::All => {
-            slice_gateway_anthropic::run(env).await
-                .context("slice gateway-anthropic")?;
-            slice_egress_enforcement::run(env).await
-                .context("slice egress-enforcement")?;
-            slice_postgres_proxy::run().await
-                .context("slice postgres-proxy")?;
-            slice_postgres_proxy_restrictions::run().await
-                .context("slice postgres-proxy-restrictions")?;
-            slice_postgres_proxy_table_allowlists::run().await
-                .context("slice postgres-proxy-table-allowlists")?;
-            slice_postgres_proxy_max_result_rows::run().await
-                .context("slice postgres-proxy-max-result-rows")?;
-            slice_http_proxy_bearer::run(env).await
-                .context("slice http-proxy-bearer")?;
-            slice_http_proxy_restrictions::run(env).await
-                .context("slice http-proxy-restrictions")?;
-            slice_session_spawn::run().await
-                .context("slice session-spawn")?;
-            slice_smtp_proxy::run().await
-                .context("slice smtp-proxy")?;
-            slice_redis_proxy::run().await
-                .context("slice redis-proxy")?;
-            slice_aws_proxy::run().await
-                .context("slice aws-proxy")?;
-            slice_gcp_proxy::run().await
-                .context("slice gcp-proxy")?;
-            slice_azure_proxy::run().await
-                .context("slice azure-proxy")?;
-            slice_aws_proxy_real_endpoint::run().await
-                .context("slice aws-proxy-real-endpoint")?;
-            slice_gcp_proxy_real_endpoint::run().await
-                .context("slice gcp-proxy-real-endpoint")?;
-            slice_azure_proxy_real_endpoint::run().await
-                .context("slice azure-proxy-real-endpoint")?;
-            slice_mysql_proxy::run().await
-                .context("slice mysql-proxy")?;
-            slice_mssql_proxy::run().await
-                .context("slice mssql-proxy")?;
-            slice_mongodb_proxy::run().await
-                .context("slice mongodb-proxy")?;
+        Slice::GatewayAnthropic => slice_gateway_anthropic::run(env).await,
+        Slice::EgressEnforcement => slice_egress_enforcement::run(env).await,
+        Slice::PostgresProxy => slice_postgres_proxy::run().await,
+        Slice::PostgresProxyRestrictions => slice_postgres_proxy_restrictions::run().await,
+        Slice::PostgresProxyTableAllowlists => slice_postgres_proxy_table_allowlists::run().await,
+        Slice::PostgresProxyMaxResultRows => slice_postgres_proxy_max_result_rows::run().await,
+        Slice::HttpProxyBearer => slice_http_proxy_bearer::run(env).await,
+        Slice::HttpProxyRestrictions => slice_http_proxy_restrictions::run(env).await,
+        Slice::SessionSpawn => slice_session_spawn::run().await,
+        Slice::SmtpProxy => slice_smtp_proxy::run().await,
+        Slice::RedisProxy => slice_redis_proxy::run().await,
+        Slice::AwsProxy => slice_aws_proxy::run().await,
+        Slice::GcpProxy => slice_gcp_proxy::run().await,
+        Slice::AzureProxy => slice_azure_proxy::run().await,
+        Slice::AwsProxyRealEndpoint => slice_aws_proxy_real_endpoint::run().await,
+        Slice::GcpProxyRealEndpoint => slice_gcp_proxy_real_endpoint::run().await,
+        Slice::AzureProxyRealEndpoint => slice_azure_proxy_real_endpoint::run().await,
+        Slice::MysqlProxy => slice_mysql_proxy::run().await,
+        Slice::MssqlProxy => slice_mssql_proxy::run().await,
+        Slice::MongodbProxy => slice_mongodb_proxy::run().await,
+        Slice::MongodbProxyCollectionAllowlists => {
             slice_mongodb_proxy_collection_allowlists::run().await
+        }
+        Slice::VmCapabilities => slice_vm_capabilities::run().await,
+        Slice::All => {
+            slice_gateway_anthropic::run(env)
+                .await
+                .context("slice gateway-anthropic")?;
+            slice_egress_enforcement::run(env)
+                .await
+                .context("slice egress-enforcement")?;
+            slice_postgres_proxy::run()
+                .await
+                .context("slice postgres-proxy")?;
+            slice_postgres_proxy_restrictions::run()
+                .await
+                .context("slice postgres-proxy-restrictions")?;
+            slice_postgres_proxy_table_allowlists::run()
+                .await
+                .context("slice postgres-proxy-table-allowlists")?;
+            slice_postgres_proxy_max_result_rows::run()
+                .await
+                .context("slice postgres-proxy-max-result-rows")?;
+            slice_http_proxy_bearer::run(env)
+                .await
+                .context("slice http-proxy-bearer")?;
+            slice_http_proxy_restrictions::run(env)
+                .await
+                .context("slice http-proxy-restrictions")?;
+            slice_session_spawn::run()
+                .await
+                .context("slice session-spawn")?;
+            slice_smtp_proxy::run().await.context("slice smtp-proxy")?;
+            slice_redis_proxy::run()
+                .await
+                .context("slice redis-proxy")?;
+            slice_aws_proxy::run().await.context("slice aws-proxy")?;
+            slice_gcp_proxy::run().await.context("slice gcp-proxy")?;
+            slice_azure_proxy::run()
+                .await
+                .context("slice azure-proxy")?;
+            slice_aws_proxy_real_endpoint::run()
+                .await
+                .context("slice aws-proxy-real-endpoint")?;
+            slice_gcp_proxy_real_endpoint::run()
+                .await
+                .context("slice gcp-proxy-real-endpoint")?;
+            slice_azure_proxy_real_endpoint::run()
+                .await
+                .context("slice azure-proxy-real-endpoint")?;
+            slice_mysql_proxy::run()
+                .await
+                .context("slice mysql-proxy")?;
+            slice_mssql_proxy::run()
+                .await
+                .context("slice mssql-proxy")?;
+            slice_mongodb_proxy::run()
+                .await
+                .context("slice mongodb-proxy")?;
+            slice_mongodb_proxy_collection_allowlists::run()
+                .await
                 .context("slice mongodb-proxy-collection-allowlists")?;
-            slice_vm_capabilities::run().await
+            slice_vm_capabilities::run()
+                .await
                 .context("slice vm-capabilities")?;
             Ok(())
         }

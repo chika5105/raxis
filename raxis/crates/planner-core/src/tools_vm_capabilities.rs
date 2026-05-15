@@ -70,7 +70,9 @@ pub struct VmCapabilitiesTool;
 
 #[async_trait::async_trait]
 impl Tool for VmCapabilitiesTool {
-    fn name(&self) -> &'static str { "vm_capabilities" }
+    fn name(&self) -> &'static str {
+        "vm_capabilities"
+    }
 
     fn description(&self) -> &'static str {
         "Discover what is pre-installed in the current VM — \
@@ -150,10 +152,10 @@ impl Tool for VmCapabilitiesTool {
     async fn execute(
         &self,
         input: &serde_json::Value,
-        _ctx:  &ToolContext,
+        _ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let categories = parse_categories(input)?;
-        let filter     = parse_filter(input)?;
+        let filter = parse_filter(input)?;
 
         // The probe cache is process-wide (cached_capabilities
         // memoizes on first call), so this is O(1) on every
@@ -161,11 +163,9 @@ impl Tool for VmCapabilitiesTool {
         let base = cached_capabilities();
         let projected = project_manifest(base.as_ref(), &categories, &filter);
 
-        let json = serde_json::to_string_pretty(&projected).map_err(|e| {
-            ToolError::Internal {
-                tool:   "vm_capabilities".to_owned(),
-                reason: format!("manifest serialise: {e}"),
-            }
+        let json = serde_json::to_string_pretty(&projected).map_err(|e| ToolError::Internal {
+            tool: "vm_capabilities".to_owned(),
+            reason: format!("manifest serialise: {e}"),
         })?;
         Ok(ToolOutput::ok(json))
     }
@@ -173,50 +173,39 @@ impl Tool for VmCapabilitiesTool {
 
 /// Parse the `categories: [...]` array. Defaults to `[All]` when
 /// absent / null / empty (matches the schema's `description`).
-fn parse_categories(
-    input: &serde_json::Value,
-) -> Result<Vec<CapabilityCategory>, ToolError> {
+fn parse_categories(input: &serde_json::Value) -> Result<Vec<CapabilityCategory>, ToolError> {
     match input.get("categories") {
         None | Some(serde_json::Value::Null) => Ok(vec![CapabilityCategory::All]),
-        Some(serde_json::Value::Array(arr)) if arr.is_empty() => {
-            Ok(vec![CapabilityCategory::All])
-        }
+        Some(serde_json::Value::Array(arr)) if arr.is_empty() => Ok(vec![CapabilityCategory::All]),
         Some(serde_json::Value::Array(arr)) => {
             let mut out = Vec::with_capacity(arr.len());
             for v in arr {
                 let s = v.as_str().ok_or_else(|| ToolError::InvalidInput {
-                    tool:   "vm_capabilities".to_owned(),
-                    reason: format!(
-                        "`categories[]` entries must be strings, got {v:?}"
-                    ),
+                    tool: "vm_capabilities".to_owned(),
+                    reason: format!("`categories[]` entries must be strings, got {v:?}"),
                 })?;
-                let cat = CapabilityCategory::from_wire(s).ok_or_else(|| {
-                    ToolError::InvalidInput {
-                        tool:   "vm_capabilities".to_owned(),
+                let cat =
+                    CapabilityCategory::from_wire(s).ok_or_else(|| ToolError::InvalidInput {
+                        tool: "vm_capabilities".to_owned(),
                         reason: format!(
                             "unknown category {s:?} (allowed: binaries, \
                              python, node, rust, go, env, filesystem, all)"
                         ),
-                    }
-                })?;
+                    })?;
                 out.push(cat);
             }
             Ok(out)
         }
         Some(other) => Err(ToolError::InvalidInput {
-            tool:   "vm_capabilities".to_owned(),
-            reason: format!(
-                "`categories` must be an array of strings, got {other:?}"
-            ),
+            tool: "vm_capabilities".to_owned(),
+            reason: format!("`categories` must be an array of strings, got {other:?}"),
         }),
     }
 }
 
 /// Parse the `filter: { ... }` object. Defaults to all-fields-
 /// `None` when absent / null.
-fn parse_filter(
-    input: &serde_json::Value,
-) -> Result<CapabilityFilter, ToolError> {
+fn parse_filter(input: &serde_json::Value) -> Result<CapabilityFilter, ToolError> {
     match input.get("filter") {
         None | Some(serde_json::Value::Null) => Ok(CapabilityFilter::default()),
         Some(serde_json::Value::Object(map)) => {
@@ -236,21 +225,18 @@ fn parse_filter(
             Ok(f)
         }
         Some(other) => Err(ToolError::InvalidInput {
-            tool:   "vm_capabilities".to_owned(),
+            tool: "vm_capabilities".to_owned(),
             reason: format!("`filter` must be an object, got {other:?}"),
         }),
     }
 }
 
-fn string_or_err(
-    v:     &serde_json::Value,
-    field: &str,
-) -> Result<Option<String>, ToolError> {
+fn string_or_err(v: &serde_json::Value, field: &str) -> Result<Option<String>, ToolError> {
     match v {
-        serde_json::Value::Null     => Ok(None),
+        serde_json::Value::Null => Ok(None),
         serde_json::Value::String(s) => Ok(Some(s.clone())),
         other => Err(ToolError::InvalidInput {
-            tool:   "vm_capabilities".to_owned(),
+            tool: "vm_capabilities".to_owned(),
             reason: format!("filter `{field}` must be a string, got {other:?}"),
         }),
     }
@@ -285,7 +271,10 @@ mod tests {
     fn parse_categories_known_strings_round_trip() {
         let v = serde_json::json!({ "categories": ["python", "env"] });
         let cats = parse_categories(&v).unwrap();
-        assert_eq!(cats, vec![CapabilityCategory::Python, CapabilityCategory::Env]);
+        assert_eq!(
+            cats,
+            vec![CapabilityCategory::Python, CapabilityCategory::Env]
+        );
     }
 
     /// Unknown category ⇒ structured error mentioning the bad
@@ -297,10 +286,14 @@ mod tests {
         match err {
             ToolError::InvalidInput { tool, reason } => {
                 assert_eq!(tool, "vm_capabilities");
-                assert!(reason.contains("moo"),
-                    "error must cite the bad token: {reason}");
-                assert!(reason.contains("binaries"),
-                    "error must cite the allowed alternatives: {reason}");
+                assert!(
+                    reason.contains("moo"),
+                    "error must cite the bad token: {reason}"
+                );
+                assert!(
+                    reason.contains("binaries"),
+                    "error must cite the allowed alternatives: {reason}"
+                );
             }
             other => panic!("expected InvalidInput, got {other:?}"),
         }
@@ -334,16 +327,26 @@ mod tests {
     fn tool_spec_advertises_categories_enum() {
         let spec = VmCapabilitiesTool.to_spec();
         assert_eq!(spec.name, "vm_capabilities");
-        let enum_arr = spec.input_schema
+        let enum_arr = spec
+            .input_schema
             .pointer("/properties/categories/items/enum")
             .and_then(|v| v.as_array())
             .expect("schema must declare /properties/categories/items/enum");
         let names: Vec<&str> = enum_arr.iter().filter_map(|v| v.as_str()).collect();
         for required in [
-            "binaries", "python", "node", "rust", "go", "env", "filesystem", "all",
+            "binaries",
+            "python",
+            "node",
+            "rust",
+            "go",
+            "env",
+            "filesystem",
+            "all",
         ] {
-            assert!(names.contains(&required),
-                "schema enum missing {required}: {names:?}");
+            assert!(
+                names.contains(&required),
+                "schema enum missing {required}: {names:?}"
+            );
         }
     }
 
@@ -352,16 +355,17 @@ mod tests {
     #[tokio::test]
     async fn execute_returns_parseable_filtered_json() {
         let ctx = ToolContext::for_workspace(
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
         );
-        let out = VmCapabilitiesTool.execute(
-            &serde_json::json!({"categories": ["filesystem"]}),
-            &ctx,
-        ).await.unwrap();
+        let out = VmCapabilitiesTool
+            .execute(&serde_json::json!({"categories": ["filesystem"]}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
         let parsed: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         // Filesystem is requested → `workdir` must be populated.
-        let workdir = parsed.pointer("/filesystem/workdir")
+        let workdir = parsed
+            .pointer("/filesystem/workdir")
             .and_then(|v| v.as_str())
             .expect("filesystem.workdir must be present");
         assert!(!workdir.is_empty(), "workdir must be a non-empty path");
@@ -378,9 +382,12 @@ mod tests {
     #[tokio::test]
     async fn execute_no_args_returns_all_categories() {
         let ctx = ToolContext::for_workspace(
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
         );
-        let out = VmCapabilitiesTool.execute(&serde_json::json!({}), &ctx).await.unwrap();
+        let out = VmCapabilitiesTool
+            .execute(&serde_json::json!({}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
         let parsed: serde_json::Value = serde_json::from_str(&out.content).unwrap();
         // Filesystem MUST be present (every host has a cwd).
@@ -398,12 +405,15 @@ mod tests {
     #[tokio::test]
     async fn execute_unknown_category_surfaces_invalid_input() {
         let ctx = ToolContext::for_workspace(
-            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp"))
+            std::env::current_dir().unwrap_or_else(|_| PathBuf::from("/tmp")),
         );
-        let err = VmCapabilitiesTool.execute(
-            &serde_json::json!({"categories": ["totally-bogus-category"]}),
-            &ctx,
-        ).await.unwrap_err();
+        let err = VmCapabilitiesTool
+            .execute(
+                &serde_json::json!({"categories": ["totally-bogus-category"]}),
+                &ctx,
+            )
+            .await
+            .unwrap_err();
         match err {
             ToolError::InvalidInput { tool, reason } => {
                 assert_eq!(tool, "vm_capabilities");

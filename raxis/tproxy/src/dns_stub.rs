@@ -84,9 +84,9 @@ pub enum DnsStubError {
 /// TCP) and run them forever, fanning queries out to the kernel
 /// admission channel.
 pub async fn run_dns_stub(
-    host_cid:       u32,
+    host_cid: u32,
     admission_port: u32,
-    session_token:  String,
+    session_token: String,
 ) -> Result<(), DnsStubError> {
     let bind: SocketAddr = "127.0.0.1:53".parse().expect("static parse");
     let udp = UdpSocket::bind(bind).await?;
@@ -119,7 +119,8 @@ pub async fn run_dns_stub(
             let token = Arc::clone(&token_udp);
             let socket = Arc::clone(&udp_socket);
             tokio::spawn(async move {
-                let _ = handle_udp_query(&pkt, peer, &socket, host_cid, admission_port, &token).await;
+                let _ =
+                    handle_udp_query(&pkt, peer, &socket, host_cid, admission_port, &token).await;
             });
         }
     });
@@ -148,12 +149,12 @@ pub async fn run_dns_stub(
 }
 
 async fn handle_udp_query(
-    pkt:            &[u8],
-    peer:           SocketAddr,
-    socket:         &UdpSocket,
-    host_cid:       u32,
+    pkt: &[u8],
+    peer: SocketAddr,
+    socket: &UdpSocket,
+    host_cid: u32,
     admission_port: u32,
-    session_token:  &str,
+    session_token: &str,
 ) -> Result<(), DnsStubError> {
     let response = build_response_for_query(pkt, host_cid, admission_port, session_token).await?;
     // Truncate per RFC1035 if the response exceeds the UDP cap.
@@ -167,10 +168,10 @@ async fn handle_udp_query(
 }
 
 async fn handle_tcp_connection(
-    sock:           &mut tokio::net::TcpStream,
-    host_cid:       u32,
+    sock: &mut tokio::net::TcpStream,
+    host_cid: u32,
     admission_port: u32,
-    session_token:  &str,
+    session_token: &str,
 ) -> Result<(), DnsStubError> {
     // RFC1035 §4.2.2: 2-byte length prefix, big-endian.
     let mut len_buf = [0u8; 2];
@@ -192,10 +193,10 @@ async fn handle_tcp_connection(
 }
 
 async fn build_response_for_query(
-    pkt:            &[u8],
-    host_cid:       u32,
+    pkt: &[u8],
+    host_cid: u32,
     admission_port: u32,
-    session_token:  &str,
+    session_token: &str,
 ) -> Result<Vec<u8>, DnsStubError> {
     let parsed = parse_query(pkt)?;
     // Set a short connect timeout on the vsock dial so a hung
@@ -211,7 +212,7 @@ async fn build_response_for_query(
         session_token: session_token.to_owned(),
         hostname: parsed.qname.clone(),
         query_type: match parsed.qtype {
-            QTYPE_A    => DnsQueryType::A,
+            QTYPE_A => DnsQueryType::A,
             QTYPE_AAAA => DnsQueryType::Aaaa,
             _ => return Ok(build_response(&parsed, &[], /*nxdomain*/ true, 0)),
         },
@@ -223,15 +224,20 @@ async fn build_response_for_query(
         _ => return Err(DnsStubError::UnexpectedResponse),
     };
     let nxdomain = resp.addresses.is_empty();
-    Ok(build_response(&parsed, &resp.addresses, nxdomain, resp.ttl_secs))
+    Ok(build_response(
+        &parsed,
+        &resp.addresses,
+        nxdomain,
+        resp.ttl_secs,
+    ))
 }
 
 #[derive(Debug, Clone)]
 struct ParsedQuery {
-    id:     u16,
-    flags:  u16,
-    qname:  String,
-    qtype:  u16,
+    id: u16,
+    flags: u16,
+    qname: String,
+    qtype: u16,
     qclass: u16,
     /// Raw on-the-wire QNAME bytes so the response can echo them
     /// back unchanged.
@@ -242,11 +248,13 @@ fn parse_query(pkt: &[u8]) -> Result<ParsedQuery, DnsStubError> {
     if pkt.len() < 12 {
         return Err(DnsStubError::Malformed("packet shorter than dns header"));
     }
-    let id    = u16::from_be_bytes([pkt[0], pkt[1]]);
+    let id = u16::from_be_bytes([pkt[0], pkt[1]]);
     let flags = u16::from_be_bytes([pkt[2], pkt[3]]);
     let qdcount = u16::from_be_bytes([pkt[4], pkt[5]]);
     if qdcount != 1 {
-        return Err(DnsStubError::Malformed("only single-question queries supported"));
+        return Err(DnsStubError::Malformed(
+            "only single-question queries supported",
+        ));
     }
     // Parse QNAME — labels separated by length octets, terminated
     // by a zero octet. No compression in the question section.
@@ -271,36 +279,40 @@ fn parse_query(pkt: &[u8]) -> Result<ParsedQuery, DnsStubError> {
         if !qname.is_empty() {
             qname.push('.');
         }
-        qname.push_str(std::str::from_utf8(&pkt[idx..idx + len])
-            .map_err(|_| DnsStubError::Malformed("qname label not utf-8"))?);
+        qname.push_str(
+            std::str::from_utf8(&pkt[idx..idx + len])
+                .map_err(|_| DnsStubError::Malformed("qname label not utf-8"))?,
+        );
         idx += len;
     }
     let qname_wire = pkt[qname_start..idx].to_vec();
     if idx + 4 > pkt.len() {
         return Err(DnsStubError::Malformed("truncated qtype/qclass"));
     }
-    let qtype  = u16::from_be_bytes([pkt[idx],     pkt[idx + 1]]);
+    let qtype = u16::from_be_bytes([pkt[idx], pkt[idx + 1]]);
     let qclass = u16::from_be_bytes([pkt[idx + 2], pkt[idx + 3]]);
     if qclass != QCLASS_IN {
         return Err(DnsStubError::Malformed("only QCLASS IN supported"));
     }
-    Ok(ParsedQuery { id, flags, qname, qtype, qclass, qname_wire })
+    Ok(ParsedQuery {
+        id,
+        flags,
+        qname,
+        qtype,
+        qclass,
+        qname_wire,
+    })
 }
 
-fn build_response(
-    q:          &ParsedQuery,
-    addrs:      &[IpAddr],
-    nxdomain:   bool,
-    ttl_secs:   u32,
-) -> Vec<u8> {
+fn build_response(q: &ParsedQuery, addrs: &[IpAddr], nxdomain: bool, ttl_secs: u32) -> Vec<u8> {
     let mut out = Vec::with_capacity(64);
     out.extend_from_slice(&q.id.to_be_bytes());
     // Response flags: QR=1, OPCODE from request, AA=0, TC=0,
     // RD = request RD bit, RA=1 (we recursed via the kernel),
     // Z=0, RCODE = 0 (NOERROR) or 3 (NXDOMAIN).
-    let opcode  = (q.flags >> 11) & 0xF;
-    let rd      = (q.flags >> 8) & 1;
-    let rcode   = if nxdomain { 3u16 } else { 0u16 };
+    let opcode = (q.flags >> 11) & 0xF;
+    let rd = (q.flags >> 8) & 1;
+    let rcode = if nxdomain { 3u16 } else { 0u16 };
     let flags_out: u16 = 0x8000              // QR
         | (opcode << 11)
         | (rd << 8)
@@ -308,15 +320,15 @@ fn build_response(
         | rcode;
     out.extend_from_slice(&flags_out.to_be_bytes());
     out.extend_from_slice(&1u16.to_be_bytes()); // QDCOUNT
-    // Filter the addresses by the requested type so we never emit
-    // an A record for an AAAA query (or vice versa). Defence in
-    // depth: the kernel-side resolver already filters but we keep
-    // the codec strict.
+                                                // Filter the addresses by the requested type so we never emit
+                                                // an A record for an AAAA query (or vice versa). Defence in
+                                                // depth: the kernel-side resolver already filters but we keep
+                                                // the codec strict.
     let filtered: Vec<IpAddr> = addrs
         .iter()
         .copied()
         .filter(|ip| match (q.qtype, ip) {
-            (QTYPE_A,    IpAddr::V4(_)) => true,
+            (QTYPE_A, IpAddr::V4(_)) => true,
             (QTYPE_AAAA, IpAddr::V6(_)) => true,
             _ => false,
         })
@@ -324,7 +336,7 @@ fn build_response(
     out.extend_from_slice(&(filtered.len() as u16).to_be_bytes()); // ANCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // NSCOUNT
     out.extend_from_slice(&0u16.to_be_bytes()); // ARCOUNT
-    // Echo the question section verbatim.
+                                                // Echo the question section verbatim.
     out.extend_from_slice(&q.qname_wire);
     out.push(0); // null terminator we stripped during parsing
     out.extend_from_slice(&q.qtype.to_be_bytes());
@@ -415,7 +427,7 @@ mod tests {
         let parsed = parse_query(&q).expect("parses");
         assert_eq!(parsed.qname, "api.example.com");
         assert_eq!(parsed.qtype, QTYPE_A);
-        assert_eq!(parsed.id,    0x1234);
+        assert_eq!(parsed.id, 0x1234);
     }
 
     #[test]
@@ -450,7 +462,7 @@ mod tests {
         assert_eq!(&resp[0..2], &0x1234u16.to_be_bytes());
         let flags = u16::from_be_bytes([resp[2], resp[3]]);
         assert_eq!(flags & 0x8000, 0x8000, "QR bit set");
-        assert_eq!(flags & 0x000F, 0,       "NOERROR rcode");
+        assert_eq!(flags & 0x000F, 0, "NOERROR rcode");
         assert_eq!(u16::from_be_bytes([resp[6], resp[7]]), 1, "ANCOUNT=1");
         // Last 4 bytes = the IPv4 address.
         assert_eq!(&resp[resp.len() - 4..], &[1, 2, 3, 4]);

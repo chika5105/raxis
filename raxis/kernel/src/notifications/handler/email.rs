@@ -63,18 +63,18 @@ const SMTP_TIMEOUT: Duration = Duration::from_secs(30);
 /// `smtps://` uses implicit TLS on the connect socket.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ParsedTarget {
-    host:        String,
-    port:        u16,
-    username:    String,
-    from:        String,
-    recipients:  Vec<String>,
+    host: String,
+    port: u16,
+    username: String,
+    from: String,
+    recipients: Vec<String>,
     implicit_tls: bool,
 }
 
 /// Deliver one notification via SMTP submission. See module docs.
 pub async fn deliver(
-    channel:  &NotificationChannel,
-    event:    &AuditEvent,
+    channel: &NotificationChannel,
+    event: &AuditEvent,
     data_dir: &Path,
 ) -> Result<(), DeliveryError> {
     let target = parse_target(&channel.target).map_err(|reason| {
@@ -106,21 +106,22 @@ fn parse_target(target: &str) -> Result<ParsedTarget, String> {
     } else if let Some(s) = target.strip_prefix("smtp://") {
         (s, false)
     } else {
-        return Err(format!("unsupported scheme; expected smtp:// or smtps://, got {target:?}"));
+        return Err(format!(
+            "unsupported scheme; expected smtp:// or smtps://, got {target:?}"
+        ));
     };
     // <user>@<host>:<port>?from=...&to=...
     let (auth_host, query) = match rest.split_once('?') {
         Some((a, q)) => (a, q),
-        None         => (rest, ""),
+        None => (rest, ""),
     };
     let (username, host_port) = match auth_host.rsplit_once('@') {
         Some((u, hp)) => (u.to_owned(), hp),
-        None          => return Err("missing username (smtp://user@host:port?...)".to_owned()),
+        None => return Err("missing username (smtp://user@host:port?...)".to_owned()),
     };
     let (host, port) = match host_port.rsplit_once(':') {
         Some((h, p)) => {
-            let port: u16 = p.parse()
-                .map_err(|e| format!("port parse error: {e}"))?;
+            let port: u16 = p.parse().map_err(|e| format!("port parse error: {e}"))?;
             (h.to_owned(), port)
         }
         None => return Err("missing port (smtp://user@host:port?...)".to_owned()),
@@ -131,13 +132,13 @@ fn parse_target(target: &str) -> Result<ParsedTarget, String> {
 
     // Parse query string. We accept only `from` and `to` keys; other
     // keys are rejected so a typo'd URL fails loudly.
-    let mut from:       Option<String> = None;
-    let mut recipients: Vec<String>    = Vec::new();
+    let mut from: Option<String> = None;
+    let mut recipients: Vec<String> = Vec::new();
     if !query.is_empty() {
         for kv in query.split('&') {
-            let (k, v) = kv.split_once('=').ok_or_else(|| {
-                format!("malformed query parameter (expected key=value): {kv:?}")
-            })?;
+            let (k, v) = kv
+                .split_once('=')
+                .ok_or_else(|| format!("malformed query parameter (expected key=value): {kv:?}"))?;
             let v = url_decode(v);
             match k {
                 "from" => from = Some(v),
@@ -153,15 +154,14 @@ fn parse_target(target: &str) -> Result<ParsedTarget, String> {
             }
         }
     }
-    let from = from.ok_or_else(|| {
-        "missing ?from=<address> query parameter".to_owned()
-    })?;
+    let from = from.ok_or_else(|| "missing ?from=<address> query parameter".to_owned())?;
     if recipients.is_empty() {
         return Err("missing ?to=<addr1,addr2,...> query parameter".to_owned());
     }
     Ok(ParsedTarget {
-        host, port,
-        username:     url_decode(&username),
+        host,
+        port,
+        username: url_decode(&username),
         from,
         recipients,
         implicit_tls,
@@ -178,10 +178,7 @@ fn url_decode(s: &str) -> String {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'%' && i + 2 < bytes.len() {
-            if let (Some(h), Some(l)) = (
-                hex_digit(bytes[i + 1]),
-                hex_digit(bytes[i + 2]),
-            ) {
+            if let (Some(h), Some(l)) = (hex_digit(bytes[i + 1]), hex_digit(bytes[i + 2])) {
                 out.push((h * 16 + l) as char);
                 i += 3;
                 continue;
@@ -206,26 +203,30 @@ fn hex_digit(b: u8) -> Option<u8> {
 // Password sidecar
 // ---------------------------------------------------------------------------
 
-async fn load_password_sidecar(
-    data_dir:   &Path,
-    channel_id: &str,
-) -> Result<String, DeliveryError> {
-    let path = data_dir.join("notifications").join("credentials")
+async fn load_password_sidecar(data_dir: &Path, channel_id: &str) -> Result<String, DeliveryError> {
+    let path = data_dir
+        .join("notifications")
+        .join("credentials")
         .join(format!("{channel_id}.notify-cred"));
     let bytes = tokio::fs::read(&path).await.map_err(|e| {
         DeliveryError::CredentialUnavailable(format!(
-            "cannot read sidecar at {}: {e}", path.display(),
+            "cannot read sidecar at {}: {e}",
+            path.display(),
         ))
     })?;
     let s = String::from_utf8(bytes).map_err(|e| {
         DeliveryError::CredentialUnavailable(format!(
-            "sidecar at {} is not UTF-8: {e}", path.display(),
+            "sidecar at {} is not UTF-8: {e}",
+            path.display(),
         ))
     })?;
-    let trimmed = s.trim_end_matches(|c: char| c == '\r' || c == '\n').to_owned();
+    let trimmed = s
+        .trim_end_matches(|c: char| c == '\r' || c == '\n')
+        .to_owned();
     if trimmed.is_empty() {
         return Err(DeliveryError::CredentialUnavailable(format!(
-            "sidecar at {} is empty", path.display(),
+            "sidecar at {} is empty",
+            path.display(),
         )));
     }
     Ok(trimmed)
@@ -237,20 +238,19 @@ async fn load_password_sidecar(
 
 fn render_message_body(
     channel: &NotificationChannel,
-    event:   &AuditEvent,
-    target:  &ParsedTarget,
+    event: &AuditEvent,
+    target: &ParsedTarget,
 ) -> Vec<u8> {
     let _ = channel;
     let summary_line = summary::render(event);
-    let to_header    = target.recipients.join(", ");
-    let pretty_json  = serde_json::to_string_pretty(&event.payload)
+    let to_header = target.recipients.join(", ");
+    let pretty_json = serde_json::to_string_pretty(&event.payload)
         .unwrap_or_else(|_| "<failed to format payload>".to_owned());
-    let raw_json     = serde_json::to_string(&event.payload)
-        .unwrap_or_else(|_| "{}".to_owned());
+    let raw_json = serde_json::to_string(&event.payload).unwrap_or_else(|_| "{}".to_owned());
 
     let boundary = format!("raxis-{}", event.event_id.simple());
-    let date     = format_rfc2822_date(event.emitted_at.max(0) as u64);
-    let msgid    = format!("<{}.{}@raxis-kernel>", event.seq, event.event_id);
+    let date = format_rfc2822_date(event.emitted_at.max(0) as u64);
+    let msgid = format!("<{}.{}@raxis-kernel>", event.seq, event.event_id);
 
     let mut buf = String::with_capacity(2048 + raw_json.len());
     buf.push_str(&format!("From: {}\r\n", target.from));
@@ -307,7 +307,7 @@ fn render_message_body(
 /// will rewrite it server-side anyway. We render UTC.
 fn format_rfc2822_date(unix_secs: u64) -> String {
     // Compute Y/M/D/H/M/S without any external date library.
-    let secs       = unix_secs % 86_400;
+    let secs = unix_secs % 86_400;
     let total_days = (unix_secs / 86_400) as i64;
     let h = secs / 3600;
     let m = (secs / 60) % 60;
@@ -316,34 +316,41 @@ fn format_rfc2822_date(unix_secs: u64) -> String {
     let (y, mo, d) = days_to_ymd(total_days);
     let dow = day_of_week(total_days);
 
-    let dow_str = ["Mon","Tue","Wed","Thu","Fri","Sat","Sun"][dow as usize];
-    let mo_str  = ["Jan","Feb","Mar","Apr","May","Jun",
-                   "Jul","Aug","Sep","Oct","Nov","Dec"][(mo - 1) as usize];
-    format!(
-        "{dow_str}, {d:02} {mo_str} {y:04} {h:02}:{m:02}:{s:02} +0000"
-    )
+    let dow_str = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"][dow as usize];
+    let mo_str = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ][(mo - 1) as usize];
+    format!("{dow_str}, {d:02} {mo_str} {y:04} {h:02}:{m:02}:{s:02} +0000")
 }
 
 /// Convert days-since-1970 to (year, month, day). Pure arithmetic;
 /// pinned by the test suite below against known anchor dates.
 fn days_to_ymd(mut days: i64) -> (i32, u32, u32) {
     days += 719_468; // shift epoch to 0000-03-01
-    let era = if days >= 0 { days / 146_097 } else { (days - 146_096) / 146_097 };
+    let era = if days >= 0 {
+        days / 146_097
+    } else {
+        (days - 146_096) / 146_097
+    };
     let doe = (days - era * 146_097) as u64;
-    let yoe = (doe - doe/1460 + doe/36524 - doe/146_096) / 365;
-    let y   = yoe as i64 + era * 400;
-    let doy = doe - (365*yoe + yoe/4 - yoe/100);
-    let mp  = (5*doy + 2) / 153;
-    let d   = doy - (153*mp + 2)/5 + 1;
-    let m   = if mp < 10 { mp + 3 } else { mp - 9 };
-    let y   = if m <= 2 { y + 1 } else { y };
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
+    let y = yoe as i64 + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = if m <= 2 { y + 1 } else { y };
     (y as i32, m as u32, d as u32)
 }
 
 fn day_of_week(days_since_1970: i64) -> i64 {
     // 1970-01-01 was a Thursday (index 3 in our Mon-first week).
     let dow = (days_since_1970 + 3) % 7;
-    if dow < 0 { dow + 7 } else { dow }
+    if dow < 0 {
+        dow + 7
+    } else {
+        dow
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -351,11 +358,12 @@ fn day_of_week(days_since_1970: i64) -> i64 {
 // ---------------------------------------------------------------------------
 
 async fn do_smtp_submit(
-    target:   &ParsedTarget,
+    target: &ParsedTarget,
     password: &str,
-    body:     &[u8],
+    body: &[u8],
 ) -> Result<(), DeliveryError> {
-    let plain = TcpStream::connect((target.host.as_str(), target.port)).await
+    let plain = TcpStream::connect((target.host.as_str(), target.port))
+        .await
         .map_err(|e| DeliveryError::Network(format!("tcp connect failed: {e}")))?;
 
     if target.implicit_tls {
@@ -364,7 +372,8 @@ async fn do_smtp_submit(
         sess.banner_check().await?;
         sess.ehlo(&target.host).await?;
         sess.auth_plain(&target.username, password).await?;
-        sess.send_message(&target.from, &target.recipients, body).await?;
+        sess.send_message(&target.from, &target.recipients, body)
+            .await?;
         sess.quit().await?;
     } else {
         let mut sess = SmtpSession::new(plain);
@@ -376,15 +385,16 @@ async fn do_smtp_submit(
         let mut sess = SmtpSession::new(tls);
         sess.ehlo(&target.host).await?;
         sess.auth_plain(&target.username, password).await?;
-        sess.send_message(&target.from, &target.recipients, body).await?;
+        sess.send_message(&target.from, &target.recipients, body)
+            .await?;
         sess.quit().await?;
     }
     Ok(())
 }
 
 async fn tls_wrap<S>(
-    stream:    S,
-    sni_host:  &str,
+    stream: S,
+    sni_host: &str,
 ) -> Result<tokio_rustls::client::TlsStream<S>, DeliveryError>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
@@ -395,12 +405,12 @@ where
         .with_root_certificates(roots)
         .with_no_client_auth();
     let connector = TlsConnector::from(Arc::new(cfg));
-    let server_name = ServerName::try_from(sni_host.to_owned()).map_err(|e| {
-        DeliveryError::Network(format!("invalid SNI host {sni_host:?}: {e}"))
-    })?;
-    connector.connect(server_name, stream).await.map_err(|e| {
-        DeliveryError::Network(format!("TLS handshake failed: {e}"))
-    })
+    let server_name = ServerName::try_from(sni_host.to_owned())
+        .map_err(|e| DeliveryError::Network(format!("invalid SNI host {sni_host:?}: {e}")))?;
+    connector
+        .connect(server_name, stream)
+        .await
+        .map_err(|e| DeliveryError::Network(format!("TLS handshake failed: {e}")))
 }
 
 /// Tiny in-tree SMTP session driver. We deliberately do not pull in
@@ -416,7 +426,9 @@ where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,
 {
     fn new(stream: S) -> Self {
-        Self { inner: BufReader::new(stream) }
+        Self {
+            inner: BufReader::new(stream),
+        }
     }
 
     fn into_inner(self) -> S {
@@ -427,7 +439,10 @@ where
         let mut buf = Vec::with_capacity(line.len() + 2);
         buf.extend_from_slice(line.as_bytes());
         buf.extend_from_slice(b"\r\n");
-        self.inner.get_mut().write_all(&buf).await
+        self.inner
+            .get_mut()
+            .write_all(&buf)
+            .await
             .map_err(|e| DeliveryError::Network(format!("smtp write: {e}")))?;
         Ok(())
     }
@@ -438,7 +453,10 @@ where
         let mut text = String::new();
         loop {
             let mut line = String::new();
-            let n = self.inner.read_line(&mut line).await
+            let n = self
+                .inner
+                .read_line(&mut line)
+                .await
                 .map_err(|e| DeliveryError::Network(format!("smtp read: {e}")))?;
             if n == 0 {
                 return Err(DeliveryError::Network("smtp connection closed".to_owned()));
@@ -449,15 +467,15 @@ where
                 )));
             }
             let parsed: u16 = line[..3].parse().map_err(|e| {
-                DeliveryError::Network(format!(
-                    "smtp response code parse: {line:?}: {e}",
-                ))
+                DeliveryError::Network(format!("smtp response code parse: {line:?}: {e}",))
             })?;
             let sep = line.as_bytes()[3];
             text.push_str(line[4..].trim_end());
             // Parse "<3 digits><sep><text>". `sep == '-'` ⇒ more
             // lines follow; `sep == ' '` ⇒ last line.
-            if sep == b' ' { return Ok((parsed, text)); }
+            if sep == b' ' {
+                return Ok((parsed, text));
+            }
             if sep != b'-' {
                 return Err(DeliveryError::Network(format!(
                     "smtp response separator unexpected: {line:?}",
@@ -499,11 +517,7 @@ where
         Ok(())
     }
 
-    async fn auth_plain(
-        &mut self,
-        username: &str,
-        password: &str,
-    ) -> Result<(), DeliveryError> {
+    async fn auth_plain(&mut self, username: &str, password: &str) -> Result<(), DeliveryError> {
         // RFC 4616 PLAIN: \0<authcid>\0<password>, base64.
         let mut sasl = Vec::with_capacity(2 + username.len() + password.len());
         sasl.push(0);
@@ -523,9 +537,9 @@ where
 
     async fn send_message(
         &mut self,
-        from:       &str,
+        from: &str,
         recipients: &[String],
-        body:       &[u8],
+        body: &[u8],
     ) -> Result<(), DeliveryError> {
         self.write_line(&format!("MAIL FROM:<{from}>")).await?;
         let (code, text) = self.read_response().await?;
@@ -551,7 +565,10 @@ where
             )));
         }
         // Body is already dot-stuffed by `render_message_body`.
-        self.inner.get_mut().write_all(body).await
+        self.inner
+            .get_mut()
+            .write_all(body)
+            .await
             .map_err(|e| DeliveryError::Network(format!("smtp body write: {e}")))?;
         // RFC 5321 end-of-data: ".\r\n" on its own line.
         self.write_line(".").await?;
@@ -588,14 +605,14 @@ mod tests {
     fn make_event(kind: &str, seq: u64, payload: serde_json::Value) -> AuditEvent {
         AuditEvent {
             seq,
-            event_id:      Uuid::new_v4(),
-            event_kind:    kind.to_owned(),
-            session_id:    None,
-            task_id:       None,
+            event_id: Uuid::new_v4(),
+            event_kind: kind.to_owned(),
+            session_id: None,
+            task_id: None,
             initiative_id: None,
             payload,
-            emitted_at:    1_700_000_000,
-            prev_sha256:   "0".repeat(64),
+            emitted_at: 1_700_000_000,
+            prev_sha256: "0".repeat(64),
         }
     }
 
@@ -604,15 +621,19 @@ mod tests {
         let p = parse_target(
             "smtp://ops%40example.com@smtp.example.com:587\
              ?from=ops@example.com&to=alerts@example.com,oncall@example.com",
-        ).unwrap();
-        assert_eq!(p.host,       "smtp.example.com");
-        assert_eq!(p.port,       587);
-        assert_eq!(p.username,   "ops@example.com");
-        assert_eq!(p.from,       "ops@example.com");
-        assert_eq!(p.recipients, vec![
-            "alerts@example.com".to_owned(),
-            "oncall@example.com".to_owned(),
-        ]);
+        )
+        .unwrap();
+        assert_eq!(p.host, "smtp.example.com");
+        assert_eq!(p.port, 587);
+        assert_eq!(p.username, "ops@example.com");
+        assert_eq!(p.from, "ops@example.com");
+        assert_eq!(
+            p.recipients,
+            vec![
+                "alerts@example.com".to_owned(),
+                "oncall@example.com".to_owned(),
+            ]
+        );
         assert!(!p.implicit_tls);
     }
 
@@ -620,69 +641,63 @@ mod tests {
     fn parse_target_smtps_implicit_tls() {
         let p = parse_target(
             "smtps://relay@smtp.example.com:465?from=ops@example.com&to=alerts@example.com",
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(p.port, 465);
-        assert!(p.implicit_tls,
-            "smtps:// must set implicit_tls=true");
+        assert!(p.implicit_tls, "smtps:// must set implicit_tls=true");
     }
 
     #[test]
     fn parse_target_rejects_unknown_scheme() {
-        let err = parse_target(
-            "imap://relay@host:143?from=x&to=y",
-        ).unwrap_err();
+        let err = parse_target("imap://relay@host:143?from=x&to=y").unwrap_err();
         assert!(err.contains("unsupported scheme"));
     }
 
     #[test]
     fn parse_target_rejects_missing_from() {
-        let err = parse_target(
-            "smtp://relay@host:587?to=alerts@example.com",
-        ).unwrap_err();
+        let err = parse_target("smtp://relay@host:587?to=alerts@example.com").unwrap_err();
         assert!(err.contains("?from="));
     }
 
     #[test]
     fn parse_target_rejects_missing_to() {
-        let err = parse_target(
-            "smtp://relay@host:587?from=ops@example.com",
-        ).unwrap_err();
+        let err = parse_target("smtp://relay@host:587?from=ops@example.com").unwrap_err();
         assert!(err.contains("?to="));
     }
 
     #[test]
     fn parse_target_rejects_missing_username() {
-        let err = parse_target(
-            "smtp://host:587?from=x&to=y",
-        ).unwrap_err();
-        assert!(err.contains("missing username"),
-            "got: {err}");
+        let err = parse_target("smtp://host:587?from=x&to=y").unwrap_err();
+        assert!(err.contains("missing username"), "got: {err}");
     }
 
     #[test]
     fn parse_target_rejects_unknown_query_param() {
-        let err = parse_target(
-            "smtp://relay@host:587?from=x&to=y&password=PEOPLE",
-        ).unwrap_err();
-        assert!(err.contains("unknown query parameter"),
-            "passwords MUST NOT be transported in URL queries; got: {err}");
+        let err = parse_target("smtp://relay@host:587?from=x&to=y&password=PEOPLE").unwrap_err();
+        assert!(
+            err.contains("unknown query parameter"),
+            "passwords MUST NOT be transported in URL queries; got: {err}"
+        );
     }
 
     #[tokio::test]
     async fn missing_password_sidecar_returns_credential_unavailable() {
         let tmp = tempfile::tempdir().unwrap();
         let chan = NotificationChannel {
-            id:     "ops-email".into(),
-            kind:   NotificationChannelKind::Email,
+            id: "ops-email".into(),
+            kind: NotificationChannelKind::Email,
             target: "smtp://ops@smtp.example.com:587\
-                     ?from=ops@example.com&to=alerts@example.com".into(),
+                     ?from=ops@example.com&to=alerts@example.com"
+                .into(),
             max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({}));
         match deliver(&chan, &e, tmp.path()).await {
             Err(DeliveryError::CredentialUnavailable(reason)) => {
-                assert!(reason.contains("ops-email.notify-cred"),
-                    "audit reason should name the missing sidecar; got: {reason}");
+                assert!(
+                    reason.contains("ops-email.notify-cred"),
+                    "audit reason should name the missing sidecar; got: {reason}"
+                );
             }
             other => panic!("expected CredentialUnavailable, got {other:?}"),
         }
@@ -695,10 +710,11 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("ops-email.notify-cred"), "\n").unwrap();
         let chan = NotificationChannel {
-            id:     "ops-email".into(),
-            kind:   NotificationChannelKind::Email,
+            id: "ops-email".into(),
+            kind: NotificationChannelKind::Email,
             target: "smtp://ops@smtp.example.com:587\
-                     ?from=ops@example.com&to=alerts@example.com".into(),
+                     ?from=ops@example.com&to=alerts@example.com"
+                .into(),
             max_in_flight: 8,
         };
         let e = make_event("EscalationApproved", 1, json!({}));
@@ -712,8 +728,8 @@ mod tests {
     async fn target_with_unparseable_url_returns_network_error() {
         let tmp = tempfile::tempdir().unwrap();
         let chan = NotificationChannel {
-            id:     "broken".into(),
-            kind:   NotificationChannelKind::Email,
+            id: "broken".into(),
+            kind: NotificationChannelKind::Email,
             target: "this-is-not-an-smtp-url".into(),
             max_in_flight: 8,
         };
@@ -723,8 +739,7 @@ mod tests {
         // DeliveryErrorExt.
         match deliver(&chan, &e, tmp.path()).await {
             Err(DeliveryError::Network(reason)) => {
-                assert!(reason.contains("smtp target parse"),
-                    "got: {reason}");
+                assert!(reason.contains("smtp target parse"), "got: {reason}");
             }
             other => panic!("expected Network(parse), got {other:?}"),
         }
@@ -733,16 +748,16 @@ mod tests {
     #[test]
     fn render_message_body_includes_required_headers() {
         let tgt = ParsedTarget {
-            host:        "smtp.example.com".into(),
-            port:        587,
-            username:    "ops@example.com".into(),
-            from:        "ops@example.com".into(),
-            recipients:  vec!["alerts@example.com".into()],
+            host: "smtp.example.com".into(),
+            port: 587,
+            username: "ops@example.com".into(),
+            from: "ops@example.com".into(),
+            recipients: vec!["alerts@example.com".into()],
             implicit_tls: false,
         };
         let chan = NotificationChannel {
-            id:     "ops-email".into(),
-            kind:   NotificationChannelKind::Email,
+            id: "ops-email".into(),
+            kind: NotificationChannelKind::Email,
             target: String::new(),
             max_in_flight: 8,
         };
@@ -755,18 +770,24 @@ mod tests {
         assert!(text.contains("X-RAXIS-Event-Kind: EscalationApproved"));
         assert!(text.contains("X-RAXIS-Event-Seq: 7"));
         assert!(text.contains("Content-Type: multipart/alternative;"));
-        assert!(text.contains("\"k\": \"v\""),
-            "pretty JSON body must include the payload");
-        assert!(text.contains("\"k\":\"v\""),
-            "raw JSON attachment must include the payload");
+        assert!(
+            text.contains("\"k\": \"v\""),
+            "pretty JSON body must include the payload"
+        );
+        assert!(
+            text.contains("\"k\":\"v\""),
+            "raw JSON attachment must include the payload"
+        );
     }
 
     #[test]
     fn render_message_body_dot_stuffs_lines_starting_with_dot() {
         let tgt = ParsedTarget {
-            host:        "h".into(), port: 25,
-            username:    "u".into(), from: "f@x".into(),
-            recipients:  vec!["r@x".into()],
+            host: "h".into(),
+            port: 25,
+            username: "u".into(),
+            from: "f@x".into(),
+            recipients: vec!["r@x".into()],
             implicit_tls: false,
         };
         let chan = NotificationChannel {
@@ -794,12 +815,16 @@ mod tests {
     fn format_rfc2822_date_known_anchors() {
         // 1970-01-01 00:00:00 UTC = epoch 0.
         let s = format_rfc2822_date(0);
-        assert!(s.starts_with("Thu, 01 Jan 1970 00:00:00 +0000"),
-            "epoch must format as 1970-01-01 Thursday, got: {s}");
+        assert!(
+            s.starts_with("Thu, 01 Jan 1970 00:00:00 +0000"),
+            "epoch must format as 1970-01-01 Thursday, got: {s}"
+        );
         // 2024-01-01 00:00:00 UTC.
         let s = format_rfc2822_date(1_704_067_200);
-        assert!(s.starts_with("Mon, 01 Jan 2024"),
-            "2024 New Year must be Monday, got: {s}");
+        assert!(
+            s.starts_with("Mon, 01 Jan 2024"),
+            "2024 New Year must be Monday, got: {s}"
+        );
     }
 
     #[test]

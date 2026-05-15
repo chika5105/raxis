@@ -66,19 +66,19 @@ const DEFAULT_BINARY: &str = "raxis-kernel";
 #[derive(Debug)]
 struct Args {
     /// Cargo profile dir under `target/`. Defaults to `release`.
-    profile:      String,
+    profile: String,
     /// Optional entitlements override. Defaults to
     /// `release/raxis.entitlements`.
     entitlements: PathBuf,
     /// Binary basename. Defaults to `raxis-kernel`.
-    binary:       String,
+    binary: String,
 }
 
 impl Args {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut profile      = DEFAULT_PROFILE.to_owned();
+        let mut profile = DEFAULT_PROFILE.to_owned();
         let mut entitlements = PathBuf::from(DEFAULT_ENTITLEMENTS);
-        let mut binary       = DEFAULT_BINARY.to_owned();
+        let mut binary = DEFAULT_BINARY.to_owned();
 
         let mut i = 0;
         while i < argv.len() {
@@ -107,7 +107,11 @@ impl Args {
             i += 1;
         }
 
-        Ok(Self { profile, entitlements, binary })
+        Ok(Self {
+            profile,
+            entitlements,
+            binary,
+        })
     }
 }
 
@@ -226,14 +230,12 @@ pub fn run(argv: &[String]) -> Result<()> {
 /// Walk up from CWD until we find a `Cargo.toml` containing
 /// `[workspace]`. Returns the directory containing that file.
 fn workspace_root_from_cwd() -> Result<PathBuf> {
-    let mut cwd: PathBuf = std::env::current_dir()
-        .context("cannot read CWD")?;
+    let mut cwd: PathBuf = std::env::current_dir().context("cannot read CWD")?;
     loop {
         let candidate = cwd.join("Cargo.toml");
         if candidate.exists() {
-            let s = std::fs::read_to_string(&candidate).with_context(|| {
-                format!("read {}", candidate.display())
-            })?;
+            let s = std::fs::read_to_string(&candidate)
+                .with_context(|| format!("read {}", candidate.display()))?;
             // Cheap heuristic: a workspace root's manifest has a
             // `[workspace]` section. `cargo metadata` would be more
             // robust but pulls in `cargo` as a build dep we'd
@@ -259,27 +261,33 @@ mod tests {
     fn args_parser_uses_documented_defaults_when_no_flags_passed() {
         let args = Args::parse(&[]).unwrap();
         assert_eq!(args.profile, "release");
-        assert_eq!(args.entitlements, PathBuf::from("release/raxis.entitlements"));
+        assert_eq!(
+            args.entitlements,
+            PathBuf::from("release/raxis.entitlements")
+        );
         assert_eq!(args.binary, "raxis-kernel");
     }
 
     #[test]
     fn args_parser_round_trips_explicit_overrides() {
         let argv = vec![
-            "--profile".to_owned(),      "debug".to_owned(),
-            "--entitlements".to_owned(), "/etc/raxis.ents".to_owned(),
-            "--binary".to_owned(),       "raxis-kernel-fork".to_owned(),
+            "--profile".to_owned(),
+            "debug".to_owned(),
+            "--entitlements".to_owned(),
+            "/etc/raxis.ents".to_owned(),
+            "--binary".to_owned(),
+            "raxis-kernel-fork".to_owned(),
         ];
         let args = Args::parse(&argv).unwrap();
-        assert_eq!(args.profile,      "debug");
+        assert_eq!(args.profile, "debug");
         assert_eq!(args.entitlements, PathBuf::from("/etc/raxis.ents"));
-        assert_eq!(args.binary,       "raxis-kernel-fork");
+        assert_eq!(args.binary, "raxis-kernel-fork");
     }
 
     #[test]
     fn args_parser_rejects_unknown_flag() {
         let argv = vec!["--nope".to_owned()];
-        let err  = Args::parse(&argv).unwrap_err().to_string();
+        let err = Args::parse(&argv).unwrap_err().to_string();
         assert!(err.contains("unknown dev-codesign arg"), "got: {err}");
     }
 
@@ -287,7 +295,7 @@ mod tests {
     fn args_parser_requires_value_for_each_flag() {
         for flag in ["--profile", "--entitlements", "--binary"] {
             let argv = vec![flag.to_owned()];
-            let err  = Args::parse(&argv).unwrap_err().to_string();
+            let err = Args::parse(&argv).unwrap_err().to_string();
             assert!(
                 err.contains("requires"),
                 "flag {flag} should bail when value is missing; got: {err}",

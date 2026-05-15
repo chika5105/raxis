@@ -72,7 +72,9 @@ pub struct InitiativeEventBus {
 
 impl InitiativeEventBus {
     pub fn new() -> Arc<Self> {
-        Arc::new(Self { channels: Mutex::new(HashMap::new()) })
+        Arc::new(Self {
+            channels: Mutex::new(HashMap::new()),
+        })
     }
 
     /// Subscribe to events for `initiative_id`. The returned
@@ -97,7 +99,9 @@ impl InitiativeEventBus {
     /// Used by tests; production telemetry may eventually surface
     /// this through `raxis status`.
     pub fn subscriber_count(&self, initiative_id: &str) -> usize {
-        self.channels.lock().unwrap()
+        self.channels
+            .lock()
+            .unwrap()
             .get(initiative_id)
             .map(|s| s.receiver_count())
             .unwrap_or(0)
@@ -105,7 +109,8 @@ impl InitiativeEventBus {
 
     fn sender(&self, initiative_id: &str) -> broadcast::Sender<InitiativeEvent> {
         let mut guard = self.channels.lock().unwrap();
-        guard.entry(initiative_id.to_owned())
+        guard
+            .entry(initiative_id.to_owned())
             .or_insert_with(|| {
                 let (tx, _rx) = broadcast::channel(PER_INITIATIVE_BROADCAST_CAPACITY);
                 tx
@@ -135,13 +140,16 @@ impl InitiativeEventBus {
 ///   2. Add an arm here + a round-trip test in this file.
 ///   3. Add a round-trip test in `initiative_event::tests`.
 pub fn audit_kind_to_initiative_event(
-    kind:        &AuditEventKind,
-    task_id:     Option<&str>,
-    emitted_at:  i64,
+    kind: &AuditEventKind,
+    task_id: Option<&str>,
+    emitted_at: i64,
 ) -> Option<InitiativeEvent> {
     match kind {
         AuditEventKind::TaskStateChanged {
-            task_id: t, from_state, to_state, ..
+            task_id: t,
+            from_state,
+            to_state,
+            ..
         } => Some(InitiativeEvent::TaskStateChanged {
             task_id: t.clone(),
             from_state: Some(from_state.clone()),
@@ -150,7 +158,9 @@ pub fn audit_kind_to_initiative_event(
         }),
 
         AuditEventKind::InitiativeStateChanged {
-            from_state, to_state, ..
+            from_state,
+            to_state,
+            ..
         } => Some(InitiativeEvent::InitiativeStateChanged {
             from_state: Some(from_state.clone()),
             to_state: to_state.clone(),
@@ -158,9 +168,11 @@ pub fn audit_kind_to_initiative_event(
         }),
 
         AuditEventKind::ReviewAggregationCompleted {
-            executor_task_id, verdict, ..
+            executor_task_id,
+            verdict,
+            ..
         } => Some(InitiativeEvent::ReviewAggregationCompleted {
-            task_id:    executor_task_id.clone(),
+            task_id: executor_task_id.clone(),
             // Spec strings are `"AllPassed"` / `"AtLeastOneRejected"`
             // / `"NoSuccessors"` (audit-paired-writes.md §2). The
             // wire boolean is `true` iff every reviewer approved.
@@ -168,11 +180,14 @@ pub fn audit_kind_to_initiative_event(
         }),
 
         AuditEventKind::EscalationSubmitted {
-            escalation_id, task_id: t, class, ..
+            escalation_id,
+            task_id: t,
+            class,
+            ..
         } => Some(InitiativeEvent::EscalationRaised {
             escalation_id: escalation_id.clone(),
-            task_id:       Some(t.clone()),
-            capability:    class.clone(),
+            task_id: Some(t.clone()),
+            capability: class.clone(),
         }),
 
         AuditEventKind::EscalationApproved { escalation_id, .. } => {
@@ -199,16 +214,19 @@ pub fn audit_kind_to_initiative_event(
         // `IntegrationMergeAttemptDiscarded`); the wire frame
         // therefore stamps `outcome = "Succeeded"` unconditionally
         // and surfaces the resulting commit SHA as `head_sha`.
-        AuditEventKind::IntegrationMergeCompleted {
-            commit_sha, ..
-        } => Some(InitiativeEvent::IntegrationMergeCompleted {
-            task_id:  task_id.map(str::to_owned).unwrap_or_default(),
-            outcome:  "Succeeded".into(),
-            head_sha: Some(commit_sha.clone()),
-        }),
+        AuditEventKind::IntegrationMergeCompleted { commit_sha, .. } => {
+            Some(InitiativeEvent::IntegrationMergeCompleted {
+                task_id: task_id.map(str::to_owned).unwrap_or_default(),
+                outcome: "Succeeded".into(),
+                head_sha: Some(commit_sha.clone()),
+            })
+        }
 
         AuditEventKind::StructuredOutputEmitted {
-            task_id: t, output_kind, severity, ..
+            task_id: t,
+            output_kind,
+            severity,
+            ..
         } => Some(InitiativeEvent::StructuredOutputEmitted {
             task_id: t.clone(),
             output_kind: output_kind.clone(),
@@ -239,7 +257,7 @@ pub fn audit_kind_to_initiative_event(
 /// the same error they would have without the wrapper.
 pub struct BroadcastingAuditSink {
     inner: Arc<dyn AuditSink>,
-    bus:   Arc<InitiativeEventBus>,
+    bus: Arc<InitiativeEventBus>,
 }
 
 impl BroadcastingAuditSink {
@@ -251,14 +269,16 @@ impl BroadcastingAuditSink {
 impl AuditSink for BroadcastingAuditSink {
     fn emit(
         &self,
-        kind:          AuditEventKind,
-        session_id:    Option<&str>,
-        task_id:       Option<&str>,
+        kind: AuditEventKind,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
         initiative_id: Option<&str>,
     ) -> Result<AuditEvent, AuditWriterError> {
         // 1. Durable write first. If this fails the broadcast
         //    MUST NOT happen.
-        let result = self.inner.emit(kind.clone(), session_id, task_id, initiative_id);
+        let result = self
+            .inner
+            .emit(kind.clone(), session_id, task_id, initiative_id);
 
         // 2. On success, translate + broadcast for any
         //    initiative-attributed audit row. We pull the
@@ -267,9 +287,8 @@ impl AuditSink for BroadcastingAuditSink {
         //    bit-for-bit.
         if let Ok(event) = result.as_ref() {
             if let Some(iid) = initiative_id {
-                if let Some(wire) = audit_kind_to_initiative_event(
-                    &kind, task_id, event.emitted_at,
-                ) {
+                if let Some(wire) = audit_kind_to_initiative_event(&kind, task_id, event.emitted_at)
+                {
                     self.bus.publish(iid, wire);
                 }
             }
@@ -298,9 +317,13 @@ mod tests {
         emitted: StdMutex<Vec<AuditEventKind>>,
     }
     impl AuditSink for OkSink {
-        fn emit(&self, kind: AuditEventKind, _s: Option<&str>, _t: Option<&str>, _i: Option<&str>)
-            -> Result<AuditEvent, AuditWriterError>
-        {
+        fn emit(
+            &self,
+            kind: AuditEventKind,
+            _s: Option<&str>,
+            _t: Option<&str>,
+            _i: Option<&str>,
+        ) -> Result<AuditEvent, AuditWriterError> {
             self.emitted.lock().unwrap().push(kind.clone());
             Ok(AuditEvent {
                 seq: 0,
@@ -323,21 +346,26 @@ mod tests {
     /// keeping the test close to a real failure mode.
     struct FailSink;
     impl AuditSink for FailSink {
-        fn emit(&self, _k: AuditEventKind, _s: Option<&str>, _t: Option<&str>, _i: Option<&str>)
-            -> Result<AuditEvent, AuditWriterError>
-        {
-            Err(AuditWriterError::Io(
-                std::io::Error::new(std::io::ErrorKind::Other, "stub failure"),
-            ))
+        fn emit(
+            &self,
+            _k: AuditEventKind,
+            _s: Option<&str>,
+            _t: Option<&str>,
+            _i: Option<&str>,
+        ) -> Result<AuditEvent, AuditWriterError> {
+            Err(AuditWriterError::Io(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "stub failure",
+            )))
         }
     }
 
     fn task_state_changed_kind() -> AuditEventKind {
         AuditEventKind::TaskStateChanged {
-            task_id:      "t-1".into(),
-            from_state:   "Admitted".into(),
-            to_state:     "Running".into(),
-            actor:        "kernel".into(),
+            task_id: "t-1".into(),
+            from_state: "Admitted".into(),
+            to_state: "Running".into(),
+            actor: "kernel".into(),
             policy_epoch: 1,
         }
     }
@@ -349,7 +377,9 @@ mod tests {
         let mut b = bus.subscribe("i-1");
         assert_eq!(bus.subscriber_count("i-1"), 2);
 
-        let event = InitiativeEvent::Subscribed { initiative_id: "i-1".into() };
+        let event = InitiativeEvent::Subscribed {
+            initiative_id: "i-1".into(),
+        };
         bus.publish("i-1", event.clone());
 
         assert_eq!(a.recv().await.unwrap(), event);
@@ -360,16 +390,16 @@ mod tests {
     async fn publish_to_unknown_initiative_is_a_noop_for_other_channels() {
         let bus = InitiativeEventBus::new();
         let mut a = bus.subscribe("i-1");
-        bus.publish("i-2", InitiativeEvent::Closed {
-            reason: ClosedReason::InitiativeTerminal,
-        });
+        bus.publish(
+            "i-2",
+            InitiativeEvent::Closed {
+                reason: ClosedReason::InitiativeTerminal,
+            },
+        );
         // i-1's subscriber must NOT receive the i-2 event. Use a
         // small timeout to differentiate "no message" from
         // "blocked".
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            a.recv(),
-        ).await;
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), a.recv()).await;
         assert!(timed.is_err(), "isolated initiatives must not bleed events");
     }
 
@@ -388,7 +418,12 @@ mod tests {
 
         // Subscriber received the public-wire mapped event.
         match rx.recv().await.unwrap() {
-            InitiativeEvent::TaskStateChanged { task_id, to_state, from_state, .. } => {
+            InitiativeEvent::TaskStateChanged {
+                task_id,
+                to_state,
+                from_state,
+                ..
+            } => {
                 assert_eq!(task_id, "t-1");
                 assert_eq!(to_state, "Running");
                 assert_eq!(from_state.as_deref(), Some("Admitted"));
@@ -411,12 +446,11 @@ mod tests {
         let res = sink.emit(task_state_changed_kind(), None, Some("t-1"), Some("i-1"));
         assert!(res.is_err());
 
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        ).await;
-        assert!(timed.is_err(),
-            "broadcast on failed audit emit would mislead operators");
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            timed.is_err(),
+            "broadcast on failed audit emit would mislead operators"
+        );
     }
 
     #[tokio::test]
@@ -432,11 +466,10 @@ mod tests {
         sink.emit(task_state_changed_kind(), None, Some("t-1"), None)
             .expect("inner sink succeeds");
 
-        let timed = tokio::time::timeout(
-            std::time::Duration::from_millis(50),
-            rx.recv(),
-        ).await;
-        assert!(timed.is_err(),
-            "audit emits without initiative_id must not land on any bus channel");
+        let timed = tokio::time::timeout(std::time::Duration::from_millis(50), rx.recv()).await;
+        assert!(
+            timed.is_err(),
+            "audit emits without initiative_id must not land on any bus channel"
+        );
     }
 }

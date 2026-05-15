@@ -22,18 +22,18 @@ use super::harness_timeout::{
 };
 
 /// `live-e2e/docker-compose.extended.e2e.yml` pins these.
-pub const PG_HOST_PORT:    &str = "127.0.0.1:54399";
+pub const PG_HOST_PORT: &str = "127.0.0.1:54399";
 pub const MONGO_HOST_PORT: &str = "127.0.0.1:27399";
-pub const PG_USER:         &str = "raxis_test";
-pub const PG_PASSWORD:     &str = "raxis_test_pass";
-pub const PG_DATABASE:     &str = "raxis_e2e_pg";
-pub const MONGO_USER:      &str = "raxis_test";
-pub const MONGO_PASSWORD:  &str = "raxis_test_pass";
-pub const MONGO_DATABASE:  &str = "raxis_e2e_mongo";
+pub const PG_USER: &str = "raxis_test";
+pub const PG_PASSWORD: &str = "raxis_test_pass";
+pub const PG_DATABASE: &str = "raxis_e2e_pg";
+pub const MONGO_USER: &str = "raxis_test";
+pub const MONGO_PASSWORD: &str = "raxis_test_pass";
+pub const MONGO_DATABASE: &str = "raxis_e2e_mongo";
 
 /// Expected count for each seeded data source. Matched against the
 /// actual count in `verify_seed_counts_or_skip`.
-pub const EXPECTED_PG_ROWS:   usize = 25;
+pub const EXPECTED_PG_ROWS: usize = 25;
 pub const EXPECTED_MONGO_DOCS: usize = 25;
 
 // ---------------------------------------------------------------------------
@@ -44,14 +44,11 @@ pub const EXPECTED_MONGO_DOCS: usize = 25;
 /// Embedded via `include_str!` so the test binary needs no runtime
 /// filesystem path to the seed directory. The byte-stable canonical
 /// expected output is the witness oracle.
-pub const POSTGRES_ROWS_JSON: &str = include_str!(
-    "../../../live-e2e/seed/expected/postgres_rows.json"
-);
+pub const POSTGRES_ROWS_JSON: &str =
+    include_str!("../../../live-e2e/seed/expected/postgres_rows.json");
 
 /// Raw bytes of `live-e2e/seed/expected/mongo_docs.json`.
-pub const MONGO_DOCS_JSON: &str = include_str!(
-    "../../../live-e2e/seed/expected/mongo_docs.json"
-);
+pub const MONGO_DOCS_JSON: &str = include_str!("../../../live-e2e/seed/expected/mongo_docs.json");
 
 // ---------------------------------------------------------------------------
 // Typed expected-record shapes.
@@ -61,8 +58,8 @@ pub const MONGO_DOCS_JSON: &str = include_str!(
 /// emitted by `materialize-records`; equality is structural.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExpectedPgRow {
-    pub id:         String,
-    pub payload:    serde_json::Value,
+    pub id: String,
+    pub payload: serde_json::Value,
     pub created_at: i64,
 }
 
@@ -72,9 +69,9 @@ pub struct ExpectedPgRow {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExpectedMongoDoc {
     #[serde(rename = "_id_hex")]
-    pub id_hex:     String,
-    pub doc_id:     String,
-    pub payload:    serde_json::Value,
+    pub id_hex: String,
+    pub doc_id: String,
+    pub payload: serde_json::Value,
     pub created_at: i64,
 }
 
@@ -159,16 +156,20 @@ pub fn verify_postgres_seed_count_or_panic() {
         .arg("--quiet")
         .arg("--tuples-only")
         .arg("--no-align")
-        .arg(format!("postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"))
+        .arg(format!(
+            "postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"
+        ))
         .arg("-c")
         .arg("SELECT COUNT(*) FROM seeded_rows;");
     let out = run_command_output_timeout(&mut cmd, SEED_TIMEOUT, "psql-verify-pg-count")
-        .unwrap_or_else(|e| panic!(
-            "psql preflight wrapper failed: {e}\n\
+        .unwrap_or_else(|e| {
+            panic!(
+                "psql preflight wrapper failed: {e}\n\
              remediation:\n  \
              docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait\n  \
              (or set RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1 to opt out of harness auto-bring-up)"
-        ));
+            )
+        });
     if !out.status.success() {
         panic!(
             "psql preflight failed (exit {:?}): {}\n\
@@ -184,11 +185,10 @@ pub fn verify_postgres_seed_count_or_panic() {
     let count: usize = stdout
         .lines()
         .find_map(|l| l.trim().parse::<usize>().ok())
-        .unwrap_or_else(|| panic!(
-            "psql returned no parseable count; stdout=\n{stdout}",
-        ));
+        .unwrap_or_else(|| panic!("psql returned no parseable count; stdout=\n{stdout}",));
     assert_eq!(
-        count, EXPECTED_PG_ROWS,
+        count,
+        EXPECTED_PG_ROWS,
         "seeded_rows count drift: expected {EXPECTED_PG_ROWS}, got {count}; \
          re-apply the seed:\n  \
          psql {PG_DATABASE} -h 127.0.0.1 -p 54399 -U {PG_USER} -f {script}",
@@ -211,11 +211,13 @@ pub fn verify_mongo_seed_count_or_panic() {
         .arg("--eval")
         .arg("print(db.seeded_docs.countDocuments({}))");
     let out = run_command_output_timeout(&mut cmd, SEED_TIMEOUT, "mongosh-verify-count")
-        .unwrap_or_else(|e| panic!(
-            "mongosh preflight wrapper failed: {e}\n\
+        .unwrap_or_else(|e| {
+            panic!(
+                "mongosh preflight wrapper failed: {e}\n\
              remediation:\n  \
              docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait"
-        ));
+            )
+        });
     if !out.status.success() {
         panic!(
             "mongosh preflight failed (exit {:?}): {}\n\
@@ -231,11 +233,10 @@ pub fn verify_mongo_seed_count_or_panic() {
     let count: usize = stdout
         .lines()
         .find_map(|l| l.trim().parse::<usize>().ok())
-        .unwrap_or_else(|| panic!(
-            "mongosh returned no parseable count; stdout=\n{stdout}",
-        ));
+        .unwrap_or_else(|| panic!("mongosh returned no parseable count; stdout=\n{stdout}",));
     assert_eq!(
-        count, EXPECTED_MONGO_DOCS,
+        count,
+        EXPECTED_MONGO_DOCS,
         "seeded_docs count drift: expected {EXPECTED_MONGO_DOCS}, got {count}; \
          re-apply the seed:\n  \
          mongosh '{uri}' --file {script}",
@@ -260,7 +261,9 @@ fn require_tcp_reachable(host_port: &str, what: &str) {
     if TcpStream::connect_timeout(
         &host_port.parse().expect("static literal parses"),
         Duration::from_millis(500),
-    ).is_err() {
+    )
+    .is_err()
+    {
         panic!(
             "{what} not reachable at {host_port}. Run:\n  \
              docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait",
@@ -281,8 +284,11 @@ pub fn reseed_both_or_panic() {
     pg_cmd
         .env("PGPASSWORD", PG_PASSWORD)
         .arg("--quiet")
-        .arg(format!("postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"))
-        .arg("-f").arg(&pg_script);
+        .arg(format!(
+            "postgresql://{PG_USER}@127.0.0.1:54399/{PG_DATABASE}"
+        ))
+        .arg("-f")
+        .arg(&pg_script);
     let pg_status = run_command_status_timeout(&mut pg_cmd, SEED_TIMEOUT, "psql-reseed")
         .unwrap_or_else(|e| panic!("psql reseed wrapper failed: {e}"));
     assert!(
@@ -300,7 +306,8 @@ pub fn reseed_both_or_panic() {
     mongo_cmd
         .arg("--quiet")
         .arg(&mongo_uri)
-        .arg("--file").arg(&mongo_script);
+        .arg("--file")
+        .arg(&mongo_script);
     let mongo_status = run_command_status_timeout(&mut mongo_cmd, SEED_TIMEOUT, "mongosh-reseed")
         .unwrap_or_else(|e| panic!("mongosh reseed wrapper failed: {e}"));
     assert!(

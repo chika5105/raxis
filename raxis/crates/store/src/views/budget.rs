@@ -22,18 +22,18 @@ use crate::Table;
 /// COUNT.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LaneBudgetRow {
-    pub lane_id:       String,
+    pub lane_id: String,
     pub reserved_cost: u64,
-    pub task_count:    u64,
+    pub task_count: u64,
 }
 
 /// One row of `lane_budget_reservations`, projected for the CLI.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReservationRow {
-    pub lane_id:       String,
-    pub task_id:       String,
+    pub lane_id: String,
+    pub task_id: String,
     pub reserved_cost: u64,
-    pub reserved_at:   u64,
+    pub reserved_at: u64,
 }
 
 #[derive(Debug, Error)]
@@ -56,9 +56,9 @@ pub fn per_lane(conn: &RoConn) -> Result<Vec<LaneBudgetRow>, BudgetViewError> {
     let rows = stmt
         .query_map([], |r| {
             Ok(LaneBudgetRow {
-                lane_id:       r.get(0)?,
+                lane_id: r.get(0)?,
                 reserved_cost: r.get::<_, i64>(1)?.max(0) as u64,
-                task_count:    r.get::<_, i64>(2)?.max(0) as u64,
+                task_count: r.get::<_, i64>(2)?.max(0) as u64,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -71,9 +71,9 @@ pub fn per_lane(conn: &RoConn) -> Result<Vec<LaneBudgetRow>, BudgetViewError> {
 /// callers cross-check against `PolicyBundle::lanes()` if they need
 /// that signal).
 pub fn reservations_for_lane(
-    conn:    &RoConn,
+    conn: &RoConn,
     lane_id: &str,
-    limit:   usize,
+    limit: usize,
 ) -> Result<Vec<ReservationRow>, BudgetViewError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT lane_id, task_id, reserved_cost, reserved_at \
@@ -85,10 +85,10 @@ pub fn reservations_for_lane(
     let rows = stmt
         .query_map(rusqlite::params![lane_id, limit as i64], |r| {
             Ok(ReservationRow {
-                lane_id:       r.get(0)?,
-                task_id:       r.get(1)?,
+                lane_id: r.get(0)?,
+                task_id: r.get(1)?,
                 reserved_cost: r.get::<_, i64>(2)?.max(0) as u64,
-                reserved_at:   r.get::<_, i64>(3)?.max(0) as u64,
+                reserved_at: r.get::<_, i64>(3)?.max(0) as u64,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -102,48 +102,54 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_reservations() -> TempDir {
-        const INITIATIVES:              &str = Table::Initiatives.as_str();
-        const TASKS:                    &str = Table::Tasks.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
-        guard.execute(
-            &format!(
-                "INSERT INTO {INITIATIVES} \
+        guard
+            .execute(
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
                  (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
                  VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
-            ),
-            [],
-        ).unwrap();
+                ),
+                [],
+            )
+            .unwrap();
         // Tasks (FK target).
         for id in ["t-a", "t-b", "t-c"] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {TASKS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {TASKS} \
                      (task_id, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
                      VALUES (?1, 'init-1', 'd', 'Running', 'op', 1, 1, 1)"
-                ),
-                rusqlite::params![id],
-            ).unwrap();
+                    ),
+                    rusqlite::params![id],
+                )
+                .unwrap();
         }
         // Reservations: lane "default" gets 30 across 2 tasks; lane
         // "high" gets 100 across 1 task.
         for (lane, task, cost, at) in [
             ("default", "t-a", 10_i64, 100_i64),
-            ("default", "t-b", 20,     200),
-            ("high",    "t-c", 100,    300),
+            ("default", "t-b", 20, 200),
+            ("high", "t-c", 100, 300),
         ] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {LANE_BUDGET_RESERVATIONS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {LANE_BUDGET_RESERVATIONS} \
                      (lane_id, task_id, reserved_cost, reserved_at) \
                      VALUES (?1, ?2, ?3, ?4)"
-                ),
-                rusqlite::params![lane, task, cost, at],
-            ).unwrap();
+                    ),
+                    rusqlite::params![lane, task, cost, at],
+                )
+                .unwrap();
         }
         tmp
     }
@@ -179,6 +185,8 @@ mod tests {
     fn reservations_for_lane_returns_empty_for_unknown_lane() {
         let tmp = fresh_store_with_seed_reservations();
         let conn = open_ro(tmp.path()).unwrap();
-        assert!(reservations_for_lane(&conn, "no-such-lane", 100).unwrap().is_empty());
+        assert!(reservations_for_lane(&conn, "no-such-lane", 100)
+            .unwrap()
+            .is_empty());
     }
 }

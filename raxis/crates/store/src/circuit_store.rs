@@ -46,7 +46,7 @@
 //! Public-API behaviour is unchanged; this is purely a deadlock
 //! correctness contract.
 
-use rusqlite::{Connection, params};
+use rusqlite::{params, Connection};
 use std::sync::Mutex;
 
 use raxis_types::CircuitBreakerState;
@@ -54,9 +54,15 @@ use raxis_types::CircuitBreakerState;
 use crate::table::Table;
 
 // Convenience aliases for the three state SQL strings.
-fn closed_str() -> &'static str { CircuitBreakerState::Closed.as_sql_str() }
-fn open_str()   -> &'static str { CircuitBreakerState::Open.as_sql_str() }
-fn half_open_str() -> &'static str { CircuitBreakerState::HalfOpen.as_sql_str() }
+fn closed_str() -> &'static str {
+    CircuitBreakerState::Closed.as_sql_str()
+}
+fn open_str() -> &'static str {
+    CircuitBreakerState::Open.as_sql_str()
+}
+fn half_open_str() -> &'static str {
+    CircuitBreakerState::HalfOpen.as_sql_str()
+}
 
 // ---------------------------------------------------------------------------
 // CircuitTransition — returned when a state-class change occurred.
@@ -66,14 +72,14 @@ fn half_open_str() -> &'static str { CircuitBreakerState::HalfOpen.as_sql_str() 
 /// `CircuitBreakerStateChanged` audit event.
 #[derive(Debug, Clone)]
 pub struct CircuitTransition {
-    pub provider:             String,
-    pub model:                String,
-    pub from_state:           CircuitBreakerState,
-    pub to_state:             CircuitBreakerState,
+    pub provider: String,
+    pub model: String,
+    pub from_state: CircuitBreakerState,
+    pub to_state: CircuitBreakerState,
     pub consecutive_failures: u32,
-    pub last_failure_kind:    Option<String>,
-    pub open_expires_at_ms:   Option<u64>,
-    pub trigger:              String,
+    pub last_failure_kind: Option<String>,
+    pub open_expires_at_ms: Option<u64>,
+    pub trigger: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -83,17 +89,17 @@ pub struct CircuitTransition {
 /// Snapshot of a single `provider_circuit_state` row.
 #[derive(Debug, Clone)]
 pub struct CircuitRowSqlite {
-    pub provider:               String,
-    pub model:                  String,
-    pub state:                  CircuitBreakerState,
-    pub consecutive_failures:   u32,
-    pub last_failure_at_ms:     Option<i64>,
-    pub last_failure_kind:      Option<String>,
+    pub provider: String,
+    pub model: String,
+    pub state: CircuitBreakerState,
+    pub consecutive_failures: u32,
+    pub last_failure_at_ms: Option<i64>,
+    pub last_failure_kind: Option<String>,
     pub last_failure_http_code: Option<i32>,
-    pub opened_at_ms:           Option<i64>,
-    pub open_expires_at_ms:     Option<i64>,
-    pub half_open_inflight:     i32,
-    pub last_success_at_ms:     Option<i64>,
+    pub opened_at_ms: Option<i64>,
+    pub open_expires_at_ms: Option<i64>,
+    pub half_open_inflight: i32,
+    pub last_success_at_ms: Option<i64>,
     pub last_state_change_at_ms: i64,
 }
 
@@ -102,17 +108,17 @@ impl CircuitRowSqlite {
     /// never been seen before.
     pub fn default_closed(provider: &str, model: &str, now_ms: i64) -> Self {
         Self {
-            provider:               provider.to_owned(),
-            model:                  model.to_owned(),
-            state:                  CircuitBreakerState::Closed,
-            consecutive_failures:   0,
-            last_failure_at_ms:     None,
-            last_failure_kind:      None,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            state: CircuitBreakerState::Closed,
+            consecutive_failures: 0,
+            last_failure_at_ms: None,
+            last_failure_kind: None,
             last_failure_http_code: None,
-            opened_at_ms:           None,
-            open_expires_at_ms:     None,
-            half_open_inflight:     0,
-            last_success_at_ms:     None,
+            opened_at_ms: None,
+            open_expires_at_ms: None,
+            half_open_inflight: 0,
+            last_success_at_ms: None,
             last_state_change_at_ms: now_ms,
         }
     }
@@ -128,17 +134,17 @@ fn parse_state(s: &str) -> CircuitBreakerState {
 fn row_from_rusqlite(r: &rusqlite::Row<'_>) -> rusqlite::Result<CircuitRowSqlite> {
     let state_str: String = r.get(2)?;
     Ok(CircuitRowSqlite {
-        provider:               r.get(0)?,
-        model:                  r.get(1)?,
-        state:                  parse_state(&state_str),
-        consecutive_failures:   r.get(3)?,
-        last_failure_at_ms:     r.get(4)?,
-        last_failure_kind:      r.get(5)?,
+        provider: r.get(0)?,
+        model: r.get(1)?,
+        state: parse_state(&state_str),
+        consecutive_failures: r.get(3)?,
+        last_failure_at_ms: r.get(4)?,
+        last_failure_kind: r.get(5)?,
         last_failure_http_code: r.get(6)?,
-        opened_at_ms:           r.get(7)?,
-        open_expires_at_ms:     r.get(8)?,
-        half_open_inflight:     r.get(9)?,
-        last_success_at_ms:     r.get(10)?,
+        opened_at_ms: r.get(7)?,
+        open_expires_at_ms: r.get(8)?,
+        half_open_inflight: r.get(9)?,
+        last_success_at_ms: r.get(10)?,
         last_state_change_at_ms: r.get(11)?,
     })
 }
@@ -170,7 +176,9 @@ impl SqliteCircuitStore {
     ///
     /// The caller MUST have already applied migration 15 on `conn`.
     pub fn new(conn: Connection) -> Self {
-        Self { conn: Mutex::new(conn) }
+        Self {
+            conn: Mutex::new(conn),
+        }
     }
 
     /// Read the current state for `(provider, model)`.
@@ -193,16 +201,9 @@ impl SqliteCircuitStore {
     /// public [`Self::load`] wraps this with a single lock
     /// acquisition; mutating sites call this directly so the read
     /// reuses the outer guard (one lock per public operation).
-    fn load_with_conn(
-        conn: &Connection,
-        provider: &str,
-        model: &str,
-    ) -> CircuitRowSqlite {
+    fn load_with_conn(conn: &Connection, provider: &str, model: &str) -> CircuitRowSqlite {
         let tbl = Table::ProviderCircuitState.as_str();
-        let sql = format!(
-            "{} WHERE provider = ?1 AND model = ?2",
-            select_columns(tbl),
-        );
+        let sql = format!("{} WHERE provider = ?1 AND model = ?2", select_columns(tbl),);
         let result = conn.query_row(&sql, params![provider, model], row_from_rusqlite);
         match result {
             Ok(row) => row,
@@ -257,15 +258,14 @@ impl SqliteCircuitStore {
                  last_failure_kind    = ?4,
                  last_failure_http_code = ?5"
         );
-        tx.execute(&upsert_sql, params![
-            provider, model, now, failure_kind, http_code, closed_str(),
-        ]).unwrap();
+        tx.execute(
+            &upsert_sql,
+            params![provider, model, now, failure_kind, http_code, closed_str(),],
+        )
+        .unwrap();
 
         // Read back the current row.
-        let select_sql = format!(
-            "{} WHERE provider = ?1 AND model = ?2",
-            select_columns(tbl),
-        );
+        let select_sql = format!("{} WHERE provider = ?1 AND model = ?2", select_columns(tbl),);
         let row: CircuitRowSqlite = tx
             .query_row(&select_sql, params![provider, model], row_from_rusqlite)
             .unwrap();
@@ -283,19 +283,21 @@ impl SqliteCircuitStore {
                      last_state_change_at_ms = ?4
                  WHERE provider = ?1 AND model = ?2"
             );
-            tx.execute(&trip_sql, params![
-                provider, model, open_str(), now, expires,
-            ]).unwrap();
+            tx.execute(
+                &trip_sql,
+                params![provider, model, open_str(), now, expires,],
+            )
+            .unwrap();
 
             transition = Some(CircuitTransition {
-                provider:             provider.to_owned(),
-                model:                model.to_owned(),
+                provider: provider.to_owned(),
+                model: model.to_owned(),
                 from_state,
-                to_state:             CircuitBreakerState::Open,
+                to_state: CircuitBreakerState::Open,
                 consecutive_failures: row.consecutive_failures,
-                last_failure_kind:    Some(failure_kind.to_owned()),
-                open_expires_at_ms:   Some(expires as u64),
-                trigger:              "FailureThreshold".to_owned(),
+                last_failure_kind: Some(failure_kind.to_owned()),
+                open_expires_at_ms: Some(expires as u64),
+                trigger: "FailureThreshold".to_owned(),
             });
         }
 
@@ -323,9 +325,7 @@ impl SqliteCircuitStore {
         let tx = conn.transaction().unwrap();
 
         // Read current state first.
-        let select_sql = format!(
-            "SELECT state FROM {tbl} WHERE provider = ?1 AND model = ?2"
-        );
+        let select_sql = format!("SELECT state FROM {tbl} WHERE provider = ?1 AND model = ?2");
         let prev_state: Option<CircuitBreakerState> = tx
             .query_row(&select_sql, params![provider, model], |r| {
                 let s: String = r.get(0)?;
@@ -350,22 +350,21 @@ impl SqliteCircuitStore {
                      ELSE last_state_change_at_ms
                  END"
         );
-        tx.execute(&upsert_sql, params![
-            provider, model, closed_str(), now,
-        ]).unwrap();
+        tx.execute(&upsert_sql, params![provider, model, closed_str(), now,])
+            .unwrap();
 
         let mut transition = None;
         if let Some(prev) = prev_state {
             if prev != CircuitBreakerState::Closed {
                 transition = Some(CircuitTransition {
-                    provider:             provider.to_owned(),
-                    model:                model.to_owned(),
-                    from_state:           prev,
-                    to_state:             CircuitBreakerState::Closed,
+                    provider: provider.to_owned(),
+                    model: model.to_owned(),
+                    from_state: prev,
+                    to_state: CircuitBreakerState::Closed,
                     consecutive_failures: 0,
-                    last_failure_kind:    None,
-                    open_expires_at_ms:   None,
-                    trigger:              "ProbeSuccess".to_owned(),
+                    last_failure_kind: None,
+                    open_expires_at_ms: None,
+                    trigger: "ProbeSuccess".to_owned(),
                 });
             }
         }
@@ -385,9 +384,9 @@ impl SqliteCircuitStore {
                AND state = ?3
                AND half_open_inflight = 0"
         );
-        let changed = conn.execute(&sql, params![
-            provider, model, half_open_str(),
-        ]).unwrap_or(0);
+        let changed = conn
+            .execute(&sql, params![provider, model, half_open_str(),])
+            .unwrap_or(0);
         changed > 0
     }
 
@@ -425,21 +424,24 @@ impl SqliteCircuitStore {
                AND state = ?5
                AND open_expires_at_ms <= ?4"
         );
-        let changed = tx.execute(&sql, params![
-            provider, model, half_open_str(), now, open_str(),
-        ]).unwrap_or(0);
+        let changed = tx
+            .execute(
+                &sql,
+                params![provider, model, half_open_str(), now, open_str(),],
+            )
+            .unwrap_or(0);
 
         let mut transition = None;
         if changed > 0 {
             transition = Some(CircuitTransition {
-                provider:             provider.to_owned(),
-                model:                model.to_owned(),
-                from_state:           CircuitBreakerState::Open,
-                to_state:             CircuitBreakerState::HalfOpen,
+                provider: provider.to_owned(),
+                model: model.to_owned(),
+                from_state: CircuitBreakerState::Open,
+                to_state: CircuitBreakerState::HalfOpen,
                 consecutive_failures: 0,
-                last_failure_kind:    None,
-                open_expires_at_ms:   None,
-                trigger:              "OpenWindowElapsed".to_owned(),
+                last_failure_kind: None,
+                open_expires_at_ms: None,
+                trigger: "OpenWindowElapsed".to_owned(),
             });
         }
 
@@ -488,22 +490,21 @@ impl SqliteCircuitStore {
                  half_open_inflight = 0,
                  last_state_change_at_ms = ?4"
         );
-        tx.execute(&upsert_sql, params![
-            provider, model, closed_str(), now,
-        ]).unwrap();
+        tx.execute(&upsert_sql, params![provider, model, closed_str(), now,])
+            .unwrap();
 
         let mut transition = None;
         if let Some((prev_state, prev_failures)) = prev {
             if prev_state != CircuitBreakerState::Closed {
                 transition = Some(CircuitTransition {
-                    provider:             provider.to_owned(),
-                    model:                model.to_owned(),
-                    from_state:           prev_state,
-                    to_state:             CircuitBreakerState::Closed,
+                    provider: provider.to_owned(),
+                    model: model.to_owned(),
+                    from_state: prev_state,
+                    to_state: CircuitBreakerState::Closed,
                     consecutive_failures: prev_failures,
-                    last_failure_kind:    None,
-                    open_expires_at_ms:   None,
-                    trigger:              "ManualReset".to_owned(),
+                    last_failure_kind: None,
+                    open_expires_at_ms: None,
+                    trigger: "ManualReset".to_owned(),
                 });
             }
         }
@@ -520,10 +521,7 @@ impl SqliteCircuitStore {
     pub fn list_all(&self) -> Vec<CircuitRowSqlite> {
         let conn = self.conn.lock().unwrap();
         let tbl = Table::ProviderCircuitState.as_str();
-        let sql = format!(
-            "{} ORDER BY provider, model",
-            select_columns(tbl),
-        );
+        let sql = format!("{} ORDER BY provider, model", select_columns(tbl),);
         let mut stmt = conn.prepare(&sql).unwrap();
         let rows = stmt.query_map([], row_from_rusqlite).unwrap();
         rows.filter_map(|r| r.ok()).collect()
@@ -567,9 +565,8 @@ mod tests {
     #[test]
     fn record_failure_increments_counter() {
         let store = test_store();
-        let (row, transition) = store.record_failure(
-            "anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000,
-        );
+        let (row, transition) =
+            store.record_failure("anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000);
         assert_eq!(row.consecutive_failures, 1);
         assert_eq!(row.state, CircuitBreakerState::Closed);
         assert!(transition.is_none(), "shouldn't trip at 1/5");
@@ -579,14 +576,12 @@ mod tests {
     fn record_failure_trips_at_threshold() {
         let store = test_store();
         for i in 0..4 {
-            let (_, t) = store.record_failure(
-                "anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000,
-            );
+            let (_, t) =
+                store.record_failure("anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000);
             assert!(t.is_none(), "shouldn't trip at {}/5", i + 1);
         }
-        let (row, transition) = store.record_failure(
-            "anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000,
-        );
+        let (row, transition) =
+            store.record_failure("anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000);
         assert_eq!(row.state, CircuitBreakerState::Open);
         let t = transition.expect("should trip at 5/5");
         assert_eq!(t.from_state, CircuitBreakerState::Closed);
@@ -599,9 +594,7 @@ mod tests {
         let store = test_store();
         // Trip it open first.
         for _ in 0..5 {
-            store.record_failure(
-                "anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000,
-            );
+            store.record_failure("anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000);
         }
         let row = store.load("anthropic", "claude-4");
         assert_eq!(row.state, CircuitBreakerState::Open);
@@ -624,9 +617,7 @@ mod tests {
     fn manual_reset_forces_closed() {
         let store = test_store();
         for _ in 0..5 {
-            store.record_failure(
-                "anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000,
-            );
+            store.record_failure("anthropic", "claude-4", "Unavailable", Some(503), 5, 60_000);
         }
         let (row, transition) = store.manual_reset("anthropic", "claude-4");
         assert_eq!(row.state, CircuitBreakerState::Closed);

@@ -38,36 +38,45 @@ use crate::ImageResolverError;
 /// adds support.
 pub(crate) async fn extract_into_images(
     verified_blob_path: &Path,
-    extracted_dir:      &Path,
+    extracted_dir: &Path,
 ) -> Result<(), ImageResolverError> {
-    tokio::fs::create_dir_all(extracted_dir).await
+    tokio::fs::create_dir_all(extracted_dir)
+        .await
         .map_err(|source| ImageResolverError::Io {
-            path: extracted_dir.to_path_buf(), source,
+            path: extracted_dir.to_path_buf(),
+            source,
         })?;
 
-    let rootfs   = extracted_dir.join("rootfs.img");
+    let rootfs = extracted_dir.join("rootfs.img");
     let manifest = extracted_dir.join("manifest.json");
-    let config   = extracted_dir.join("config.json");
+    let config = extracted_dir.join("config.json");
 
     // Copy is intentional, not rename — we want the cached blob to
     // stay addressable from `blobs/sha256/...` so a re-extract
     // (e.g. after a process kill mid-extract) can re-derive
     // `rootfs.img` without re-pulling.
-    tokio::fs::copy(verified_blob_path, &rootfs).await
+    tokio::fs::copy(verified_blob_path, &rootfs)
+        .await
         .map_err(|source| ImageResolverError::Io {
-            path: rootfs.clone(), source,
+            path: rootfs.clone(),
+            source,
         })?;
 
     // Synthesised sidecars. See module docs for rationale.
-    let manifest_doc = b"{\"schemaVersion\":2,\"mediaType\":\"application/vnd.raxis.image.rootfs.v1+erofs\"}";
-    let config_doc   = b"{\"config\":{}}";
-    tokio::fs::write(&manifest, manifest_doc).await
+    let manifest_doc =
+        b"{\"schemaVersion\":2,\"mediaType\":\"application/vnd.raxis.image.rootfs.v1+erofs\"}";
+    let config_doc = b"{\"config\":{}}";
+    tokio::fs::write(&manifest, manifest_doc)
+        .await
         .map_err(|source| ImageResolverError::Io {
-            path: manifest, source,
+            path: manifest,
+            source,
         })?;
-    tokio::fs::write(&config, config_doc).await
+    tokio::fs::write(&config, config_doc)
+        .await
         .map_err(|source| ImageResolverError::Io {
-            path: config, source,
+            path: config,
+            source,
         })?;
 
     Ok(())
@@ -81,8 +90,8 @@ mod tests {
 
     #[tokio::test]
     async fn extract_writes_rootfs_and_synthesised_sidecars() {
-        let tmp     = TempDir::new().unwrap();
-        let blob    = tmp.path().join("blob.bin");
+        let tmp = TempDir::new().unwrap();
+        let blob = tmp.path().join("blob.bin");
         let extract = tmp.path().join("images/abc");
 
         let mut f = std::fs::File::create(&blob).unwrap();
@@ -104,8 +113,8 @@ mod tests {
 
     #[tokio::test]
     async fn extract_creates_intermediate_directories() {
-        let tmp     = TempDir::new().unwrap();
-        let blob    = tmp.path().join("blob.bin");
+        let tmp = TempDir::new().unwrap();
+        let blob = tmp.path().join("blob.bin");
         let extract = tmp.path().join("nested/many/levels/images/abc");
 
         std::fs::write(&blob, b"data").unwrap();

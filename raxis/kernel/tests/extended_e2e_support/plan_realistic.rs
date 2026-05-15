@@ -125,8 +125,7 @@ pub const TASK_LINT_RUNNER_JS: &str = "lint-runner-js";
 /// (a) the chain admitted the commit AND (b) the file landed on
 /// disk AND (c) the path-allowlist did not falsely reject the
 /// task. See [`super::path_allowlist::PathAllowlistPositiveWitness`].
-pub const TASK_ALLOWLIST_POSITIVE: &str =
-    super::path_allowlist::TASK_ALLOWLIST_POSITIVE;
+pub const TASK_ALLOWLIST_POSITIVE: &str = super::path_allowlist::TASK_ALLOWLIST_POSITIVE;
 
 /// Service-evidence round-trip executor task id -- exercises the
 /// per-protocol credential proxies against the real backing
@@ -135,8 +134,7 @@ pub const TASK_ALLOWLIST_POSITIVE: &str =
 /// and commits the per-service canonical output files under
 /// `out/services/`. Witness lives in
 /// [`super::service_evidence`].
-pub const TASK_SERVICE_ROUND_TRIP: &str =
-    super::service_evidence::TASK_SERVICE_ROUND_TRIP;
+pub const TASK_SERVICE_ROUND_TRIP: &str = super::service_evidence::TASK_SERVICE_ROUND_TRIP;
 
 /// Credential-substitution-canary executor task id.
 ///
@@ -181,10 +179,8 @@ pub const TASK_TRANSPARENT_PROXY_REALSCRIPTS: &str =
 /// lint-defect target file (`greet.py`) for the witness in
 /// [`super::reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness`]
 /// to satisfy.
-pub const TASK_REVIEW_LINT_A: &str =
-    super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_A;
-pub const TASK_REVIEW_LINT_B: &str =
-    super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_B;
+pub const TASK_REVIEW_LINT_A: &str = super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_A;
+pub const TASK_REVIEW_LINT_B: &str = super::reviewer_substantive_disagreement::TASK_REVIEW_LINT_B;
 
 /// Single rubber-stamp Reviewer for `lint-runner-rust`. Plain
 /// prompt — read the captured `out/lint/check-rust.txt`, observe
@@ -222,49 +218,43 @@ pub const MATERIALIZER_PROMPT_MD: &str = super::plan::MATERIALIZER_PROMPT_MD;
 
 /// Cross-file refactor prompt. Drives the executor through a
 /// rename that must propagate across the Rust / TS / Python trees.
-pub const XFILE_REFACTOR_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/cross_file_refactor.md"
-);
+pub const XFILE_REFACTOR_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/cross_file_refactor.md");
 
 /// Lint-defect prompt. Drives the executor through introducing
 /// exactly one real lint defect that the reviewer must catch on
 /// round 1.
-pub const LINT_DEFECT_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/lint_defect.md"
-);
+pub const LINT_DEFECT_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/lint_defect.md");
 
 /// Positive path-allowlist prompt. Drives the executor through
 /// writing `target/codegen/build_meta.txt` under an allowlist
 /// that admits only `target/codegen/`.
-pub const ALLOWLIST_POSITIVE_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/allowlist_positive.md"
-);
+pub const ALLOWLIST_POSITIVE_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/allowlist_positive.md");
 
 /// Service-evidence round-trip prompt. Drives the executor
 /// through reading the per-service seed via each credential proxy
 /// and writing one canonical-form file per service into
 /// `out/services/`. See [`super::service_evidence`] for the
 /// canonical-bytes formulas the witness recomputes.
-pub const SERVICE_ROUND_TRIP_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/service_round_trip.md"
-);
+pub const SERVICE_ROUND_TRIP_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/service_round_trip.md");
 
 /// Transparent-proxy real-scripts prompt. Operator-realistic
 /// phrasing — does NOT mention raxis or "credential proxy". The
 /// witness in [`super::transparent_proxy_evidence`] asserts the
 /// prompt does not leak.
-pub const TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md"
-);
+pub const TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md");
 
 /// Credential-substitution-canary prompt. Operator-realistic — the
 /// agent is told the staged `.env` carries production credentials,
 /// and is instructed to use them via `$DATABASE_URL`. The proxy
 /// substitutes the real credentials transparently; the witness
 /// verifies the structural property mechanically.
-pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str = include_str!(
-    "../../../live-e2e/seed/prompts/credential_substitution_canary.md"
-);
+pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str =
+    include_str!("../../../live-e2e/seed/prompts/credential_substitution_canary.md");
 
 // ---------------------------------------------------------------------------
 // Plan-TOML builder.
@@ -275,13 +265,13 @@ pub const CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD: &str = include_str!(
 /// includes `materialize-records` + `xfile-refactor`; subsequent
 /// commits on this branch extend it.
 pub fn realistic_plan_toml() -> String {
-    let materializer    = MATERIALIZER_PROMPT_MD;
-    let xfile           = XFILE_REFACTOR_PROMPT_MD;
-    let lint            = LINT_DEFECT_PROMPT_MD;
-    let allowlist       = ALLOWLIST_POSITIVE_PROMPT_MD;
-    let service_rt      = SERVICE_ROUND_TRIP_PROMPT_MD;
-    let transparent_rt  = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
-    let cred_sub        = CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD;
+    let materializer = MATERIALIZER_PROMPT_MD;
+    let xfile = XFILE_REFACTOR_PROMPT_MD;
+    let lint = LINT_DEFECT_PROMPT_MD;
+    let allowlist = ALLOWLIST_POSITIVE_PROMPT_MD;
+    let service_rt = SERVICE_ROUND_TRIP_PROMPT_MD;
+    let transparent_rt = TRANSPARENT_PROXY_REALSCRIPTS_PROMPT_MD;
+    let cred_sub = CREDENTIAL_SUBSTITUTION_CANARY_PROMPT_MD;
     let mut s = String::new();
     s.push_str(REALISTIC_PLAN_HEADER);
     s.push_str("\n\n");
@@ -1055,8 +1045,7 @@ mod tests {
     #[test]
     fn realistic_toml_decodes_and_carries_executors() {
         let toml_text = realistic_plan_toml();
-        let v: toml::Value =
-            toml::from_str(&toml_text).expect("realistic plan must be valid TOML");
+        let v: toml::Value = toml::from_str(&toml_text).expect("realistic plan must be valid TOML");
         let tasks = v
             .get("tasks")
             .and_then(|t| t.as_array())
@@ -1199,9 +1188,7 @@ mod tests {
         for (runner_id, capture_path, expected_allowlist, reviewer_ids) in cases {
             let runner = tasks
                 .iter()
-                .find(|t| {
-                    t.get("task_id").and_then(|i| i.as_str()) == Some(*runner_id)
-                })
+                .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*runner_id))
                 .unwrap_or_else(|| panic!("`{runner_id}` task present"));
 
             assert_eq!(
@@ -1232,7 +1219,8 @@ mod tests {
                 .filter_map(|v| v.as_str())
                 .collect();
             assert_eq!(
-                &allowlist[..], *expected_allowlist,
+                &allowlist[..],
+                *expected_allowlist,
                 "`{runner_id}`.path_allowlist MUST be scoped to ONE language \
                  + out/lint/ (iter55 per-language split); got {allowlist:?}",
             );
@@ -1253,24 +1241,18 @@ mod tests {
             for reviewer_task_id in reviewer_ids.iter() {
                 let reviewer = tasks
                     .iter()
-                    .find(|t| {
-                        t.get("task_id").and_then(|i| i.as_str())
-                            == Some(*reviewer_task_id)
-                    })
-                    .unwrap_or_else(|| {
-                        panic!("reviewer task `{reviewer_task_id}` present")
-                    });
+                    .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
+                    .unwrap_or_else(|| panic!("reviewer task `{reviewer_task_id}` present"));
                 let rev_preds: Vec<&str> = reviewer
                     .get("predecessors")
                     .and_then(|p| p.as_array())
-                    .unwrap_or_else(|| {
-                        panic!("`{reviewer_task_id}`.predecessors array")
-                    })
+                    .unwrap_or_else(|| panic!("`{reviewer_task_id}`.predecessors array"))
                     .iter()
                     .filter_map(|v| v.as_str())
                     .collect();
                 assert_eq!(
-                    rev_preds, vec![*runner_id],
+                    rev_preds,
+                    vec![*runner_id],
                     "`{reviewer_task_id}` MUST depend on `{runner_id}` so the \
                      kernel's reverse-DAG evaluation_sha resolution \
                      returns the SHA carrying `{capture_path}`; got {rev_preds:?}",
@@ -1295,27 +1277,20 @@ mod tests {
             .expect("[[tasks]] array present");
 
         let cases: &[(&str, &str)] = &[
-            (TASK_REVIEW_LINT_A,    "out/lint/check-python.txt"),
-            (TASK_REVIEW_LINT_B,    "out/lint/check-python.txt"),
+            (TASK_REVIEW_LINT_A, "out/lint/check-python.txt"),
+            (TASK_REVIEW_LINT_B, "out/lint/check-python.txt"),
             (TASK_REVIEW_LINT_RUST, "out/lint/check-rust.txt"),
-            (TASK_REVIEW_LINT_JS,   "out/lint/check-js.txt"),
+            (TASK_REVIEW_LINT_JS, "out/lint/check-js.txt"),
         ];
         for (reviewer_task_id, capture_path) in cases {
             let reviewer = tasks
                 .iter()
-                .find(|t| {
-                    t.get("task_id").and_then(|i| i.as_str())
-                        == Some(*reviewer_task_id)
-                })
-                .unwrap_or_else(|| {
-                    panic!("reviewer task `{reviewer_task_id}` present")
-                });
+                .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(*reviewer_task_id))
+                .unwrap_or_else(|| panic!("reviewer task `{reviewer_task_id}` present"));
             let desc = reviewer
                 .get("description")
                 .and_then(|d| d.as_str())
-                .unwrap_or_else(|| {
-                    panic!("`{reviewer_task_id}` description present")
-                });
+                .unwrap_or_else(|| panic!("`{reviewer_task_id}` description present"));
 
             assert!(
                 desc.contains(capture_path),
@@ -1326,8 +1301,7 @@ mod tests {
                 desc.len(),
             );
             assert!(
-                !desc.contains("run `scripts/check.sh`")
-                    && !desc.contains("run scripts/check.sh"),
+                !desc.contains("run `scripts/check.sh`") && !desc.contains("run scripts/check.sh"),
                 "`{reviewer_task_id}` prompt MUST NOT tell the Reviewer \
                  to run scripts/check.sh — the Reviewer VM image \
                  (raxis-reviewer-core) ships only raxis-planner + ripgrep \
@@ -1355,18 +1329,13 @@ mod tests {
             .expect("[[tasks]] array present");
         let lint = tasks
             .iter()
-            .find(|t| {
-                t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_LINT_DEFECT)
-            })
+            .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_LINT_DEFECT))
             .expect("lint-defect task present");
         let predecessors = lint
             .get("predecessors")
             .and_then(|p| p.as_array())
             .expect("lint-defect.predecessors array");
-        let names: Vec<&str> = predecessors
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let names: Vec<&str> = predecessors.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             names.contains(&TASK_XFILE_REFACTOR),
             "lint-defect must depend on xfile-refactor; got {names:?}",
@@ -1383,19 +1352,13 @@ mod tests {
             .expect("[[tasks]] array present");
         let srt = tasks
             .iter()
-            .find(|t| {
-                t.get("task_id").and_then(|i| i.as_str())
-                    == Some(TASK_SERVICE_ROUND_TRIP)
-            })
+            .find(|t| t.get("task_id").and_then(|i| i.as_str()) == Some(TASK_SERVICE_ROUND_TRIP))
             .expect("service-round-trip task present");
         let allowlist = srt
             .get("path_allowlist")
             .and_then(|a| a.as_array())
             .expect("service-round-trip path_allowlist present");
-        let paths: Vec<&str> = allowlist
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let paths: Vec<&str> = allowlist.iter().filter_map(|v| v.as_str()).collect();
         assert_eq!(
             paths,
             vec!["out/services/"],
@@ -1459,10 +1422,7 @@ mod tests {
             .get("predecessors")
             .and_then(|p| p.as_array())
             .expect("transparent-proxy-realscripts.predecessors array");
-        let preds: Vec<&str> = predecessors
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let preds: Vec<&str> = predecessors.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             preds.contains(&TASK_SERVICE_ROUND_TRIP),
             "transparent-proxy task must run AFTER service-round-trip; \
@@ -1473,10 +1433,7 @@ mod tests {
             .get("path_allowlist")
             .and_then(|a| a.as_array())
             .expect("transparent-proxy-realscripts path_allowlist present");
-        let paths: Vec<&str> = allowlist
-            .iter()
-            .filter_map(|v| v.as_str())
-            .collect();
+        let paths: Vec<&str> = allowlist.iter().filter_map(|v| v.as_str()).collect();
         assert!(
             paths.contains(&"out/services/"),
             "transparent-proxy task must allow writes to out/services/; \

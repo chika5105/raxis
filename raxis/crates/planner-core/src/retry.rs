@@ -66,19 +66,19 @@ use crate::model::{MessageRequest, MessageResponse, ModelClient, ModelError};
 pub struct RetryConfig {
     /// Maximum number of retry attempts after the initial call. A
     /// total of `1 + max_retries` model invocations may run.
-    pub max_retries:    u32,
+    pub max_retries: u32,
     /// Base delay before the first retry. The actual sleep is
     /// `base_delay * multiplier^attempt + jitter`.
-    pub base_delay:     Duration,
+    pub base_delay: Duration,
     /// Multiplicative factor for each successive attempt. `2.0` ⇒
     /// classic exponential backoff (1s → 2s → 4s → …). `1.0` ⇒
     /// constant delay.
-    pub multiplier:     f32,
+    pub multiplier: f32,
     /// Jitter percentage applied to each sleep — `0.25` means each
     /// sleep is uniformly drawn from `[0.75x, 1.25x]` of the
     /// computed delay. `0.0` ⇒ no jitter (deterministic; useful in
     /// tests).
-    pub jitter:         f32,
+    pub jitter: f32,
     /// Hard wall-clock ceiling on the entire retry budget (the
     /// initial call's own latency plus all sleeps + retries).
     /// `None` ⇒ no per-shell ceiling (the dispatch loop's parent
@@ -89,7 +89,7 @@ pub struct RetryConfig {
     /// this is the OUTER bound applied via `tokio::time::timeout`
     /// around the `create_message(...)` future. `None` ⇒ no extra
     /// timeout (use the inner client's).
-    pub call_timeout:   Option<Duration>,
+    pub call_timeout: Option<Duration>,
 }
 
 impl RetryConfig {
@@ -101,12 +101,12 @@ impl RetryConfig {
     /// * 90 s total ceiling, 60 s per-call timeout
     pub fn anthropic_default() -> Self {
         Self {
-            max_retries:    3,
-            base_delay:     Duration::from_millis(500),
-            multiplier:     2.0,
-            jitter:         0.25,
+            max_retries: 3,
+            base_delay: Duration::from_millis(500),
+            multiplier: 2.0,
+            jitter: 0.25,
             total_deadline: Some(Duration::from_secs(90)),
-            call_timeout:   Some(Duration::from_secs(60)),
+            call_timeout: Some(Duration::from_secs(60)),
         }
     }
 
@@ -115,11 +115,11 @@ impl RetryConfig {
     pub fn deterministic_for_tests(max_retries: u32) -> Self {
         Self {
             max_retries,
-            base_delay:     Duration::from_millis(0),
-            multiplier:     1.0,
-            jitter:         0.0,
+            base_delay: Duration::from_millis(0),
+            multiplier: 1.0,
+            jitter: 0.0,
             total_deadline: None,
-            call_timeout:   None,
+            call_timeout: None,
         }
     }
 }
@@ -132,7 +132,7 @@ impl RetryConfig {
 pub fn is_retryable(err: &ModelError) -> bool {
     match err {
         ModelError::Transport(_) => true,
-        ModelError::Timeout(_)   => true,
+        ModelError::Timeout(_) => true,
         ModelError::Upstream { status, .. } => {
             *status == 408                           // request timeout
             || *status == 429                        // rate-limited
@@ -150,7 +150,7 @@ pub fn is_retryable(err: &ModelError) -> bool {
 /// `ModelClient` adapter that retries the inner client per
 /// [`RetryConfig`] when an error is classified as retryable.
 pub struct RetryingModelClient {
-    inner:  Arc<dyn ModelClient>,
+    inner: Arc<dyn ModelClient>,
     config: RetryConfig,
 }
 
@@ -211,10 +211,7 @@ impl RetryingModelClient {
 
 #[async_trait]
 impl ModelClient for RetryingModelClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         let started = Instant::now();
         let mut last_err: Option<ModelError> = None;
 
@@ -230,7 +227,7 @@ impl ModelClient for RetryingModelClient {
             let call_fut = self.inner.create_message(req);
             let result = match self.config.call_timeout {
                 Some(t) => match tokio::time::timeout(t, call_fut).await {
-                    Ok(r)  => r,
+                    Ok(r) => r,
                     Err(_) => Err(ModelError::Timeout(t)),
                 },
                 None => call_fut.await,
@@ -258,9 +255,9 @@ impl ModelClient for RetryingModelClient {
             }
         }
 
-        Err(last_err.unwrap_or_else(|| ModelError::Transport(
-            "retry budget exhausted with no recorded error".to_owned(),
-        )))
+        Err(last_err.unwrap_or_else(|| {
+            ModelError::Transport("retry budget exhausted with no recorded error".to_owned())
+        }))
     }
 }
 
@@ -292,14 +289,9 @@ impl FallbackModelClient {
 
 #[async_trait]
 impl ModelClient for FallbackModelClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         if self.chain.is_empty() {
-            return Err(ModelError::Transport(
-                "no providers configured".to_owned(),
-            ));
+            return Err(ModelError::Transport("no providers configured".to_owned()));
         }
         let mut last: Option<ModelError> = None;
         for client in &self.chain {
@@ -312,9 +304,9 @@ impl ModelClient for FallbackModelClient {
                 Err(err) => return Err(err),
             }
         }
-        Err(last.unwrap_or_else(|| ModelError::Transport(
-            "fallback chain exhausted with no recorded error".to_owned(),
-        )))
+        Err(last.unwrap_or_else(|| {
+            ModelError::Transport("fallback chain exhausted with no recorded error".to_owned())
+        }))
     }
 }
 
@@ -330,9 +322,9 @@ mod tests {
 
     fn ok_response() -> MessageResponse {
         MessageResponse {
-            id:    "msg-ok".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg-ok".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: "ok".to_owned(),
             }],
@@ -344,7 +336,7 @@ mod tests {
 
     fn empty_request() -> MessageRequest {
         MessageRequest {
-            model:      "claude-test".to_owned(),
+            model: "claude-test".to_owned(),
             max_tokens: 8,
             ..MessageRequest::default()
         }
@@ -353,7 +345,7 @@ mod tests {
     /// Test fake — a model client that fails N times, then succeeds.
     struct FailThenSucceed {
         remaining_fails: Mutex<u32>,
-        err_factory:     Box<dyn Fn() -> ModelError + Send + Sync>,
+        err_factory: Box<dyn Fn() -> ModelError + Send + Sync>,
     }
 
     #[async_trait]
@@ -375,16 +367,34 @@ mod tests {
     fn classifier_is_retryable_for_transient_classes() {
         assert!(is_retryable(&ModelError::Transport("dns".into())));
         assert!(is_retryable(&ModelError::Timeout(Duration::from_secs(1))));
-        assert!(is_retryable(&ModelError::Upstream { status: 429, body: "rate".into() }));
-        assert!(is_retryable(&ModelError::Upstream { status: 503, body: "outage".into() }));
-        assert!(is_retryable(&ModelError::Upstream { status: 500, body: "internal".into() }));
+        assert!(is_retryable(&ModelError::Upstream {
+            status: 429,
+            body: "rate".into()
+        }));
+        assert!(is_retryable(&ModelError::Upstream {
+            status: 503,
+            body: "outage".into()
+        }));
+        assert!(is_retryable(&ModelError::Upstream {
+            status: 500,
+            body: "internal".into()
+        }));
     }
 
     #[test]
     fn classifier_is_not_retryable_for_client_errors() {
-        assert!(!is_retryable(&ModelError::Upstream { status: 400, body: "bad".into() }));
-        assert!(!is_retryable(&ModelError::Upstream { status: 401, body: "auth".into() }));
-        assert!(!is_retryable(&ModelError::Upstream { status: 404, body: "ne".into() }));
+        assert!(!is_retryable(&ModelError::Upstream {
+            status: 400,
+            body: "bad".into()
+        }));
+        assert!(!is_retryable(&ModelError::Upstream {
+            status: 401,
+            body: "auth".into()
+        }));
+        assert!(!is_retryable(&ModelError::Upstream {
+            status: 404,
+            body: "ne".into()
+        }));
         assert!(!is_retryable(&ModelError::Json("malformed".into())));
     }
 
@@ -392,12 +402,9 @@ mod tests {
     async fn retry_succeeds_after_two_transient_failures() {
         let inner = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(2),
-            err_factory:     Box::new(|| ModelError::Transport("blip".into())),
+            err_factory: Box::new(|| ModelError::Transport("blip".into())),
         });
-        let client = RetryingModelClient::new(
-            inner,
-            RetryConfig::deterministic_for_tests(3),
-        );
+        let client = RetryingModelClient::new(inner, RetryConfig::deterministic_for_tests(3));
         let resp = client.create_message(&empty_request()).await.unwrap();
         assert_eq!(resp.id, "msg-ok");
     }
@@ -406,14 +413,12 @@ mod tests {
     async fn retry_surfaces_last_error_when_budget_exhausted() {
         let inner = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(10),
-            err_factory:     Box::new(|| ModelError::Upstream {
-                status: 500, body: "outage".into(),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 500,
+                body: "outage".into(),
             }),
         });
-        let client = RetryingModelClient::new(
-            inner,
-            RetryConfig::deterministic_for_tests(3),
-        );
+        let client = RetryingModelClient::new(inner, RetryConfig::deterministic_for_tests(3));
         let err = client.create_message(&empty_request()).await.unwrap_err();
         match err {
             ModelError::Upstream { status, .. } => assert_eq!(status, 500),
@@ -425,8 +430,9 @@ mod tests {
     async fn retry_does_not_retry_non_retryable_errors() {
         let inner = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(10),
-            err_factory:     Box::new(|| ModelError::Upstream {
-                status: 400, body: "bad request".into(),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 400,
+                body: "bad request".into(),
             }),
         });
         let client = RetryingModelClient::new(
@@ -441,22 +447,25 @@ mod tests {
         // Only the FIRST call consumed a fail; the budget never
         // ticked further.
         let remaining = *inner.remaining_fails.lock().unwrap();
-        assert_eq!(remaining, 9,
+        assert_eq!(
+            remaining, 9,
             "non-retryable error must NOT exhaust the retry budget; \
-             expected 9 remaining (1 consumed), got {remaining}");
+             expected 9 remaining (1 consumed), got {remaining}"
+        );
     }
 
     #[tokio::test]
     async fn fallback_advances_to_next_provider_on_retryable_error() {
         let primary = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(10), // never succeed
-            err_factory:     Box::new(|| ModelError::Upstream {
-                status: 503, body: "primary down".into(),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 503,
+                body: "primary down".into(),
             }),
         }) as Arc<dyn ModelClient>;
         let secondary = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(0), // always succeed
-            err_factory:     Box::new(|| ModelError::Transport("never".into())),
+            err_factory: Box::new(|| ModelError::Transport("never".into())),
         }) as Arc<dyn ModelClient>;
         let chain = FallbackModelClient::new(vec![primary, secondary]);
         let resp = chain.create_message(&empty_request()).await.unwrap();
@@ -467,13 +476,14 @@ mod tests {
     async fn fallback_does_not_advance_on_non_retryable_error() {
         let primary = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(10),
-            err_factory:     Box::new(|| ModelError::Upstream {
-                status: 401, body: "auth".into(),
+            err_factory: Box::new(|| ModelError::Upstream {
+                status: 401,
+                body: "auth".into(),
             }),
         }) as Arc<dyn ModelClient>;
         let secondary = Arc::new(FailThenSucceed {
             remaining_fails: Mutex::new(0),
-            err_factory:     Box::new(|| ModelError::Transport("never".into())),
+            err_factory: Box::new(|| ModelError::Transport("never".into())),
         }) as Arc<dyn ModelClient>;
         let chain = FallbackModelClient::new(vec![primary, secondary]);
         let err = chain.create_message(&empty_request()).await.unwrap_err();

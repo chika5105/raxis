@@ -51,7 +51,11 @@ struct MemBackend {
 }
 
 impl MemBackend {
-    fn new() -> Self { Self { inner: Mutex::new(HashMap::new()) } }
+    fn new() -> Self {
+        Self {
+            inner: Mutex::new(HashMap::new()),
+        }
+    }
 
     #[allow(dead_code)]
     fn pre_seed(&self, name: &str, bytes: Vec<u8>) {
@@ -93,18 +97,20 @@ impl CredentialBackend for MemBackend {
         self.inner.lock().unwrap().contains_key(name.as_str())
     }
 
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
 
-    fn backend_kind(&self) -> &'static str { "memory_test_only" }
+    fn backend_kind(&self) -> &'static str {
+        "memory_test_only"
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Test scaffolding helpers
 // ---------------------------------------------------------------------------
 
-fn build_audited_mem_backend()
-    -> (Arc<dyn CredentialBackend>, Arc<FakeAuditSink>)
-{
+fn build_audited_mem_backend() -> (Arc<dyn CredentialBackend>, Arc<FakeAuditSink>) {
     let inner: Arc<dyn CredentialBackend> = Arc::new(MemBackend::new());
     let audit_sink = Arc::new(FakeAuditSink::new());
     let audit_sink_dyn: Arc<dyn AuditSink> = audit_sink.clone();
@@ -320,9 +326,9 @@ fn rule_4_each_resolve_emits_one_credential_accessed_event() {
     let failure = events
         .iter()
         .filter_map(|e| match &e.kind {
-            AuditEventKind::CredentialAccessed {
-                name, success, ..
-            } if !*success => Some(name.clone()),
+            AuditEventKind::CredentialAccessed { name, success, .. } if !*success => {
+                Some(name.clone())
+            }
             _ => None,
         })
         .next()
@@ -348,7 +354,11 @@ fn rotation_emits_credential_rotated_event_with_actor_fingerprint() {
                 name,
                 actor_fingerprint,
                 backend_kind,
-            } => Some((name.clone(), actor_fingerprint.clone(), backend_kind.clone())),
+            } => Some((
+                name.clone(),
+                actor_fingerprint.clone(),
+                backend_kind.clone(),
+            )),
             _ => None,
         })
         .expect("CredentialRotated emitted");

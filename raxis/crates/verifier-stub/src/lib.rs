@@ -58,9 +58,7 @@
 
 use std::env;
 
-use raxis_types::{
-    CommitSha, GateType, TaskId, WitnessResultClass, WitnessSubmission,
-};
+use raxis_types::{CommitSha, GateType, TaskId, WitnessResultClass, WitnessSubmission};
 
 // ---------------------------------------------------------------------------
 // Exit codes — narrow surface, every variant has a dedicated test.
@@ -116,27 +114,27 @@ impl ExitCode {
 #[derive(Debug, Clone)]
 pub struct StubEnv {
     pub verifier_token: String,
-    pub task_id:        String,
-    pub gate_type:      String,
+    pub task_id: String,
+    pub gate_type: String,
     pub evaluation_sha: String,
-    pub socket_path:    String,
+    pub socket_path: String,
     /// `RAXIS_STUB_RESULT_CLASS` parsed via [`parse_result_class`]; defaults
     /// to `Pass` when the env var is absent or empty.
-    pub result_class:   WitnessResultClass,
+    pub result_class: WitnessResultClass,
     /// `RAXIS_STUB_BODY_JSON` parsed as JSON; defaults to `{}` when the env
     /// var is absent. A malformed JSON body short-circuits to `IoError`
     /// (parse error is observable via stderr).
-    pub body:           serde_json::Value,
+    pub body: serde_json::Value,
     /// `RAXIS_STUB_SLEEP_MS` parsed as `u64`; defaults to 0. The stub
     /// `tokio::time::sleep`s this long BEFORE the connect, useful for
     /// wall-clock-kill tests that need the stub to outlive the kernel's
     /// `verifier_max_wall_secs` timer.
-    pub sleep_ms:       u64,
+    pub sleep_ms: u64,
     /// `RAXIS_STUB_SKIP_SEND` — when `Some("1")`, the stub connects to
     /// the kernel socket and then drops the connection without sending.
     /// Anything else → false (false positives here would break the
     /// happy-path test suite).
-    pub skip_send:      bool,
+    pub skip_send: bool,
 }
 
 /// Errors the env parser can surface. Distinct from runtime I/O errors so
@@ -147,8 +145,8 @@ pub enum StubEnvError {
     Missing(&'static str),
     #[error("environment variable {var} has invalid value {value:?}: {reason}")]
     Invalid {
-        var:    &'static str,
-        value:  String,
+        var: &'static str,
+        value: String,
         reason: String,
     },
 }
@@ -163,17 +161,17 @@ pub enum StubEnvError {
 /// only sets the five required envelope vars still works.
 pub fn parse_stub_env_from_process() -> Result<StubEnv, StubEnvError> {
     let verifier_token = require_env("RAXIS_VERIFIER_TOKEN")?;
-    let task_id        = require_env("RAXIS_TASK_ID")?;
-    let gate_type      = require_env("RAXIS_GATE_TYPE")?;
+    let task_id = require_env("RAXIS_TASK_ID")?;
+    let gate_type = require_env("RAXIS_GATE_TYPE")?;
     let evaluation_sha = require_env("RAXIS_EVALUATION_SHA")?;
-    let socket_path    = require_env("RAXIS_KERNEL_SOCKET")?;
+    let socket_path = require_env("RAXIS_KERNEL_SOCKET")?;
 
     // RAXIS_STUB_RESULT_CLASS — defaults to Pass for the happy path.
     let result_class = match env::var("RAXIS_STUB_RESULT_CLASS").ok().as_deref() {
         None | Some("") => WitnessResultClass::Pass,
         Some(other) => parse_result_class(other).map_err(|reason| StubEnvError::Invalid {
-            var:    "RAXIS_STUB_RESULT_CLASS",
-            value:  other.to_owned(),
+            var: "RAXIS_STUB_RESULT_CLASS",
+            value: other.to_owned(),
             reason,
         })?,
     };
@@ -184,8 +182,8 @@ pub fn parse_stub_env_from_process() -> Result<StubEnv, StubEnvError> {
     let body = match env::var("RAXIS_STUB_BODY_JSON").ok().as_deref() {
         None | Some("") => serde_json::json!({}),
         Some(raw) => serde_json::from_str(raw).map_err(|e| StubEnvError::Invalid {
-            var:    "RAXIS_STUB_BODY_JSON",
-            value:  raw.to_owned(),
+            var: "RAXIS_STUB_BODY_JSON",
+            value: raw.to_owned(),
             reason: format!("invalid JSON: {e}"),
         })?,
     };
@@ -194,8 +192,8 @@ pub fn parse_stub_env_from_process() -> Result<StubEnv, StubEnvError> {
     let sleep_ms = match env::var("RAXIS_STUB_SLEEP_MS").ok().as_deref() {
         None | Some("") => 0u64,
         Some(raw) => raw.parse::<u64>().map_err(|e| StubEnvError::Invalid {
-            var:    "RAXIS_STUB_SLEEP_MS",
-            value:  raw.to_owned(),
+            var: "RAXIS_STUB_SLEEP_MS",
+            value: raw.to_owned(),
             reason: e.to_string(),
         })?,
     };
@@ -238,8 +236,8 @@ pub fn parse_result_class(raw: &str) -> Result<WitnessResultClass, String> {
     // canonical form, and accepting fuzzy variants here would mask real
     // bugs in the test harness.
     match raw {
-        "Pass"         => Ok(WitnessResultClass::Pass),
-        "Fail"         => Ok(WitnessResultClass::Fail),
+        "Pass" => Ok(WitnessResultClass::Pass),
+        "Fail" => Ok(WitnessResultClass::Fail),
         "Inconclusive" => Ok(WitnessResultClass::Inconclusive),
         other => Err(format!(
             "expected one of 'Pass', 'Fail', 'Inconclusive'; got {other:?}",
@@ -276,11 +274,11 @@ pub enum BuildError {
 pub fn build_submission(env: &StubEnv) -> Result<WitnessSubmission, BuildError> {
     Ok(WitnessSubmission {
         verifier_token: env.verifier_token.clone(),
-        task_id:        TaskId::parse(&env.task_id)?,
-        gate_type:      GateType::parse(&env.gate_type)?,
+        task_id: TaskId::parse(&env.task_id)?,
+        gate_type: GateType::parse(&env.gate_type)?,
         evaluation_sha: CommitSha::parse(&env.evaluation_sha)?,
-        result_class:   env.result_class,
-        body:           env.body.clone(),
+        result_class: env.result_class,
+        body: env.body.clone(),
     })
 }
 
@@ -295,14 +293,14 @@ mod tests {
     fn fixture_env() -> StubEnv {
         StubEnv {
             verifier_token: "tok".to_owned(),
-            task_id:        "task-1".to_owned(),
-            gate_type:      "test-gate".to_owned(),
+            task_id: "task-1".to_owned(),
+            gate_type: "test-gate".to_owned(),
             evaluation_sha: "abcd1234abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            socket_path:    "/tmp/kernel.sock".to_owned(),
-            result_class:   WitnessResultClass::Pass,
-            body:           serde_json::json!({}),
-            sleep_ms:       0,
-            skip_send:      false,
+            socket_path: "/tmp/kernel.sock".to_owned(),
+            result_class: WitnessResultClass::Pass,
+            body: serde_json::json!({}),
+            sleep_ms: 0,
+            skip_send: false,
         }
     }
 
@@ -314,9 +312,18 @@ mod tests {
         // §2.5.1 Table 13). Pinned literally — accepting fuzzy variants
         // here would mask test-harness bugs that send unexpected wire
         // values to the kernel.
-        assert_eq!(parse_result_class("Pass").unwrap(),         WitnessResultClass::Pass);
-        assert_eq!(parse_result_class("Fail").unwrap(),         WitnessResultClass::Fail);
-        assert_eq!(parse_result_class("Inconclusive").unwrap(), WitnessResultClass::Inconclusive);
+        assert_eq!(
+            parse_result_class("Pass").unwrap(),
+            WitnessResultClass::Pass
+        );
+        assert_eq!(
+            parse_result_class("Fail").unwrap(),
+            WitnessResultClass::Fail
+        );
+        assert_eq!(
+            parse_result_class("Inconclusive").unwrap(),
+            WitnessResultClass::Inconclusive
+        );
     }
 
     #[test]
@@ -325,8 +332,10 @@ mod tests {
         // "PASS", "pass", "fail" etc. would let bugs in the test harness
         // pass silently — make them loud.
         for bad in &["PASS", "pass", "fail", "FAIL", "inconclusive"] {
-            assert!(parse_result_class(bad).is_err(),
-                "case-insensitive accept of {bad:?} would mask harness bugs");
+            assert!(
+                parse_result_class(bad).is_err(),
+                "case-insensitive accept of {bad:?} would mask harness bugs"
+            );
         }
     }
 
@@ -335,10 +344,14 @@ mod tests {
         let err = parse_result_class("Maybe").unwrap_err();
         // Spec contract: error string lists the three accepted values so
         // a failing test prints a useful message.
-        assert!(err.contains("'Pass'") && err.contains("'Fail'") && err.contains("'Inconclusive'"),
-            "diagnostic must enumerate accepted values; got {err:?}");
-        assert!(err.contains("Maybe"),
-            "diagnostic must echo the offending value; got {err:?}");
+        assert!(
+            err.contains("'Pass'") && err.contains("'Fail'") && err.contains("'Inconclusive'"),
+            "diagnostic must enumerate accepted values; got {err:?}"
+        );
+        assert!(
+            err.contains("Maybe"),
+            "diagnostic must echo the offending value; got {err:?}"
+        );
     }
 
     // ── build_submission ────────────────────────────────────────────────────
@@ -352,12 +365,12 @@ mod tests {
         // would make the stub useless for round-trip tests.
         let env = fixture_env();
         let sub = build_submission(&env).expect("happy-path env must build");
-        assert_eq!(sub.verifier_token,            env.verifier_token);
-        assert_eq!(sub.task_id.as_str(),          env.task_id);
-        assert_eq!(sub.gate_type.as_str(),        env.gate_type);
-        assert_eq!(sub.evaluation_sha.as_str(),   env.evaluation_sha);
-        assert_eq!(sub.result_class,              env.result_class);
-        assert_eq!(sub.body,                      env.body);
+        assert_eq!(sub.verifier_token, env.verifier_token);
+        assert_eq!(sub.task_id.as_str(), env.task_id);
+        assert_eq!(sub.gate_type.as_str(), env.gate_type);
+        assert_eq!(sub.evaluation_sha.as_str(), env.evaluation_sha);
+        assert_eq!(sub.result_class, env.result_class);
+        assert_eq!(sub.body, env.body);
     }
 
     #[test]
@@ -370,9 +383,15 @@ mod tests {
             WitnessResultClass::Fail,
             WitnessResultClass::Inconclusive,
         ] {
-            let env = StubEnv { result_class: class, ..fixture_env() };
+            let env = StubEnv {
+                result_class: class,
+                ..fixture_env()
+            };
             let sub = build_submission(&env).expect("class variant must build");
-            assert_eq!(sub.result_class, class, "result_class threading broken for {class:?}");
+            assert_eq!(
+                sub.result_class, class,
+                "result_class threading broken for {class:?}"
+            );
         }
     }
 
@@ -404,16 +423,23 @@ mod tests {
             ..fixture_env()
         };
         let err = build_submission(&env).expect_err("4-char SHA must fail");
-        assert!(matches!(err, BuildError::BadEvaluationSha(_)),
-            "expected BadEvaluationSha, got {err:?}");
+        assert!(
+            matches!(err, BuildError::BadEvaluationSha(_)),
+            "expected BadEvaluationSha, got {err:?}"
+        );
     }
 
     #[test]
     fn build_submission_rejects_empty_task_id() {
-        let env = StubEnv { task_id: String::new(), ..fixture_env() };
+        let env = StubEnv {
+            task_id: String::new(),
+            ..fixture_env()
+        };
         let err = build_submission(&env).expect_err("empty task_id must fail");
-        assert!(matches!(err, BuildError::BadTaskId(_)),
-            "expected BadTaskId, got {err:?}");
+        assert!(
+            matches!(err, BuildError::BadTaskId(_)),
+            "expected BadTaskId, got {err:?}"
+        );
     }
 
     #[test]
@@ -424,8 +450,10 @@ mod tests {
             ..fixture_env()
         };
         let err = build_submission(&env).expect_err("gate type with '!' must fail");
-        assert!(matches!(err, BuildError::BadGateType(_)),
-            "expected BadGateType, got {err:?}");
+        assert!(
+            matches!(err, BuildError::BadGateType(_)),
+            "expected BadGateType, got {err:?}"
+        );
     }
 
     // ── ExitCode ────────────────────────────────────────────────────────────
@@ -437,10 +465,10 @@ mod tests {
         // literal values to distinguish the stub's outcome from spawn /
         // shell errors. Renumbering any of these breaks that test loudly.
         assert_eq!(ExitCode::AcceptedPass.as_i32(), 0);
-        assert_eq!(ExitCode::Rejected.as_i32(),     1);
-        assert_eq!(ExitCode::MissingEnv.as_i32(),   2);
-        assert_eq!(ExitCode::IoError.as_i32(),      3);
-        assert_eq!(ExitCode::SkippedSend.as_i32(),  4);
+        assert_eq!(ExitCode::Rejected.as_i32(), 1);
+        assert_eq!(ExitCode::MissingEnv.as_i32(), 2);
+        assert_eq!(ExitCode::IoError.as_i32(), 3);
+        assert_eq!(ExitCode::SkippedSend.as_i32(), 4);
     }
 
     // ── parse_stub_env_from_process ─────────────────────────────────────────
@@ -453,10 +481,16 @@ mod tests {
 
     fn clear_all_stub_env_vars() {
         for var in &[
-            "RAXIS_VERIFIER_TOKEN", "RAXIS_TASK_ID", "RAXIS_GATE_TYPE",
-            "RAXIS_EVALUATION_SHA", "RAXIS_KERNEL_SOCKET", "RAXIS_WORKTREE_ROOT",
-            "RAXIS_STUB_RESULT_CLASS", "RAXIS_STUB_BODY_JSON",
-            "RAXIS_STUB_SLEEP_MS", "RAXIS_STUB_SKIP_SEND",
+            "RAXIS_VERIFIER_TOKEN",
+            "RAXIS_TASK_ID",
+            "RAXIS_GATE_TYPE",
+            "RAXIS_EVALUATION_SHA",
+            "RAXIS_KERNEL_SOCKET",
+            "RAXIS_WORKTREE_ROOT",
+            "RAXIS_STUB_RESULT_CLASS",
+            "RAXIS_STUB_BODY_JSON",
+            "RAXIS_STUB_SLEEP_MS",
+            "RAXIS_STUB_SKIP_SEND",
         ] {
             std::env::remove_var(var);
         }
@@ -464,10 +498,13 @@ mod tests {
 
     fn set_minimal_required_env() {
         std::env::set_var("RAXIS_VERIFIER_TOKEN", "tok");
-        std::env::set_var("RAXIS_TASK_ID",        "task-1");
-        std::env::set_var("RAXIS_GATE_TYPE",      "test-gate");
-        std::env::set_var("RAXIS_EVALUATION_SHA", "abcd1234abcd1234abcd1234abcd1234abcd1234");
-        std::env::set_var("RAXIS_KERNEL_SOCKET",  "/tmp/kernel.sock");
+        std::env::set_var("RAXIS_TASK_ID", "task-1");
+        std::env::set_var("RAXIS_GATE_TYPE", "test-gate");
+        std::env::set_var(
+            "RAXIS_EVALUATION_SHA",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+        );
+        std::env::set_var("RAXIS_KERNEL_SOCKET", "/tmp/kernel.sock");
     }
 
     #[test]
@@ -480,8 +517,16 @@ mod tests {
         assert_eq!(env.task_id, "task-1");
         assert_eq!(env.gate_type, "test-gate");
         assert_eq!(env.socket_path, "/tmp/kernel.sock");
-        assert_eq!(env.result_class, WitnessResultClass::Pass, "default class is Pass");
-        assert_eq!(env.body, serde_json::json!({}), "default body is empty object");
+        assert_eq!(
+            env.result_class,
+            WitnessResultClass::Pass,
+            "default class is Pass"
+        );
+        assert_eq!(
+            env.body,
+            serde_json::json!({}),
+            "default body is empty object"
+        );
         assert_eq!(env.sleep_ms, 0, "default sleep is 0");
         assert!(!env.skip_send, "default skip_send is false");
         clear_all_stub_env_vars();
@@ -493,8 +538,11 @@ mod tests {
         // back exactly that var's name in the error. This is the strongest
         // shape pin possible — it survives renaming any single var.
         let required = [
-            "RAXIS_VERIFIER_TOKEN", "RAXIS_TASK_ID", "RAXIS_GATE_TYPE",
-            "RAXIS_EVALUATION_SHA", "RAXIS_KERNEL_SOCKET",
+            "RAXIS_VERIFIER_TOKEN",
+            "RAXIS_TASK_ID",
+            "RAXIS_GATE_TYPE",
+            "RAXIS_EVALUATION_SHA",
+            "RAXIS_KERNEL_SOCKET",
         ];
         for missing_var in &required {
             let _g = ENV_LOCK.lock().unwrap();
@@ -502,8 +550,11 @@ mod tests {
             set_minimal_required_env();
             std::env::remove_var(missing_var);
             let err = parse_stub_env_from_process().unwrap_err();
-            assert_eq!(err, StubEnvError::Missing(missing_var),
-                "expected Missing({missing_var}), got {err:?}");
+            assert_eq!(
+                err,
+                StubEnvError::Missing(missing_var),
+                "expected Missing({missing_var}), got {err:?}"
+            );
             clear_all_stub_env_vars();
         }
     }
@@ -556,7 +607,10 @@ mod tests {
         let _g = ENV_LOCK.lock().unwrap();
         clear_all_stub_env_vars();
         set_minimal_required_env();
-        std::env::set_var("RAXIS_STUB_BODY_JSON", r#"{"k": 42, "nested": {"v": [1, 2, 3]}}"#);
+        std::env::set_var(
+            "RAXIS_STUB_BODY_JSON",
+            r#"{"k": 42, "nested": {"v": [1, 2, 3]}}"#,
+        );
         let env = parse_stub_env_from_process().unwrap();
         assert_eq!(env.body["k"], serde_json::json!(42));
         assert_eq!(env.body["nested"]["v"][2], serde_json::json!(3));
@@ -591,8 +645,10 @@ mod tests {
         for non_one in &["true", "yes", "Y", "0", "TRUE", "1.0"] {
             std::env::set_var("RAXIS_STUB_SKIP_SEND", non_one);
             let env = parse_stub_env_from_process().unwrap();
-            assert!(!env.skip_send,
-                "skip_send must be false for value {non_one:?}, got true");
+            assert!(
+                !env.skip_send,
+                "skip_send must be false for value {non_one:?}, got true"
+            );
         }
         // Sanity: the literal "1" actually flips it on.
         std::env::set_var("RAXIS_STUB_SKIP_SEND", "1");
@@ -608,7 +664,13 @@ mod tests {
         set_minimal_required_env();
         std::env::set_var("RAXIS_STUB_SLEEP_MS", "soon");
         let err = parse_stub_env_from_process().unwrap_err();
-        assert!(matches!(err, StubEnvError::Invalid { var: "RAXIS_STUB_SLEEP_MS", .. }));
+        assert!(matches!(
+            err,
+            StubEnvError::Invalid {
+                var: "RAXIS_STUB_SLEEP_MS",
+                ..
+            }
+        ));
         clear_all_stub_env_vars();
     }
 }

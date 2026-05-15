@@ -35,11 +35,11 @@ use bytes::{BufMut, BytesMut};
 /// TDS packet types (the first byte of the header).
 pub mod pkt {
     /// SQLBatch — client → server SQL text.
-    pub const SQL_BATCH:      u8 = 0x01;
+    pub const SQL_BATCH: u8 = 0x01;
     /// Pre-TDS7-Login (PRELOGIN) — version + encryption negotiation.
-    pub const PRELOGIN:       u8 = 0x12;
+    pub const PRELOGIN: u8 = 0x12;
     /// LOGIN7 — client → server credentials.
-    pub const LOGIN7:         u8 = 0x10;
+    pub const LOGIN7: u8 = 0x10;
     /// Tabular Result — server → client.
     pub const TABULAR_RESULT: u8 = 0x04;
 }
@@ -57,15 +57,15 @@ pub struct PacketHeader {
     /// Packet type byte.
     pub packet_type: u8,
     /// Status flags.
-    pub status:      u8,
+    pub status: u8,
     /// Total packet length INCLUDING header (big-endian on the wire).
-    pub length:      u16,
+    pub length: u16,
     /// Server process ID (clients send 0).
-    pub spid:        u16,
+    pub spid: u16,
     /// Sequential packet ID within a message.
-    pub packet_id:   u8,
+    pub packet_id: u8,
     /// Reserved, must be 0.
-    pub window:      u8,
+    pub window: u8,
 }
 
 impl PacketHeader {
@@ -73,23 +73,23 @@ impl PacketHeader {
     pub fn parse(buf: [u8; 8]) -> Self {
         Self {
             packet_type: buf[0],
-            status:      buf[1],
-            length:      u16::from_be_bytes([buf[2], buf[3]]),
-            spid:        u16::from_be_bytes([buf[4], buf[5]]),
-            packet_id:   buf[6],
-            window:      buf[7],
+            status: buf[1],
+            length: u16::from_be_bytes([buf[2], buf[3]]),
+            spid: u16::from_be_bytes([buf[4], buf[5]]),
+            packet_id: buf[6],
+            window: buf[7],
         }
     }
 
     /// Encode this header to 8 wire bytes.
     pub fn encode(&self) -> [u8; 8] {
         let mut out = [0u8; 8];
-        out[0]     = self.packet_type;
-        out[1]     = self.status;
-        out[2..4]  .copy_from_slice(&self.length.to_be_bytes());
-        out[4..6]  .copy_from_slice(&self.spid  .to_be_bytes());
-        out[6]     = self.packet_id;
-        out[7]     = self.window;
+        out[0] = self.packet_type;
+        out[1] = self.status;
+        out[2..4].copy_from_slice(&self.length.to_be_bytes());
+        out[4..6].copy_from_slice(&self.spid.to_be_bytes());
+        out[6] = self.packet_id;
+        out[7] = self.window;
         out
     }
 }
@@ -149,8 +149,8 @@ pub fn build_prelogin_response_body() -> Vec<u8> {
 // ---------------------------------------------------------------------------
 
 const TOKEN_LOGINACK: u8 = 0xAD;
-const TOKEN_ERROR:    u8 = 0xAA;
-const TOKEN_DONE:     u8 = 0xFD;
+const TOKEN_ERROR: u8 = 0xAA;
+const TOKEN_DONE: u8 = 0xFD;
 
 /// Build a LOGINACK + DONE body — the response to LOGIN7.
 pub fn build_loginack_done_body(server_version: &str) -> Vec<u8> {
@@ -168,20 +168,20 @@ pub fn build_loginack_done_body(server_version: &str) -> Vec<u8> {
     //   ver_build_hi:u8
     //   ver_build_lo:u8
     let progname: Vec<u16> = server_version.encode_utf16().collect();
-    let progname_bytes: Vec<u8> = progname
-        .iter()
-        .flat_map(|c| c.to_le_bytes())
-        .collect();
+    let progname_bytes: Vec<u8> = progname.iter().flat_map(|c| c.to_le_bytes()).collect();
     let token_inner_len = 1 /* interface */ + 4 /* tds_version */
         + 1 /* progname_len */ + progname_bytes.len() + 4 /* version */;
 
     body.put_u8(TOKEN_LOGINACK);
     body.put_u16_le(token_inner_len as u16);
-    body.put_u8(0x01);                    // interface = TSQL
-    body.put_u32(0x73000004);             // TDS 7.3 (BE per spec)
+    body.put_u8(0x01); // interface = TSQL
+    body.put_u32(0x73000004); // TDS 7.3 (BE per spec)
     body.put_u8(progname.len() as u8);
     body.put_slice(&progname_bytes);
-    body.put_u8(15); body.put_u8(0); body.put_u8(0); body.put_u8(0); // version
+    body.put_u8(15);
+    body.put_u8(0);
+    body.put_u8(0);
+    body.put_u8(0); // version
 
     body.put_slice(&build_done_token(0x0000, 0x0000, 0));
     body.to_vec()
@@ -215,21 +215,21 @@ pub fn build_error_done_body(error_number: i32, message: &str) -> Vec<u8> {
     //   proc:        UTF-16 LE
     //   line:        i32 LE
     let msg_utf16: Vec<u16> = message.encode_utf16().collect();
-    let msg_bytes: Vec<u8>  = msg_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
-    let server: Vec<u16>    = "raxis-mssql-proxy".encode_utf16().collect();
+    let msg_bytes: Vec<u8> = msg_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
+    let server: Vec<u16> = "raxis-mssql-proxy".encode_utf16().collect();
     let server_bytes: Vec<u8> = server.iter().flat_map(|c| c.to_le_bytes()).collect();
     let inner_len = 4 + 1 + 1 + 2 + msg_bytes.len() + 1 + server_bytes.len() + 1 + 0 + 4;
 
     body.put_u8(TOKEN_ERROR);
     body.put_u16_le(inner_len as u16);
     body.put_i32_le(error_number);
-    body.put_u8(1);  // state
+    body.put_u8(1); // state
     body.put_u8(14); // class (14 = security)
     body.put_u16_le(msg_utf16.len() as u16);
     body.put_slice(&msg_bytes);
     body.put_u8(server.len() as u8);
     body.put_slice(&server_bytes);
-    body.put_u8(0);  // proc_len = 0
+    body.put_u8(0); // proc_len = 0
     body.put_i32_le(0);
 
     // DONE_ERROR: status bit 0x0002 = error
@@ -243,11 +243,11 @@ pub fn frame_packet(packet_type: u8, body: &[u8]) -> Vec<u8> {
     let total = HEADER_LEN + body.len();
     let header = PacketHeader {
         packet_type,
-        status:    status::EOM,
-        length:    total as u16,
-        spid:      0,
+        status: status::EOM,
+        length: total as u16,
+        spid: 0,
         packet_id: 1,
-        window:    0,
+        window: 0,
     };
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&header.encode());
@@ -262,7 +262,9 @@ pub fn decode_sql_batch_body(body: &[u8]) -> Option<String> {
     // SQLBatch body begins with ALL_HEADERS:
     //   total_length:u32 LE = full length of headers including itself
     //   followed by `total_length - 4` bytes of headers.
-    if body.len() < 4 { return None; }
+    if body.len() < 4 {
+        return None;
+    }
     let total_headers = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
     if total_headers > body.len() {
         // Some clients omit ALL_HEADERS entirely on TDS 7.0/7.1; in
@@ -273,7 +275,9 @@ pub fn decode_sql_batch_body(body: &[u8]) -> Option<String> {
 }
 
 fn decode_utf16_le(bytes: &[u8]) -> Option<String> {
-    if bytes.len() % 2 != 0 { return None; }
+    if bytes.len() % 2 != 0 {
+        return None;
+    }
     let units: Vec<u16> = bytes
         .chunks_exact(2)
         .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -289,11 +293,11 @@ mod tests {
     fn header_round_trip() {
         let h = PacketHeader {
             packet_type: pkt::SQL_BATCH,
-            status:      status::EOM,
-            length:      256,
-            spid:        7,
-            packet_id:   1,
-            window:      0,
+            status: status::EOM,
+            length: 256,
+            spid: 7,
+            packet_id: 1,
+            window: 0,
         };
         let b = h.encode();
         assert_eq!(PacketHeader::parse(b), h);
@@ -302,8 +306,8 @@ mod tests {
     #[test]
     fn prelogin_response_has_two_option_headers_and_terminator() {
         let body = build_prelogin_response_body();
-        assert_eq!(body[0],  0x00); // VERSION
-        assert_eq!(body[5],  0x01); // ENCRYPTION
+        assert_eq!(body[0], 0x00); // VERSION
+        assert_eq!(body[5], 0x01); // ENCRYPTION
         assert_eq!(body[10], 0xff); // terminator
         assert_eq!(body.len(), 18);
     }
@@ -323,7 +327,7 @@ mod tests {
     #[test]
     fn frame_packet_sets_eom_flag() {
         let body = build_done_token(0, 0, 0);
-        let pkt  = frame_packet(pkt::TABULAR_RESULT, &body);
+        let pkt = frame_packet(pkt::TABULAR_RESULT, &body);
         let h = PacketHeader::parse([
             pkt[0], pkt[1], pkt[2], pkt[3], pkt[4], pkt[5], pkt[6], pkt[7],
         ]);

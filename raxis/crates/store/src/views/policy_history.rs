@@ -15,11 +15,11 @@ use crate::Table;
 /// struct so CLI consumers don't need to know the column order.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PolicyEpochRow {
-    pub epoch_id:              u64,
-    pub policy_sha256:         String,
-    pub signed_by_authority:   String,
+    pub epoch_id: u64,
+    pub policy_sha256: String,
+    pub signed_by_authority: String,
     pub triggered_by_operator: String,
-    pub advanced_at:           u64,
+    pub advanced_at: u64,
 }
 
 #[derive(Debug, Error)]
@@ -57,15 +57,17 @@ pub fn list(conn: &RoConn, limit: usize) -> Result<Vec<PolicyEpochRow>, PolicyHi
          FROM {} ORDER BY advanced_at DESC LIMIT ?1",
         Table::PolicyEpochHistory.as_str(),
     ))?;
-    let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
-        Ok(PolicyEpochRow {
-            epoch_id:              r.get::<_, i64>(0)?.max(0) as u64,
-            policy_sha256:         r.get(1)?,
-            signed_by_authority:   r.get(2)?,
-            triggered_by_operator: r.get(3)?,
-            advanced_at:           r.get::<_, i64>(4)?.max(0) as u64,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit as i64], |r| {
+            Ok(PolicyEpochRow {
+                epoch_id: r.get::<_, i64>(0)?.max(0) as u64,
+                policy_sha256: r.get(1)?,
+                signed_by_authority: r.get(2)?,
+                triggered_by_operator: r.get(3)?,
+                advanced_at: r.get::<_, i64>(4)?.max(0) as u64,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
@@ -83,18 +85,20 @@ mod tests {
         let guard = store.lock_sync();
         for (epoch, sha, by, at) in [
             (1_i64, "sha-genesis", "fp-1", 100_i64),
-            (2,     "sha-two",     "fp-1", 200),
-            (3,     "sha-three",   "fp-2", 300),
+            (2, "sha-two", "fp-1", 200),
+            (3, "sha-three", "fp-2", 300),
         ] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {POLICY_EPOCH_HISTORY} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {POLICY_EPOCH_HISTORY} \
                      (epoch_id, policy_sha256, signed_by_authority, \
                       triggered_by_operator, advanced_at) \
                      VALUES (?1, ?2, 'auth-fp', ?3, ?4)"
-                ),
-                rusqlite::params![epoch, sha, by, at],
-            ).unwrap();
+                    ),
+                    rusqlite::params![epoch, sha, by, at],
+                )
+                .unwrap();
         }
         tmp
     }

@@ -63,32 +63,17 @@ const MAX_HOSTNAME_LEN: usize = 255;
 /// Returns `DnsResolveResponse` for every input. Empty `addresses`
 /// vector ⇒ NXDOMAIN-equivalent on the wire; the guest stub
 /// translates that to a DNS `NXDOMAIN` response packet.
-pub async fn handle(
-    req: DnsResolveRequest,
-    ctx: &Arc<HandlerContext>,
-) -> DnsResolveResponse {
+pub async fn handle(req: DnsResolveRequest, ctx: &Arc<HandlerContext>) -> DnsResolveResponse {
     // ── Step 1: defence-in-depth hostname validation ──────────────
     if req.hostname.is_empty() || req.hostname.len() > MAX_HOSTNAME_LEN {
-        return audit_and_return(
-            ctx,
-            "",
-            &req,
-            Vec::new(),
-            DNS_NEGATIVE_TTL_SECS,
-        );
+        return audit_and_return(ctx, "", &req, Vec::new(), DNS_NEGATIVE_TTL_SECS);
     }
 
     // ── Step 2: resolve session token ─────────────────────────────
     let session_id = match resolve_session_id(&req.session_token, ctx).await {
         Some(s) => s,
         None => {
-            return audit_and_return(
-                ctx,
-                "",
-                &req,
-                Vec::new(),
-                DNS_NEGATIVE_TTL_SECS,
-            );
+            return audit_and_return(ctx, "", &req, Vec::new(), DNS_NEGATIVE_TTL_SECS);
         }
     };
 
@@ -118,17 +103,17 @@ pub async fn handle(
 }
 
 fn audit_and_return(
-    ctx:        &Arc<HandlerContext>,
+    ctx: &Arc<HandlerContext>,
     session_id: &str,
-    req:        &DnsResolveRequest,
-    addresses:  Vec<IpAddr>,
-    ttl_secs:   u32,
+    req: &DnsResolveRequest,
+    addresses: Vec<IpAddr>,
+    ttl_secs: u32,
 ) -> DnsResolveResponse {
     let kind = AuditEventKind::DnsResolveRequested {
-        session_id:     session_id.to_owned(),
-        hostname:       req.hostname.clone(),
-        query_type:     match req.query_type {
-            DnsQueryType::A    => "A".to_owned(),
+        session_id: session_id.to_owned(),
+        hostname: req.hostname.clone(),
+        query_type: match req.query_type {
+            DnsQueryType::A => "A".to_owned(),
             DnsQueryType::Aaaa => "AAAA".to_owned(),
         },
         resolved_count: addresses.len() as u32,
@@ -159,16 +144,13 @@ fn audit_and_return(
 
 fn query_type_matches(q: DnsQueryType, ip: &IpAddr) -> bool {
     match (q, ip) {
-        (DnsQueryType::A,    IpAddr::V4(_)) => true,
+        (DnsQueryType::A, IpAddr::V4(_)) => true,
         (DnsQueryType::Aaaa, IpAddr::V6(_)) => true,
         _ => false,
     }
 }
 
-async fn resolve_session_id(
-    token: &str,
-    ctx:   &Arc<HandlerContext>,
-) -> Option<String> {
+async fn resolve_session_id(token: &str, ctx: &Arc<HandlerContext>) -> Option<String> {
     let store = Arc::clone(&ctx.store);
     let tok = token.to_owned();
     tokio::task::spawn_blocking(move || {
@@ -194,8 +176,8 @@ mod tests {
     fn query_type_filter_admits_only_matching_family() {
         let v4: IpAddr = Ipv4Addr::new(1, 2, 3, 4).into();
         let v6: IpAddr = Ipv6Addr::LOCALHOST.into();
-        assert!(query_type_matches(DnsQueryType::A,    &v4));
-        assert!(!query_type_matches(DnsQueryType::A,    &v6));
+        assert!(query_type_matches(DnsQueryType::A, &v4));
+        assert!(!query_type_matches(DnsQueryType::A, &v6));
         assert!(query_type_matches(DnsQueryType::Aaaa, &v6));
         assert!(!query_type_matches(DnsQueryType::Aaaa, &v4));
     }
@@ -204,7 +186,7 @@ mod tests {
     fn default_and_negative_ttls_pinned() {
         // Negative-cache TTL needs to be small enough not to wedge
         // the guest behind a transient resolver flap.
-        assert_eq!(DNS_DEFAULT_TTL_SECS,  60);
+        assert_eq!(DNS_DEFAULT_TTL_SECS, 60);
         assert_eq!(DNS_NEGATIVE_TTL_SECS, 5);
     }
 

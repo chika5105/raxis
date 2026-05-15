@@ -85,12 +85,12 @@ pub enum PlanBundleStoreError {
 /// not "this call inserted a new row" — content-addressed dedup is
 /// intentional and audit-safe.
 pub fn insert_bundle(
-    tx:                  &Transaction<'_>,
-    bundle_sha256:       &BundleSha256,
-    bundle_bytes:        &[u8],
-    signature:           &[u8; 64],
-    signed_by:           &OperatorFingerprint,
-    bundle:              &PlanBundle,
+    tx: &Transaction<'_>,
+    bundle_sha256: &BundleSha256,
+    bundle_bytes: &[u8],
+    signature: &[u8; 64],
+    signed_by: &OperatorFingerprint,
+    bundle: &PlanBundle,
     sealed_at_unix_secs: i64,
 ) -> Result<(), PlanBundleStoreError> {
     // Re-validate the schema/envelope contract before SQL fires. A
@@ -98,19 +98,19 @@ pub fn insert_bundle(
     // (the codec catches the wire path); surfacing a structured
     // error makes the regression traceable.
     let envelope_ok = match bundle.schema_version {
-        SchemaVersion::V2_0 =>
-            bundle.signed_at_unix_secs.is_none() && bundle.bundle_nonce.is_none(),
-        SchemaVersion::V2_1 =>
-            bundle.signed_at_unix_secs.is_some() && bundle.bundle_nonce.is_some(),
+        SchemaVersion::V2_0 => {
+            bundle.signed_at_unix_secs.is_none() && bundle.bundle_nonce.is_none()
+        }
+        SchemaVersion::V2_1 => {
+            bundle.signed_at_unix_secs.is_some() && bundle.bundle_nonce.is_some()
+        }
     };
     if !envelope_ok {
         return Err(PlanBundleStoreError::SchemaEnvelopeMismatch {
             schema: bundle.schema_version,
             detail: match bundle.schema_version {
-                SchemaVersion::V2_0 =>
-                    "V2.0 must NOT carry signed_at_unix_secs / bundle_nonce",
-                SchemaVersion::V2_1 =>
-                    "V2.1 MUST carry both signed_at_unix_secs and bundle_nonce",
+                SchemaVersion::V2_0 => "V2.0 must NOT carry signed_at_unix_secs / bundle_nonce",
+                SchemaVersion::V2_1 => "V2.1 MUST carry both signed_at_unix_secs and bundle_nonce",
             },
         });
     }
@@ -158,19 +158,17 @@ pub fn insert_bundle(
 /// responsibility (it validates the bundle at decode time); this
 /// function is content-blind and trusts the input.
 pub fn insert_artifacts(
-    tx:            &Transaction<'_>,
+    tx: &Transaction<'_>,
     bundle_sha256: &BundleSha256,
-    artifacts:     &[BundleArtifact],
+    artifacts: &[BundleArtifact],
 ) -> Result<(), PlanBundleStoreError> {
     let plan_bundle_artifacts = Table::PlanBundleArtifacts.as_str();
-    let mut stmt = tx.prepare_cached(
-        &format!(
-            "INSERT OR IGNORE INTO {plan_bundle_artifacts} \
+    let mut stmt = tx.prepare_cached(&format!(
+        "INSERT OR IGNORE INTO {plan_bundle_artifacts} \
                 (bundle_sha256, artifact_seq, artifact_name, \
                  artifact_sha256, artifact_bytes, artifact_bytes_len) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6)"
-        ),
-    )?;
+    ))?;
     for (seq, artifact) in artifacts.iter().enumerate() {
         stmt.execute(params![
             bundle_sha256.as_bytes().as_slice(),
@@ -213,19 +211,19 @@ pub fn insert_artifacts(
 /// `SchemaEnvelopeMismatch`-style structured error path the
 /// kernel's admission handler can render into an audit log.
 pub fn record_nonce(
-    tx:                       &Transaction<'_>,
-    bundle_nonce:             &BundleNonce,
-    bundle_sha256:            &BundleSha256,
-    signed_at_unix_secs:      i64,
-    first_seen_at_unix_secs:  i64,
-    outcome:                  PlanBundleNonceOutcome,
-    initiative_id:            Option<&str>,
+    tx: &Transaction<'_>,
+    bundle_nonce: &BundleNonce,
+    bundle_sha256: &BundleSha256,
+    signed_at_unix_secs: i64,
+    first_seen_at_unix_secs: i64,
+    outcome: PlanBundleNonceOutcome,
+    initiative_id: Option<&str>,
 ) -> Result<(), PlanBundleStoreError> {
     // Pre-flight: enforce the §8.1 step 12b coherency contract.
     let coherent = matches!(
         (outcome, initiative_id),
-        (PlanBundleNonceOutcome::Admitted, Some(_)) |
-        (PlanBundleNonceOutcome::TerminallyRejected, None)
+        (PlanBundleNonceOutcome::Admitted, Some(_))
+            | (PlanBundleNonceOutcome::TerminallyRejected, None)
     );
     if !coherent {
         return Err(PlanBundleStoreError::Sqlite(
@@ -282,12 +280,12 @@ pub struct NonceStatus {
     /// Original `bundle_sha256` recorded for this nonce. Useful when
     /// the kernel wants to log the prior bundle's hash in the
     /// `FAIL_PLAN_BUNDLE_REPLAY` detail.
-    pub bundle_sha256:           BundleSha256,
-    pub signed_at_unix_secs:     i64,
+    pub bundle_sha256: BundleSha256,
+    pub signed_at_unix_secs: i64,
     pub first_seen_at_unix_secs: i64,
-    pub outcome:                 PlanBundleNonceOutcome,
+    pub outcome: PlanBundleNonceOutcome,
     /// Set iff `outcome == Admitted` (DDL CHECK enforces).
-    pub initiative_id:           Option<String>,
+    pub initiative_id: Option<String>,
 }
 
 /// Look up a `bundle_nonce` in the replay-protection table inside
@@ -295,7 +293,7 @@ pub struct NonceStatus {
 /// (admission proceeds), `Some(NonceStatus)` for any prior
 /// disposition (admission rejects with `FAIL_PLAN_BUNDLE_REPLAY`).
 pub fn nonce_status_in_tx(
-    tx:           &Transaction<'_>,
+    tx: &Transaction<'_>,
     bundle_nonce: &BundleNonce,
 ) -> Result<Option<NonceStatus>, PlanBundleStoreError> {
     let plan_bundle_nonces_seen = Table::PlanBundleNoncesSeen.as_str();
@@ -309,29 +307,33 @@ pub fn nonce_status_in_tx(
             ),
             params![bundle_nonce.as_bytes().as_slice()],
             |r| {
-                let sha_blob: Vec<u8>      = r.get(0)?;
-                let signed_at: i64          = r.get(1)?;
-                let first_seen: i64         = r.get(2)?;
-                let outcome_str: String     = r.get(3)?;
+                let sha_blob: Vec<u8> = r.get(0)?;
+                let signed_at: i64 = r.get(1)?;
+                let first_seen: i64 = r.get(2)?;
+                let outcome_str: String = r.get(3)?;
                 let init_id: Option<String> = r.get(4)?;
 
                 let sha_arr: [u8; 32] = sha_blob.as_slice().try_into().map_err(|_| {
                     rusqlite::Error::InvalidColumnType(
-                        0, "bundle_sha256".into(),
+                        0,
+                        "bundle_sha256".into(),
                         rusqlite::types::Type::Blob,
                     )
                 })?;
-                let outcome = PlanBundleNonceOutcome::from_sql_str(&outcome_str)
-                    .ok_or_else(|| rusqlite::Error::InvalidColumnType(
-                        3, "outcome".into(),
-                        rusqlite::types::Type::Text,
-                    ))?;
+                let outcome =
+                    PlanBundleNonceOutcome::from_sql_str(&outcome_str).ok_or_else(|| {
+                        rusqlite::Error::InvalidColumnType(
+                            3,
+                            "outcome".into(),
+                            rusqlite::types::Type::Text,
+                        )
+                    })?;
                 Ok(NonceStatus {
-                    bundle_sha256:           BundleSha256::new(sha_arr),
-                    signed_at_unix_secs:     signed_at,
+                    bundle_sha256: BundleSha256::new(sha_arr),
+                    signed_at_unix_secs: signed_at,
                     first_seen_at_unix_secs: first_seen,
                     outcome,
-                    initiative_id:           init_id,
+                    initiative_id: init_id,
                 })
             },
         )
@@ -358,7 +360,7 @@ pub fn nonce_status_in_tx(
 /// The caller is responsible for computing `cutoff_unix_secs`; this
 /// function is a pure DELETE.
 pub fn sweep_expired_nonces(
-    tx:               &Transaction<'_>,
+    tx: &Transaction<'_>,
     cutoff_unix_secs: i64,
 ) -> Result<usize, PlanBundleStoreError> {
     let plan_bundle_nonces_seen = Table::PlanBundleNoncesSeen.as_str();
@@ -393,7 +395,7 @@ mod tests {
 
     fn fixture_v2_1_bundle() -> (PlanBundle, BundleSha256) {
         let plan_bytes = b"[orchestrator]\n".to_vec();
-        let plan_sha   = BundleSha256::new({
+        let plan_sha = BundleSha256::new({
             // SHA-256(b"[orchestrator]\n") computed at test time —
             // we don't need to pin the exact value, only that the
             // store accepts the row through.
@@ -408,8 +410,8 @@ mod tests {
             BundleNonce::new([0xAAu8; 16]),
             "myplan".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  plan_bytes,
+                name: "plan.toml".to_owned(),
+                bytes: plan_bytes,
                 sha256: plan_sha,
             }],
         );
@@ -428,7 +430,8 @@ mod tests {
                 Table::Initiatives.as_str(),
             ),
             params![initiative_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     // ── insert_bundle ────────────────────────────────────────────────
@@ -441,34 +444,49 @@ mod tests {
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             insert_bundle(
-                &tx, &sha, &canonical,
+                &tx,
+                &sha,
+                &canonical,
                 &[0x77u8; 64],
                 &OperatorFingerprint::new([0x88u8; 8]),
-                &bundle, 1_700_000_999,
-            ).unwrap();
+                &bundle,
+                1_700_000_999,
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
         let conn = store.lock_sync();
-        let row: (Vec<u8>, i64, i64, i64, Option<i64>, Option<Vec<u8>>) = conn.query_row(
-            &format!(
-                "SELECT bundle_sha256, schema_version, artifact_count, \
+        let row: (Vec<u8>, i64, i64, i64, Option<i64>, Option<Vec<u8>>) = conn
+            .query_row(
+                &format!(
+                    "SELECT bundle_sha256, schema_version, artifact_count, \
                         sealed_at_unix_secs, signed_at_unix_secs, bundle_nonce \
                  FROM {} WHERE bundle_sha256 = ?1",
-                Table::PlanBundles.as_str(),
-            ),
-            params![sha.as_bytes().as_slice()],
-            |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
-            )),
-        ).unwrap();
+                    Table::PlanBundles.as_str(),
+                ),
+                params![sha.as_bytes().as_slice()],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
+            )
+            .unwrap();
         assert_eq!(row.0, sha.as_bytes());
-        assert_eq!(row.1, 2);                          // schema_version = V2.1
+        assert_eq!(row.1, 2); // schema_version = V2.1
         assert_eq!(row.2, bundle.artifacts.len() as i64);
-        assert_eq!(row.3, 1_700_000_999);              // sealed_at
-        assert_eq!(row.4, Some(200));                  // signed_at_unix_secs
+        assert_eq!(row.3, 1_700_000_999); // sealed_at
+        assert_eq!(row.4, Some(200)); // signed_at_unix_secs
         assert_eq!(row.5.as_deref(), Some([0xAAu8; 16].as_slice()));
     }
 
@@ -476,38 +494,48 @@ mod tests {
     fn insert_bundle_persists_v2_0_legacy_with_null_envelope_fields() {
         let store = fresh_store();
         let plan_bytes = Vec::<u8>::new();
-        let plan_sha   = BundleSha256::new([0u8; 32]);
+        let plan_sha = BundleSha256::new([0u8; 32]);
         let bundle = PlanBundle::new_v2_0_legacy(
-            42, "old".to_owned(),
+            42,
+            "old".to_owned(),
             vec![BundleArtifact {
                 name: "plan.toml".to_owned(),
-                bytes: plan_bytes, sha256: plan_sha,
+                bytes: plan_bytes,
+                sha256: plan_sha,
             }],
         );
         let sha = BundleSha256::new([0xCCu8; 32]);
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             insert_bundle(
-                &tx, &sha, &[0u8; 8],
+                &tx,
+                &sha,
+                &[0u8; 8],
                 &[0u8; 64],
                 &OperatorFingerprint::new([1u8; 8]),
-                &bundle, 0,
-            ).unwrap();
+                &bundle,
+                0,
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
         let conn = store.lock_sync();
-        let (signed_at, nonce): (Option<i64>, Option<Vec<u8>>) = conn.query_row(
-            &format!(
-                "SELECT signed_at_unix_secs, bundle_nonce \
+        let (signed_at, nonce): (Option<i64>, Option<Vec<u8>>) = conn
+            .query_row(
+                &format!(
+                    "SELECT signed_at_unix_secs, bundle_nonce \
                  FROM {} WHERE bundle_sha256 = ?1",
-                Table::PlanBundles.as_str(),
-            ),
-            params![sha.as_bytes().as_slice()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+                    Table::PlanBundles.as_str(),
+                ),
+                params![sha.as_bytes().as_slice()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert!(signed_at.is_none());
         assert!(nonce.is_none());
     }
@@ -519,25 +547,29 @@ mod tests {
         let store = fresh_store();
         let (bundle, sha) = fixture_v2_1_bundle();
         let canonical = b"hello".to_vec();
-        let sig       = [0x77u8; 64];
-        let signer    = OperatorFingerprint::new([0x88u8; 8]);
+        let sig = [0x77u8; 64];
+        let signer = OperatorFingerprint::new([0x88u8; 8]);
 
         for _ in 0..3 {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             insert_bundle(&tx, &sha, &canonical, &sig, &signer, &bundle, 1).unwrap();
             tx.commit().unwrap();
         }
 
         let conn = store.lock_sync();
-        let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE bundle_sha256 = ?1",
-                Table::PlanBundles.as_str(),
-            ),
-            params![sha.as_bytes().as_slice()],
-            |r| r.get(0),
-        ).unwrap();
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE bundle_sha256 = ?1",
+                    Table::PlanBundles.as_str(),
+                ),
+                params![sha.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 1, "INSERT OR IGNORE must dedupe by bundle_sha256");
     }
 
@@ -548,15 +580,24 @@ mod tests {
         bundle.signed_at_unix_secs = None;
 
         let mut conn = store.lock_sync();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         let err = insert_bundle(
-            &tx, &sha, b"x", &[0u8; 64], &OperatorFingerprint::new([0u8; 8]),
-            &bundle, 0,
-        ).unwrap_err();
+            &tx,
+            &sha,
+            b"x",
+            &[0u8; 64],
+            &OperatorFingerprint::new([0u8; 8]),
+            &bundle,
+            0,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             PlanBundleStoreError::SchemaEnvelopeMismatch {
-                schema: SchemaVersion::V2_1, ..
+                schema: SchemaVersion::V2_1,
+                ..
             }
         ));
     }
@@ -570,8 +611,8 @@ mod tests {
         let bundle_with_more_artifacts = {
             let mut b = bundle.clone();
             b.artifacts.push(BundleArtifact {
-                name:   "extra.md".to_owned(),
-                bytes:  b"hello".to_vec(),
+                name: "extra.md".to_owned(),
+                bytes: b"hello".to_vec(),
                 sha256: BundleSha256::new([0x99u8; 32]),
             });
             b
@@ -579,24 +620,36 @@ mod tests {
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-            insert_bundle(&tx, &sha, b"x", &[0u8; 64],
-                          &OperatorFingerprint::new([0u8; 8]),
-                          &bundle_with_more_artifacts, 0).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            insert_bundle(
+                &tx,
+                &sha,
+                b"x",
+                &[0u8; 64],
+                &OperatorFingerprint::new([0u8; 8]),
+                &bundle_with_more_artifacts,
+                0,
+            )
+            .unwrap();
             insert_artifacts(&tx, &sha, &bundle_with_more_artifacts.artifacts).unwrap();
             tx.commit().unwrap();
         }
 
         let conn = store.lock_sync();
-        let rows: Vec<(i64, String, Vec<u8>)> = conn.prepare(&format!(
-            "SELECT artifact_seq, artifact_name, artifact_sha256 \
+        let rows: Vec<(i64, String, Vec<u8>)> = conn
+            .prepare(&format!(
+                "SELECT artifact_seq, artifact_name, artifact_sha256 \
              FROM {} WHERE bundle_sha256 = ?1 \
              ORDER BY artifact_seq",
-            Table::PlanBundleArtifacts.as_str(),
-        )).unwrap()
+                Table::PlanBundleArtifacts.as_str(),
+            ))
+            .unwrap()
             .query_map(params![sha.as_bytes().as_slice()], |r| {
                 Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-            }).unwrap()
+            })
+            .unwrap()
             .map(Result::unwrap)
             .collect();
 
@@ -618,22 +671,37 @@ mod tests {
 
         for _ in 0..2 {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
-            insert_bundle(&tx, &sha, b"x", &[0u8; 64],
-                          &OperatorFingerprint::new([0u8; 8]), &bundle, 0).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
+            insert_bundle(
+                &tx,
+                &sha,
+                b"x",
+                &[0u8; 64],
+                &OperatorFingerprint::new([0u8; 8]),
+                &bundle,
+                0,
+            )
+            .unwrap();
             insert_artifacts(&tx, &sha, &bundle.artifacts).unwrap();
             tx.commit().unwrap();
         }
         let conn = store.lock_sync();
-        let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE bundle_sha256 = ?1",
-                Table::PlanBundleArtifacts.as_str(),
-            ),
-            params![sha.as_bytes().as_slice()],
-            |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 1, "duplicate (bundle_sha256, artifact_seq) must dedupe");
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE bundle_sha256 = ?1",
+                    Table::PlanBundleArtifacts.as_str(),
+                ),
+                params![sha.as_bytes().as_slice()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "duplicate (bundle_sha256, artifact_seq) must dedupe"
+        );
     }
 
     // ── record_nonce + nonce_status_in_tx + sweep_expired_nonces ─────
@@ -644,24 +712,35 @@ mod tests {
         seed_initiative(&store, "init-1");
 
         let nonce = BundleNonce::new([0x12u8; 16]);
-        let sha   = BundleSha256::new([0x34u8; 32]);
+        let sha = BundleSha256::new([0x34u8; 32]);
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             record_nonce(
-                &tx, &nonce, &sha, 1_700_000_000, 1_700_000_001,
-                PlanBundleNonceOutcome::Admitted, Some("init-1"),
-            ).unwrap();
+                &tx,
+                &nonce,
+                &sha,
+                1_700_000_000,
+                1_700_000_001,
+                PlanBundleNonceOutcome::Admitted,
+                Some("init-1"),
+            )
+            .unwrap();
 
             let status = nonce_status_in_tx(&tx, &nonce).unwrap();
-            assert_eq!(status, Some(NonceStatus {
-                bundle_sha256:           sha,
-                signed_at_unix_secs:     1_700_000_000,
-                first_seen_at_unix_secs: 1_700_000_001,
-                outcome:                 PlanBundleNonceOutcome::Admitted,
-                initiative_id:           Some("init-1".to_owned()),
-            }));
+            assert_eq!(
+                status,
+                Some(NonceStatus {
+                    bundle_sha256: sha,
+                    signed_at_unix_secs: 1_700_000_000,
+                    first_seen_at_unix_secs: 1_700_000_001,
+                    outcome: PlanBundleNonceOutcome::Admitted,
+                    initiative_id: Some("init-1".to_owned()),
+                })
+            );
             tx.commit().unwrap();
         }
     }
@@ -670,18 +749,29 @@ mod tests {
     fn record_terminally_rejected_nonce_with_null_initiative_id_round_trips() {
         let store = fresh_store();
         let nonce = BundleNonce::new([0xABu8; 16]);
-        let sha   = BundleSha256::new([0xCDu8; 32]);
+        let sha = BundleSha256::new([0xCDu8; 32]);
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             record_nonce(
-                &tx, &nonce, &sha, 1_700_000_000, 1_700_000_002,
-                PlanBundleNonceOutcome::TerminallyRejected, None,
-            ).unwrap();
+                &tx,
+                &nonce,
+                &sha,
+                1_700_000_000,
+                1_700_000_002,
+                PlanBundleNonceOutcome::TerminallyRejected,
+                None,
+            )
+            .unwrap();
 
             let status = nonce_status_in_tx(&tx, &nonce).unwrap();
-            assert_eq!(status.unwrap().outcome, PlanBundleNonceOutcome::TerminallyRejected);
+            assert_eq!(
+                status.unwrap().outcome,
+                PlanBundleNonceOutcome::TerminallyRejected
+            );
             tx.commit().unwrap();
         }
     }
@@ -694,16 +784,23 @@ mod tests {
     fn record_nonce_rejects_admitted_with_null_initiative_id() {
         let store = fresh_store();
         let mut conn = store.lock_sync();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         let err = record_nonce(
             &tx,
             &BundleNonce::new([0u8; 16]),
             &BundleSha256::new([0u8; 32]),
-            0, 0,
-            PlanBundleNonceOutcome::Admitted, None,
-        ).unwrap_err();
-        assert!(matches!(err, PlanBundleStoreError::Sqlite(_)),
-            "incoherent (outcome, initiative_id) must be rejected before SQL fires");
+            0,
+            0,
+            PlanBundleNonceOutcome::Admitted,
+            None,
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, PlanBundleStoreError::Sqlite(_)),
+            "incoherent (outcome, initiative_id) must be rejected before SQL fires"
+        );
     }
 
     #[test]
@@ -712,14 +809,19 @@ mod tests {
         seed_initiative(&store, "init-x");
 
         let mut conn = store.lock_sync();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         let err = record_nonce(
             &tx,
             &BundleNonce::new([0u8; 16]),
             &BundleSha256::new([0u8; 32]),
-            0, 0,
-            PlanBundleNonceOutcome::TerminallyRejected, Some("init-x"),
-        ).unwrap_err();
+            0,
+            0,
+            PlanBundleNonceOutcome::TerminallyRejected,
+            Some("init-x"),
+        )
+        .unwrap_err();
         assert!(matches!(err, PlanBundleStoreError::Sqlite(_)));
     }
 
@@ -732,23 +834,39 @@ mod tests {
         let store = fresh_store();
         seed_initiative(&store, "init-dup");
         let nonce = BundleNonce::new([0xEEu8; 16]);
-        let sha   = BundleSha256::new([0xFFu8; 32]);
+        let sha = BundleSha256::new([0xFFu8; 32]);
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             record_nonce(
-                &tx, &nonce, &sha, 0, 0,
-                PlanBundleNonceOutcome::Admitted, Some("init-dup"),
-            ).unwrap();
+                &tx,
+                &nonce,
+                &sha,
+                0,
+                0,
+                PlanBundleNonceOutcome::Admitted,
+                Some("init-dup"),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         let mut conn = store.lock_sync();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         let err = record_nonce(
-            &tx, &nonce, &sha, 0, 0,
-            PlanBundleNonceOutcome::Admitted, Some("init-dup"),
-        ).unwrap_err();
+            &tx,
+            &nonce,
+            &sha,
+            0,
+            0,
+            PlanBundleNonceOutcome::Admitted,
+            Some("init-dup"),
+        )
+        .unwrap_err();
         assert!(matches!(err, PlanBundleStoreError::Sqlite(_)));
     }
 
@@ -756,7 +874,9 @@ mod tests {
     fn nonce_status_in_tx_returns_none_for_unseen_nonce() {
         let store = fresh_store();
         let mut conn = store.lock_sync();
-        let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .unwrap();
         let status = nonce_status_in_tx(&tx, &BundleNonce::new([0x42u8; 16])).unwrap();
         assert_eq!(status, None);
     }
@@ -768,21 +888,28 @@ mod tests {
 
         for (i, first_seen) in [100i64, 200, 300, 400].iter().enumerate() {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             record_nonce(
                 &tx,
                 &BundleNonce::new([i as u8; 16]),
                 &BundleSha256::new([0u8; 32]),
-                0, *first_seen,
-                PlanBundleNonceOutcome::Admitted, Some("init-sweep"),
-            ).unwrap();
+                0,
+                *first_seen,
+                PlanBundleNonceOutcome::Admitted,
+                Some("init-sweep"),
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
 
         // Sweep with cutoff = 250 → rows with first_seen IN (100, 200) go.
         let removed = {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate).unwrap();
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .unwrap();
             let n = sweep_expired_nonces(&tx, 250).unwrap();
             tx.commit().unwrap();
             n
@@ -790,11 +917,16 @@ mod tests {
         assert_eq!(removed, 2);
 
         let conn = store.lock_sync();
-        let remaining: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {}",
-                     Table::PlanBundleNoncesSeen.as_str()),
-            [], |r| r.get(0),
-        ).unwrap();
+        let remaining: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {}",
+                    Table::PlanBundleNoncesSeen.as_str()
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(remaining, 2);
     }
 }

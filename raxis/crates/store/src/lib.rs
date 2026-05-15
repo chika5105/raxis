@@ -30,15 +30,13 @@ pub mod ro;
 pub mod table;
 pub mod views;
 
-pub use circuit_store::{
-    CircuitRowSqlite, CircuitTransition, SqliteCircuitStore,
-};
+pub use circuit_store::{CircuitRowSqlite, CircuitTransition, SqliteCircuitStore};
 pub use db::{Store, StoreError};
 pub use genesis::install_genesis_policy_epoch_row;
 pub use migration::SCHEMA_VERSION;
 pub use plan_bundles::{
-    insert_artifacts, insert_bundle, nonce_status_in_tx, record_nonce,
-    sweep_expired_nonces, NonceStatus, PlanBundleStoreError,
+    insert_artifacts, insert_bundle, nonce_status_in_tx, record_nonce, sweep_expired_nonces,
+    NonceStatus, PlanBundleStoreError,
 };
 pub use ro::{assert_compatible_schema, open as open_ro, RoConn, RoError, KERNEL_DB_FILE};
 pub use table::Table;

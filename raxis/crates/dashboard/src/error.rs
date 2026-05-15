@@ -129,17 +129,20 @@ impl ApiError {
             Self::JwtRevoked => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_AUTH_JWT_REVOKED"),
             Self::Forbidden { .. } => (StatusCode::FORBIDDEN, "FAIL_DASHBOARD_FORBIDDEN"),
             Self::CertRejected { .. } => (StatusCode::FORBIDDEN, "FAIL_DASHBOARD_CERT_REJECTED"),
-            Self::ChallengeExpired => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_CHALLENGE_EXPIRED"),
+            Self::ChallengeExpired => {
+                (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_CHALLENGE_EXPIRED")
+            }
             Self::SignatureInvalid => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_SIGNATURE"),
             Self::UnknownOperator => (StatusCode::UNAUTHORIZED, "FAIL_DASHBOARD_OPERATOR"),
             Self::NotFound { .. } => (StatusCode::NOT_FOUND, "FAIL_DASHBOARD_NOT_FOUND"),
             Self::Gone { .. } => (StatusCode::GONE, "FAIL_DASHBOARD_GONE"),
             Self::BadRequest { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_BAD_REQUEST"),
-            Self::PolicyInvalid { .. } => (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_POLICY_INVALID"),
-            Self::TooManyRequests { .. } => (
-                StatusCode::TOO_MANY_REQUESTS,
-                "FAIL_DASHBOARD_RATE_LIMITED",
-            ),
+            Self::PolicyInvalid { .. } => {
+                (StatusCode::BAD_REQUEST, "FAIL_DASHBOARD_POLICY_INVALID")
+            }
+            Self::TooManyRequests { .. } => {
+                (StatusCode::TOO_MANY_REQUESTS, "FAIL_DASHBOARD_RATE_LIMITED")
+            }
             Self::Internal { log_only } => {
                 tracing::error!(error = %log_only, "raxis-dashboard internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "FAIL_DASHBOARD_INTERNAL")
@@ -171,7 +174,10 @@ mod tests {
 
     #[test]
     fn forbidden_yields_403() {
-        let r = ApiError::Forbidden { required: "admin".into() }.into_response();
+        let r = ApiError::Forbidden {
+            required: "admin".into(),
+        }
+        .into_response();
         assert_eq!(r.status(), StatusCode::FORBIDDEN);
     }
 
@@ -188,7 +194,10 @@ mod tests {
 
     #[test]
     fn not_found_yields_404() {
-        let r = ApiError::NotFound { kind: "initiative".into() }.into_response();
+        let r = ApiError::NotFound {
+            kind: "initiative".into(),
+        }
+        .into_response();
         assert_eq!(r.status(), StatusCode::NOT_FOUND);
     }
 
@@ -199,13 +208,19 @@ mod tests {
     /// purged (`INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01`).
     #[test]
     fn gone_yields_410_with_distinct_code() {
-        let r = ApiError::Gone { kind: "plan".into() }.into_response();
+        let r = ApiError::Gone {
+            kind: "plan".into(),
+        }
+        .into_response();
         assert_eq!(r.status(), StatusCode::GONE);
     }
 
     #[test]
     fn gone_carries_distinct_code_string() {
-        let (status, code) = ApiError::Gone { kind: "plan".into() }.status_and_code();
+        let (status, code) = ApiError::Gone {
+            kind: "plan".into(),
+        }
+        .status_and_code();
         assert_eq!(status, StatusCode::GONE);
         assert_eq!(code, "FAIL_DASHBOARD_GONE");
     }

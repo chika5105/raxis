@@ -38,7 +38,7 @@ pub fn run_approve(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     // legacy `operator_pubkey_hex` field that earlier V2 builds
     // accepted-and-ignored was removed in V2.5.
     let req = OperatorRequest::ApprovePlan {
-        initiative_id:      initiative_id.clone(),
+        initiative_id: initiative_id.clone(),
         approving_operator: fingerprint,
     };
     let req_json = to_wire(&req)?;
@@ -66,8 +66,8 @@ pub fn run_reject(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 
     let req = OperatorRequest::RejectPlan {
         initiative_id: initiative_id.clone(),
-        rejected_by:   fingerprint,
-        reason:        None,
+        rejected_by: fingerprint,
+        reason: None,
     };
     let req_json = to_wire(&req)?;
 
@@ -81,23 +81,16 @@ pub fn run_reject(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 // Shared helpers
 // ---------------------------------------------------------------------------
 
-pub fn open_conn(
-    flags: &GlobalFlags,
-) -> Result<(crate::conn::OperatorConn, String), CliError> {
-    let key_path = flags
-        .operator_key_path
-        .as_deref()
-        .ok_or_else(|| CliError::Usage("--operator-key <path> is required for this command".to_owned()))?;
+pub fn open_conn(flags: &GlobalFlags) -> Result<(crate::conn::OperatorConn, String), CliError> {
+    let key_path = flags.operator_key_path.as_deref().ok_or_else(|| {
+        CliError::Usage("--operator-key <path> is required for this command".to_owned())
+    })?;
 
     let signing_key = crate::signing::load_operator_key(key_path)?;
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
     let fingerprint = crate::conn::pubkey_fingerprint(&pubkey_bytes);
 
-    let conn = crate::conn::OperatorConn::connect(
-        &flags.socket_path(),
-        key_path,
-        &fingerprint,
-    )?;
+    let conn = crate::conn::OperatorConn::connect(&flags.socket_path(), key_path, &fingerprint)?;
     Ok((conn, fingerprint))
 }
 
@@ -108,9 +101,8 @@ pub fn open_conn(
 /// to be serialisable), so we surface it as a usage error rather than
 /// a kernel-comm error.
 pub fn to_wire(req: &OperatorRequest) -> Result<Value, CliError> {
-    serde_json::to_value(req).map_err(|e| {
-        CliError::Usage(format!("could not serialise operator request: {e}"))
-    })
+    serde_json::to_value(req)
+        .map_err(|e| CliError::Usage(format!("could not serialise operator request: {e}")))
 }
 
 /// Pattern-match the kernel's `OperatorResponse` envelope. The wire
@@ -122,17 +114,17 @@ pub fn to_wire(req: &OperatorRequest) -> Result<Value, CliError> {
 /// status is treated as success and the inner `payload` object is
 /// passed to `on_ok` (so callers index payload fields directly,
 /// e.g. `ok["session_id"]`).
-pub fn handle_response(
-    resp: Value,
-    on_ok: impl FnOnce(&Value),
-) -> Result<(), CliError> {
+pub fn handle_response(resp: Value, on_ok: impl FnOnce(&Value)) -> Result<(), CliError> {
     let status = resp["status"].as_str();
     let payload = &resp["payload"];
 
     match status {
         Some("Error") => {
-            let code   = payload["code"].as_str().unwrap_or("UNKNOWN").to_owned();
-            let detail = payload["detail"].as_str().unwrap_or("(no detail)").to_owned();
+            let code = payload["code"].as_str().unwrap_or("UNKNOWN").to_owned();
+            let detail = payload["detail"]
+                .as_str()
+                .unwrap_or("(no detail)")
+                .to_owned();
             Err(CliError::KernelError { code, detail })
         }
         Some(_) => {
@@ -140,7 +132,7 @@ pub fn handle_response(
             Ok(())
         }
         None => Err(CliError::KernelError {
-            code:   "MALFORMED_RESPONSE".to_owned(),
+            code: "MALFORMED_RESPONSE".to_owned(),
             detail: format!("kernel response missing `status` field: {resp}"),
         }),
     }

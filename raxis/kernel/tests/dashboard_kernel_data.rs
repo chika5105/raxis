@@ -120,14 +120,20 @@ async fn list_initiatives_returns_seeded_rows_with_real_store() {
 
     let entries = data.list_initiatives(50, None).expect("list");
     let ids: Vec<&str> = entries.iter().map(|e| e.initiative_id.as_str()).collect();
-    assert!(ids.contains(&"init-A"), "init-A must be listed; got {ids:?}");
+    assert!(
+        ids.contains(&"init-A"),
+        "init-A must be listed; got {ids:?}"
+    );
     assert!(ids.contains(&"init-B"));
 
     // Filter narrows correctly.
     let only_completed = data
         .list_initiatives(50, Some("Completed"))
         .expect("filtered list");
-    let ids: Vec<&str> = only_completed.iter().map(|e| e.initiative_id.as_str()).collect();
+    let ids: Vec<&str> = only_completed
+        .iter()
+        .map(|e| e.initiative_id.as_str())
+        .collect();
     assert_eq!(ids, vec!["init-B"]);
 }
 
@@ -168,7 +174,9 @@ async fn get_initiative_includes_tasks_and_dag_edges() {
     assert!(task_ids.contains(&"task-A1"));
     assert!(task_ids.contains(&"task-A2"));
     assert!(
-        view.edges.iter().any(|e| e.from == "task-A1" && e.to == "task-A2"),
+        view.edges
+            .iter()
+            .any(|e| e.from == "task-A1" && e.to == "task-A2"),
         "DAG must surface the inserted edge; got {:?}",
         view.edges
     );
@@ -189,7 +197,11 @@ async fn health_snapshot_reports_ok_when_chain_and_store_are_clean() {
     )
     .expect("KernelDashboardData::new");
     let h = data.health();
-    assert_eq!(h.status, "ok", "checks should all pass against a fresh dir; got {:#?}", h);
+    assert_eq!(
+        h.status, "ok",
+        "checks should all pass against a fresh dir; got {:#?}",
+        h
+    );
     assert_eq!(h.policy_epoch, 0); // for_tests_with_operators starts at epoch 0
     assert_eq!(h.active_initiatives, 1, "only Executing counts as active");
 }
@@ -238,9 +250,10 @@ async fn audit_list_returns_genesis_record_from_real_chain() {
 
     let page = data.list_audit(None, 100, None).expect("list_audit");
     assert!(!page.is_empty(), "genesis record should appear");
-    let genesis = page.iter().find(|e| e.event_kind == "GenesisRecord").expect(
-        "GenesisRecord must surface as the chain anchor",
-    );
+    let genesis = page
+        .iter()
+        .find(|e| e.event_kind == "GenesisRecord")
+        .expect("GenesisRecord must surface as the chain anchor");
     assert_eq!(genesis.seq, 0);
 }
 
@@ -289,7 +302,10 @@ async fn http_server_serves_initiatives_endpoint_after_jwt_handshake() {
         .json()
         .await
         .unwrap();
-    let challenge_hex = chal_resp["challenge"].as_str().expect("challenge field").to_owned();
+    let challenge_hex = chal_resp["challenge"]
+        .as_str()
+        .expect("challenge field")
+        .to_owned();
 
     // 2) Sign the decoded challenge bytes with our Ed25519 key.
     let challenge_bytes = hex::decode(&challenge_hex).expect("hex");
@@ -327,8 +343,14 @@ async fn http_server_serves_initiatives_endpoint_after_jwt_handshake() {
         .await
         .unwrap();
     let arr = inits.as_array().expect("array");
-    let ids: Vec<&str> = arr.iter().filter_map(|v| v["initiative_id"].as_str()).collect();
-    assert!(ids.contains(&"init-A"), "real HTTP path must surface seeded initiatives; got {ids:?}");
+    let ids: Vec<&str> = arr
+        .iter()
+        .filter_map(|v| v["initiative_id"].as_str())
+        .collect();
+    assert!(
+        ids.contains(&"init-A"),
+        "real HTTP path must surface seeded initiatives; got {ids:?}"
+    );
     assert!(ids.contains(&"init-B"));
 
     // 5) Same call without auth must 401.
@@ -396,11 +418,8 @@ async fn worktree_endpoints_surface_real_git_state() {
 
     // Build a policy whose allowed worktree roots include the
     // freshly-initialised repo path.
-    let policy = policy_with_operator_and_roots(
-        [0x55u8; 32],
-        vec![],
-        vec![repo.display().to_string()],
-    );
+    let policy =
+        policy_with_operator_and_roots([0x55u8; 32], vec![], vec![repo.display().to_string()]);
 
     let data = raxis_dashboard_kernel::KernelDashboardData::new(
         Arc::clone(&store),
@@ -414,7 +433,9 @@ async fn worktree_endpoints_surface_real_git_state() {
     // 1) Listing surfaces our root.
     let listed = data.list_worktrees().expect("list_worktrees");
     assert!(
-        listed.iter().any(|w| w.kind == "Main" && w.path == repo.display().to_string()),
+        listed
+            .iter()
+            .any(|w| w.kind == "Main" && w.path == repo.display().to_string()),
         "expected a Main worktree at {}, got {listed:#?}",
         repo.display()
     );
@@ -467,7 +488,10 @@ async fn worktree_endpoints_surface_real_git_state() {
 
     // 6) Resolution refuses paths outside `allowed_worktree_roots`.
     let err = data.get_worktree("session-deadbeefdead").unwrap_err();
-    assert!(matches!(err, raxis_dashboard::error::ApiError::NotFound { .. }));
+    assert!(matches!(
+        err,
+        raxis_dashboard::error::ApiError::NotFound { .. }
+    ));
 }
 
 // ---------------------------------------------------------------------------
@@ -609,27 +633,27 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
         .send()
         .await
         .unwrap();
-    assert!(resp.status().is_success(), "stream connect: {}", resp.status());
-    let stream = resp.bytes_stream();
-    let reader = tokio_util::io::StreamReader::new(
-        stream.map(|r| r.map_err(|e| std::io::Error::other(e))),
+    assert!(
+        resp.status().is_success(),
+        "stream connect: {}",
+        resp.status()
     );
+    let stream = resp.bytes_stream();
+    let reader =
+        tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(|e| std::io::Error::other(e))));
     let mut lines = tokio::io::BufReader::new(reader).lines();
 
     // Capture lines until we see the `tail-complete` marker.
     let mut tail_lines = Vec::new();
-    let read_tail = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                tail_lines.push(line.clone());
-                if line == "event: tail-complete" {
-                    return Ok::<_, std::io::Error>(());
-                }
+    let read_tail = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            tail_lines.push(line.clone());
+            if line == "event: tail-complete" {
+                return Ok::<_, std::io::Error>(());
             }
-            Err(std::io::Error::other("EOF before tail-complete"))
-        },
-    )
+        }
+        Err(std::io::Error::other("EOF before tail-complete"))
+    })
     .await
     .expect("did not see tail-complete in 10s")
     .expect("tail read");
@@ -667,17 +691,14 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     // `event: tool_call` line the old wire emitted no longer
     // exists. Scan for the kind discriminant inside the JSON
     // envelope instead.
-    let live = tokio::time::timeout(
-        std::time::Duration::from_secs(10),
-        async {
-            while let Ok(Some(line)) = lines.next_line().await {
-                if line.starts_with("data:") && line.contains("\"kind\":\"tool_call\"") {
-                    return Ok::<String, std::io::Error>(line);
-                }
+    let live = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        while let Ok(Some(line)) = lines.next_line().await {
+            if line.starts_with("data:") && line.contains("\"kind\":\"tool_call\"") {
+                return Ok::<String, std::io::Error>(line);
             }
-            Err(std::io::Error::other("EOF before live event"))
-        },
-    )
+        }
+        Err(std::io::Error::other("EOF before live event"))
+    })
     .await
     .expect("did not see live tool_call event in 10s")
     .expect("live read");
@@ -700,11 +721,7 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     // is woken by the broadcast sender being dropped. We do not
     // drop `capture` here because the test has not exited yet,
     // so we cap the shutdown await instead.
-    let _ = tokio::time::timeout(
-        std::time::Duration::from_secs(5),
-        handle.shutdown(),
-    )
-    .await;
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown()).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -731,9 +748,9 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
     // Mint two operator keys: alice has `RotateEpoch` (=>
     // write_policy role); bob has nothing (=> read-only).
     let alice = SigningKey::from_bytes(&[0xA1u8; 32]);
-    let bob   = SigningKey::from_bytes(&[0xB0u8; 32]);
+    let bob = SigningKey::from_bytes(&[0xB0u8; 32]);
     let alice_pk = alice.verifying_key().to_bytes();
-    let bob_pk   = bob.verifying_key().to_bytes();
+    let bob_pk = bob.verifying_key().to_bytes();
 
     // Build a policy that knows BOTH operators. We extend the
     // helper inline because `policy_with_operator` only takes
@@ -755,7 +772,7 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
         Arc::new(ArcSwap::from_pointee(
             raxis_policy::PolicyBundle::for_tests_with_operators(vec![
                 mk_entry(alice_pk, "alice", vec!["RotateEpoch"]),
-                mk_entry(bob_pk,   "bob",   vec![]),
+                mk_entry(bob_pk, "bob", vec![]),
             ]),
         ))
     };
@@ -765,11 +782,11 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
     // handler is the system-under-test; the advancer is
     // intentionally minimal.
     let advance_calls = Arc::new(AtomicUsize::new(0));
-    let last_op_fp    = Arc::new(parking_lot::Mutex::new(String::new()));
+    let last_op_fp = Arc::new(parking_lot::Mutex::new(String::new()));
     let last_toml_len = Arc::new(AtomicUsize::new(0));
     {
         let advance_calls_for_closure = Arc::clone(&advance_calls);
-        let last_op_fp_for_closure    = Arc::clone(&last_op_fp);
+        let last_op_fp_for_closure = Arc::clone(&last_op_fp);
         let last_toml_len_for_closure = Arc::clone(&last_toml_len);
         let advancer = Arc::new(ClosurePolicyAdvancer::new(
             move |toml: &[u8], _sig: &[u8], op: &str| {
@@ -789,13 +806,10 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
                     advanced_at: 1_700_000_500,
                 })
             },
-        ))
-            as Arc<dyn raxis_dashboard_kernel::PolicyAdvancer>;
-        let capture = SessionStreamCapture::new(
-            tmp.path(),
-            raxis_dashboard_kernel::CaptureConfig::default(),
-        )
-        .expect("capture::new");
+        )) as Arc<dyn raxis_dashboard_kernel::PolicyAdvancer>;
+        let capture =
+            SessionStreamCapture::new(tmp.path(), raxis_dashboard_kernel::CaptureConfig::default())
+                .expect("capture::new");
         let data = Arc::new(
             KernelDashboardData::with_capture(
                 Arc::clone(&store),
@@ -836,8 +850,7 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
                     .json()
                     .await
                     .unwrap();
-                let challenge_hex =
-                    chal_resp["challenge"].as_str().unwrap().to_owned();
+                let challenge_hex = chal_resp["challenge"].as_str().unwrap().to_owned();
                 let challenge_bytes = hex::decode(&challenge_hex).unwrap();
                 let sig = signing.sign(&challenge_bytes);
                 let body = json!({
@@ -860,7 +873,7 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
         };
 
         let alice_token = auth(alice.clone(), alice_pk).await;
-        let bob_token   = auth(bob.clone(),   bob_pk).await;
+        let bob_token = auth(bob.clone(), bob_pk).await;
 
         // 1) Bob (read-only) gets 403 — his cert lacks
         //    RotateEpoch so the role mapper grants only Read.
@@ -968,10 +981,6 @@ async fn policy_update_endpoint_round_trips_through_real_http_with_role_enforcem
             .unwrap();
         assert_eq!(resp.status().as_u16(), 401);
 
-        let _ = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            handle.shutdown(),
-        )
-        .await;
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(5), handle.shutdown()).await;
     }
 }

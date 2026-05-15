@@ -47,8 +47,8 @@ pub fn load_operator_key(path: &Path) -> Result<ed25519_dalek::SigningKey, CliEr
         .collect::<Vec<_>>()
         .join("");
 
-    let der = base64_decode(&b64)
-        .map_err(|e| CliError::Key(format!("PEM base64 decode failed: {e}")))?;
+    let der =
+        base64_decode(&b64).map_err(|e| CliError::Key(format!("PEM base64 decode failed: {e}")))?;
 
     // PKCS#8 Ed25519 key: last 32 bytes are the raw seed.
     // A minimal PKCS#8 Ed25519 DER is 48 bytes; the seed is the last 32.

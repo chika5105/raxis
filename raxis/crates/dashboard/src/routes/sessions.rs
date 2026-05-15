@@ -42,7 +42,9 @@ pub struct ListQuery {
     pub initiative_id: Option<String>,
 }
 
-fn default_limit() -> u32 { 50 }
+fn default_limit() -> u32 {
+    50
+}
 
 /// `GET /api/sessions`.
 pub async fn list<D>(
@@ -84,7 +86,9 @@ pub struct StreamQuery {
     pub tail: usize,
 }
 
-fn default_tail() -> usize { 100 }
+fn default_tail() -> usize {
+    100
+}
 
 /// `GET /api/sessions/:id/stream`. Server-Sent Events stream of
 /// the session's captured model output AND of any kernel audit
@@ -166,7 +170,7 @@ where
         );
         SseActiveGuard {
             counter: Arc::clone(&state.sse_active),
-            hub:     Arc::clone(hub),
+            hub: Arc::clone(hub),
         }
     });
     let _ = sse_guard.as_ref();
@@ -252,7 +256,7 @@ where
 /// disconnect, publisher close, kernel shutdown).
 struct SseActiveGuard {
     counter: Arc<std::sync::atomic::AtomicI64>,
-    hub:     Arc<raxis_observability::ObservabilityHub>,
+    hub: Arc<raxis_observability::ObservabilityHub>,
 }
 
 impl Drop for SseActiveGuard {
@@ -393,7 +397,9 @@ fn build_sse_stream(
                 Ok(Event::default().event("closed").data("no-stream-source"))
             })),
         };
-    stream::iter(tail_iter).chain(tail_marker).chain(live_stream)
+    stream::iter(tail_iter)
+        .chain(tail_marker)
+        .chain(live_stream)
 }
 
 /// Render one [`StreamEvent`] as the wire envelope the FE
@@ -414,7 +420,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

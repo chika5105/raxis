@@ -81,19 +81,16 @@ mod extended_e2e_support;
 use std::path::PathBuf;
 
 use raxis_audit_tools::AuditEventKind;
-use raxis_dashboard_kernel::notification_filter::{
-    notification_priority, NotificationPriority,
-};
+use raxis_dashboard_kernel::notification_filter::{notification_priority, NotificationPriority};
 
 use extended_e2e_support::byo_image::{
-    bake_byo_executor_image_synthetic, inject_byo_executor_image_in_policy,
-    sha256_of_file, stage_byo_image_in_oci_cache, tampered_digest_one_hex_off,
-    BYO_ALIAS, BYO_DESCRIPTION, BYO_LINUX_KERNEL_MIN, PINNED_NODE_MAJOR,
-    PINNED_PYTHON_MAJOR_MINOR,
+    bake_byo_executor_image_synthetic, inject_byo_executor_image_in_policy, sha256_of_file,
+    stage_byo_image_in_oci_cache, tampered_digest_one_hex_off, BYO_ALIAS, BYO_DESCRIPTION,
+    BYO_LINUX_KERNEL_MIN, PINNED_NODE_MAJOR, PINNED_PYTHON_MAJOR_MINOR,
 };
 
 const LIVE_E2E_GATE: &str = "RAXIS_LIVE_E2E";
-const BYO_GATE:      &str = "RAXIS_LIVE_E2E_BYO";
+const BYO_GATE: &str = "RAXIS_LIVE_E2E_BYO";
 
 // ---------------------------------------------------------------------------
 // Top-level test entry — chooses smoke vs live based on env gates.
@@ -102,7 +99,7 @@ const BYO_GATE:      &str = "RAXIS_LIVE_E2E_BYO";
 #[test]
 fn byo_executor_image_lifecycle() {
     let live_gate_on = std::env::var(LIVE_E2E_GATE).as_deref() == Ok("1");
-    let byo_gate_on  = std::env::var(BYO_GATE).as_deref()      == Ok("1");
+    let byo_gate_on = std::env::var(BYO_GATE).as_deref() == Ok("1");
 
     if !(live_gate_on && byo_gate_on) {
         eprintln!(
@@ -153,7 +150,9 @@ fn smoke_mode() {
     smoke_bake_stage_inject_pipeline();
     eprintln!("[byo-e2e:smoke] §2 tampered-digest negative-path fixture");
     smoke_tampered_digest_pipeline();
-    eprintln!("[byo-e2e:smoke] §3 audit-event surface (VmImageResolved + OperatorImageDigestMismatch)");
+    eprintln!(
+        "[byo-e2e:smoke] §3 audit-event surface (VmImageResolved + OperatorImageDigestMismatch)"
+    );
     smoke_audit_event_surface();
     eprintln!("[byo-e2e:smoke] all wiring assertions pass");
 }
@@ -171,19 +170,23 @@ fn smoke_mode() {
 ///     validator expects.
 fn smoke_bake_stage_inject_pipeline() {
     let data_dir = tempfile::tempdir().expect("tempdir for data_dir");
-    let staging  = tempfile::tempdir().expect("tempdir for bake staging");
+    let staging = tempfile::tempdir().expect("tempdir for bake staging");
 
     // ── bake ─────────────────────────────────────────────────────
-    let baked = bake_byo_executor_image_synthetic(staging.path())
-        .expect("synthetic bake");
-    assert!(baked.oci_digest.starts_with("sha256:"),
-        "BYO bake must produce a sha256:-prefixed digest");
-    assert_eq!(baked.oci_digest.len(), "sha256:".len() + 64,
-        "BYO bake digest length wrong: {}", baked.oci_digest);
+    let baked = bake_byo_executor_image_synthetic(staging.path()).expect("synthetic bake");
+    assert!(
+        baked.oci_digest.starts_with("sha256:"),
+        "BYO bake must produce a sha256:-prefixed digest"
+    );
+    assert_eq!(
+        baked.oci_digest.len(),
+        "sha256:".len() + 64,
+        "BYO bake digest length wrong: {}",
+        baked.oci_digest
+    );
 
     // ── stage (clean) ────────────────────────────────────────────
-    let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, false)
-        .expect("stage clean");
+    let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, false).expect("stage clean");
     let staged_hash = format!("sha256:{}", sha256_of_file(&staged).unwrap());
     assert_eq!(
         staged_hash, baked.oci_digest,
@@ -203,18 +206,35 @@ fn smoke_bake_stage_inject_pipeline() {
     inject_byo_executor_image_in_policy(data_dir.path(), &baked.oci_digest);
 
     let body = std::fs::read_to_string(&policy_path).unwrap();
-    assert!(body.contains(&format!("name                     = \"{BYO_ALIAS}\"")),
-        "policy.toml missing [[vm_images]] alias `{BYO_ALIAS}`:\n---\n{body}");
-    assert!(body.contains(&format!("oci_digest               = \"{}\"", baked.oci_digest)),
-        "policy.toml missing oci_digest line for BYO image:\n---\n{body}");
-    assert!(body.contains("role_restriction         = [\"Executor\"]"),
-        "policy.toml [[vm_images]] missing role_restriction = [\"Executor\"]:\n---\n{body}");
-    assert!(body.contains(&format!("linux_kernel_version_min = \"{BYO_LINUX_KERNEL_MIN}\"")),
-        "policy.toml [[vm_images]] missing linux_kernel_version_min:\n---\n{body}");
-    assert!(body.contains(&format!("description              = \"{BYO_DESCRIPTION}\"")),
-        "policy.toml [[vm_images]] missing description:\n---\n{body}");
-    assert!(body.contains(&format!("alias = \"{BYO_ALIAS}\"")),
-        "policy.toml missing [default_executor_image] alias = \"{BYO_ALIAS}\":\n---\n{body}");
+    assert!(
+        body.contains(&format!("name                     = \"{BYO_ALIAS}\"")),
+        "policy.toml missing [[vm_images]] alias `{BYO_ALIAS}`:\n---\n{body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "oci_digest               = \"{}\"",
+            baked.oci_digest
+        )),
+        "policy.toml missing oci_digest line for BYO image:\n---\n{body}"
+    );
+    assert!(
+        body.contains("role_restriction         = [\"Executor\"]"),
+        "policy.toml [[vm_images]] missing role_restriction = [\"Executor\"]:\n---\n{body}"
+    );
+    assert!(
+        body.contains(&format!(
+            "linux_kernel_version_min = \"{BYO_LINUX_KERNEL_MIN}\""
+        )),
+        "policy.toml [[vm_images]] missing linux_kernel_version_min:\n---\n{body}"
+    );
+    assert!(
+        body.contains(&format!("description              = \"{BYO_DESCRIPTION}\"")),
+        "policy.toml [[vm_images]] missing description:\n---\n{body}"
+    );
+    assert!(
+        body.contains(&format!("alias = \"{BYO_ALIAS}\"")),
+        "policy.toml missing [default_executor_image] alias = \"{BYO_ALIAS}\":\n---\n{body}"
+    );
 }
 
 /// The negative-path fixture: tamper the staged rootfs (one byte
@@ -226,13 +246,12 @@ fn smoke_bake_stage_inject_pipeline() {
 /// the bytes; the live mode would assert the audit emit fires.
 fn smoke_tampered_digest_pipeline() {
     let data_dir = tempfile::tempdir().expect("tempdir for data_dir");
-    let staging  = tempfile::tempdir().expect("tempdir for bake staging");
-    let baked    = bake_byo_executor_image_synthetic(staging.path())
-        .expect("synthetic bake");
+    let staging = tempfile::tempdir().expect("tempdir for bake staging");
+    let baked = bake_byo_executor_image_synthetic(staging.path()).expect("synthetic bake");
 
     // Stage with tamper=true — write one-byte-different bytes.
-    let staged = stage_byo_image_in_oci_cache(data_dir.path(), &baked, true)
-        .expect("stage tampered");
+    let staged =
+        stage_byo_image_in_oci_cache(data_dir.path(), &baked, true).expect("stage tampered");
     let staged_hash = format!("sha256:{}", sha256_of_file(&staged).unwrap());
     assert_ne!(
         staged_hash, baked.oci_digest,
@@ -247,10 +266,15 @@ fn smoke_tampered_digest_pipeline() {
     // hashes the on-disk file, finds it doesn't match the
     // declared digest, emits OperatorImageDigestMismatch.
     let typo_digest = tampered_digest_one_hex_off(&baked.oci_digest);
-    assert_ne!(typo_digest, baked.oci_digest,
-        "tampered_digest_one_hex_off must actually change the digest");
-    assert_eq!(typo_digest.len(), baked.oci_digest.len(),
-        "tampered digest must preserve the sha256:<64-hex> shape");
+    assert_ne!(
+        typo_digest, baked.oci_digest,
+        "tampered_digest_one_hex_off must actually change the digest"
+    );
+    assert_eq!(
+        typo_digest.len(),
+        baked.oci_digest.len(),
+        "tampered digest must preserve the sha256:<64-hex> shape"
+    );
 }
 
 /// The kernel emits two new `AuditEventKind` variants for the BYO
@@ -264,20 +288,27 @@ fn smoke_audit_event_surface() {
     // dashboard does NOT route to the inbox (a 50-task initiative
     // would otherwise produce 50 inbox rows).
     let resolved = AuditEventKind::VmImageResolved {
-        session_id:    "00000000-0000-7000-8000-000000000001".to_owned(),
-        task_id:       Some("byo-task-001".to_owned()),
+        session_id: "00000000-0000-7000-8000-000000000001".to_owned(),
+        task_id: Some("byo-task-001".to_owned()),
         initiative_id: "00000000-0000-7000-8000-00000000000a".to_owned(),
-        alias:         BYO_ALIAS.to_owned(),
-        oci_digest:    "sha256:1111111111111111111111111111111111111111111111111111111111111111".to_owned(),
-        agent_role:    "Executor".to_owned(),
+        alias: BYO_ALIAS.to_owned(),
+        oci_digest: "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+            .to_owned(),
+        agent_role: "Executor".to_owned(),
     };
-    assert_eq!(resolved.as_str(), "VmImageResolved",
+    assert_eq!(
+        resolved.as_str(),
+        "VmImageResolved",
         "VmImageResolved::as_str MUST return the variant name verbatim — \
-         dashboards / forensics tools key on this string");
-    assert_eq!(notification_priority(&resolved), None,
+         dashboards / forensics tools key on this string"
+    );
+    assert_eq!(
+        notification_priority(&resolved),
+        None,
         "VmImageResolved is routine-lifecycle observability; the dashboard \
          MUST NOT surface it in the operator inbox (would flood at >1 task \
-         per initiative)");
+         per initiative)"
+    );
 
     // SecurityViolationDetected { violation_kind:
     // "OperatorImageDigestMismatch" } — the negative-path
@@ -290,8 +321,8 @@ fn smoke_audit_event_surface() {
     let mismatch = AuditEventKind::SecurityViolationDetected {
         violation_kind: "OperatorImageDigestMismatch".to_owned(),
         expected: Some("sha256:aaaa...".to_owned()),
-        actual:   Some("sha256:bbbb...".to_owned()),
-        path:     Some("/data/oci-cache/images/sha256/aa/...rootfs.img".to_owned()),
+        actual: Some("sha256:bbbb...".to_owned()),
+        path: Some("/data/oci-cache/images/sha256/aa/...rootfs.img".to_owned()),
     };
     assert_eq!(mismatch.as_str(), "SecurityViolationDetected");
     assert_eq!(
@@ -305,16 +336,18 @@ fn smoke_audit_event_surface() {
     // Pin the documented BYO constants so a typo in the helper
     // module cannot silently drift away from the spec / recipe /
     // operator-facing examples.
-    assert_eq!(BYO_ALIAS,                    "byo-executor-py312-node22");
-    assert_eq!(PINNED_PYTHON_MAJOR_MINOR,    "3.12");
-    assert_eq!(PINNED_NODE_MAJOR,            "22");
-    assert_eq!(BYO_LINUX_KERNEL_MIN,         "5.14");
+    assert_eq!(BYO_ALIAS, "byo-executor-py312-node22");
+    assert_eq!(PINNED_PYTHON_MAJOR_MINOR, "3.12");
+    assert_eq!(PINNED_NODE_MAJOR, "22");
+    assert_eq!(BYO_LINUX_KERNEL_MIN, "5.14");
 
     // The Containerfile lives in the workspace; sanity-check it's
     // there so a future cleanup that accidentally removes it does
     // not break the harness silently.
     let containerfile = workspace_root_from_manifest_dir()
-        .join("live-e2e").join("seed").join("byoi-executor")
+        .join("live-e2e")
+        .join("seed")
+        .join("byoi-executor")
         .join("Containerfile");
     assert!(
         containerfile.exists(),

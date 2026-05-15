@@ -51,13 +51,13 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge,
-    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
-    InitiativePlanView, InitiativeView, NotificationView, OperatorAuthResolution,
-    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView,
-    SessionView, StructuredOutputView, SubsystemDetailRow, SubsystemHealthCard,
-    SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff, WorktreeFile,
-    WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
+    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
+    InitiativeView, NotificationView, OperatorAuthResolution, PolicyAdvancement,
+    PolicyOperatorView, PolicySnapshotView, ReviewerVerdictView, SessionView, StructuredOutputView,
+    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
+    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
+    WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
@@ -167,16 +167,14 @@ pub trait PolicyAdvancer: Send + Sync + 'static {
 /// (`kernel/src/dashboard_glue::KernelPolicyAdvancer`).
 pub struct ClosurePolicyAdvancer<F>
 where
-    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
-        + Send + Sync + 'static,
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError> + Send + Sync + 'static,
 {
     inner: F,
 }
 
 impl<F> ClosurePolicyAdvancer<F>
 where
-    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
-        + Send + Sync + 'static,
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError> + Send + Sync + 'static,
 {
     /// Wrap a closure into a `PolicyAdvancer`.
     pub fn new(f: F) -> Self {
@@ -186,8 +184,7 @@ where
 
 impl<F> PolicyAdvancer for ClosurePolicyAdvancer<F>
 where
-    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError>
-        + Send + Sync + 'static,
+    F: Fn(&[u8], &[u8], &str) -> Result<AdvanceResult, AdvanceError> + Send + Sync + 'static,
 {
     fn advance(
         &self,
@@ -306,10 +303,7 @@ impl KernelDashboardData {
         booted_at: u64,
     ) -> std::io::Result<Self> {
         let audit_dir = data_dir.join("audit");
-        let stream_capture = SessionStreamCapture::new(
-            &data_dir,
-            CaptureConfig::default(),
-        )?;
+        let stream_capture = SessionStreamCapture::new(&data_dir, CaptureConfig::default())?;
         Ok(Self {
             policy,
             data_dir,
@@ -357,10 +351,7 @@ impl KernelDashboardData {
     /// Wire the per-task raw-LLM-turn capture (`task_llm_capture.rs`).
     /// Builder-style: returns `Self` so the kernel main can
     /// chain the call onto `with_capture(...).with_task_llm_capture(...)`.
-    pub fn with_task_llm_capture(
-        mut self,
-        capture: Arc<TaskLlmCapture>,
-    ) -> Self {
+    pub fn with_task_llm_capture(mut self, capture: Arc<TaskLlmCapture>) -> Self {
         self.task_llm_capture = Some(capture);
         self
     }
@@ -373,10 +364,7 @@ impl KernelDashboardData {
     ///
     /// Builder-style: returns `Self` so the kernel main can
     /// chain the call onto a `KernelDashboardData::with_capture(...)`.
-    pub fn with_audit_sink(
-        mut self,
-        sink: Arc<dyn raxis_audit_tools::AuditSink>,
-    ) -> Self {
+    pub fn with_audit_sink(mut self, sink: Arc<dyn raxis_audit_tools::AuditSink>) -> Self {
         self.audit_sink = Some(sink);
         self
     }
@@ -443,22 +431,21 @@ impl DashboardData for KernelDashboardData {
     fn health(&self) -> HealthSnapshot {
         let bundle = self.policy.load_full();
         let policy_epoch = bundle.epoch();
-        let (active_initiatives, active_sessions, pending_escalations) =
-            match self.open_ro() {
-                Ok(conn) => {
-                    let inits = raxis_store::views::initiatives::counts_by_state(&conn)
-                        .map(|c| (c.draft + c.approved_plan + c.executing + c.blocked) as u32)
-                        .unwrap_or(0);
-                    let sess = raxis_store::views::sessions::active_counts(&conn)
-                        .map(|c| c.active as u32)
-                        .unwrap_or(0);
-                    let esc = raxis_store::views::escalations::pending_count(&conn)
-                        .map(|n| n as u32)
-                        .unwrap_or(0);
-                    (inits, sess, esc)
-                }
-                Err(_) => (0, 0, 0),
-            };
+        let (active_initiatives, active_sessions, pending_escalations) = match self.open_ro() {
+            Ok(conn) => {
+                let inits = raxis_store::views::initiatives::counts_by_state(&conn)
+                    .map(|c| (c.draft + c.approved_plan + c.executing + c.blocked) as u32)
+                    .unwrap_or(0);
+                let sess = raxis_store::views::sessions::active_counts(&conn)
+                    .map(|c| c.active as u32)
+                    .unwrap_or(0);
+                let esc = raxis_store::views::escalations::pending_count(&conn)
+                    .map(|n| n as u32)
+                    .unwrap_or(0);
+                (inits, sess, esc)
+            }
+            Err(_) => (0, 0, 0),
+        };
         // Coarse status:
         //   - chain readable + store readable + policy loaded ⇒ "ok"
         //   - any one absent ⇒ "degraded"
@@ -481,10 +468,7 @@ impl DashboardData for KernelDashboardData {
             Ok(r) => checks.push(HealthCheck {
                 id: "audit_chain".into(),
                 status: "ok".into(),
-                message: format!(
-                    "{} segment(s) discovered",
-                    r.segment_count()
-                ),
+                message: format!("{} segment(s) discovered", r.segment_count()),
             }),
             Err(e) => checks.push(HealthCheck {
                 id: "audit_chain".into(),
@@ -560,8 +544,7 @@ impl DashboardData for KernelDashboardData {
                     "audit_writer" => {
                         let s = if chain_ok { "ok" } else { "failing" };
                         let summary = if chain_ok {
-                            "Audit segments readable; chain reader opens cleanly."
-                                .to_owned()
+                            "Audit segments readable; chain reader opens cleanly.".to_owned()
                         } else {
                             "Chain reader could not open audit directory.".to_owned()
                         };
@@ -586,32 +569,28 @@ impl DashboardData for KernelDashboardData {
                     ),
                     "egress_admission" => (
                         if store_ok { "ok" } else { "unknown" },
-                        "Egress-admission decisions surfaced via audit chain."
-                            .to_owned(),
+                        "Egress-admission decisions surfaced via audit chain.".to_owned(),
                         vec![],
                         if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("egress"),
                     ),
                     "session_spawn_pool" => (
                         if store_ok { "ok" } else { "unknown" },
-                        "Session spawn / lifecycle visible through sessions view."
-                            .to_owned(),
+                        "Session spawn / lifecycle visible through sessions view.".to_owned(),
                         vec![],
                         if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("sessions"),
                     ),
                     "planner_registry" => (
                         if store_ok { "ok" } else { "unknown" },
-                        "Planner registry health derives from planner-core."
-                            .to_owned(),
+                        "Planner registry health derives from planner-core.".to_owned(),
                         vec![],
                         if store_ok { now_s } else { 0 },
                         grafana_dashboard_url("planner"),
                     ),
                     "observability_pusher" => (
                         "unknown",
-                        "Observability stack signal not yet wired into dashboard."
-                            .to_owned(),
+                        "Observability stack signal not yet wired into dashboard.".to_owned(),
                         vec![],
                         0,
                         grafana_dashboard_url("observability"),
@@ -625,8 +604,7 @@ impl DashboardData for KernelDashboardData {
                     ),
                     "dashboard_sse_pump" => (
                         "ok",
-                        "SSE pump active — this request was served by it."
-                            .to_owned(),
+                        "SSE pump active — this request was served by it.".to_owned(),
                         vec![],
                         now_s,
                         None,
@@ -648,15 +626,13 @@ impl DashboardData for KernelDashboardData {
                 // (`INV-DASHBOARD-FAILURE-VISIBILITY-01`). Healthy /
                 // unknown cards keep `last_error = None`.
                 let last_error = match status {
-                    "failing" | "degraded" if !summary.is_empty() => {
-                        Some(summary.clone())
-                    }
+                    "failing" | "degraded" if !summary.is_empty() => Some(summary.clone()),
                     _ => None,
                 };
                 SubsystemHealthCard {
-                    id:               (*id).to_owned(),
-                    label:            (*label).to_owned(),
-                    status:           status.to_owned(),
+                    id: (*id).to_owned(),
+                    label: (*label).to_owned(),
+                    status: status.to_owned(),
                     summary,
                     details,
                     grafana_url,
@@ -692,38 +668,37 @@ impl DashboardData for KernelDashboardData {
         state_filter: Option<&str>,
     ) -> Result<Vec<InitiativeListEntry>, ApiError> {
         let conn = self.open_ro()?;
-        let rows = raxis_store::views::initiatives::list(
-            &conn,
-            state_filter,
-            limit.min(200) as usize,
-        )
-        .map_err(|e| ApiError::Internal { log_only: format!("initiatives::list: {e}") })?;
+        let rows =
+            raxis_store::views::initiatives::list(&conn, state_filter, limit.min(200) as usize)
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("initiatives::list: {e}"),
+                })?;
         // Per-initiative task counts (one extra read per row — bounded
         // by `limit` so worst-case is 200 lookups).
         let mut out = Vec::with_capacity(rows.len());
         for r in rows {
-            let tasks = raxis_store::views::tasks::list_by_initiative(
-                &conn,
-                &r.initiative_id,
-                500,
-            )
-            .map_err(|e| ApiError::Internal { log_only: format!("tasks::list_by_initiative: {e}") })?;
+            let tasks = raxis_store::views::tasks::list_by_initiative(&conn, &r.initiative_id, 500)
+                .map_err(|e| ApiError::Internal {
+                    log_only: format!("tasks::list_by_initiative: {e}"),
+                })?;
             let task_count = tasks.len() as u32;
             let completed_tasks = tasks.iter().filter(|t| t.state == "Completed").count() as u32;
             let failed_tasks = tasks.iter().filter(|t| t.state == "Failed").count() as u32;
-            let updated_at = tasks.iter().map(|t| t.transitioned_at).max().unwrap_or(r.created_at);
+            let updated_at = tasks
+                .iter()
+                .map(|t| t.transitioned_at)
+                .max()
+                .unwrap_or(r.created_at);
             // `initiatives` table has no `display_name` column —
             // the operator-visible title lives in
             // `[plan.initiative].title` inside the plan TOML
             // (`02-first-initiative.md §"Define the plan"`). Fall
             // back to `initiative_id` so the list view never
             // renders an invisible <Link> row.
-            let title = raxis_store::views::plan_fields::reveal_initiative_meta(
-                &conn,
-                &r.initiative_id,
-            )
-            .map(|m| m.title)
-            .unwrap_or_default();
+            let title =
+                raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &r.initiative_id)
+                    .map(|m| m.title)
+                    .unwrap_or_default();
             let display_name = if title.is_empty() {
                 r.initiative_id.clone()
             } else {
@@ -746,15 +721,27 @@ impl DashboardData for KernelDashboardData {
     fn get_initiative(&self, id: &str) -> Result<InitiativeView, ApiError> {
         let conn = self.open_ro()?;
         let row = raxis_store::views::initiatives::by_id(&conn, id)
-            .map_err(|e| ApiError::Internal { log_only: format!("initiatives::by_id: {e}") })?
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("initiatives::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
         let bundle = self.policy.load_full();
-        let task_rows = raxis_store::views::tasks::list_by_initiative(&conn, id, 500)
-            .map_err(|e| ApiError::Internal { log_only: format!("tasks::list_by_initiative: {e}") })?;
+        let task_rows =
+            raxis_store::views::tasks::list_by_initiative(&conn, id, 500).map_err(|e| {
+                ApiError::Internal {
+                    log_only: format!("tasks::list_by_initiative: {e}"),
+                }
+            })?;
         let task_count = task_rows.len() as u32;
         let completed_tasks = task_rows.iter().filter(|t| t.state == "Completed").count() as u32;
         let failed_tasks = task_rows.iter().filter(|t| t.state == "Failed").count() as u32;
-        let updated_at = task_rows.iter().map(|t| t.transitioned_at).max().unwrap_or(row.created_at);
+        let updated_at = task_rows
+            .iter()
+            .map(|t| t.transitioned_at)
+            .max()
+            .unwrap_or(row.created_at);
         let mut tasks = Vec::with_capacity(task_rows.len());
         let mut edges: Vec<DagEdge> = Vec::new();
         for t in &task_rows {
@@ -773,12 +760,10 @@ impl DashboardData for KernelDashboardData {
             }
             tasks.push(task_row_to_view(&conn, t));
         }
-        let title = raxis_store::views::plan_fields::reveal_initiative_meta(
-            &conn,
-            &row.initiative_id,
-        )
-        .map(|m| m.title)
-        .unwrap_or_default();
+        let title =
+            raxis_store::views::plan_fields::reveal_initiative_meta(&conn, &row.initiative_id)
+                .map(|m| m.title)
+                .unwrap_or_default();
         let display_name = if title.is_empty() {
             row.initiative_id.clone()
         } else {
@@ -816,7 +801,9 @@ impl DashboardData for KernelDashboardData {
     fn list_tasks(&self, initiative_id: &str) -> Result<Vec<TaskView>, ApiError> {
         let conn = self.open_ro()?;
         let rows = raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
-            .map_err(|e| ApiError::Internal { log_only: format!("tasks::list_by_initiative: {e}") })?;
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("tasks::list_by_initiative: {e}"),
+            })?;
         Ok(rows.iter().map(|t| task_row_to_view(&conn, t)).collect())
     }
 
@@ -837,16 +824,18 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("initiatives::by_id: {e}"),
             })?
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
 
         // Step 2 — original submitted TOML (V1 + V2.1 fallback).
-        let raw = raxis_store::views::plan_fields::submitted_toml_for_initiative(
-            &conn, id,
-        )
-        .map_err(|e| ApiError::Internal {
-            log_only: format!("plan_fields::submitted_toml_for_initiative: {e}"),
-        })?
-        .ok_or(ApiError::Gone { kind: "plan".into() })?;
+        let raw = raxis_store::views::plan_fields::submitted_toml_for_initiative(&conn, id)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("plan_fields::submitted_toml_for_initiative: {e}"),
+            })?
+            .ok_or(ApiError::Gone {
+                kind: "plan".into(),
+            })?;
 
         // The DDL pins both `signed_plan_artifacts.plan_bytes` and
         // `plan_bundle_artifacts.artifact_bytes` to BLOB; every
@@ -854,9 +843,7 @@ impl DashboardData for KernelDashboardData {
         // A non-UTF-8 row is a kernel bug — surface it as a
         // structured 500 rather than corrupt the wire body.
         let toml_string = String::from_utf8(raw).map_err(|e| ApiError::Internal {
-            log_only: format!(
-                "plan TOML for initiative {id} is not valid UTF-8: {e}",
-            ),
+            log_only: format!("plan TOML for initiative {id} is not valid UTF-8: {e}",),
         })?;
         let toml_len = toml_string.len() as u64;
 
@@ -896,8 +883,7 @@ impl DashboardData for KernelDashboardData {
             )
             .map_err(|e| ApiError::Internal {
                 log_only: format!("signed_plan_artifacts::header_by_initiative: {e}"),
-            })?
-            {
+            })? {
                 submitted_at_unix = header.stored_at;
                 submitted_by = header.signed_by_fingerprint;
             }
@@ -918,27 +904,31 @@ impl DashboardData for KernelDashboardData {
         .to_owned();
 
         Ok(InitiativePlanView {
-            initiative_id:        init_row.initiative_id,
-            plan_sha256:          if init_row.plan_artifact_sha256.is_empty() {
+            initiative_id: init_row.initiative_id,
+            plan_sha256: if init_row.plan_artifact_sha256.is_empty() {
                 None
             } else {
                 Some(init_row.plan_artifact_sha256)
             },
-            bundle_sha256:        bundle_sha256_hex,
-            submitted_toml:       toml_string,
+            bundle_sha256: bundle_sha256_hex,
+            submitted_toml: toml_string,
             submitted_toml_bytes: toml_len,
             submitted_at_unix,
             submitted_by,
             approval_status,
-            approved_at_unix:     init_row.approved_at.map(|v| v as i64),
+            approved_at_unix: init_row.approved_at.map(|v| v as i64),
         })
     }
 
     fn get_task(&self, task_id: &str) -> Result<TaskView, ApiError> {
         let conn = self.open_ro()?;
         let row = raxis_store::views::tasks::by_id(&conn, task_id)
-            .map_err(|e| ApiError::Internal { log_only: format!("tasks::by_id: {e}") })?
-            .ok_or(ApiError::NotFound { kind: "task".into() })?;
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("tasks::by_id: {e}"),
+            })?
+            .ok_or(ApiError::NotFound {
+                kind: "task".into(),
+            })?;
         Ok(task_row_to_view(&conn, &row))
     }
 
@@ -955,9 +945,9 @@ impl DashboardData for KernelDashboardData {
         task_id: &str,
         n: u32,
     ) -> Result<Vec<raxis_dashboard::data::TaskLlmTurnView>, ApiError> {
-        let cap = self.task_llm_capture.as_ref().ok_or(
-            ApiError::NotFound { kind: "task_llm_turns".into() },
-        )?;
+        let cap = self.task_llm_capture.as_ref().ok_or(ApiError::NotFound {
+            kind: "task_llm_turns".into(),
+        })?;
         let n = (n.min(500)) as usize;
         let records = cap.tail(task_id, n);
         Ok(records.into_iter().map(record_to_view).collect())
@@ -981,21 +971,17 @@ impl DashboardData for KernelDashboardData {
         // itself does not carry an initiative FK — tasks own
         // the link — so this is the only consistent way to
         // narrow without a schema change.
-        let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
-            None => None,
-            Some(i) => {
-                let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
-                    .map_err(|e| ApiError::Internal {
-                        log_only: format!("tasks::list_by_initiative: {e}"),
-                    })?;
-                Some(
-                    tasks
-                        .into_iter()
-                        .filter_map(|t| t.session_id)
-                        .collect(),
-                )
-            }
-        };
+        let allowed: Option<std::collections::HashSet<String>> =
+            match initiative_id {
+                None => None,
+                Some(i) => {
+                    let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
+                        .map_err(|e| ApiError::Internal {
+                            log_only: format!("tasks::list_by_initiative: {e}"),
+                        })?;
+                    Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
+                }
+            };
         Ok(rows
             .into_iter()
             .filter(|s| match &allowed {
@@ -1053,7 +1039,9 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("sessions::by_id: {e}"),
             })?
-            .ok_or(ApiError::NotFound { kind: "session".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "session".into(),
+            })?;
         let state = session_row_state(&s);
         Ok(SessionView {
             session_id: s.session_id,
@@ -1086,7 +1074,9 @@ impl DashboardData for KernelDashboardData {
             raxis_store::views::escalations::EscalationStatusFilter::Pending,
             200,
         )
-        .map_err(|e| ApiError::Internal { log_only: format!("escalations::list: {e}") })?;
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("escalations::list: {e}"),
+        })?;
         Ok(rows
             .into_iter()
             .map(|e| EscalationView {
@@ -1108,7 +1098,9 @@ impl DashboardData for KernelDashboardData {
             raxis_store::views::escalations::EscalationStatusFilter::All,
             500,
         )
-        .map_err(|e| ApiError::Internal { log_only: format!("escalations::list: {e}") })?;
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("escalations::list: {e}"),
+        })?;
         rows.into_iter()
             .find(|e| e.escalation_id == id)
             .map(|e| EscalationView {
@@ -1120,7 +1112,9 @@ impl DashboardData for KernelDashboardData {
                 action_required: e.class,
                 created_at: e.created_at,
             })
-            .ok_or(ApiError::NotFound { kind: "escalation".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "escalation".into(),
+            })
     }
 
     fn list_audit(
@@ -1224,10 +1218,7 @@ impl DashboardData for KernelDashboardData {
         Ok(matched)
     }
 
-    fn audit_chain_status(
-        &self,
-        reverify: bool,
-    ) -> Result<(bool, ChainStatusView), ApiError> {
+    fn audit_chain_status(&self, reverify: bool) -> Result<(bool, ChainStatusView), ApiError> {
         // Cache discipline (INV-AUDIT-DASHBOARD-01): full
         // verifies are expensive (the walker scans every JSONL
         // segment end-to-end), and a chatty UI mounted on a
@@ -1251,22 +1242,22 @@ impl DashboardData for KernelDashboardData {
         // truth for chain integrity.
         let view = match raxis_audit_tools::verify_chain_from(&self.audit_dir, 0) {
             Ok(stats) => ChainStatusView {
-                status:            "ok".into(),
+                status: "ok".into(),
                 last_verified_seq: stats.last_seq,
-                total_records:     stats.total_records,
-                segment_count:     stats.segment_count as u64,
-                verified_at_ms:    now_ms,
-                last_error:        None,
+                total_records: stats.total_records,
+                segment_count: stats.segment_count as u64,
+                verified_at_ms: now_ms,
+                last_error: None,
             },
             Err(e) => {
                 let (seq, msg) = describe_chain_error(&e);
                 ChainStatusView {
-                    status:            "broken".into(),
+                    status: "broken".into(),
                     last_verified_seq: seq,
-                    total_records:     0,
-                    segment_count:     0,
-                    verified_at_ms:    now_ms,
-                    last_error:        Some(msg),
+                    total_records: 0,
+                    segment_count: 0,
+                    verified_at_ms: now_ms,
+                    last_error: Some(msg),
                 }
             }
         };
@@ -1285,8 +1276,8 @@ impl DashboardData for KernelDashboardData {
         if let Ok(conn) = self.open_ro() {
             if let Ok(rows) = raxis_store::views::notifications::list_unread(&conn, 100) {
                 for r in rows {
-                    let payload = serde_json::from_str(&r.payload_json)
-                        .unwrap_or(serde_json::json!({}));
+                    let payload =
+                        serde_json::from_str(&r.payload_json).unwrap_or(serde_json::json!({}));
                     inbox.push(AuditEntryView {
                         seq: 0,
                         event_id: r.notification_id,
@@ -1357,8 +1348,9 @@ impl DashboardData for KernelDashboardData {
     }
 
     fn policy_toml_bytes(&self) -> Result<String, ApiError> {
-        std::fs::read_to_string(&self.policy_path)
-            .map_err(|e| ApiError::Internal { log_only: format!("policy.toml read: {e}") })
+        std::fs::read_to_string(&self.policy_path).map_err(|e| ApiError::Internal {
+            log_only: format!("policy.toml read: {e}"),
+        })
     }
 
     fn list_worktrees(&self) -> Result<Vec<WorktreeListEntry>, ApiError> {
@@ -1370,7 +1362,9 @@ impl DashboardData for KernelDashboardData {
         let resolved = self.resolve_worktree(name)?;
         let path = std::path::PathBuf::from(&resolved.summary.path);
         if !path.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         let head_sha = git::head_sha(&path);
         let branch = git::branch(&path);
@@ -1391,35 +1385,35 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
-    fn worktree_log(
-        &self,
-        name: &str,
-        limit: u32,
-    ) -> Result<Vec<WorktreeLogEntry>, ApiError> {
+    fn worktree_log(&self, name: &str, limit: u32) -> Result<Vec<WorktreeLogEntry>, ApiError> {
         let resolved = self.resolve_worktree(name)?;
         let path = std::path::PathBuf::from(&resolved.summary.path);
         if !path.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         git::log_entries(&path, limit.clamp(1, 200)).map_err(map_git_error_to_api)
     }
 
-    fn worktree_diff_default(
-        &self,
-        name: &str,
-    ) -> Result<WorktreeDiff, ApiError> {
+    fn worktree_diff_default(&self, name: &str) -> Result<WorktreeDiff, ApiError> {
         let resolved = self.resolve_worktree(name)?;
         let path = std::path::PathBuf::from(&resolved.summary.path);
         if !path.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         let from = resolved
             .summary
             .base_sha
             .clone()
-            .ok_or(ApiError::NotFound { kind: "default-diff".into() })?;
-        let to = git::head_sha(&path)
-            .ok_or(ApiError::NotFound { kind: "head-sha".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "default-diff".into(),
+            })?;
+        let to = git::head_sha(&path).ok_or(ApiError::NotFound {
+            kind: "head-sha".into(),
+        })?;
         let files = git::diff_files(&path, &from, &to).map_err(map_git_error_to_api)?;
         Ok(WorktreeDiff {
             name: resolved.summary.name,
@@ -1438,7 +1432,9 @@ impl DashboardData for KernelDashboardData {
         let resolved = self.resolve_worktree(name)?;
         let path = std::path::PathBuf::from(&resolved.summary.path);
         if !path.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         let files = git::diff_files(&path, from_sha, to_sha).map_err(map_git_error_to_api)?;
         Ok(WorktreeDiff {
@@ -1449,15 +1445,13 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
-    fn worktree_tree(
-        &self,
-        name: &str,
-        sub_path: Option<&str>,
-    ) -> Result<WorktreeTree, ApiError> {
+    fn worktree_tree(&self, name: &str, sub_path: Option<&str>) -> Result<WorktreeTree, ApiError> {
         let resolved = self.resolve_worktree(name)?;
         let root = std::path::PathBuf::from(&resolved.summary.path);
         if !root.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         let target = resolve_within_root(&root, sub_path.unwrap_or(""))?;
         let meta = std::fs::metadata(&target).map_err(|_| ApiError::NotFound {
@@ -1526,9 +1520,11 @@ impl DashboardData for KernelDashboardData {
         entries.sort_by(|a, b| {
             let dir_a = a.kind == "dir";
             let dir_b = b.kind == "dir";
-            dir_b
-                .cmp(&dir_a)
-                .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
+            dir_b.cmp(&dir_a).then_with(|| {
+                a.name
+                    .to_ascii_lowercase()
+                    .cmp(&b.name.to_ascii_lowercase())
+            })
         });
         Ok(WorktreeTree {
             name: resolved.summary.name,
@@ -1538,15 +1534,13 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
-    fn worktree_file(
-        &self,
-        name: &str,
-        file_path: &str,
-    ) -> Result<WorktreeFile, ApiError> {
+    fn worktree_file(&self, name: &str, file_path: &str) -> Result<WorktreeFile, ApiError> {
         let resolved = self.resolve_worktree(name)?;
         let root = std::path::PathBuf::from(&resolved.summary.path);
         if !root.exists() {
-            return Err(ApiError::NotFound { kind: "worktree-path".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree-path".into(),
+            });
         }
         let target = resolve_within_root(&root, file_path)?;
         // Refuse symlinks outright (do not follow). Defends
@@ -1606,18 +1600,11 @@ impl DashboardData for KernelDashboardData {
         })
     }
 
-    fn stream_tail(
-        &self,
-        session_id: &str,
-        n: usize,
-    ) -> Result<Vec<StreamEvent>, ApiError> {
+    fn stream_tail(&self, session_id: &str, n: usize) -> Result<Vec<StreamEvent>, ApiError> {
         Ok(self.stream_capture.tail(session_id, n))
     }
 
-    fn stream_subscribe(
-        &self,
-        session_id: &str,
-    ) -> Result<StreamSubscription, ApiError> {
+    fn stream_subscribe(&self, session_id: &str) -> Result<StreamSubscription, ApiError> {
         // Lazily allocate the session state so a subscriber
         // that connects before the first append still attaches
         // to a real broadcast channel (events that arrive after
@@ -1629,7 +1616,9 @@ impl DashboardData for KernelDashboardData {
             })?;
         self.stream_capture
             .subscribe(session_id)
-            .ok_or(ApiError::NotFound { kind: "stream".into() })
+            .ok_or(ApiError::NotFound {
+                kind: "stream".into(),
+            })
     }
 
     fn update_policy_toml(
@@ -1695,8 +1684,8 @@ impl DashboardData for KernelDashboardData {
         Ok(rows
             .into_iter()
             .map(|r| {
-                let payload = serde_json::from_str(&r.payload_json)
-                    .unwrap_or(serde_json::json!({}));
+                let payload =
+                    serde_json::from_str(&r.payload_json).unwrap_or(serde_json::json!({}));
                 // INV-NOTIF-SCOPE-01 — project the canonical
                 // `notification_priority` taxonomy onto every row
                 // so the dashboard FE can group + filter without
@@ -1709,10 +1698,9 @@ impl DashboardData for KernelDashboardData {
                 // INV-NOTIF-SCOPE-01 — qualified path so the
                 // pub-use re-export stays the canonical entry
                 // point for downstream callers.
-                let priority = notification_filter::notification_priority_for_kind_str(
-                    &r.event_kind,
-                )
-                .map(|p| p.as_str().to_string());
+                let priority =
+                    notification_filter::notification_priority_for_kind_str(&r.event_kind)
+                        .map(|p| p.as_str().to_string());
                 NotificationView {
                     notification_id: r.notification_id,
                     event_kind: r.event_kind,
@@ -1732,10 +1720,8 @@ impl DashboardData for KernelDashboardData {
 
     fn notification_count_unread(&self) -> Result<u64, ApiError> {
         let conn = self.open_ro()?;
-        raxis_store::views::notifications::unread_count(&conn).map_err(|e| {
-            ApiError::Internal {
-                log_only: format!("notification unread count: {e}"),
-            }
+        raxis_store::views::notifications::unread_count(&conn).map_err(|e| ApiError::Internal {
+            log_only: format!("notification unread count: {e}"),
         })
     }
 
@@ -1746,8 +1732,7 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("mark_notification_read BEGIN: {e}"),
             })?;
-        let result =
-            raxis_store::views::notifications::mark_read(&guard, notification_id);
+        let result = raxis_store::views::notifications::mark_read(&guard, notification_id);
         match result {
             Ok(updated) => {
                 guard
@@ -1805,19 +1790,22 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("initiatives::by_id: {e}"),
             })?
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
         // Step 2: enumerate task ids for the initiative.
-        let task_rows =
-            raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
-                .map_err(|e| ApiError::Internal {
-                    log_only: format!("tasks::list_by_initiative: {e}"),
-                })?;
+        let task_rows = raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("tasks::list_by_initiative: {e}"),
+            })?;
         // Step 3: union credential decls across every task,
         // dedup by name (the same credential may be bound by
         // multiple tasks; the dashboard listing surface shows
         // each unique credential once).
-        let mut seen: std::collections::BTreeMap<String, raxis_plan_credentials::TaskCredentialDecl> =
-            std::collections::BTreeMap::new();
+        let mut seen: std::collections::BTreeMap<
+            String,
+            raxis_plan_credentials::TaskCredentialDecl,
+        > = std::collections::BTreeMap::new();
         for t in &task_rows {
             let decls = read_task_credential_proxies_via_dashboard_glue(&conn, &t.task_id)?;
             for d in decls {
@@ -1846,23 +1834,29 @@ impl DashboardData for KernelDashboardData {
             .map_err(|e| ApiError::Internal {
                 log_only: format!("initiatives::by_id: {e}"),
             })?
-            .ok_or(ApiError::NotFound { kind: "initiative".into() })?;
-        let task_rows =
-            raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
-                .map_err(|e| ApiError::Internal {
-                    log_only: format!("tasks::list_by_initiative: {e}"),
-                })?;
+            .ok_or(ApiError::NotFound {
+                kind: "initiative".into(),
+            })?;
+        let task_rows = raxis_store::views::tasks::list_by_initiative(&conn, initiative_id, 500)
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("tasks::list_by_initiative: {e}"),
+            })?;
         // Walk every task once; first match wins. We do not need
         // to dedup here because a found-decl is enough.
         let mut found: Option<raxis_plan_credentials::TaskCredentialDecl> = None;
         for t in &task_rows {
             let decls = read_task_credential_proxies_via_dashboard_glue(&conn, &t.task_id)?;
-            if let Some(d) = decls.into_iter().find(|d| d.name.as_str() == credential_name) {
+            if let Some(d) = decls
+                .into_iter()
+                .find(|d| d.name.as_str() == credential_name)
+            {
                 found = Some(d);
                 break;
             }
         }
-        let decl = found.ok_or(ApiError::NotFound { kind: "credential".into() })?;
+        let decl = found.ok_or(ApiError::NotFound {
+            kind: "credential".into(),
+        })?;
         // Drop the conn before the (potentially blocking) read.
         drop(conn);
         let reveal = read_credential_bytes(
@@ -1887,19 +1881,14 @@ impl DashboardData for KernelDashboardData {
         // current system-credential set is provider-only; future
         // system credentials will bring their own prefix.
         if !credential_name.starts_with("providers.") {
-            return Err(ApiError::NotFound { kind: "system-credential".into() });
+            return Err(ApiError::NotFound {
+                kind: "system-credential".into(),
+            });
         }
-        read_credential_bytes(
-            &self.data_dir,
-            credential_name,
-            REVEAL_AUTOHIDE_SYSTEM_SECS,
-        )
+        read_credential_bytes(&self.data_dir, credential_name, REVEAL_AUTOHIDE_SYSTEM_SECS)
     }
 
-    fn enforce_reveal_rate_limit(
-        &self,
-        operator_fingerprint: &str,
-    ) -> Result<(), ApiError> {
+    fn enforce_reveal_rate_limit(&self, operator_fingerprint: &str) -> Result<(), ApiError> {
         let mut g = self.reveal_rate_limit.lock();
         let now = std::time::Instant::now();
         let window = REVEAL_RATE_LIMIT_WINDOW;
@@ -1949,8 +1938,7 @@ impl DashboardData for KernelDashboardData {
         // require them, but when present they let the chain
         // walker associate the audit row with an existing
         // session/task surface in the dashboard.
-        let (session_id, task_id, initiative_id) =
-            correlation_fields_for_operator_event(&event);
+        let (session_id, task_id, initiative_id) = correlation_fields_for_operator_event(&event);
         sink.emit(
             event,
             session_id.as_deref(),
@@ -2018,18 +2006,21 @@ fn correlation_fields_for_operator_event(
         | K::OperatorViewedPlanToml { initiative_id, .. } => {
             (None, None, Some(initiative_id.clone()))
         }
-        K::OperatorViewedTask { task_id, .. }
-        | K::OperatorViewedTaskOutputs { task_id, .. } => {
+        K::OperatorViewedTask { task_id, .. } | K::OperatorViewedTaskOutputs { task_id, .. } => {
             (None, Some(task_id.clone()), None)
         }
         K::OperatorViewedSession { session_id, .. }
         | K::OperatorOpenedSessionStream { session_id, .. } => {
             (Some(session_id.clone()), None, None)
         }
-        K::OperatorViewedAuditChain { initiative_id_filter, .. }
-        | K::OperatorViewedSessionList { initiative_id_filter, .. } => {
-            (None, None, initiative_id_filter.clone())
+        K::OperatorViewedAuditChain {
+            initiative_id_filter,
+            ..
         }
+        | K::OperatorViewedSessionList {
+            initiative_id_filter,
+            ..
+        } => (None, None, initiative_id_filter.clone()),
         K::OperatorDiffViewed { .. }
         | K::OperatorFileContentFetched { .. }
         | K::OperatorNotificationMarkedRead { .. }
@@ -2157,21 +2148,17 @@ fn project_credential_metadata(
         ProxyDecl::Unknown => "unknown",
     };
     let format_hint = match &decl.proxy {
-        ProxyDecl::Postgres { .. } => {
-            "libpq URL (postgresql://user:pass@host:port/db)".to_owned()
-        }
+        ProxyDecl::Postgres { .. } => "libpq URL (postgresql://user:pass@host:port/db)".to_owned(),
         ProxyDecl::Mysql { .. } => "MySQL URL (mysql://user:pass@host:port/db)".to_owned(),
         ProxyDecl::Mssql { .. } => "MSSQL URL (mssql://user:pass@host:port/db)".to_owned(),
-        ProxyDecl::Mongodb { .. } => {
-            "MongoDB URI (mongodb://user:pass@host:port/db)".to_owned()
-        }
+        ProxyDecl::Mongodb { .. } => "MongoDB URI (mongodb://user:pass@host:port/db)".to_owned(),
         ProxyDecl::Redis { .. } => "Redis password (single-line plaintext)".to_owned(),
         ProxyDecl::Smtp { .. } => "SMTP relay password (raw bytes)".to_owned(),
-        ProxyDecl::Http { .. } => {
-            "HTTP credential (Bearer token / Basic password)".to_owned()
-        }
+        ProxyDecl::Http { .. } => "HTTP credential (Bearer token / Basic password)".to_owned(),
         ProxyDecl::K8s { .. } => "Kubeconfig YAML".to_owned(),
-        ProxyDecl::Aws { .. } => "AWS access-key TOML (access_key_id + secret_access_key)".to_owned(),
+        ProxyDecl::Aws { .. } => {
+            "AWS access-key TOML (access_key_id + secret_access_key)".to_owned()
+        }
         ProxyDecl::Gcp { .. } => "GCP service-account JSON".to_owned(),
         ProxyDecl::Azure { .. } => {
             "Azure service-principal TOML (client_id + client_secret)".to_owned()
@@ -2179,10 +2166,7 @@ fn project_credential_metadata(
         ProxyDecl::Unknown => "(unknown proxy type — see plan TOML)".to_owned(),
     };
     let upstream_host_port = upstream_host_port_for_decl(&decl.proxy);
-    let path = raxis_credentials_file::credential_file_path(
-        data_dir,
-        &decl.name,
-    );
+    let path = raxis_credentials_file::credential_file_path(data_dir, &decl.name);
     let (byte_size, sha256_prefix) = stat_credential_bytes(&path);
     CredentialMetadata {
         name,
@@ -2202,13 +2186,15 @@ fn project_credential_metadata(
 /// proxy variant. Variants with no upstream concept (k8s, aws,
 /// gcp, azure, mysql, mssql, mongodb) return `None` — the FE
 /// hides the row in those cases.
-fn upstream_host_port_for_decl(
-    proxy: &raxis_plan_credentials::ProxyDecl,
-) -> Option<String> {
+fn upstream_host_port_for_decl(proxy: &raxis_plan_credentials::ProxyDecl) -> Option<String> {
     use raxis_plan_credentials::ProxyDecl;
     match proxy {
-        ProxyDecl::Smtp { upstream_host_port, .. }
-        | ProxyDecl::Redis { upstream_host_port, .. } => Some(upstream_host_port.clone()),
+        ProxyDecl::Smtp {
+            upstream_host_port, ..
+        }
+        | ProxyDecl::Redis {
+            upstream_host_port, ..
+        } => Some(upstream_host_port.clone()),
         ProxyDecl::Http { upstream_url, .. } => {
             // `upstream_url` is a full URL; we surface `host:port`
             // when the URL parses cleanly. Otherwise we surface
@@ -2252,7 +2238,7 @@ fn read_credential_bytes(
     credential_name: &str,
     auto_hide_secs: u64,
 ) -> Result<CredentialReveal, ApiError> {
-    use raxis_credentials::{CredentialBackend, CredentialError, ConsumerIdentity, CredentialName};
+    use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
     let cn = CredentialName::new(credential_name.to_owned());
     // Run the same backend the kernel uses to resolve credentials
     // for proxy injection. This routes through the shared
@@ -2264,7 +2250,9 @@ fn read_credential_bytes(
     let value = match backend.resolve(&cn, consumer) {
         Ok(v) => v,
         Err(CredentialError::NotFound(_)) => {
-            return Err(ApiError::NotFound { kind: "credential".into() });
+            return Err(ApiError::NotFound {
+                kind: "credential".into(),
+            });
         }
         Err(e) => {
             return Err(ApiError::Internal {
@@ -2569,7 +2557,11 @@ impl KernelDashboardData {
             out.push(ResolvedWorktree {
                 summary: WorktreeListEntry {
                     name: format!("main-{idx}"),
-                    label: if label.is_empty() { format!("main-{idx}") } else { label },
+                    label: if label.is_empty() {
+                        format!("main-{idx}")
+                    } else {
+                        label
+                    },
                     kind: "Main".into(),
                     path,
                     session_id: None,
@@ -2616,9 +2608,13 @@ impl KernelDashboardData {
             .collect_worktrees()?
             .into_iter()
             .find(|w| w.summary.name == name)
-            .ok_or(ApiError::NotFound { kind: "worktree".into() })?;
+            .ok_or(ApiError::NotFound {
+                kind: "worktree".into(),
+            })?;
         if !bundle.worktree_root_allowed(&resolved.summary.path) {
-            return Err(ApiError::NotFound { kind: "worktree".into() });
+            return Err(ApiError::NotFound {
+                kind: "worktree".into(),
+            });
         }
         Ok(resolved)
     }
@@ -2676,10 +2672,7 @@ fn resolve_within_root(
             // already rejects these; refusing them here
             // closes the door if a future caller bypasses
             // the route layer (e.g. an internal helper).
-            if component.is_empty()
-                || component == "."
-                || component == ".."
-                || component == ".git"
+            if component.is_empty() || component == "." || component == ".." || component == ".git"
             {
                 return Err(ApiError::BadRequest {
                     detail: "path contains forbidden component".into(),
@@ -2814,20 +2807,18 @@ pub(crate) fn task_display_title(task_id: &str, initiative_id: &str) -> String {
 /// Field order MUST stay identity — the FE consumes the
 /// dashboard view shape and the JSON wire shape is pinned by
 /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`.
-fn record_to_view(
-    r: crate::LlmTurnRecord,
-) -> raxis_dashboard::data::TaskLlmTurnView {
+fn record_to_view(r: crate::LlmTurnRecord) -> raxis_dashboard::data::TaskLlmTurnView {
     raxis_dashboard::data::TaskLlmTurnView {
-        at_ms:               r.at_ms,
-        task_id:             r.task_id,
-        session_id:          r.session_id,
-        fetch_id:            r.fetch_id,
-        status_code:         r.status_code,
-        latency_ms:          r.latency_ms,
-        body:                r.body,
-        body_truncated:      r.body_truncated,
+        at_ms: r.at_ms,
+        task_id: r.task_id,
+        session_id: r.session_id,
+        fetch_id: r.fetch_id,
+        status_code: r.status_code,
+        latency_ms: r.latency_ms,
+        body: r.body,
+        body_truncated: r.body_truncated,
         original_body_bytes: r.original_body_bytes,
-        error:               r.error,
+        error: r.error,
     }
 }
 
@@ -2962,14 +2953,8 @@ pub async fn start_dashboard(
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
 ) -> Result<ServerHandle, String> {
     let data = Arc::new(
-        KernelDashboardData::new(
-            store,
-            policy,
-            data_dir,
-            policy_path,
-            booted_at,
-        )
-        .map_err(|e| format!("dashboard streams dir init failed: {e}"))?,
+        KernelDashboardData::new(store, policy, data_dir, policy_path, booted_at)
+            .map_err(|e| format!("dashboard streams dir init failed: {e}"))?,
     );
     let server = DashboardServer::bind_with_observability(cfg, data, observability)
         .await
@@ -3049,10 +3034,7 @@ mod tests {
 
     #[test]
     fn admin_requires_both_rotate_and_cert_install() {
-        let r = roles_from_permitted_ops(&[
-            "RotateEpoch".into(),
-            "OperatorCertInstall".into(),
-        ]);
+        let r = roles_from_permitted_ops(&["RotateEpoch".into(), "OperatorCertInstall".into()]);
         assert!(r.contains(&DashboardRole::Admin));
     }
 
@@ -3112,15 +3094,15 @@ mod tests {
     // tone mapping there in the same commit.
     fn mk_row(revoked: bool, expires_at: u64) -> raxis_store::views::sessions::SessionRow {
         raxis_store::views::sessions::SessionRow {
-            session_id:      "sess".into(),
-            role_id:         "Executor".into(),
-            lineage_id:      "lin".into(),
-            worktree_root:   None,
+            session_id: "sess".into(),
+            role_id: "Executor".into(),
+            lineage_id: "lin".into(),
+            worktree_root: None,
             sequence_number: 0,
-            created_at:      100,
+            created_at: 100,
             expires_at,
             revoked,
-            revoked_at:      if revoked { Some(150) } else { None },
+            revoked_at: if revoked { Some(150) } else { None },
         }
     }
 
@@ -3209,21 +3191,21 @@ mod tests {
 
     fn synth_task_row(state: raxis_types::TaskState) -> raxis_store::views::tasks::TaskRow {
         raxis_store::views::tasks::TaskRow {
-            task_id:                  "t-state".into(),
-            initiative_id:            "init-state".into(),
-            initiative_state:         "Executing".into(),
-            lane_id:                  "default".into(),
-            state:                    state.as_sql_str().into(),
-            block_reason:             None,
-            actor:                    "kernel".into(),
-            policy_epoch:             1,
-            admitted_at:              100,
-            transitioned_at:          200,
-            session_id:               None,
-            evaluation_sha:           None,
-            base_sha:                 None,
+            task_id: "t-state".into(),
+            initiative_id: "init-state".into(),
+            initiative_state: "Executing".into(),
+            lane_id: "default".into(),
+            state: state.as_sql_str().into(),
+            block_reason: None,
+            actor: "kernel".into(),
+            policy_epoch: 1,
+            admitted_at: 100,
+            transitioned_at: 200,
+            session_id: None,
+            evaluation_sha: None,
+            base_sha: None,
             admission_reserved_units: None,
-            actual_cost:              0,
+            actual_cost: 0,
         }
     }
 

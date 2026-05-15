@@ -83,17 +83,12 @@ impl HostPreflightError {
     /// Convenience constructor for `DiskPressure` with the V2.5
     /// defaults (`cargo xtask hygiene` remediation, the operator
     /// recipe URL).
-    pub fn disk_pressure(
-        threshold_pct: u32,
-        observed_volumes: Vec<DiskVolumeReport>,
-    ) -> Self {
+    pub fn disk_pressure(threshold_pct: u32, observed_volumes: Vec<DiskVolumeReport>) -> Self {
         Self::DiskPressure {
             threshold_pct,
             observed_volumes,
             remediation_cmd: "cargo xtask hygiene".to_string(),
-            docs_url: Some(
-                "raxis/guides/operator/18-host-hygiene.md".to_string(),
-            ),
+            docs_url: Some("raxis/guides/operator/18-host-hygiene.md".to_string()),
         }
     }
 
@@ -138,11 +133,7 @@ impl fmt::Display for HostPreflightError {
                         if i > 0 {
                             write!(f, ", ")?;
                         }
-                        write!(
-                            f,
-                            "{} at {}% (free {})",
-                            v.mount, v.used_pct, v.free_human
-                        )?;
+                        write!(f, "{} at {}% (free {})", v.mount, v.used_pct, v.free_human)?;
                     }
                     write!(f, ". Run `{remediation_cmd}` to remediate.")
                 }

@@ -88,9 +88,9 @@ use std::time::Duration;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BinaryEntry {
     /// File-name as it appears on PATH (e.g. `python3`, `node`).
-    pub name:    String,
+    pub name: String,
     /// Absolute path the first PATH-walk hit resolved to.
-    pub path:    String,
+    pub path: String,
     /// Best-effort version string (`5.2.15`, `1.79.0`, …). `None`
     /// means we did not invoke the binary — either the name was
     /// not in our well-known toolchain table or the version probe
@@ -104,9 +104,9 @@ pub struct BinaryEntry {
 pub struct PythonPackage {
     /// Distribution name (canonical PyPI form, e.g.
     /// `psycopg2-binary`).
-    pub name:       String,
+    pub name: String,
     /// Version string from the `dist-info/METADATA` `Version:` line.
-    pub version:    String,
+    pub version: String,
     /// `true` if `python3 -c "import <module>"` round-tripped on
     /// the VM. Only populated when the caller passed an explicit
     /// `python_package` filter; otherwise `None` (importability is
@@ -121,21 +121,21 @@ pub struct PythonPackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PythonRuntime {
     /// Path to the interpreter (`/usr/bin/python3`).
-    pub interpreter:   String,
+    pub interpreter: String,
     /// Version string (`3.11.2`).
-    pub version:       String,
+    pub version: String,
     /// Site-packages root the manifest scanned for installed
     /// distributions.
     pub site_packages: String,
     /// Packages discovered in `site-packages` (lex-sorted by name).
-    pub packages:      Vec<PythonPackage>,
+    pub packages: Vec<PythonPackage>,
 }
 
 /// One Node global package.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodePackage {
     /// npm package name (e.g. `npm`, `yarn`).
-    pub name:    String,
+    pub name: String,
     /// Version string from `npm list -g --json --depth=0` (or
     /// `package.json` fallback).
     pub version: String,
@@ -145,9 +145,9 @@ pub struct NodePackage {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NodeRuntime {
     /// Path to the interpreter (`/usr/bin/node`).
-    pub interpreter:     String,
+    pub interpreter: String,
     /// Version string (`20.18.0`).
-    pub version:         String,
+    pub version: String,
     /// Globally-installed packages (lex-sorted by name).
     pub global_packages: Vec<NodePackage>,
 }
@@ -173,7 +173,7 @@ pub struct GoToolchain {
 pub struct FilesystemSnapshot {
     /// Working directory as observed at probe time
     /// (`std::env::current_dir`).
-    pub workdir:                   String,
+    pub workdir: String,
     /// Languages we detected by inspecting the workdir's TOP-LEVEL
     /// entries only (`Cargo.toml` ⇒ rust, `package.json` ⇒ node,
     /// `pyproject.toml` / `setup.py` / `requirements.txt` ⇒ python,
@@ -181,10 +181,10 @@ pub struct FilesystemSnapshot {
     /// authoritative tagging.
     pub workdir_languages_detected: Vec<String>,
     /// `true` if the workdir contains a `.git/` directory.
-    pub git_initialized:           bool,
+    pub git_initialized: bool,
     /// `git rev-parse HEAD` if the workdir is a git repo, else
     /// `None`.
-    pub head_commit:               Option<String>,
+    pub head_commit: Option<String>,
 }
 
 /// Image role tag — which planner-harness role this manifest was
@@ -218,28 +218,28 @@ pub enum ImageRole {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CapabilityManifest {
     /// Which planner role this manifest was probed in.
-    pub image_role:  ImageRole,
+    pub image_role: ImageRole,
     /// SHA-256 image digest (`sha256:<64-hex>`) when the kernel
     /// stamped one via the `RAXIS_VM_IMAGE_DIGEST` env at spawn,
     /// else `None`. Inert metadata for the LLM; the kernel-side
     /// digest verification is what binds the contents.
     pub image_digest: Option<String>,
     /// Binaries discovered on PATH (lex-sorted).
-    pub binaries:    Vec<BinaryEntry>,
+    pub binaries: Vec<BinaryEntry>,
     /// Python runtime + packages. `None` ⇒ no python interpreter
     /// on PATH.
-    pub python:      Option<PythonRuntime>,
+    pub python: Option<PythonRuntime>,
     /// Node runtime + global packages. `None` ⇒ no node on PATH.
-    pub node:        Option<NodeRuntime>,
+    pub node: Option<NodeRuntime>,
     /// Rust toolchain (always emitted; per-tool `Option<String>`
     /// reflects per-tool absence).
-    pub rust:        RustToolchain,
+    pub rust: RustToolchain,
     /// Go toolchain (always emitted).
-    pub go:          GoToolchain,
+    pub go: GoToolchain,
     /// Env var name → value, after kernel-private redaction.
-    pub env:         BTreeMap<String, String>,
+    pub env: BTreeMap<String, String>,
     /// Workdir / git state.
-    pub filesystem:  FilesystemSnapshot,
+    pub filesystem: FilesystemSnapshot,
 }
 
 // ---------------------------------------------------------------------------
@@ -275,15 +275,15 @@ impl CapabilityCategory {
     /// tool surface can produce a structured error message.
     pub fn from_wire(s: &str) -> Option<Self> {
         match s {
-            "binaries"   => Some(Self::Binaries),
-            "python"     => Some(Self::Python),
-            "node"       => Some(Self::Node),
-            "rust"       => Some(Self::Rust),
-            "go"         => Some(Self::Go),
-            "env"        => Some(Self::Env),
+            "binaries" => Some(Self::Binaries),
+            "python" => Some(Self::Python),
+            "node" => Some(Self::Node),
+            "rust" => Some(Self::Rust),
+            "go" => Some(Self::Go),
+            "env" => Some(Self::Env),
             "filesystem" => Some(Self::Filesystem),
-            "all"        => Some(Self::All),
-            _            => None,
+            "all" => Some(Self::All),
+            _ => None,
         }
     }
 }
@@ -295,15 +295,15 @@ pub struct CapabilityFilter {
     /// `to_lowercase` on both sides so "RIPGREP" matches `rg`?
     /// No — only literal substring of the name; the LLM should
     /// know the binary name.
-    pub binary_name:    Option<String>,
+    pub binary_name: Option<String>,
     /// Single Python package name to surface (and probe
     /// importability for).
     pub python_package: Option<String>,
     /// Single Node global-package name to surface.
-    pub node_package:   Option<String>,
+    pub node_package: Option<String>,
     /// Single env var name to surface (subject to kernel-private
     /// redaction).
-    pub env_var:        Option<String>,
+    pub env_var: Option<String>,
 }
 
 /// Apply categories + filter to a base manifest, producing a new
@@ -312,15 +312,15 @@ pub struct CapabilityFilter {
 ///
 /// `categories` empty ⇒ same as `[All]`.
 pub fn project_manifest(
-    base:       &CapabilityManifest,
+    base: &CapabilityManifest,
     categories: &[CapabilityCategory],
-    filter:     &CapabilityFilter,
+    filter: &CapabilityFilter,
 ) -> CapabilityManifest {
-    let want_all =
-        categories.is_empty() || categories.iter().any(|c| matches!(c, CapabilityCategory::All));
-    let want = |c: CapabilityCategory| -> bool {
-        want_all || categories.iter().any(|x| *x == c)
-    };
+    let want_all = categories.is_empty()
+        || categories
+            .iter()
+            .any(|c| matches!(c, CapabilityCategory::All));
+    let want = |c: CapabilityCategory| -> bool { want_all || categories.iter().any(|x| *x == c) };
 
     let binaries = if want(CapabilityCategory::Binaries) {
         match filter.binary_name.as_deref() {
@@ -358,15 +358,15 @@ pub fn project_manifest(
                     // about it — still surface the importability
                     // probe so a failure is visible.
                     filtered.packages.push(PythonPackage {
-                        name:       pkg.to_owned(),
-                        version:    String::new(),
+                        name: pkg.to_owned(),
+                        version: String::new(),
                         importable: Some(importable),
                     });
                 }
                 Some(filtered)
             }
             (Some(py), None) => Some(py.clone()),
-            (None, _)        => None,
+            (None, _) => None,
         }
     } else {
         None
@@ -385,7 +385,7 @@ pub fn project_manifest(
                 Some(filtered)
             }
             (Some(n), None) => Some(n.clone()),
-            (None, _)       => None,
+            (None, _) => None,
         }
     } else {
         None
@@ -394,7 +394,10 @@ pub fn project_manifest(
     let rust = if want(CapabilityCategory::Rust) {
         base.rust.clone()
     } else {
-        RustToolchain { rustc: None, cargo: None }
+        RustToolchain {
+            rustc: None,
+            cargo: None,
+        }
     };
 
     let go = if want(CapabilityCategory::Go) {
@@ -422,15 +425,15 @@ pub fn project_manifest(
         base.filesystem.clone()
     } else {
         FilesystemSnapshot {
-            workdir:                    String::new(),
+            workdir: String::new(),
             workdir_languages_detected: Vec::new(),
-            git_initialized:            false,
-            head_commit:                None,
+            git_initialized: false,
+            head_commit: None,
         }
     };
 
     CapabilityManifest {
-        image_role:   base.image_role.clone(),
+        image_role: base.image_role.clone(),
         image_digest: base.image_digest.clone(),
         binaries,
         python,
@@ -514,21 +517,20 @@ where
 {
     let path_var = env_reader("PATH").unwrap_or_default();
     let binaries = probe_binaries(&path_var);
-    let python   = probe_python(&binaries);
-    let node     = probe_node(&binaries);
-    let rust     = probe_rust(&binaries);
-    let go       = probe_go(&binaries);
-    let env      = probe_env(env_reader);
+    let python = probe_python(&binaries);
+    let node = probe_node(&binaries);
+    let rust = probe_rust(&binaries);
+    let go = probe_go(&binaries);
+    let env = probe_env(env_reader);
     let filesystem = probe_filesystem(cwd);
     let image_role = match env_reader("RAXIS_PLANNER_ROLE").as_deref() {
-        Some("executor")     => ImageRole::Executor,
-        Some("reviewer")     => ImageRole::Reviewer,
+        Some("executor") => ImageRole::Executor,
+        Some("reviewer") => ImageRole::Reviewer,
         Some("orchestrator") => ImageRole::Orchestrator,
-        Some("byo")          => ImageRole::Byo,
-        _                    => ImageRole::Unknown,
+        Some("byo") => ImageRole::Byo,
+        _ => ImageRole::Unknown,
     };
-    let image_digest = env_reader("RAXIS_VM_IMAGE_DIGEST")
-        .filter(|s| !s.is_empty());
+    let image_digest = env_reader("RAXIS_VM_IMAGE_DIGEST").filter(|s| !s.is_empty());
 
     CapabilityManifest {
         image_role,
@@ -570,12 +572,12 @@ fn probe_binaries(path_var: &str) -> Vec<BinaryEntry> {
     let mut seen: BTreeMap<String, BinaryEntry> = BTreeMap::new();
     for dir in path_var.split(':').filter(|s| !s.is_empty()) {
         let entries = match std::fs::read_dir(dir) {
-            Ok(e)  => e,
+            Ok(e) => e,
             Err(_) => continue,
         };
         for entry in entries.flatten() {
             let name = match entry.file_name().into_string() {
-                Ok(n)  => n,
+                Ok(n) => n,
                 Err(_) => continue,
             };
             // Skip if we already saw this name in an earlier PATH
@@ -590,18 +592,21 @@ fn probe_binaries(path_var: &str) -> Vec<BinaryEntry> {
             // model can resolve that. The cheap check is "it's a
             // regular file in a PATH dir".
             let meta = match entry.metadata() {
-                Ok(m)  => m,
+                Ok(m) => m,
                 Err(_) => continue,
             };
             if meta.is_dir() {
                 continue;
             }
             let path = format!("{dir}/{name}");
-            seen.insert(name.clone(), BinaryEntry {
-                name,
-                path,
-                version: None,
-            });
+            seen.insert(
+                name.clone(),
+                BinaryEntry {
+                    name,
+                    path,
+                    version: None,
+                },
+            );
         }
     }
 
@@ -622,10 +627,9 @@ fn probe_binaries(path_var: &str) -> Vec<BinaryEntry> {
 /// cover the canonical executor starter image plus the operator
 /// most-likely BYO additions.
 const WELL_KNOWN_VERSION_PROBES: &[&str] = &[
-    "bash", "cargo", "clang", "curl", "fd", "gcc", "git", "gh", "go",
-    "gofmt", "grep", "jq", "make", "node", "npm", "npx", "pip",
-    "pip3", "pnpm", "python", "python3", "ripgrep", "rg", "ruby",
-    "rustc", "sed", "wget", "yarn",
+    "bash", "cargo", "clang", "curl", "fd", "gcc", "git", "gh", "go", "gofmt", "grep", "jq",
+    "make", "node", "npm", "npx", "pip", "pip3", "pnpm", "python", "python3", "ripgrep", "rg",
+    "ruby", "rustc", "sed", "wget", "yarn",
 ];
 
 /// Run `<bin> --version` (or `<bin> version` for `go`) with a
@@ -643,12 +647,12 @@ fn best_effort_version(name: &str, path: &str) -> Option<String> {
     // API rather than tokio because the probe runs at session
     // boot before the dispatch loop's tokio runtime is engaged.
     let child = match cmd.spawn() {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return None,
     };
     let out = match wait_with_timeout(child, Duration::from_secs(2)) {
         Some(o) => o,
-        None    => return None,
+        None => return None,
     };
     let raw = if !out.stdout.is_empty() {
         String::from_utf8_lossy(&out.stdout).into_owned()
@@ -669,7 +673,7 @@ fn best_effort_version(name: &str, path: &str) -> Option<String> {
 /// because this runs before the tokio runtime is set up.
 fn wait_with_timeout(
     mut child: std::process::Child,
-    budget:    Duration,
+    budget: Duration,
 ) -> Option<std::process::Output> {
     let start = std::time::Instant::now();
     loop {
@@ -698,11 +702,15 @@ fn probe_python(binaries: &[BinaryEntry]) -> Option<PythonRuntime> {
         .iter()
         .find(|b| b.name == "python3")
         .or_else(|| binaries.iter().find(|b| b.name == "python"))?;
-    let version = interp.version.clone().unwrap_or_else(|| {
-        best_effort_version(&interp.name, &interp.path).unwrap_or_default()
-    });
+    let version = interp
+        .version
+        .clone()
+        .unwrap_or_else(|| best_effort_version(&interp.name, &interp.path).unwrap_or_default());
     // Strip the `Python ` prefix that `python3 --version` emits.
-    let version = version.strip_prefix("Python ").unwrap_or(&version).to_owned();
+    let version = version
+        .strip_prefix("Python ")
+        .unwrap_or(&version)
+        .to_owned();
 
     // Resolve site-packages by asking the interpreter directly. This
     // is the only authoritative source — the on-disk path varies
@@ -710,12 +718,14 @@ fn probe_python(binaries: &[BinaryEntry]) -> Option<PythonRuntime> {
     // `/usr/lib/python3.11/site-packages`, virtualenv targets, …).
     let site_packages = match python_site_packages(&interp.path) {
         Some(p) => p,
-        None    => return Some(PythonRuntime {
-            interpreter:   interp.path.clone(),
-            version,
-            site_packages: String::new(),
-            packages:      Vec::new(),
-        }),
+        None => {
+            return Some(PythonRuntime {
+                interpreter: interp.path.clone(),
+                version,
+                site_packages: String::new(),
+                packages: Vec::new(),
+            })
+        }
     };
 
     let packages = read_python_packages(&site_packages);
@@ -750,7 +760,11 @@ fn python_site_packages(interpreter: &str) -> Option<String> {
         return None;
     }
     let s = String::from_utf8_lossy(&out.stdout).trim().to_owned();
-    if s.is_empty() { None } else { Some(s) }
+    if s.is_empty() {
+        None
+    } else {
+        Some(s)
+    }
 }
 
 /// Walk the site-packages root looking for `*.dist-info/METADATA`
@@ -759,12 +773,12 @@ fn python_site_packages(interpreter: &str) -> Option<String> {
 fn read_python_packages(site_packages: &str) -> Vec<PythonPackage> {
     let mut packages: BTreeMap<String, PythonPackage> = BTreeMap::new();
     let entries = match std::fs::read_dir(site_packages) {
-        Ok(e)  => e,
+        Ok(e) => e,
         Err(_) => return Vec::new(),
     };
     for entry in entries.flatten() {
         let name = match entry.file_name().into_string() {
-            Ok(n)  => n,
+            Ok(n) => n,
             Err(_) => continue,
         };
         let metadata_path = if name.ends_with(".dist-info") {
@@ -775,10 +789,10 @@ fn read_python_packages(site_packages: &str) -> Vec<PythonPackage> {
             continue;
         };
         let body = match std::fs::read_to_string(&metadata_path) {
-            Ok(s)  => s,
+            Ok(s) => s,
             Err(_) => continue,
         };
-        let mut pkg_name:    Option<String> = None;
+        let mut pkg_name: Option<String> = None;
         let mut pkg_version: Option<String> = None;
         for line in body.lines() {
             // PEP 566: only the headers above the first blank
@@ -796,11 +810,14 @@ fn read_python_packages(site_packages: &str) -> Vec<PythonPackage> {
             }
         }
         if let (Some(n), Some(v)) = (pkg_name, pkg_version) {
-            packages.insert(n.clone(), PythonPackage {
-                name:       n,
-                version:    v,
-                importable: None,
-            });
+            packages.insert(
+                n.clone(),
+                PythonPackage {
+                    name: n,
+                    version: v,
+                    importable: None,
+                },
+            );
         }
     }
     packages.into_values().collect()
@@ -820,12 +837,12 @@ fn python_importable(interpreter: &str, package: &str) -> bool {
         .stderr(Stdio::null())
         .spawn()
     {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return false,
     };
     match wait_with_timeout(child, Duration::from_secs(5)) {
         Some(o) => o.status.success(),
-        None    => false,
+        None => false,
     }
 }
 
@@ -835,13 +852,14 @@ fn python_importable(interpreter: &str, package: &str) -> bool {
 /// empty `global_packages` set.
 fn probe_node(binaries: &[BinaryEntry]) -> Option<NodeRuntime> {
     let node = binaries.iter().find(|b| b.name == "node")?;
-    let version = node.version.clone().unwrap_or_else(|| {
-        best_effort_version("node", &node.path).unwrap_or_default()
-    });
+    let version = node
+        .version
+        .clone()
+        .unwrap_or_else(|| best_effort_version("node", &node.path).unwrap_or_default());
     let version = version.trim_start_matches('v').to_owned();
     let global_packages = match binaries.iter().find(|b| b.name == "npm") {
         Some(npm) => npm_list_global(&npm.path).unwrap_or_default(),
-        None      => Vec::new(),
+        None => Vec::new(),
     };
     Some(NodeRuntime {
         interpreter: node.path.clone(),
@@ -961,17 +979,34 @@ fn probe_filesystem(cwd: &Path) -> FilesystemSnapshot {
         for entry in entries.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
             match name.as_str() {
-                "Cargo.toml"        => { langs.insert("rust"); }
-                "package.json"      => { langs.insert("node"); }
-                "pyproject.toml"    => { langs.insert("python"); }
-                "setup.py"          => { langs.insert("python"); }
-                "requirements.txt"  => { langs.insert("python"); }
-                "go.mod"            => { langs.insert("go"); }
-                "Gemfile"           => { langs.insert("ruby"); }
-                "pom.xml"           => { langs.insert("java"); }
-                "build.gradle"
-                | "build.gradle.kts" => { langs.insert("java"); }
-                _                   => {}
+                "Cargo.toml" => {
+                    langs.insert("rust");
+                }
+                "package.json" => {
+                    langs.insert("node");
+                }
+                "pyproject.toml" => {
+                    langs.insert("python");
+                }
+                "setup.py" => {
+                    langs.insert("python");
+                }
+                "requirements.txt" => {
+                    langs.insert("python");
+                }
+                "go.mod" => {
+                    langs.insert("go");
+                }
+                "Gemfile" => {
+                    langs.insert("ruby");
+                }
+                "pom.xml" => {
+                    langs.insert("java");
+                }
+                "build.gradle" | "build.gradle.kts" => {
+                    langs.insert("java");
+                }
+                _ => {}
             }
         }
     }
@@ -1031,11 +1066,11 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     s.push_str("## VM Environment\n\n");
 
     let role = match m.image_role {
-        ImageRole::Executor     => "executor",
-        ImageRole::Reviewer     => "reviewer",
+        ImageRole::Executor => "executor",
+        ImageRole::Reviewer => "reviewer",
         ImageRole::Orchestrator => "orchestrator",
-        ImageRole::Byo          => "byo (operator-published)",
-        ImageRole::Unknown      => "unknown",
+        ImageRole::Byo => "byo (operator-published)",
+        ImageRole::Unknown => "unknown",
     };
     s.push_str(&format!("Image role: {role}"));
     if let Some(digest) = &m.image_digest {
@@ -1074,13 +1109,19 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     // Python packages — TOP curated subset (DB clients first).
     if let Some(py) = &m.python {
         let curated = curated_subset(
-            &py.packages.iter().map(|p| (p.name.as_str(), p.version.as_str())).collect::<Vec<_>>(),
+            &py.packages
+                .iter()
+                .map(|p| (p.name.as_str(), p.version.as_str()))
+                .collect::<Vec<_>>(),
             CURATED_PYTHON,
         );
         s.push_str(&format!(
             "Pre-installed Python packages: {}\n",
             if curated.is_empty() {
-                format!("(none of common DB/util set; full count {})", py.packages.len())
+                format!(
+                    "(none of common DB/util set; full count {})",
+                    py.packages.len()
+                )
             } else if py.packages.len() > curated.len() {
                 format!(
                     "{} (+ {} others; query `vm_capabilities` for full list)",
@@ -1105,7 +1146,10 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
                 .iter()
                 .map(|p| format!("{} {}", p.name, p.version))
                 .collect();
-            s.push_str(&format!("Pre-installed Node packages: {}\n", listed.join(", ")));
+            s.push_str(&format!(
+                "Pre-installed Node packages: {}\n",
+                listed.join(", ")
+            ));
         }
     }
 
@@ -1160,18 +1204,19 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
     s.push_str(&format!(
         "Workdir: {} ({}{}{})\n",
         fs.workdir,
-        if fs.git_initialized { "git-initialized" } else { "no .git" },
+        if fs.git_initialized {
+            "git-initialized"
+        } else {
+            "no .git"
+        },
         if fs.workdir_languages_detected.is_empty() {
             String::new()
         } else {
-            format!(
-                ", languages: {}",
-                fs.workdir_languages_detected.join("/"),
-            )
+            format!(", languages: {}", fs.workdir_languages_detected.join("/"),)
         },
         match &fs.head_commit {
             Some(sha) => format!(", head {}", &sha[..sha.len().min(12)]),
-            None      => String::new(),
+            None => String::new(),
         },
     ));
 
@@ -1192,21 +1237,29 @@ pub fn build_capability_hint(m: &CapabilityManifest) -> String {
 /// canonical executor starter image's pinned DB clients
 /// (planner-harness.md §10.6) plus a few utility libs.
 const CURATED_PYTHON: &[&str] = &[
-    "psycopg2", "psycopg2-binary", "psycopg",
-    "pymongo", "redis", "PyMySQL", "pymssql",
-    "requests", "boto3", "google-cloud-core",
-    "azure-identity", "numpy", "pandas", "pyyaml",
+    "psycopg2",
+    "psycopg2-binary",
+    "psycopg",
+    "pymongo",
+    "redis",
+    "PyMySQL",
+    "pymssql",
+    "requests",
+    "boto3",
+    "google-cloud-core",
+    "azure-identity",
+    "numpy",
+    "pandas",
+    "pyyaml",
 ];
 
 /// Names whose presence we surface in the system-prompt hint's
 /// "Available binaries" line. Curated to match the canonical
 /// starter manifest plus the operator-most-used additions.
 const CURATED_BINARIES: &[&str] = &[
-    "bash", "git", "gh", "jq", "yq", "rg", "ripgrep", "fd", "curl",
-    "wget", "make", "gcc", "g++", "clang", "ld", "ar", "node", "npm",
-    "npx", "yarn", "pnpm", "python3", "pip3", "cargo", "rustc",
-    "go", "gofmt", "diff", "patch", "awk", "sed", "grep", "sort",
-    "find", "xargs",
+    "bash", "git", "gh", "jq", "yq", "rg", "ripgrep", "fd", "curl", "wget", "make", "gcc", "g++",
+    "clang", "ld", "ar", "node", "npm", "npx", "yarn", "pnpm", "python3", "pip3", "cargo", "rustc",
+    "go", "gofmt", "diff", "patch", "awk", "sed", "grep", "sort", "find", "xargs",
 ];
 
 /// Pull the curated subset out of a (name, version) sequence,
@@ -1255,19 +1308,22 @@ mod tests {
 
     fn empty_manifest() -> CapabilityManifest {
         CapabilityManifest {
-            image_role:   ImageRole::Unknown,
+            image_role: ImageRole::Unknown,
             image_digest: None,
-            binaries:     Vec::new(),
-            python:       None,
-            node:         None,
-            rust:         RustToolchain { rustc: None, cargo: None },
-            go:           GoToolchain { go: None },
-            env:          BTreeMap::new(),
-            filesystem:   FilesystemSnapshot {
-                workdir:                    "/workspace/repo".to_owned(),
+            binaries: Vec::new(),
+            python: None,
+            node: None,
+            rust: RustToolchain {
+                rustc: None,
+                cargo: None,
+            },
+            go: GoToolchain { go: None },
+            env: BTreeMap::new(),
+            filesystem: FilesystemSnapshot {
+                workdir: "/workspace/repo".to_owned(),
                 workdir_languages_detected: Vec::new(),
-                git_initialized:            false,
-                head_commit:                None,
+                git_initialized: false,
+                head_commit: None,
             },
         }
     }
@@ -1319,20 +1375,31 @@ mod tests {
     fn probe_env_with_iter_redacts_loopback_plan() {
         let env = probe_env_with_iter([
             ("PATH".to_owned(), "/usr/bin".to_owned()),
-            ("RAXIS_VSOCK_LOOPBACK_PLAN".to_owned(), "<base64-payload>".to_owned()),
+            (
+                "RAXIS_VSOCK_LOOPBACK_PLAN".to_owned(),
+                "<base64-payload>".to_owned(),
+            ),
             ("RAXIS_SESSION_TOKEN".to_owned(), "secret-token".to_owned()),
-            ("DATABASE_URL".to_owned(),
-             "postgres://raxis@127.0.0.1:54121/db".to_owned()),
+            (
+                "DATABASE_URL".to_owned(),
+                "postgres://raxis@127.0.0.1:54121/db".to_owned(),
+            ),
             ("STRIPE_API_KEY".to_owned(), "sk_live_xxx".to_owned()),
         ]);
         // INV-EXEC-DISCOVERY-01: RAXIS_VSOCK_LOOPBACK_PLAN value
         // MUST NOT appear in the manifest's env section.
-        assert!(!env.contains_key("RAXIS_VSOCK_LOOPBACK_PLAN"),
-            "RAXIS_VSOCK_LOOPBACK_PLAN must be redacted");
-        assert!(!env.contains_key("RAXIS_SESSION_TOKEN"),
-            "RAXIS_SESSION_TOKEN must be redacted");
-        assert!(!env.contains_key("STRIPE_API_KEY"),
-            "STRIPE_API_KEY must be redacted (pattern denylist)");
+        assert!(
+            !env.contains_key("RAXIS_VSOCK_LOOPBACK_PLAN"),
+            "RAXIS_VSOCK_LOOPBACK_PLAN must be redacted"
+        );
+        assert!(
+            !env.contains_key("RAXIS_SESSION_TOKEN"),
+            "RAXIS_SESSION_TOKEN must be redacted"
+        );
+        assert!(
+            !env.contains_key("STRIPE_API_KEY"),
+            "STRIPE_API_KEY must be redacted (pattern denylist)"
+        );
         // Credential proxy URL must survive.
         assert_eq!(
             env.get("DATABASE_URL").map(String::as_str),
@@ -1347,41 +1414,55 @@ mod tests {
     fn capability_hint_includes_python_node_rust_go_versions() {
         let mut m = empty_manifest();
         m.python = Some(PythonRuntime {
-            interpreter:   "/usr/bin/python3".to_owned(),
-            version:       "3.11.2".to_owned(),
+            interpreter: "/usr/bin/python3".to_owned(),
+            version: "3.11.2".to_owned(),
             site_packages: "/usr/lib/python3.11/dist-packages".to_owned(),
-            packages:      vec![
-                PythonPackage { name: "psycopg2-binary".to_owned(),
-                                version: "2.9.10".to_owned(),
-                                importable: None },
-                PythonPackage { name: "pymongo".to_owned(),
-                                version: "4.10.1".to_owned(),
-                                importable: None },
-                PythonPackage { name: "redis".to_owned(),
-                                version: "5.2.1".to_owned(),
-                                importable: None },
-                PythonPackage { name: "PyMySQL".to_owned(),
-                                version: "1.1.1".to_owned(),
-                                importable: None },
-                PythonPackage { name: "pymssql".to_owned(),
-                                version: "2.3.2".to_owned(),
-                                importable: None },
+            packages: vec![
+                PythonPackage {
+                    name: "psycopg2-binary".to_owned(),
+                    version: "2.9.10".to_owned(),
+                    importable: None,
+                },
+                PythonPackage {
+                    name: "pymongo".to_owned(),
+                    version: "4.10.1".to_owned(),
+                    importable: None,
+                },
+                PythonPackage {
+                    name: "redis".to_owned(),
+                    version: "5.2.1".to_owned(),
+                    importable: None,
+                },
+                PythonPackage {
+                    name: "PyMySQL".to_owned(),
+                    version: "1.1.1".to_owned(),
+                    importable: None,
+                },
+                PythonPackage {
+                    name: "pymssql".to_owned(),
+                    version: "2.3.2".to_owned(),
+                    importable: None,
+                },
             ],
         });
         m.node = Some(NodeRuntime {
-            interpreter:     "/usr/bin/node".to_owned(),
-            version:         "20.18.0".to_owned(),
+            interpreter: "/usr/bin/node".to_owned(),
+            version: "20.18.0".to_owned(),
             global_packages: vec![NodePackage {
-                name:    "npm".to_owned(),
+                name: "npm".to_owned(),
                 version: "10.8.0".to_owned(),
             }],
         });
         m.rust.rustc = Some("1.79.0".to_owned());
         m.go.go = Some("go1.22.0 linux/amd64".to_owned());
-        m.env.insert("DATABASE_URL".to_owned(),
-                     "postgres://raxis@127.0.0.1:54121/db".to_owned());
-        m.env.insert("MONGO_URL".to_owned(),
-                     "mongodb://127.0.0.1:54122/db".to_owned());
+        m.env.insert(
+            "DATABASE_URL".to_owned(),
+            "postgres://raxis@127.0.0.1:54121/db".to_owned(),
+        );
+        m.env.insert(
+            "MONGO_URL".to_owned(),
+            "mongodb://127.0.0.1:54122/db".to_owned(),
+        );
         let hint = build_capability_hint(&m);
         // Languages summary present.
         assert!(hint.contains("Python 3.11.2"), "{hint}");
@@ -1389,8 +1470,10 @@ mod tests {
         assert!(hint.contains("Rust"), "{hint}");
         assert!(hint.contains("Go"), "{hint}");
         // Curated DB-client subset present.
-        assert!(hint.contains("psycopg2-binary 2.9.10"),
-            "expected psycopg2-binary in hint:\n{hint}");
+        assert!(
+            hint.contains("psycopg2-binary 2.9.10"),
+            "expected psycopg2-binary in hint:\n{hint}"
+        );
         assert!(hint.contains("pymongo 4.10.1"));
         assert!(hint.contains("redis 5.2.1"));
         assert!(hint.contains("PyMySQL 1.1.1"));
@@ -1412,18 +1495,24 @@ mod tests {
             "RAXIS_VSOCK_LOOPBACK_PLAN".to_owned(),
             "<base64-payload>".to_owned(),
         );
-        m.env.insert("DATABASE_URL".to_owned(),
-                     "postgres://raxis@127.0.0.1:54121/db".to_owned());
+        m.env.insert(
+            "DATABASE_URL".to_owned(),
+            "postgres://raxis@127.0.0.1:54121/db".to_owned(),
+        );
         let hint = build_capability_hint(&m);
         // Even though `m.env` carries the kernel-private value
         // (a misuse the build_capability_hint code itself does NOT
         // re-filter), the cred-proxy section MUST select on the
         // looks-like-credential-proxy heuristic which excludes
         // RAXIS_*. The value MUST NOT appear in the rendered hint.
-        assert!(!hint.contains("<base64-payload>"),
-            "RAXIS_VSOCK_LOOPBACK_PLAN value leaked into hint:\n{hint}");
-        assert!(!hint.contains("RAXIS_VSOCK_LOOPBACK_PLAN"),
-            "RAXIS_VSOCK_LOOPBACK_PLAN name leaked into cred summary:\n{hint}");
+        assert!(
+            !hint.contains("<base64-payload>"),
+            "RAXIS_VSOCK_LOOPBACK_PLAN value leaked into hint:\n{hint}"
+        );
+        assert!(
+            !hint.contains("RAXIS_VSOCK_LOOPBACK_PLAN"),
+            "RAXIS_VSOCK_LOOPBACK_PLAN name leaked into cred summary:\n{hint}"
+        );
         // Real credential-proxy var still present.
         assert!(hint.contains("DATABASE_URL"));
     }
@@ -1434,11 +1523,13 @@ mod tests {
     fn project_manifest_filters_to_binaries_only() {
         let mut m = empty_manifest();
         m.binaries.push(BinaryEntry {
-            name: "git".to_owned(), path: "/usr/bin/git".to_owned(),
+            name: "git".to_owned(),
+            path: "/usr/bin/git".to_owned(),
             version: Some("2.43.0".to_owned()),
         });
         m.binaries.push(BinaryEntry {
-            name: "ripgrep".to_owned(), path: "/usr/bin/ripgrep".to_owned(),
+            name: "ripgrep".to_owned(),
+            path: "/usr/bin/ripgrep".to_owned(),
             version: None,
         });
         m.python = Some(PythonRuntime {
@@ -1453,22 +1544,39 @@ mod tests {
             &CapabilityFilter::default(),
         );
         assert_eq!(p.binaries.len(), 2);
-        assert!(p.python.is_none(),
-            "python section MUST be omitted when not requested");
+        assert!(
+            p.python.is_none(),
+            "python section MUST be omitted when not requested"
+        );
     }
 
     #[test]
     fn project_manifest_binary_name_filter_is_substring() {
         let mut m = empty_manifest();
         m.binaries.extend([
-            BinaryEntry { name: "git".to_owned(),    path: "/usr/bin/git".to_owned(),    version: None },
-            BinaryEntry { name: "gh".to_owned(),     path: "/usr/bin/gh".to_owned(),     version: None },
-            BinaryEntry { name: "node".to_owned(),   path: "/usr/bin/node".to_owned(),   version: None },
+            BinaryEntry {
+                name: "git".to_owned(),
+                path: "/usr/bin/git".to_owned(),
+                version: None,
+            },
+            BinaryEntry {
+                name: "gh".to_owned(),
+                path: "/usr/bin/gh".to_owned(),
+                version: None,
+            },
+            BinaryEntry {
+                name: "node".to_owned(),
+                path: "/usr/bin/node".to_owned(),
+                version: None,
+            },
         ]);
         let p = project_manifest(
             &m,
             &[CapabilityCategory::Binaries],
-            &CapabilityFilter { binary_name: Some("g".to_owned()), ..Default::default() },
+            &CapabilityFilter {
+                binary_name: Some("g".to_owned()),
+                ..Default::default()
+            },
         );
         let names: BTreeSet<&str> = p.binaries.iter().map(|b| b.name.as_str()).collect();
         assert!(names.contains("git"));
@@ -1479,22 +1587,31 @@ mod tests {
     #[test]
     fn project_manifest_env_var_filter_returns_single_value() {
         let mut m = empty_manifest();
-        m.env.insert("DATABASE_URL".to_owned(), "postgres://x".to_owned());
-        m.env.insert("MONGO_URL".to_owned(),    "mongodb://y".to_owned());
+        m.env
+            .insert("DATABASE_URL".to_owned(), "postgres://x".to_owned());
+        m.env
+            .insert("MONGO_URL".to_owned(), "mongodb://y".to_owned());
         let p = project_manifest(
             &m,
             &[CapabilityCategory::Env],
-            &CapabilityFilter { env_var: Some("DATABASE_URL".to_owned()), ..Default::default() },
+            &CapabilityFilter {
+                env_var: Some("DATABASE_URL".to_owned()),
+                ..Default::default()
+            },
         );
         assert_eq!(p.env.len(), 1);
-        assert_eq!(p.env.get("DATABASE_URL").map(String::as_str), Some("postgres://x"));
+        assert_eq!(
+            p.env.get("DATABASE_URL").map(String::as_str),
+            Some("postgres://x")
+        );
     }
 
     #[test]
     fn project_manifest_all_returns_full_manifest() {
         let mut m = empty_manifest();
         m.binaries.push(BinaryEntry {
-            name: "bash".to_owned(), path: "/bin/bash".to_owned(),
+            name: "bash".to_owned(),
+            path: "/bin/bash".to_owned(),
             version: Some("5.2".to_owned()),
         });
         m.env.insert("PATH".to_owned(), "/usr/bin".to_owned());
@@ -1506,7 +1623,9 @@ mod tests {
     fn project_manifest_empty_categories_means_all() {
         let mut m = empty_manifest();
         m.binaries.push(BinaryEntry {
-            name: "bash".to_owned(), path: "/bin/bash".to_owned(), version: None,
+            name: "bash".to_owned(),
+            path: "/bin/bash".to_owned(),
+            version: None,
         });
         let p = project_manifest(&m, &[], &CapabilityFilter::default());
         assert_eq!(p.binaries.len(), 1);
@@ -1525,8 +1644,10 @@ mod tests {
         let m = probe_capabilities(&|k| std::env::var(k).ok(), &cwd);
         // PATH-derived binary table is non-empty on every supported
         // host (CI Linux + dev macOS).
-        assert!(!m.binaries.is_empty(),
-            "binary table empty — PATH probe failed?");
+        assert!(
+            !m.binaries.is_empty(),
+            "binary table empty — PATH probe failed?"
+        );
         // Workdir snapshot has a non-empty path.
         assert!(!m.filesystem.workdir.is_empty());
     }
@@ -1537,8 +1658,10 @@ mod tests {
     fn cached_capabilities_is_per_process_stable() {
         let a = cached_capabilities();
         let b = cached_capabilities();
-        assert!(Arc::ptr_eq(&a, &b),
-            "cached_capabilities must return the same Arc per process");
+        assert!(
+            Arc::ptr_eq(&a, &b),
+            "cached_capabilities must return the same Arc per process"
+        );
     }
 
     // ── projection edge cases ────────────────────────────────────
@@ -1558,7 +1681,10 @@ mod tests {
         let p = project_manifest(
             &m,
             &[CapabilityCategory::Python],
-            &CapabilityFilter { python_package: Some("nonexistent_pkg".to_owned()), ..Default::default() },
+            &CapabilityFilter {
+                python_package: Some("nonexistent_pkg".to_owned()),
+                ..Default::default()
+            },
         );
         let py = p.python.unwrap();
         assert_eq!(py.packages.len(), 1);

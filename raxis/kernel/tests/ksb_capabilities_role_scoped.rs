@@ -28,9 +28,8 @@
 #![cfg(test)]
 
 use raxis_ksb::{
-    Capabilities, ExecutorCapabilities, InitiativeCapabilityView,
-    MaxTurnsScalingView, OrchestratorCapabilities, ReviewerCapabilities,
-    SessionCapabilityView, TaskCapabilityView,
+    Capabilities, ExecutorCapabilities, InitiativeCapabilityView, MaxTurnsScalingView,
+    OrchestratorCapabilities, ReviewerCapabilities, SessionCapabilityView, TaskCapabilityView,
 };
 
 /// V3 fixture default — inert `MaxTurnsScalingView` carrying
@@ -38,17 +37,17 @@ use raxis_ksb::{
 /// care about progressive scaling.
 fn default_scaling() -> MaxTurnsScalingView {
     MaxTurnsScalingView {
-        max_turns_attempt:       1,
-        max_turns_base:          100,
-        max_turns_step:          50,
-        max_turns_hard_ceiling:  240,
+        max_turns_attempt: 1,
+        max_turns_base: 100,
+        max_turns_step: 50,
+        max_turns_hard_ceiling: 240,
     }
 }
 
 fn sample_session(role: &str) -> SessionCapabilityView {
     SessionCapabilityView {
-        session_id:        format!("ses-{role}"),
-        role:              role.to_owned(),
+        session_id: format!("ses-{role}"),
+        role: role.to_owned(),
         // V2.7 — fixture default; the assembler stamps the resolved
         // value at session-spawn time, see
         // `INV-KSB-MAX-TURNS-VISIBILITY-01`.
@@ -58,14 +57,14 @@ fn sample_session(role: &str) -> SessionCapabilityView {
 
 fn sample_task_view(task_id: &str) -> TaskCapabilityView {
     TaskCapabilityView {
-        task_id:                  task_id.to_owned(),
-        crash_retry_count:        1,
-        review_reject_count:      1,
-        max_crash_retries:        3,
-        max_review_rejections:    2,
-        crash_retries_remaining:  2,
+        task_id: task_id.to_owned(),
+        crash_retry_count: 1,
+        review_reject_count: 1,
+        max_crash_retries: 3,
+        max_review_rejections: 2,
+        crash_retries_remaining: 2,
         review_retries_remaining: 1,
-        retry_admissible:         true,
+        retry_admissible: true,
         retry_inadmissible_reason: None,
     }
 }
@@ -75,33 +74,45 @@ fn sample_task_view(task_id: &str) -> TaskCapabilityView {
 #[test]
 fn orchestrator_envelope_carries_initiative_and_tasks() {
     let env = Capabilities::Orchestrator(OrchestratorCapabilities {
-        session:    sample_session("orchestrator"),
+        session: sample_session("orchestrator"),
         initiative: InitiativeCapabilityView {
-            initiative_id:                          "init-1".to_owned(),
+            initiative_id: "init-1".to_owned(),
             orchestrator_no_progress_respawn_count: 1,
-            max_orchestrator_no_progress_respawns:  3,
-            orchestrator_respawns_remaining:        2,
+            max_orchestrator_no_progress_respawns: 3,
+            orchestrator_respawns_remaining: 2,
         },
-        tasks:      vec![sample_task_view("task-a"), sample_task_view("task-b")],
+        tasks: vec![sample_task_view("task-a"), sample_task_view("task-b")],
         max_turns_scaling: default_scaling(),
     });
     let json = serde_json::to_value(&env).expect("orchestrator serialise");
-    assert_eq!(json["role"], "orchestrator",
-        "orchestrator envelope MUST tag role=orchestrator on the wire");
-    assert!(json.get("initiative").is_some(),
-        "orchestrator envelope MUST include initiative view");
-    assert!(json.get("tasks").is_some(),
-        "orchestrator envelope MUST include tasks array");
-    assert!(json.get("session").is_some(),
-        "orchestrator envelope MUST include session view");
+    assert_eq!(
+        json["role"], "orchestrator",
+        "orchestrator envelope MUST tag role=orchestrator on the wire"
+    );
+    assert!(
+        json.get("initiative").is_some(),
+        "orchestrator envelope MUST include initiative view"
+    );
+    assert!(
+        json.get("tasks").is_some(),
+        "orchestrator envelope MUST include tasks array"
+    );
+    assert!(
+        json.get("session").is_some(),
+        "orchestrator envelope MUST include session view"
+    );
 
     // The executor's single `task` field and the reviewer's
     // `artifact_task_id` field MUST NOT appear in the orchestrator
     // shape (those are role-bound to the other variants).
-    assert!(json.get("task").is_none(),
-        "orchestrator envelope MUST NOT carry executor's `task` field");
-    assert!(json.get("artifact_task_id").is_none(),
-        "orchestrator envelope MUST NOT carry reviewer's `artifact_task_id` field");
+    assert!(
+        json.get("task").is_none(),
+        "orchestrator envelope MUST NOT carry executor's `task` field"
+    );
+    assert!(
+        json.get("artifact_task_id").is_none(),
+        "orchestrator envelope MUST NOT carry reviewer's `artifact_task_id` field"
+    );
 }
 
 /// Executor envelope MUST carry exactly ONE task and MUST NOT
@@ -111,23 +122,31 @@ fn orchestrator_envelope_carries_initiative_and_tasks() {
 fn executor_envelope_omits_orchestrator_and_peer_state() {
     let env = Capabilities::Executor(ExecutorCapabilities {
         session: sample_session("executor"),
-        task:    sample_task_view("task-self"),
+        task: sample_task_view("task-self"),
         max_turns_scaling: default_scaling(),
     });
     let json = serde_json::to_value(&env).expect("executor serialise");
     assert_eq!(json["role"], "executor");
-    assert!(json.get("task").is_some(),
-        "executor envelope MUST carry the single assigned task");
+    assert!(
+        json.get("task").is_some(),
+        "executor envelope MUST carry the single assigned task"
+    );
     assert!(json.get("session").is_some());
 
-    assert!(json.get("initiative").is_none(),
+    assert!(
+        json.get("initiative").is_none(),
         "executor envelope MUST NOT surface orchestrator's per-initiative \
-         respawn counter (slice C role-scope contract)");
-    assert!(json.get("tasks").is_none(),
+         respawn counter (slice C role-scope contract)"
+    );
+    assert!(
+        json.get("tasks").is_none(),
         "executor envelope MUST NOT carry the per-initiative tasks list \
-         (cross-DAG visibility leak)");
-    assert!(json.get("artifact_task_id").is_none(),
-        "executor envelope MUST NOT carry reviewer's artifact pointer");
+         (cross-DAG visibility leak)"
+    );
+    assert!(
+        json.get("artifact_task_id").is_none(),
+        "executor envelope MUST NOT carry reviewer's artifact pointer"
+    );
 }
 
 /// Reviewer envelope MUST carry session + artifact identity ONLY.
@@ -137,33 +156,45 @@ fn executor_envelope_omits_orchestrator_and_peer_state() {
 #[test]
 fn reviewer_envelope_carries_artifact_identity_only() {
     let env = Capabilities::Reviewer(ReviewerCapabilities {
-        session:          sample_session("reviewer"),
+        session: sample_session("reviewer"),
         artifact_task_id: "task-under-review".to_owned(),
     });
     let json = serde_json::to_value(&env).expect("reviewer serialise");
     assert_eq!(json["role"], "reviewer");
     assert!(json.get("session").is_some());
-    assert_eq!(json["artifact_task_id"], "task-under-review",
-        "reviewer envelope MUST carry artifact_task_id verbatim");
+    assert_eq!(
+        json["artifact_task_id"], "task-under-review",
+        "reviewer envelope MUST carry artifact_task_id verbatim"
+    );
 
     // Counter / budget fields MUST NOT appear in the wire shape —
     // they would bias the reviewer's verdict toward the executor's
     // prior trajectory rather than the artifact under review.
-    assert!(json.get("initiative").is_none(),
+    assert!(
+        json.get("initiative").is_none(),
         "reviewer envelope MUST NOT carry orchestrator's per-initiative \
-         respawn budget");
-    assert!(json.get("tasks").is_none(),
-        "reviewer envelope MUST NOT carry the per-initiative tasks list");
-    assert!(json.get("task").is_none(),
+         respawn budget"
+    );
+    assert!(
+        json.get("tasks").is_none(),
+        "reviewer envelope MUST NOT carry the per-initiative tasks list"
+    );
+    assert!(
+        json.get("task").is_none(),
         "reviewer envelope MUST NOT carry executor-style task counters \
          (would surface crash/review counts the reviewer must verdict \
-         independently of)");
-    assert!(!json.to_string().contains("crash_retry_count"),
+         independently of)"
+    );
+    assert!(
+        !json.to_string().contains("crash_retry_count"),
         "reviewer envelope MUST NOT mention crash_retry_count anywhere — \
          the reviewer's verdict is on the artifact, not the executor's \
-         trajectory: got {json}");
-    assert!(!json.to_string().contains("review_reject_count"),
-        "reviewer envelope MUST NOT mention review_reject_count anywhere: got {json}");
+         trajectory: got {json}"
+    );
+    assert!(
+        !json.to_string().contains("review_reject_count"),
+        "reviewer envelope MUST NOT mention review_reject_count anywhere: got {json}"
+    );
 }
 
 /// Cross-role round-trip witness: every variant MUST round-trip
@@ -175,32 +206,34 @@ fn reviewer_envelope_carries_artifact_identity_only() {
 fn capabilities_round_trip_through_json_for_every_variant() {
     let envelopes = vec![
         Capabilities::Orchestrator(OrchestratorCapabilities {
-            session:    sample_session("orchestrator"),
+            session: sample_session("orchestrator"),
             initiative: InitiativeCapabilityView {
-                initiative_id:                          "init-rt".to_owned(),
+                initiative_id: "init-rt".to_owned(),
                 orchestrator_no_progress_respawn_count: 0,
-                max_orchestrator_no_progress_respawns:  3,
-                orchestrator_respawns_remaining:        3,
+                max_orchestrator_no_progress_respawns: 3,
+                orchestrator_respawns_remaining: 3,
             },
-            tasks:      vec![sample_task_view("task-rt")],
+            tasks: vec![sample_task_view("task-rt")],
             max_turns_scaling: default_scaling(),
         }),
         Capabilities::Executor(ExecutorCapabilities {
             session: sample_session("executor"),
-            task:    sample_task_view("task-rt"),
+            task: sample_task_view("task-rt"),
             max_turns_scaling: default_scaling(),
         }),
         Capabilities::Reviewer(ReviewerCapabilities {
-            session:          sample_session("reviewer"),
+            session: sample_session("reviewer"),
             artifact_task_id: "task-art".to_owned(),
         }),
     ];
     for env in envelopes {
         let json = serde_json::to_string(&env).expect("serialise");
         let back: Capabilities = serde_json::from_str(&json).expect("deserialise");
-        assert_eq!(env, back,
+        assert_eq!(
+            env, back,
             "capabilities envelope MUST round-trip byte-stably; \
-             original={env:?}, round-tripped={back:?}");
+             original={env:?}, round-tripped={back:?}"
+        );
     }
 }
 
@@ -214,71 +247,97 @@ fn rendered_capabilities_block_respects_role_scope() {
 
     fn fixture(caps: Capabilities) -> KsbSnapshot {
         KsbSnapshot {
-            version:                       KSB_SCHEMA_VERSION,
-            initiative_id:                 "init-rs".to_owned(),
-            task_id:                       Some("task-rs".to_owned()),
-            role:                          match &caps {
+            version: KSB_SCHEMA_VERSION,
+            initiative_id: "init-rs".to_owned(),
+            task_id: Some("task-rs".to_owned()),
+            role: match &caps {
                 Capabilities::Orchestrator(_) => "orchestrator",
-                Capabilities::Executor(_)     => "executor",
-                Capabilities::Reviewer(_)     => "reviewer",
-            }.to_owned(),
-            evaluation_sha:                String::new(),
-            path_allowlist:                vec![],
-            token_budget_remaining:        0,
-            wallclock_budget_remaining_s:  0,
-            dag_rows:                      vec![],
-            task_description:              String::new(),
-            target_ref:                    "refs/heads/main".to_owned(),
-            base_sha:                      String::new(),
-            reviewer_verdicts:             vec![],
-            pending_escalations:           vec![],
-            credential_ports:              vec![],
-            capabilities:                  Some(caps),
+                Capabilities::Executor(_) => "executor",
+                Capabilities::Reviewer(_) => "reviewer",
+            }
+            .to_owned(),
+            evaluation_sha: String::new(),
+            path_allowlist: vec![],
+            token_budget_remaining: 0,
+            wallclock_budget_remaining_s: 0,
+            dag_rows: vec![],
+            task_description: String::new(),
+            target_ref: "refs/heads/main".to_owned(),
+            base_sha: String::new(),
+            reviewer_verdicts: vec![],
+            pending_escalations: vec![],
+            credential_ports: vec![],
+            capabilities: Some(caps),
         }
     }
 
-    let orch = render_ksb(&fixture(Capabilities::Orchestrator(OrchestratorCapabilities {
-        session:    sample_session("orchestrator"),
-        initiative: InitiativeCapabilityView {
-            initiative_id:                          "init-rs".to_owned(),
-            orchestrator_no_progress_respawn_count: 1,
-            max_orchestrator_no_progress_respawns:  3,
-            orchestrator_respawns_remaining:        2,
+    let orch = render_ksb(&fixture(Capabilities::Orchestrator(
+        OrchestratorCapabilities {
+            session: sample_session("orchestrator"),
+            initiative: InitiativeCapabilityView {
+                initiative_id: "init-rs".to_owned(),
+                orchestrator_no_progress_respawn_count: 1,
+                max_orchestrator_no_progress_respawns: 3,
+                orchestrator_respawns_remaining: 2,
+            },
+            tasks: vec![sample_task_view("task-x")],
+            max_turns_scaling: default_scaling(),
         },
-        tasks:      vec![sample_task_view("task-x")],
-        max_turns_scaling: default_scaling(),
-    }))).expect("render orchestrator");
-    assert!(orch.contains("role=orchestrator"),
-        "orchestrator render must carry role=orchestrator key in capabilities block: {orch}");
-    assert!(orch.contains("orch_no_progress_respawns=1/3"),
-        "orchestrator render must surface initiative respawn budget: {orch}");
-    assert!(orch.contains("tasks=") && orch.contains("- task=task-x"),
-        "orchestrator render must list per-task views: {orch}");
+    )))
+    .expect("render orchestrator");
+    assert!(
+        orch.contains("role=orchestrator"),
+        "orchestrator render must carry role=orchestrator key in capabilities block: {orch}"
+    );
+    assert!(
+        orch.contains("orch_no_progress_respawns=1/3"),
+        "orchestrator render must surface initiative respawn budget: {orch}"
+    );
+    assert!(
+        orch.contains("tasks=") && orch.contains("- task=task-x"),
+        "orchestrator render must list per-task views: {orch}"
+    );
 
     let exec = render_ksb(&fixture(Capabilities::Executor(ExecutorCapabilities {
         session: sample_session("executor"),
-        task:    sample_task_view("task-x"),
+        task: sample_task_view("task-x"),
         max_turns_scaling: default_scaling(),
-    }))).expect("render executor");
-    assert!(exec.contains("role=executor"),
-        "executor render must carry role=executor: {exec}");
-    assert!(exec.contains("task=\n    - task=task-x"),
-        "executor render must surface single task block: {exec}");
-    assert!(!exec.contains("orch_no_progress_respawns"),
-        "executor render MUST NOT leak orchestrator's respawn budget: {exec}");
+    })))
+    .expect("render executor");
+    assert!(
+        exec.contains("role=executor"),
+        "executor render must carry role=executor: {exec}"
+    );
+    assert!(
+        exec.contains("task=\n    - task=task-x"),
+        "executor render must surface single task block: {exec}"
+    );
+    assert!(
+        !exec.contains("orch_no_progress_respawns"),
+        "executor render MUST NOT leak orchestrator's respawn budget: {exec}"
+    );
 
     let rev = render_ksb(&fixture(Capabilities::Reviewer(ReviewerCapabilities {
-        session:          sample_session("reviewer"),
+        session: sample_session("reviewer"),
         artifact_task_id: "task-art".to_owned(),
-    }))).expect("render reviewer");
-    assert!(rev.contains("role=reviewer"),
-        "reviewer render must carry role=reviewer: {rev}");
-    assert!(rev.contains("artifact_task_id=task-art"),
-        "reviewer render must surface artifact id: {rev}");
-    assert!(!rev.contains("crash_retry_count"),
-        "reviewer render MUST NOT leak executor crash counters: {rev}");
-    assert!(!rev.contains("review_reject_count"),
-        "reviewer render MUST NOT leak executor review counters: {rev}");
+    })))
+    .expect("render reviewer");
+    assert!(
+        rev.contains("role=reviewer"),
+        "reviewer render must carry role=reviewer: {rev}"
+    );
+    assert!(
+        rev.contains("artifact_task_id=task-art"),
+        "reviewer render must surface artifact id: {rev}"
+    );
+    assert!(
+        !rev.contains("crash_retry_count"),
+        "reviewer render MUST NOT leak executor crash counters: {rev}"
+    );
+    assert!(
+        !rev.contains("review_reject_count"),
+        "reviewer render MUST NOT leak executor review counters: {rev}"
+    );
 }
 
 /// V2.7 `INV-KSB-MAX-TURNS-VISIBILITY-01` — every role's rendered
@@ -292,67 +351,91 @@ fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
 
     fn role_session(role: &'static str, max_turns: u32) -> SessionCapabilityView {
         SessionCapabilityView {
-            session_id:        format!("ses-mt-{role}"),
-            role:              role.to_owned(),
+            session_id: format!("ses-mt-{role}"),
+            role: role.to_owned(),
             planner_max_turns: max_turns,
         }
     }
 
     fn fixture(caps: Capabilities, role: &'static str) -> KsbSnapshot {
         KsbSnapshot {
-            version:                       KSB_SCHEMA_VERSION,
-            initiative_id:                 "init-mt".to_owned(),
-            task_id:                       Some("task-mt".to_owned()),
-            role:                          role.to_owned(),
-            evaluation_sha:                String::new(),
-            path_allowlist:                vec![],
-            token_budget_remaining:        0,
-            wallclock_budget_remaining_s:  0,
-            dag_rows:                      vec![],
-            task_description:              String::new(),
-            target_ref:                    "refs/heads/main".to_owned(),
-            base_sha:                      String::new(),
-            reviewer_verdicts:             vec![],
-            pending_escalations:           vec![],
-            credential_ports:              vec![],
-            capabilities:                  Some(caps),
+            version: KSB_SCHEMA_VERSION,
+            initiative_id: "init-mt".to_owned(),
+            task_id: Some("task-mt".to_owned()),
+            role: role.to_owned(),
+            evaluation_sha: String::new(),
+            path_allowlist: vec![],
+            token_budget_remaining: 0,
+            wallclock_budget_remaining_s: 0,
+            dag_rows: vec![],
+            task_description: String::new(),
+            target_ref: "refs/heads/main".to_owned(),
+            base_sha: String::new(),
+            reviewer_verdicts: vec![],
+            pending_escalations: vec![],
+            credential_ports: vec![],
+            capabilities: Some(caps),
         }
     }
 
     // Distinct values per role to detect cross-role swaps.
     const ORCH_MT: u32 = 250;
     const EXEC_MT: u32 = 150;
-    const REV_MT:  u32 = 5;
+    const REV_MT: u32 = 5;
 
-    let orch = render_ksb(&fixture(Capabilities::Orchestrator(OrchestratorCapabilities {
-        session:    role_session("orchestrator", ORCH_MT),
-        initiative: InitiativeCapabilityView {
-            initiative_id:                          "init-mt".to_owned(),
-            orchestrator_no_progress_respawn_count: 0,
-            max_orchestrator_no_progress_respawns:  3,
-            orchestrator_respawns_remaining:        3,
-        },
-        tasks:      vec![],
-        max_turns_scaling: default_scaling(),
-    }), "orchestrator")).expect("render orchestrator");
-    assert!(orch.contains(&format!("role=orchestrator session=ses-mt-orchestrator planner_max_turns={ORCH_MT}")),
-        "orchestrator capabilities line MUST carry role+session+planner_max_turns; got: {orch}");
+    let orch = render_ksb(&fixture(
+        Capabilities::Orchestrator(OrchestratorCapabilities {
+            session: role_session("orchestrator", ORCH_MT),
+            initiative: InitiativeCapabilityView {
+                initiative_id: "init-mt".to_owned(),
+                orchestrator_no_progress_respawn_count: 0,
+                max_orchestrator_no_progress_respawns: 3,
+                orchestrator_respawns_remaining: 3,
+            },
+            tasks: vec![],
+            max_turns_scaling: default_scaling(),
+        }),
+        "orchestrator",
+    ))
+    .expect("render orchestrator");
+    assert!(
+        orch.contains(&format!(
+            "role=orchestrator session=ses-mt-orchestrator planner_max_turns={ORCH_MT}"
+        )),
+        "orchestrator capabilities line MUST carry role+session+planner_max_turns; got: {orch}"
+    );
 
-    let exec = render_ksb(&fixture(Capabilities::Executor(ExecutorCapabilities {
-        session: role_session("executor", EXEC_MT),
-        task:    sample_task_view("task-mt"),
-        max_turns_scaling: default_scaling(),
-    }), "executor")).expect("render executor");
+    let exec = render_ksb(&fixture(
+        Capabilities::Executor(ExecutorCapabilities {
+            session: role_session("executor", EXEC_MT),
+            task: sample_task_view("task-mt"),
+            max_turns_scaling: default_scaling(),
+        }),
+        "executor",
+    ))
+    .expect("render executor");
 
-    assert!(exec.contains(&format!("role=executor session=ses-mt-executor planner_max_turns={EXEC_MT}")),
-        "executor capabilities line MUST carry role+session+planner_max_turns; got: {exec}");
+    assert!(
+        exec.contains(&format!(
+            "role=executor session=ses-mt-executor planner_max_turns={EXEC_MT}"
+        )),
+        "executor capabilities line MUST carry role+session+planner_max_turns; got: {exec}"
+    );
 
-    let rev = render_ksb(&fixture(Capabilities::Reviewer(ReviewerCapabilities {
-        session:          role_session("reviewer", REV_MT),
-        artifact_task_id: "task-mt".to_owned(),
-    }), "reviewer")).expect("render reviewer");
-    assert!(rev.contains(&format!("role=reviewer session=ses-mt-reviewer planner_max_turns={REV_MT}")),
-        "reviewer capabilities line MUST carry role+session+planner_max_turns; got: {rev}");
+    let rev = render_ksb(&fixture(
+        Capabilities::Reviewer(ReviewerCapabilities {
+            session: role_session("reviewer", REV_MT),
+            artifact_task_id: "task-mt".to_owned(),
+        }),
+        "reviewer",
+    ))
+    .expect("render reviewer");
+    assert!(
+        rev.contains(&format!(
+            "role=reviewer session=ses-mt-reviewer planner_max_turns={REV_MT}"
+        )),
+        "reviewer capabilities line MUST carry role+session+planner_max_turns; got: {rev}"
+    );
 }
 
 /// V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` witness — the
@@ -368,40 +451,53 @@ fn inv_ksb_max_turns_visibility_01_all_three_roles_carry_planner_max_turns() {
 fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
     use raxis_ksb::render_ksb;
     let scaling = MaxTurnsScalingView {
-        max_turns_attempt:       2,
-        max_turns_base:          30,
-        max_turns_step:          30,
-        max_turns_hard_ceiling:  240,
+        max_turns_attempt: 2,
+        max_turns_base: 30,
+        max_turns_step: 30,
+        max_turns_hard_ceiling: 240,
     };
 
     // ── Orchestrator envelope ─────────────────────────────────────
     let orch_caps = Capabilities::Orchestrator(OrchestratorCapabilities {
-        session:    sample_session("orchestrator"),
+        session: sample_session("orchestrator"),
         initiative: InitiativeCapabilityView {
-            initiative_id:                          "init-pr".to_owned(),
+            initiative_id: "init-pr".to_owned(),
             orchestrator_no_progress_respawn_count: 0,
-            max_orchestrator_no_progress_respawns:  3,
-            orchestrator_respawns_remaining:        3,
+            max_orchestrator_no_progress_respawns: 3,
+            orchestrator_respawns_remaining: 3,
         },
-        tasks:      vec![sample_task_view("task-pr")],
+        tasks: vec![sample_task_view("task-pr")],
         max_turns_scaling: scaling,
     });
     let orch_json = serde_json::to_value(&orch_caps).expect("orchestrator serialise");
-    let orch_obj  = orch_json
-        .get("Orchestrator").or_else(|| orch_json.get("orchestrator"))
+    let orch_obj = orch_json
+        .get("Orchestrator")
+        .or_else(|| orch_json.get("orchestrator"))
         .expect("orchestrator wire variant present");
-    let orch_mts  = orch_obj.get("max_turns_scaling")
+    let orch_mts = orch_obj
+        .get("max_turns_scaling")
         .expect("orchestrator envelope MUST carry `max_turns_scaling`");
-    assert_eq!(orch_mts.get("max_turns_attempt").and_then(|v| v.as_u64()), Some(2));
-    assert_eq!(orch_mts.get("max_turns_base").and_then(|v| v.as_u64()),    Some(30));
-    assert_eq!(orch_mts.get("max_turns_step").and_then(|v| v.as_u64()),    Some(30));
     assert_eq!(
-        orch_mts.get("max_turns_hard_ceiling").and_then(|v| v.as_u64()),
+        orch_mts.get("max_turns_attempt").and_then(|v| v.as_u64()),
+        Some(2)
+    );
+    assert_eq!(
+        orch_mts.get("max_turns_base").and_then(|v| v.as_u64()),
+        Some(30)
+    );
+    assert_eq!(
+        orch_mts.get("max_turns_step").and_then(|v| v.as_u64()),
+        Some(30)
+    );
+    assert_eq!(
+        orch_mts
+            .get("max_turns_hard_ceiling")
+            .and_then(|v| v.as_u64()),
         Some(240),
     );
 
-    let orch_rendered = render_ksb(&fixture_with_caps(orch_caps, "orchestrator"))
-        .expect("render orchestrator");
+    let orch_rendered =
+        render_ksb(&fixture_with_caps(orch_caps, "orchestrator")).expect("render orchestrator");
     assert!(
         orch_rendered.contains("max_turns_attempt=2 base=30 step=30 hard_ceiling=240"),
         "orchestrator KSB text MUST carry the progressive-scaling line; got: {orch_rendered}",
@@ -410,18 +506,21 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
     // ── Executor envelope ─────────────────────────────────────────
     let exec_caps = Capabilities::Executor(ExecutorCapabilities {
         session: sample_session("executor"),
-        task:    sample_task_view("task-pr"),
+        task: sample_task_view("task-pr"),
         max_turns_scaling: scaling,
     });
     let exec_json = serde_json::to_value(&exec_caps).expect("executor serialise");
-    let exec_obj  = exec_json
-        .get("Executor").or_else(|| exec_json.get("executor"))
+    let exec_obj = exec_json
+        .get("Executor")
+        .or_else(|| exec_json.get("executor"))
         .expect("executor wire variant present");
-    assert!(exec_obj.get("max_turns_scaling").is_some(),
-        "executor envelope MUST carry `max_turns_scaling`; got: {exec_json}");
+    assert!(
+        exec_obj.get("max_turns_scaling").is_some(),
+        "executor envelope MUST carry `max_turns_scaling`; got: {exec_json}"
+    );
 
-    let exec_rendered = render_ksb(&fixture_with_caps(exec_caps, "executor"))
-        .expect("render executor");
+    let exec_rendered =
+        render_ksb(&fixture_with_caps(exec_caps, "executor")).expect("render executor");
     assert!(
         exec_rendered.contains("max_turns_attempt=2 base=30 step=30 hard_ceiling=240"),
         "executor KSB text MUST carry the progressive-scaling line; got: {exec_rendered}",
@@ -429,20 +528,23 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
 
     // ── Reviewer envelope — MUST NOT carry the scaling view ───────
     let rev_caps = Capabilities::Reviewer(ReviewerCapabilities {
-        session:          sample_session("reviewer"),
+        session: sample_session("reviewer"),
         artifact_task_id: "task-pr".to_owned(),
     });
     let rev_json = serde_json::to_value(&rev_caps).expect("reviewer serialise");
-    let rev_obj  = rev_json
-        .get("Reviewer").or_else(|| rev_json.get("reviewer"))
+    let rev_obj = rev_json
+        .get("Reviewer")
+        .or_else(|| rev_json.get("reviewer"))
         .expect("reviewer wire variant present");
-    assert!(rev_obj.get("max_turns_scaling").is_none(),
+    assert!(
+        rev_obj.get("max_turns_scaling").is_none(),
         "reviewer envelope MUST NOT carry `max_turns_scaling` \
          (role-scoping rule per INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01); \
-         got: {rev_json}");
+         got: {rev_json}"
+    );
 
-    let rev_rendered = render_ksb(&fixture_with_caps(rev_caps, "reviewer"))
-        .expect("render reviewer");
+    let rev_rendered =
+        render_ksb(&fixture_with_caps(rev_caps, "reviewer")).expect("render reviewer");
     assert!(
         !rev_rendered.contains("max_turns_attempt="),
         "reviewer KSB text MUST NOT carry the progressive-scaling line; got: {rev_rendered}",
@@ -455,21 +557,21 @@ fn inv_planner_max_turns_progressive_on_retry_01_role_scoped() {
 /// `KsbSnapshot` without re-entering that test's local scope.
 fn fixture_with_caps(caps: Capabilities, role: &'static str) -> raxis_ksb::KsbSnapshot {
     raxis_ksb::KsbSnapshot {
-        version:                       raxis_ksb::KSB_SCHEMA_VERSION,
-        initiative_id:                 "init-pr".to_owned(),
-        task_id:                       Some("task-pr".to_owned()),
-        role:                          role.to_owned(),
-        evaluation_sha:                String::new(),
-        path_allowlist:                vec![],
-        token_budget_remaining:        0,
-        wallclock_budget_remaining_s:  0,
-        dag_rows:                      vec![],
-        task_description:              String::new(),
-        target_ref:                    "refs/heads/main".to_owned(),
-        base_sha:                      String::new(),
-        reviewer_verdicts:             vec![],
-        pending_escalations:           vec![],
-        credential_ports:              vec![],
-        capabilities:                  Some(caps),
+        version: raxis_ksb::KSB_SCHEMA_VERSION,
+        initiative_id: "init-pr".to_owned(),
+        task_id: Some("task-pr".to_owned()),
+        role: role.to_owned(),
+        evaluation_sha: String::new(),
+        path_allowlist: vec![],
+        token_budget_remaining: 0,
+        wallclock_budget_remaining_s: 0,
+        dag_rows: vec![],
+        task_description: String::new(),
+        target_ref: "refs/heads/main".to_owned(),
+        base_sha: String::new(),
+        reviewer_verdicts: vec![],
+        pending_escalations: vec![],
+        credential_ports: vec![],
+        capabilities: Some(caps),
     }
 }

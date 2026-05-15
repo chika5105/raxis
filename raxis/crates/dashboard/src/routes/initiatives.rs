@@ -39,7 +39,9 @@ pub struct ListQuery {
     pub limit: u32,
 }
 
-fn default_limit() -> u32 { 50 }
+fn default_limit() -> u32 {
+    50
+}
 
 /// `GET /api/initiatives`.
 pub async fn list<D>(
@@ -103,11 +105,15 @@ where
 {
     require_read(&op)?;
     let init = state.data.get_initiative(&id)?;
-    let nodes = init.tasks.iter().map(|t| DagNode {
-        task_id: t.task_id.clone(),
-        title: t.title.clone(),
-        state: t.state.clone(),
-    }).collect();
+    let nodes = init
+        .tasks
+        .iter()
+        .map(|t| DagNode {
+            task_id: t.task_id.clone(),
+            title: t.title.clone(),
+            state: t.state.clone(),
+        })
+        .collect();
     Ok(Json(DagView {
         initiative_id: init.summary.initiative_id,
         nodes,
@@ -198,7 +204,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

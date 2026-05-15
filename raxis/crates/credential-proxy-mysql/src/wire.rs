@@ -30,14 +30,14 @@ pub const MAX_PACKET_PAYLOAD: usize = 16 * 1024 * 1024 - 1;
 /// MySQL command bytes (first byte of a `COM_*` packet payload).
 pub mod cmd {
     /// Client signals end of session and closes the connection.
-    pub const QUIT:    u8 = 0x01;
+    pub const QUIT: u8 = 0x01;
     /// Run a textual SQL statement (`COM_QUERY`).
-    pub const QUERY:   u8 = 0x03;
+    pub const QUERY: u8 = 0x03;
     /// Liveness check (`COM_PING`).
-    pub const PING:    u8 = 0x0e;
+    pub const PING: u8 = 0x0e;
     /// Reset the session connection state without re-handshaking
     /// (`COM_RESET_CONNECTION`).
-    pub const RESET:   u8 = 0x1f;
+    pub const RESET: u8 = 0x1f;
     /// Prepare a SQL statement (`COM_STMT_PREPARE`). Payload is
     /// `0x16 + sql_bytes`.
     pub const STMT_PREPARE: u8 = 0x16;
@@ -117,7 +117,7 @@ pub const STATUS_AUTOCOMMIT: u16 = 0x0002;
 /// scramble). The sequence ID is the caller's responsibility.
 pub fn build_handshake_v10(
     server_version: &str,
-    thread_id:      u32,
+    thread_id: u32,
     auth_plugin_data: &[u8; 20],
 ) -> Vec<u8> {
     let mut p = BytesMut::with_capacity(128);
@@ -242,10 +242,11 @@ pub struct PacketHeader {
 impl PacketHeader {
     /// Decode a 4-byte header off the wire.
     pub fn parse(buf: [u8; 4]) -> Self {
-        let len = (buf[0] as usize)
-            | ((buf[1] as usize) << 8)
-            | ((buf[2] as usize) << 16);
-        Self { payload_len: len, sequence_id: buf[3] }
+        let len = (buf[0] as usize) | ((buf[1] as usize) << 8) | ((buf[2] as usize) << 16);
+        Self {
+            payload_len: len,
+            sequence_id: buf[3],
+        }
     }
 }
 
@@ -261,11 +262,13 @@ mod tests {
     #[test]
     fn capabilities_does_not_advertise_ssl_or_compress() {
         assert_eq!(
-            CAPABILITIES & (1 << 11), 0,
+            CAPABILITIES & (1 << 11),
+            0,
             "CLIENT_SSL must NEVER be set in greeting caps",
         );
         assert_eq!(
-            CAPABILITIES & (1 << 5), 0,
+            CAPABILITIES & (1 << 5),
+            0,
             "CLIENT_COMPRESS must NEVER be set in greeting caps",
         );
     }
@@ -288,7 +291,7 @@ mod tests {
         let after_status = after_cap_lower + 1 + 2;
         let cap_upper = u16::from_le_bytes([p[after_status], p[after_status + 1]]);
         let cap = ((cap_upper as u32) << 16) | (cap_lower as u32);
-        assert!(cap & (1 <<  9) != 0, "CLIENT_PROTOCOL_41 must be set");
+        assert!(cap & (1 << 9) != 0, "CLIENT_PROTOCOL_41 must be set");
         assert!(cap & (1 << 15) != 0, "CLIENT_SECURE_CONNECTION must be set");
         assert!(cap & (1 << 19) != 0, "CLIENT_PLUGIN_AUTH must be set");
     }

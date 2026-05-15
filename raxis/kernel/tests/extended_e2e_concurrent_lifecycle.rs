@@ -163,20 +163,16 @@ use extended_e2e_support::{
     audit_chain::{scripts as audit_scripts, AuditChainWitness},
     concurrency::assert_overlap_or_panic,
     injection::{
-        assemble_prompt as assemble_injection_prompt, payload_summary,
-        witnesses_for_payloads,
+        assemble_prompt as assemble_injection_prompt, payload_summary, witnesses_for_payloads,
     },
     plan::{
-        extended_plan_toml, TASK_FANOUT_FMT, TASK_FANOUT_MANIFEST,
-        TASK_FANOUT_README, TASK_INJECT_EVIL, TASK_MATERIALIZE,
-        TASK_REVIEW_A, TASK_REVIEW_B,
+        extended_plan_toml, TASK_FANOUT_FMT, TASK_FANOUT_MANIFEST, TASK_FANOUT_README,
+        TASK_INJECT_EVIL, TASK_MATERIALIZE, TASK_REVIEW_A, TASK_REVIEW_B,
     },
-    seeds::{
-        preflight_or_panic as preflight_dbs_or_panic, MONGO_HOST_PORT, PG_HOST_PORT,
-    },
+    seeds::{preflight_or_panic as preflight_dbs_or_panic, MONGO_HOST_PORT, PG_HOST_PORT},
     witnesses::{
-        typed, EnforcementWitness, MaterializationWitness,
-        NoSecurityViolationWitness, ReviewerDisagreementWitness,
+        typed, EnforcementWitness, MaterializationWitness, NoSecurityViolationWitness,
+        ReviewerDisagreementWitness,
     },
 };
 use raxis_audit_tools::AuditEventKind;
@@ -186,7 +182,7 @@ use raxis_audit_tools::AuditEventKind;
 // ---------------------------------------------------------------------------
 
 const LIVE_E2E_GATE: &str = "RAXIS_LIVE_E2E";
-const READY_DEADLINE:    Duration = Duration::from_secs(15);
+const READY_DEADLINE: Duration = Duration::from_secs(15);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Distinct from the single-task test's `[0xC0; 32]` so a kernel
@@ -248,7 +244,10 @@ fn extended_session_lifecycle() {
     //    full lifecycle ops.
     let (signing_key, fingerprint) = build_e2e_operator_key();
     let (kernel_bin, data_dir) = bootstrap_with_custom_cert(&signing_key);
-    eprintln!("[ext-e2e] kernel bootstrapped, data_dir={}", data_dir.display());
+    eprintln!(
+        "[ext-e2e] kernel bootstrapped, data_dir={}",
+        data_dir.display()
+    );
 
     let gateway_binary = require_gateway_binary();
     enable_gateway_in_policy(&data_dir, &gateway_binary);
@@ -275,7 +274,10 @@ fn extended_session_lifecycle() {
 
     // ── Wait for the lifecycle to reach IntegrationMergeCompleted.
     let chain = poll_for_lifecycle_completion(kernel.data_dir(), &initiative_id);
-    eprintln!("[ext-e2e] lifecycle complete, chain has {} events", chain.len());
+    eprintln!(
+        "[ext-e2e] lifecycle complete, chain has {} events",
+        chain.len()
+    );
 
     // ── Locate the materializer executor's worktree on disk and
     //    run the worktree-side mechanical witness.
@@ -284,7 +286,8 @@ fn extended_session_lifecycle() {
     MaterializationWitness {
         workdir: workdir.clone(),
         expected_commit_message: MATERIALIZER_COMMIT_MESSAGE,
-    }.assert_satisfied();
+    }
+    .assert_satisfied();
     eprintln!("[ext-e2e] MaterializationWitness satisfied");
 
     // ── Concurrency oracle — at least one overlapping pair across
@@ -294,8 +297,8 @@ fn extended_session_lifecycle() {
 
     // ── Locate the injection task's session id by scanning the
     //    chain. Required by `PathAllowlistRejectedWitness`.
-    let injection_session_id = locate_session_id_for_task(&chain, TASK_INJECT_EVIL)
-        .unwrap_or_else(|| {
+    let injection_session_id =
+        locate_session_id_for_task(&chain, TASK_INJECT_EVIL).unwrap_or_else(|| {
             eprintln!(
                 "[ext-e2e] no SessionVmSpawned for {TASK_INJECT_EVIL}; \
                  injection witnesses will surface as failures with empty \
@@ -313,7 +316,7 @@ fn extended_session_lifecycle() {
     let mut global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
         Box::new(ReviewerDisagreementWitness {
-            executor_task_id:   TASK_MATERIALIZE.to_owned(),
+            executor_task_id: TASK_MATERIALIZE.to_owned(),
             reviewer_a_task_id: TASK_REVIEW_A.to_owned(),
             reviewer_b_task_id: TASK_REVIEW_B.to_owned(),
         }),
@@ -347,7 +350,10 @@ fn extended_session_lifecycle() {
     // ── Post-mortem chain integrity.
     let final_chain = walk_chain_or_panic(kernel.data_dir());
     assert_audit_invariants(&final_chain, &initiative_id);
-    eprintln!("[ext-e2e] audit chain integrity verified ({} events)", final_chain.len());
+    eprintln!(
+        "[ext-e2e] audit chain integrity verified ({} events)",
+        final_chain.len()
+    );
 
     // ── AuditChainWitness — Check A (structural integrity walk
     //    re-derived independently of `verify_chain_full`) and
@@ -372,13 +378,9 @@ fn extended_session_lifecycle() {
         structural_report.segments.len(),
         structural_report.kinds_seen.len(),
     );
-    let lifecycle_script = audit_scripts::concurrent_lifecycle(
-        TASK_MATERIALIZE,
-        FANOUT_GROUP,
-        initiative_id.clone(),
-    );
-    let lifecycle_report =
-        audit_witness.assert_scenario(&final_chain, &lifecycle_script);
+    let lifecycle_script =
+        audit_scripts::concurrent_lifecycle(TASK_MATERIALIZE, FANOUT_GROUP, initiative_id.clone());
+    let lifecycle_report = audit_witness.assert_scenario(&final_chain, &lifecycle_script);
     eprintln!(
         "[ext-e2e] AuditChainWitness::walk_scenario(concurrent-lifecycle): \
          {}/{} ordered matchers satisfied, {} absent matchers clean",
@@ -396,13 +398,9 @@ fn extended_session_lifecycle() {
     //    based assertion is the same invariant expressed
     //    declaratively, with per-matcher diagnostics surfacing
     //    exactly which event the chain lacked when it fails.
-    let reviewer_script = audit_scripts::reviewer_disagreement(
-        TASK_MATERIALIZE,
-        TASK_REVIEW_A,
-        TASK_REVIEW_B,
-    );
-    let reviewer_report =
-        audit_witness.assert_scenario(&final_chain, &reviewer_script);
+    let reviewer_script =
+        audit_scripts::reviewer_disagreement(TASK_MATERIALIZE, TASK_REVIEW_A, TASK_REVIEW_B);
+    let reviewer_report = audit_witness.assert_scenario(&final_chain, &reviewer_script);
     eprintln!(
         "[ext-e2e] AuditChainWitness::walk_scenario(reviewer-disagreement): \
          {}/{} ordered matchers satisfied",
@@ -423,19 +421,15 @@ fn extended_session_lifecycle() {
         .into_iter()
         .map(|(id, _label)| id)
         .collect();
-    let payload_id_refs: Vec<&str> =
-        payload_ids.iter().map(|s| s.as_str()).collect();
+    let payload_id_refs: Vec<&str> = payload_ids.iter().map(|s| s.as_str()).collect();
     let injection_session_id_for_script = if injection_session_id.is_empty() {
         None
     } else {
         Some(injection_session_id.clone())
     };
-    let injection_script = audit_scripts::prompt_injection(
-        injection_session_id_for_script,
-        &payload_id_refs,
-    );
-    let injection_report =
-        audit_witness.assert_scenario(&final_chain, &injection_script);
+    let injection_script =
+        audit_scripts::prompt_injection(injection_session_id_for_script, &payload_id_refs);
+    let injection_report = audit_witness.assert_scenario(&final_chain, &injection_script);
     eprintln!(
         "[ext-e2e] AuditChainWitness::walk_scenario(prompt-injection): \
          {}/{} ordered matchers satisfied, {} absent matchers clean",
@@ -450,11 +444,7 @@ fn extended_session_lifecycle() {
 /// because `audit_chain::scripts::concurrent_lifecycle` needs
 /// `&'static [&'static str]` so the matcher closures can capture
 /// the task-id set without per-call allocation.
-const FANOUT_GROUP: &[&str] = &[
-    TASK_FANOUT_README,
-    TASK_FANOUT_FMT,
-    TASK_FANOUT_MANIFEST,
-];
+const FANOUT_GROUP: &[&str] = &[TASK_FANOUT_README, TASK_FANOUT_FMT, TASK_FANOUT_MANIFEST];
 
 // ---------------------------------------------------------------------------
 // Preflight
@@ -474,7 +464,9 @@ fn require_tcp_reachable(host_port: &str, what: &str) {
     if std::net::TcpStream::connect_timeout(
         &host_port.parse().expect("static literal parses"),
         Duration::from_millis(500),
-    ).is_err() {
+    )
+    .is_err()
+    {
         panic!(
             "{what} not reachable at {host_port}. Run:\n  \
              docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait",
@@ -484,15 +476,16 @@ fn require_tcp_reachable(host_port: &str, what: &str) {
 
 fn require_anthropic_dev_key() {
     let env_path = workspace_dotenv_path();
-    let body = std::fs::read_to_string(&env_path).unwrap_or_else(|e| panic!(
-        "{} is required for the live LLM round-trip but read failed: {e}\n\
+    let body = std::fs::read_to_string(&env_path).unwrap_or_else(|e| {
+        panic!(
+            "{} is required for the live LLM round-trip but read failed: {e}\n\
          Create it with one line:\n  ANTHROPIC-API-DEV-KEY=sk-ant-...",
-        env_path.display(),
-    ));
-    let has_key = body
-        .lines()
-        .any(|l| l.starts_with("ANTHROPIC-API-DEV-KEY=")
-            && l.len() > "ANTHROPIC-API-DEV-KEY=".len());
+            env_path.display(),
+        )
+    });
+    let has_key = body.lines().any(|l| {
+        l.starts_with("ANTHROPIC-API-DEV-KEY=") && l.len() > "ANTHROPIC-API-DEV-KEY=".len()
+    });
     assert!(
         has_key,
         "{} must contain a non-empty ANTHROPIC-API-DEV-KEY=... line",
@@ -514,13 +507,18 @@ fn require_gcp_adc() {
 }
 
 fn require_gateway_binary() -> PathBuf {
-    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| panic!(
-        "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
+    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| {
+        panic!(
+            "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
          export the path:\n  cargo build -p raxis-gateway --release\n  \
          export RAXIS_GATEWAY_BINARY=$(pwd)/target/release/raxis-gateway",
-    ));
+        )
+    });
     let p = PathBuf::from(&raw);
-    assert!(p.is_absolute(), "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}");
+    assert!(
+        p.is_absolute(),
+        "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}"
+    );
     assert!(p.exists(), "RAXIS_GATEWAY_BINARY={raw:?} does not exist");
     p
 }
@@ -553,20 +551,23 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is post-epoch")
         .as_secs() as i64;
-    let cert = ephemeral_cert_with_key(signing_key, CertOpts {
-        now_unix_secs,
-        permitted_ops: vec![
-            "CreateInitiative".to_owned(),
-            "ApprovePlan".to_owned(),
-            "AbortInitiative".to_owned(),
-            // Grants dashboard `Admin` per
-            // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
-            "RotateEpoch".to_owned(),
-            "OperatorCertInstall".to_owned(),
-        ],
-        display_name: "ext-e2e-operator".to_owned(),
-        ..CertOpts::default()
-    });
+    let cert = ephemeral_cert_with_key(
+        signing_key,
+        CertOpts {
+            now_unix_secs,
+            permitted_ops: vec![
+                "CreateInitiative".to_owned(),
+                "ApprovePlan".to_owned(),
+                "AbortInitiative".to_owned(),
+                // Grants dashboard `Admin` per
+                // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
+                "RotateEpoch".to_owned(),
+                "OperatorCertInstall".to_owned(),
+            ],
+            display_name: "ext-e2e-operator".to_owned(),
+            ..CertOpts::default()
+        },
+    );
 
     let data_dir: PathBuf = tempfile::tempdir()
         .expect("tempdir for kernel data dir")
@@ -607,7 +608,9 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
     let stderr = child.stderr.take().expect("kernel stderr captured");
     let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_path = data_dir.join("kernel.stderr.log");
-    let log_handle = std::fs::File::create(&log_path).ok().map(|f| Arc::new(Mutex::new(f)));
+    let log_handle = std::fs::File::create(&log_path)
+        .ok()
+        .map(|f| Arc::new(Mutex::new(f)));
     {
         let lines = Arc::clone(&stderr_lines);
         let log_handle = log_handle.clone();
@@ -703,8 +706,7 @@ fn write_credentials(data_dir: &Path) {
 }
 
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body)
-        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
@@ -744,7 +746,11 @@ struct OperatorIpc {
 }
 
 impl OperatorIpc {
-    fn connect(socket_path: &Path, signing_key: &SigningKey, _fingerprint: &OperatorFingerprint) -> Self {
+    fn connect(
+        socket_path: &Path,
+        signing_key: &SigningKey,
+        _fingerprint: &OperatorFingerprint,
+    ) -> Self {
         let mut stream = UnixStream::connect(socket_path)
             .unwrap_or_else(|e| panic!("connect {}: {e}", socket_path.display()));
 
@@ -766,7 +772,8 @@ impl OperatorIpc {
 
         let ack = read_json_blocking(&mut stream);
         assert_eq!(
-            ack["status"].as_str(), Some("Ok"),
+            ack["status"].as_str(),
+            Some("Ok"),
             "kernel rejected auth: {ack:#}",
         );
 
@@ -797,7 +804,8 @@ impl OperatorIpc {
         write_json_frame(&mut self.stream, &req).expect("write CreateInitiative");
         let resp = read_json_blocking(&mut self.stream);
         assert_eq!(
-            resp["status"].as_str(), Some("InitiativeCreated"),
+            resp["status"].as_str(),
+            Some("InitiativeCreated"),
             "CreateInitiative must succeed; got: {resp:#}",
         );
         let returned_id = resp["payload"]["initiative_id"]
@@ -820,7 +828,8 @@ impl OperatorIpc {
         write_json_frame(&mut self.stream, &req).expect("write ApprovePlan");
         let resp = read_json_blocking(&mut self.stream);
         assert_eq!(
-            resp["status"].as_str(), Some("PlanApproved"),
+            resp["status"].as_str(),
+            Some("PlanApproved"),
             "ApprovePlan must succeed; got: {resp:#}",
         );
     }
@@ -835,8 +844,8 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
     let plan_bytes = plan_toml.as_bytes().to_vec();
     let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
     let artifacts = vec![BundleArtifact {
-        name:   "plan.toml".to_owned(),
-        bytes:  plan_bytes,
+        name: "plan.toml".to_owned(),
+        bytes: plan_bytes,
         sha256: plan_sha,
     }];
     let signed_at = std::time::SystemTime::now()
@@ -864,30 +873,44 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
         let manifest = anchor.join("Cargo.toml");
         if manifest.exists() {
             if let Ok(s) = std::fs::read_to_string(&manifest) {
-                if s.contains("[workspace]") { break; }
+                if s.contains("[workspace]") {
+                    break;
+                }
             }
         }
         if !anchor.pop() {
-            eprintln!("[ext-e2e] codesign: workspace root not found from {}",
-                kernel_bin.display());
+            eprintln!(
+                "[ext-e2e] codesign: workspace root not found from {}",
+                kernel_bin.display()
+            );
             return;
         }
     }
     let entitlements = anchor.join("release/raxis.entitlements");
     if !entitlements.exists() {
-        eprintln!("[ext-e2e] codesign: entitlements missing at {}", entitlements.display());
+        eprintln!(
+            "[ext-e2e] codesign: entitlements missing at {}",
+            entitlements.display()
+        );
         return;
     }
     let status = Command::new("codesign")
-        .arg("--sign").arg("-")
-        .arg("--entitlements").arg(&entitlements)
-        .arg("--options").arg("runtime")
+        .arg("--sign")
+        .arg("-")
+        .arg("--entitlements")
+        .arg(&entitlements)
+        .arg("--options")
+        .arg("runtime")
         .arg("--force")
         .arg(kernel_bin)
         .status()
         .expect("codesign required for AVF on macOS");
     if !status.success() {
-        panic!("codesign failed (exit {:?}) for {}", status.code(), kernel_bin.display());
+        panic!(
+            "codesign failed (exit {:?}) for {}",
+            status.code(),
+            kernel_bin.display()
+        );
     }
 }
 
@@ -950,9 +973,7 @@ fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<Au
         last_len = events.len();
 
         for e in &events {
-            if e.event_kind == "SecurityViolation"
-                || e.event_kind == "SecurityViolationDetected"
-            {
+            if e.event_kind == "SecurityViolation" || e.event_kind == "SecurityViolationDetected" {
                 panic!(
                     "SecurityViolation fired during extended lifecycle: \
                      event_kind={}, payload={:#}",
@@ -974,14 +995,18 @@ fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<Au
 }
 
 fn read_audit_chain(audit_dir: &Path) -> Result<Vec<AuditEvent>, ()> {
-    if !audit_dir.exists() { return Err(()); }
+    if !audit_dir.exists() {
+        return Err(());
+    }
     let mut events = Vec::new();
     for entry in std::fs::read_dir(audit_dir).map_err(|_| ())? {
         let entry = entry.map_err(|_| ())?;
         if entry.file_name().to_string_lossy().ends_with(".jsonl") {
             let bytes = std::fs::read(entry.path()).map_err(|_| ())?;
             for line in bytes.split(|&b| b == b'\n') {
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 if let Ok(ev) = serde_json::from_slice::<AuditEvent>(line) {
                     events.push(ev);
                 }
@@ -996,7 +1021,8 @@ fn summarize_chain_for_panic(audit_dir: &Path) -> String {
     match read_audit_chain(audit_dir) {
         Ok(events) => {
             let kinds: Vec<&str> = events.iter().map(|e| e.event_kind.as_str()).collect();
-            format!("seqs={}…{}, kinds={kinds:#?}",
+            format!(
+                "seqs={}…{}, kinds={kinds:#?}",
                 events.first().map(|e| e.seq).unwrap_or(0),
                 events.last().map(|e| e.seq).unwrap_or(0),
             )
@@ -1009,19 +1035,17 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
     verify_chain_full(&audit_dir)
         .unwrap_or_else(|e| panic!("verify_chain_full({audit_dir:?}) failed: {e:?}"));
-    let reader = ChainReader::open(&audit_dir).unwrap_or_else(|e| {
-        panic!("ChainReader::open({audit_dir:?}) failed: {e:?}")
-    });
+    let reader = ChainReader::open(&audit_dir)
+        .unwrap_or_else(|e| panic!("ChainReader::open({audit_dir:?}) failed: {e:?}"));
     reader
         .records()
         .map(|r| {
             let row = r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}"));
-            let value = row.parsed_value.unwrap_or_else(|| panic!(
-                "chain row seq={} has no parsed_value", row.seq,
-            ));
-            serde_json::from_value::<AuditEvent>(value).unwrap_or_else(|e| {
-                panic!("decode AuditEvent from chain row {}: {e}", row.seq)
-            })
+            let value = row
+                .parsed_value
+                .unwrap_or_else(|| panic!("chain row seq={} has no parsed_value", row.seq,));
+            serde_json::from_value::<AuditEvent>(value)
+                .unwrap_or_else(|e| panic!("decode AuditEvent from chain row {}: {e}", row.seq))
         })
         .collect()
 }
@@ -1029,7 +1053,7 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
     assert!(!chain.is_empty(), "audit chain must be non-empty");
     let first_kind = chain.first().expect("non-empty").event_kind.as_str();
-    let last_kind  = chain.last().expect("non-empty").event_kind.as_str();
+    let last_kind = chain.last().expect("non-empty").event_kind.as_str();
     assert!(
         first_kind.starts_with("Kernel") || first_kind == "GenesisAnchor",
         "first audit row must be a boot marker, got {first_kind:?}",
@@ -1078,14 +1102,13 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
 /// kernel-local fallbacks observed during V2 staging (the layout
 /// has been moved at least once during V2 development; the
 /// fallback list keeps the test working across the migration).
-fn locate_executor_worktree(
-    data_dir: &Path,
-    initiative_id: &str,
-    task_id: &str,
-) -> PathBuf {
+fn locate_executor_worktree(data_dir: &Path, initiative_id: &str, task_id: &str) -> PathBuf {
     let candidates = [
         data_dir.join("worktrees").join(initiative_id).join(task_id),
-        data_dir.join("workspaces").join(initiative_id).join(task_id),
+        data_dir
+            .join("workspaces")
+            .join(initiative_id)
+            .join(task_id),
         data_dir.join("sessions").join(initiative_id).join(task_id),
     ];
     for c in &candidates {
@@ -1112,7 +1135,9 @@ fn locate_executor_worktree(
 fn locate_session_id_for_task(chain: &[AuditEvent], task_id: &str) -> Option<String> {
     chain.iter().find_map(|ev| match typed(ev) {
         Some(AuditEventKind::SessionVmSpawned {
-            session_id, task_id: Some(t), ..
+            session_id,
+            task_id: Some(t),
+            ..
         }) if t == task_id => Some(session_id),
         _ => None,
     })

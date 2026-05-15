@@ -51,7 +51,7 @@ impl Stream {
     /// Subdirectory name relative to the observability root.
     pub fn subdir(&self) -> &'static str {
         match self {
-            Self::Spans   => "spans",
+            Self::Spans => "spans",
             Self::Metrics => "metrics",
         }
     }
@@ -143,11 +143,13 @@ pub fn hex_span_id(id: [u8; 8]) -> String {
 
 /// Parse a 32-char hex trace id into bytes; returns `None` on shape error.
 pub fn parse_trace_id(s: &str) -> Option<[u8; 16]> {
-    if s.len() != 32 { return None; }
+    if s.len() != 32 {
+        return None;
+    }
     let mut out = [0u8; 16];
     for i in 0..16 {
-        let hi = hex_digit(s.as_bytes()[i*2])?;
-        let lo = hex_digit(s.as_bytes()[i*2+1])?;
+        let hi = hex_digit(s.as_bytes()[i * 2])?;
+        let lo = hex_digit(s.as_bytes()[i * 2 + 1])?;
         out[i] = (hi << 4) | lo;
     }
     Some(out)
@@ -155,11 +157,13 @@ pub fn parse_trace_id(s: &str) -> Option<[u8; 16]> {
 
 /// Parse a 16-char hex span id into bytes; returns `None` on shape error.
 pub fn parse_span_id(s: &str) -> Option<[u8; 8]> {
-    if s.len() != 16 { return None; }
+    if s.len() != 16 {
+        return None;
+    }
     let mut out = [0u8; 8];
     for i in 0..8 {
-        let hi = hex_digit(s.as_bytes()[i*2])?;
-        let lo = hex_digit(s.as_bytes()[i*2+1])?;
+        let hi = hex_digit(s.as_bytes()[i * 2])?;
+        let lo = hex_digit(s.as_bytes()[i * 2 + 1])?;
         out[i] = (hi << 4) | lo;
     }
     Some(out)
@@ -178,23 +182,23 @@ fn hex_digit(b: u8) -> Option<u8> {
 mod tests {
     use super::*;
     use crate::types::{
-        AttrMap, DataPoint, MetricData, MetricName, MetricType, SpanData,
-        SpanKind, SpanName, SpanStatus, Unit,
+        AttrMap, DataPoint, MetricData, MetricName, MetricType, SpanData, SpanKind, SpanName,
+        SpanStatus, Unit,
     };
 
     fn sample_span() -> SpanData {
         SpanData {
-            trace_id:         [1; 16],
-            span_id:          [2; 8],
-            parent_span_id:   None,
-            name:             SpanName::IntentAdmission,
-            kind:             SpanKind::Internal,
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 0,
-            end_unix_nanos:   1,
-            status:           SpanStatus::Ok,
-            status_message:   None,
-            attrs:            AttrMap::new(),
-            events:           vec![],
+            end_unix_nanos: 1,
+            status: SpanStatus::Ok,
+            status_message: None,
+            attrs: AttrMap::new(),
+            events: vec![],
         }
     }
 
@@ -216,12 +220,12 @@ mod tests {
     #[test]
     fn metric_frame_round_trips_jsonl() {
         let m = MetricData {
-            name:         MetricName::IntentAdmissionTotal,
-            metric_type:  MetricType::Counter,
-            unit:         Unit::None,
-            labels:       AttrMap::new(),
-            datapoint:    DataPoint::Sum { value: 1.0 },
-            unix_nanos:   0,
+            name: MetricName::IntentAdmissionTotal,
+            metric_type: MetricType::Counter,
+            unit: Unit::None,
+            labels: AttrMap::new(),
+            datapoint: DataPoint::Sum { value: 1.0 },
+            unix_nanos: 0,
         };
         let f = Frame::Metric {
             schema: SCHEMA_VERSION,
@@ -236,8 +240,8 @@ mod tests {
     #[test]
     fn hex_trace_id_round_trips() {
         let id = [
-            0x01, 0x95, 0x2c, 0x0f, 0xe0, 0xa0, 0x7f, 0x37,
-            0x81, 0xe4, 0xf5, 0xe6, 0xa2, 0xa9, 0x1c, 0x00,
+            0x01, 0x95, 0x2c, 0x0f, 0xe0, 0xa0, 0x7f, 0x37, 0x81, 0xe4, 0xf5, 0xe6, 0xa2, 0xa9,
+            0x1c, 0x00,
         ];
         let s = hex_trace_id(id);
         assert_eq!(s, "01952c0fe0a07f3781e4f5e6a2a91c00");

@@ -40,7 +40,7 @@ fn fake_child(name: &str) -> PathBuf {
 /// elapses. Returns the parsed sentinel on success.
 fn await_sentinel_halted(
     data_dir: &std::path::Path,
-    timeout:  Duration,
+    timeout: Duration,
 ) -> Option<raxis_supervisor::sentinel::Sentinel> {
     let deadline = Instant::now() + timeout;
     while Instant::now() < deadline {
@@ -73,8 +73,10 @@ fn external_sigterm_to_supervisor_forwards_to_kernel_and_halts_no_restart() {
     let kernel = fake_child("sleep_forever");
     let mut child = Command::new(&supervisor)
         .arg("start")
-        .arg("--data-dir").arg(dir.path())
-        .arg("--kernel-binary").arg(&kernel)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--kernel-binary")
+        .arg(&kernel)
         .env("RAXIS_SUPERVISOR_AUTO_RESTART", "1")
         .env("RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS", "5")
         .spawn()
@@ -108,7 +110,11 @@ fn external_sigterm_to_supervisor_forwards_to_kernel_and_halts_no_restart() {
         "supervisor MUST classify its own SIGTERM forwarding as CleanExit, not OperatorSignalExit",
     );
     // Supervisor exits 0 on operator stop.
-    assert_eq!(status.code(), Some(0), "supervisor MUST exit 0 on OperatorStop");
+    assert_eq!(
+        status.code(),
+        Some(0),
+        "supervisor MUST exit 0 on OperatorStop"
+    );
 }
 
 /// `INV-SUPERVISOR-SHUTDOWN-GRACE-01`: when the kernel ignores
@@ -122,8 +128,10 @@ fn slow_sigterm_kernel_triggers_sigkill_escalation_and_operator_stop_forced() {
     let kernel = fake_child("slow_sigterm");
     let mut child = Command::new(&supervisor)
         .arg("start")
-        .arg("--data-dir").arg(dir.path())
-        .arg("--kernel-binary").arg(&kernel)
+        .arg("--data-dir")
+        .arg(dir.path())
+        .arg("--kernel-binary")
+        .arg(&kernel)
         .env("RAXIS_SUPERVISOR_AUTO_RESTART", "1")
         .env("RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS", "1")
         .spawn()

@@ -51,7 +51,7 @@ pub struct SignedPlanArtifactHeader {
     /// The initiative this plan was sealed for. Equal to the
     /// query argument; included for callers that want a single
     /// owned struct for downstream rendering.
-    pub initiative_id:        String,
+    pub initiative_id: String,
     /// Operator pubkey_fingerprint (32 hex chars, SHA-256[:16] of
     /// the operator's Ed25519 pubkey) that signed `plan.toml`.
     /// `None` for legacy rows inserted under migration 1/2 before
@@ -63,7 +63,7 @@ pub struct SignedPlanArtifactHeader {
     /// row into the store. NOT the moment the operator signed —
     /// for that, the plan signature TOML carries `signed_at` (see
     /// kernel-store.md §2.5.3 "plan.sig format").
-    pub stored_at:            i64,
+    pub stored_at: i64,
 }
 
 #[derive(Debug, Error)]
@@ -80,7 +80,7 @@ pub enum SignedPlanArtifactViewError {
 /// share a transaction, but the function still tolerates the
 /// missing case rather than panic).
 pub fn header_by_initiative(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<Option<SignedPlanArtifactHeader>, SignedPlanArtifactViewError> {
     let table = Table::SignedPlanArtifacts.as_str();
@@ -93,9 +93,9 @@ pub fn header_by_initiative(
             rusqlite::params![initiative_id],
             |r| {
                 Ok(SignedPlanArtifactHeader {
-                    initiative_id:         r.get(0)?,
+                    initiative_id: r.get(0)?,
                     signed_by_fingerprint: r.get(1)?,
-                    stored_at:             r.get(2)?,
+                    stored_at: r.get(2)?,
                 })
             },
         )
@@ -169,7 +169,9 @@ mod tests {
     fn header_by_initiative_returns_signed_by_and_stored_at() {
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
-        let h = header_by_initiative(&conn, "init-1").unwrap().expect("present");
+        let h = header_by_initiative(&conn, "init-1")
+            .unwrap()
+            .expect("present");
         assert_eq!(h.initiative_id, "init-1");
         assert_eq!(
             h.signed_by_fingerprint.as_deref(),
@@ -198,7 +200,9 @@ mod tests {
     fn header_by_initiative_returns_none_fingerprint_for_legacy_row() {
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
-        let h = header_by_initiative(&conn, "init-legacy").unwrap().expect("present");
+        let h = header_by_initiative(&conn, "init-legacy")
+            .unwrap()
+            .expect("present");
         assert_eq!(h.initiative_id, "init-legacy");
         assert!(
             h.signed_by_fingerprint.is_none(),

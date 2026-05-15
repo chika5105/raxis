@@ -103,8 +103,8 @@ async fn async_main() -> u8 {
         return code;
     }
     match run().await {
-        Ok(())  => 0,
-        Err(e)  => {
+        Ok(()) => 0,
+        Err(e) => {
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\
                   \"role\":\"executor\",\"message\":{:?}}}",
@@ -119,20 +119,20 @@ async fn async_main() -> u8 {
 /// DNS-stub dial when admission is mediated over AF_VSOCK.
 /// Defaults to `VMADDR_CID_HOST` (2) which is the only value
 /// the AVF / Firecracker substrates expose.
-const A3_HOST_CID_ENV:        &str = "RAXIS_AIRGAP_A3_HOST_CID";
+const A3_HOST_CID_ENV: &str = "RAXIS_AIRGAP_A3_HOST_CID";
 /// Env var that names the kernel-side admission listener port.
 /// Defaults to a stable canonical port — `kernel/src/main.rs`
 /// binds the same one when the A3 feature is active.
-const A3_ADMISSION_PORT_ENV:  &str = "RAXIS_AIRGAP_A3_ADMISSION_PORT";
+const A3_ADMISSION_PORT_ENV: &str = "RAXIS_AIRGAP_A3_ADMISSION_PORT";
 /// Env var that names the kernel-side byte-tunnel listener port.
-const A3_TUNNEL_PORT_ENV:     &str = "RAXIS_AIRGAP_A3_TUNNEL_PORT";
+const A3_TUNNEL_PORT_ENV: &str = "RAXIS_AIRGAP_A3_TUNNEL_PORT";
 
 /// Default kernel admission port (`spec §3.1`).
 const DEFAULT_ADMISSION_PORT: u32 = 5380;
 /// Default kernel tunnel port (`spec §4`).
-const DEFAULT_TUNNEL_PORT:    u32 = 5381;
+const DEFAULT_TUNNEL_PORT: u32 = 5381;
 /// Default host CID — `VMADDR_CID_HOST` (2).
-const DEFAULT_HOST_CID:       u32 = 2;
+const DEFAULT_HOST_CID: u32 = 2;
 
 /// Bring up the in-guest tproxy listener and DNS stub when Path
 /// A3 is active. The accept loop runs on the same tokio runtime
@@ -150,9 +150,9 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
             return Err(64);
         }
     };
-    let host_cid       = env_u32_or(A3_HOST_CID_ENV,        DEFAULT_HOST_CID);
-    let admission_port = env_u32_or(A3_ADMISSION_PORT_ENV,  DEFAULT_ADMISSION_PORT);
-    let tunnel_port    = env_u32_or(A3_TUNNEL_PORT_ENV,     DEFAULT_TUNNEL_PORT);
+    let host_cid = env_u32_or(A3_HOST_CID_ENV, DEFAULT_HOST_CID);
+    let admission_port = env_u32_or(A3_ADMISSION_PORT_ENV, DEFAULT_ADMISSION_PORT);
+    let tunnel_port = env_u32_or(A3_TUNNEL_PORT_ENV, DEFAULT_TUNNEL_PORT);
 
     #[cfg(target_os = "linux")]
     {
@@ -190,12 +190,8 @@ async fn activate_airgap_a3_chokepoint() -> Result<(), u8> {
         });
         let token_for_dns = session_token.clone();
         tokio::spawn(async move {
-            let res = raxis_tproxy::dns_stub::run_dns_stub(
-                host_cid,
-                admission_port,
-                token_for_dns,
-            )
-            .await;
+            let res =
+                raxis_tproxy::dns_stub::run_dns_stub(host_cid, admission_port, token_for_dns).await;
             if let Err(e) = res {
                 eprintln!(
                     "{{\"level\":\"error\",\"step\":\"airgap-a3-chokepoint\",\
@@ -317,7 +313,10 @@ fn log_hydration_outcome(outcome: &HydrationOutcome) {
               \"reason\":{:?}}}",
             reason,
         ),
-        HydrationOutcome::Hydrated { applied, skipped_already_set } => eprintln!(
+        HydrationOutcome::Hydrated {
+            applied,
+            skipped_already_set,
+        } => eprintln!(
             "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
               \"role\":\"executor\",\"outcome\":\"hydrated\",\
               \"applied\":{applied},\"skipped_already_set\":{skipped_already_set}}}"
@@ -418,7 +417,7 @@ fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
         WorkspaceMountOutcome::Mounted { attempts } => {
             for attempt in attempts {
                 let (status_str, reason): (&str, Option<&str>) = match &attempt.status {
-                    MountStatus::Ok      => ("ok", None),
+                    MountStatus::Ok => ("ok", None),
                     MountStatus::Already => ("already", None),
                     MountStatus::Failed { reason } => ("failed", Some(reason.as_str())),
                 };

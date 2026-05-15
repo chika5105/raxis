@@ -44,8 +44,7 @@ use std::path::PathBuf;
 use std::process::Command;
 
 use super::harness_timeout::{
-    run_command_output_timeout, BoundedWaitError, DOCKER_BRINGUP_TIMEOUT,
-    DOCKER_PROBE_TIMEOUT,
+    run_command_output_timeout, BoundedWaitError, DOCKER_BRINGUP_TIMEOUT, DOCKER_PROBE_TIMEOUT,
 };
 
 /// docker-compose project namespace shared by both compose files
@@ -200,9 +199,11 @@ pub struct StackProbe {
 fn probe_stack_health(project: &str) -> Result<StackProbe, DockerStackError> {
     let mut cmd = Command::new("docker");
     cmd.arg("compose")
-        .arg("-p").arg(project)
+        .arg("-p")
+        .arg(project)
         .arg("ps")
-        .arg("--format").arg("json");
+        .arg("--format")
+        .arg("json");
     let out = match run_command_output_timeout(&mut cmd, DOCKER_PROBE_TIMEOUT, "docker-compose-ps")
     {
         Ok(o) => o,
@@ -283,27 +284,19 @@ pub fn parse_compose_ps(stdout: &str) -> StackProbe {
         if is_running && is_health_ok {
             ok += 1;
         } else {
-            bad.push(format!(
-                "{name} (State={state:?}, Health={health:?})",
-            ));
+            bad.push(format!("{name} (State={state:?}, Health={health:?})",));
         }
     }
     let healthy = bad.is_empty() && ok == total && total > 0;
     let summary = if healthy {
         format!("{ok}/{total} services running + healthy")
     } else {
-        format!(
-            "{ok}/{total} healthy; not-ready=[{}]",
-            bad.join(", "),
-        )
+        format!("{ok}/{total} healthy; not-ready=[{}]", bad.join(", "),)
     };
     StackProbe { healthy, summary }
 }
 
-fn bring_stack_up(
-    project: &str,
-    compose_file: &std::path::Path,
-) -> Result<(), DockerStackError> {
+fn bring_stack_up(project: &str, compose_file: &std::path::Path) -> Result<(), DockerStackError> {
     eprintln!(
         "[live-e2e harness] auto-bring-up: docker compose -p {project} \
          -f {} up -d --wait (timeout: {:?}; opt out via {ENV}=1)",
@@ -313,22 +306,25 @@ fn bring_stack_up(
     );
     let mut cmd = Command::new("docker");
     cmd.arg("compose")
-        .arg("-p").arg(project)
-        .arg("-f").arg(compose_file)
-        .arg("up").arg("-d").arg("--wait");
-    let out = match run_command_output_timeout(
-        &mut cmd, DOCKER_BRINGUP_TIMEOUT, "docker-compose-up",
-    ) {
-        Ok(o) => o,
-        Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
-            return Err(DockerStackError::DockerMissing { reason });
-        }
-        Err(e) => {
-            return Err(DockerStackError::BringupFailed {
-                reason: format!("{e}"),
-            });
-        }
-    };
+        .arg("-p")
+        .arg(project)
+        .arg("-f")
+        .arg(compose_file)
+        .arg("up")
+        .arg("-d")
+        .arg("--wait");
+    let out =
+        match run_command_output_timeout(&mut cmd, DOCKER_BRINGUP_TIMEOUT, "docker-compose-up") {
+            Ok(o) => o,
+            Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
+                return Err(DockerStackError::DockerMissing { reason });
+            }
+            Err(e) => {
+                return Err(DockerStackError::BringupFailed {
+                    reason: format!("{e}"),
+                });
+            }
+        };
     if !out.status.success() {
         return Err(DockerStackError::BringupFailed {
             reason: format!(
@@ -366,18 +362,13 @@ mod tests {
             return;
         }
         let _guard = SetEnvGuard::set(ENV_NO_AUTO_DOCKER, "1");
-        let project_name = format!(
-            "raxis-live-e2e-nonexistent-{}",
-            std::process::id(),
+        let project_name = format!("raxis-live-e2e-nonexistent-{}", std::process::id(),);
+        let r = ensure_stack_up(
+            &project_name,
+            &PathBuf::from("/dev/null/no-such-compose.yml"),
         );
-        let r = ensure_stack_up(&project_name, &PathBuf::from(
-            "/dev/null/no-such-compose.yml",
-        ));
         match r {
-            Err(DockerStackError::AutoBringupDisabled {
-                ref project,
-                ..
-            }) => {
+            Err(DockerStackError::AutoBringupDisabled { ref project, .. }) => {
                 assert_eq!(project, &project_name);
                 let rendered = format!("{}", r.unwrap_err());
                 assert!(
@@ -415,7 +406,11 @@ mod tests {
         ";
         let p = parse_compose_ps(out);
         assert!(!p.healthy, "summary: {}", p.summary);
-        assert!(p.summary.contains("raxis-e2e-mssql"), "summary: {}", p.summary);
+        assert!(
+            p.summary.contains("raxis-e2e-mssql"),
+            "summary: {}",
+            p.summary
+        );
     }
 
     #[test]

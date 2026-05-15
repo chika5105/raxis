@@ -54,14 +54,14 @@ pub struct RingConfig {
     pub segment_max_bytes: u64,
     /// Maximum cumulative bytes across all segments for one stream.
     /// Default 512 MiB; range [16 MiB, 16 GiB].
-    pub max_total_bytes:   u64,
+    pub max_total_bytes: u64,
 }
 
 impl Default for RingConfig {
     fn default() -> Self {
         Self {
             segment_max_bytes: 16 * 1024 * 1024,
-            max_total_bytes:   512 * 1024 * 1024,
+            max_total_bytes: 512 * 1024 * 1024,
         }
     }
 }
@@ -75,17 +75,17 @@ impl Default for RingConfig {
 #[derive(Debug)]
 pub struct SegmentWriter {
     /// Stream type (spans vs metrics).
-    stream:        Stream,
+    stream: Stream,
     /// Directory holding `*.jsonl` segments for this stream.
-    dir:           PathBuf,
+    dir: PathBuf,
     /// Active segment file descriptor (buffered).
-    active:        BufWriter<File>,
+    active: BufWriter<File>,
     /// Current sequence number of the active segment.
-    active_seq:    u64,
+    active_seq: u64,
     /// Bytes written into the active segment so far.
-    active_bytes:  u64,
+    active_bytes: u64,
     /// Per-stream config.
-    cfg:           RingConfig,
+    cfg: RingConfig,
 }
 
 impl SegmentWriter {
@@ -108,14 +108,20 @@ impl SegmentWriter {
             .create(true)
             .append(true)
             .open(&active_path)
-            .map_err(|e| RingError::Io { path: active_path.clone(), source: e })?;
+            .map_err(|e| RingError::Io {
+                path: active_path.clone(),
+                source: e,
+            })?;
         // Pick up any existing bytes in case the kernel restarted
         // mid-segment (file existed already; defensive — open
         // cycles call `next_seq` so this is normally 0).
         let initial_bytes = file
             .metadata()
             .map(|m| m.len())
-            .map_err(|e| RingError::Io { path: active_path.clone(), source: e })?;
+            .map_err(|e| RingError::Io {
+                path: active_path.clone(),
+                source: e,
+            })?;
         Ok(Self {
             stream,
             dir,
@@ -145,21 +151,25 @@ impl SegmentWriter {
 
     /// Flush the active segment to the OS page cache.
     pub fn flush(&mut self) -> Result<(), RingError> {
-        self.active
-            .flush()
-            .map_err(|e| self.io_err(e))?;
+        self.active.flush().map_err(|e| self.io_err(e))?;
         Ok(())
     }
 
     /// Active segment's sequence number; useful for tests and
     /// `raxis doctor observability`.
-    pub fn active_segment(&self) -> u64 { self.active_seq }
+    pub fn active_segment(&self) -> u64 {
+        self.active_seq
+    }
 
     /// Active segment byte length; useful for tests.
-    pub fn active_bytes(&self) -> u64 { self.active_bytes }
+    pub fn active_bytes(&self) -> u64 {
+        self.active_bytes
+    }
 
     /// Ring root directory.
-    pub fn dir(&self) -> &Path { &self.dir }
+    pub fn dir(&self) -> &Path {
+        &self.dir
+    }
 
     fn rotate(&mut self) -> Result<(), RingError> {
         // Flush current writer first.
@@ -173,7 +183,10 @@ impl SegmentWriter {
             .create(true)
             .append(true)
             .open(&next_path)
-            .map_err(|e| RingError::Io { path: next_path.clone(), source: e })?;
+            .map_err(|e| RingError::Io {
+                path: next_path.clone(),
+                source: e,
+            })?;
         self.active = BufWriter::new(file);
         self.active_seq = next_seq;
         self.active_bytes = 0;
@@ -194,12 +207,15 @@ impl SegmentWriter {
                 break;
             }
             entries.sort();
-            let (oldest_seq, oldest_path) = entries.into_iter().next().expect("non-empty checked above");
+            let (oldest_seq, oldest_path) =
+                entries.into_iter().next().expect("non-empty checked above");
             let removed = std::fs::metadata(&oldest_path)
                 .map(|m| m.len())
                 .unwrap_or(0);
-            std::fs::remove_file(&oldest_path)
-                .map_err(|e| RingError::Io { path: oldest_path.clone(), source: e })?;
+            std::fs::remove_file(&oldest_path).map_err(|e| RingError::Io {
+                path: oldest_path.clone(),
+                source: e,
+            })?;
             total = total.saturating_sub(removed);
             // Belt-and-braces tracing: we don't emit through the
             // observability surface itself (would recursively
@@ -207,7 +223,9 @@ impl SegmentWriter {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"observability_segment_dropped\",\
                  \"stream\":\"{}\",\"seq\":{},\"bytes_freed\":{}}}",
-                self.stream.subdir(), oldest_seq, removed,
+                self.stream.subdir(),
+                oldest_seq,
+                removed,
             );
             if total <= self.cfg.max_total_bytes {
                 break;
@@ -263,7 +281,9 @@ fn highest_seq(dir: &Path) -> Option<u64> {
 /// Collect every closed segment under `dir` (i.e. seq < active_seq).
 fn collect_closed_segments(dir: &Path, active_seq: u64) -> Vec<(u64, PathBuf)> {
     let mut out = Vec::new();
-    let Ok(read) = std::fs::read_dir(dir) else { return out; };
+    let Ok(read) = std::fs::read_dir(dir) else {
+        return out;
+    };
     for entry in read.flatten() {
         if let Some(seq) = parse_seq_from_filename(&entry.file_name()) {
             if seq < active_seq {
@@ -303,13 +323,17 @@ mod tests {
         // Set tiny segment size to force rotation after one write.
         let cfg = RingConfig {
             segment_max_bytes: 16,
-            max_total_bytes:   16 * 8,
+            max_total_bytes: 16 * 8,
         };
         let mut w = SegmentWriter::open(tmp.path(), Stream::Spans, cfg).unwrap();
         // 32-byte payload (incl newline) → forces rotation.
         let line = "x".repeat(31);
         w.write_line(&line).unwrap();
-        assert!(w.active_segment() >= 2, "rotated to seq {}", w.active_segment());
+        assert!(
+            w.active_segment() >= 2,
+            "rotated to seq {}",
+            w.active_segment()
+        );
     }
 
     #[test]
@@ -318,7 +342,7 @@ mod tests {
         let cfg = RingConfig {
             segment_max_bytes: 64,
             // 4× minimum cap; tight enough to force drop after a few rotations.
-            max_total_bytes:   64 * 4,
+            max_total_bytes: 64 * 4,
         };
         let mut w = SegmentWriter::open(tmp.path(), Stream::Spans, cfg).unwrap();
         // Write enough to trigger several rotations and a GC pass.
@@ -333,8 +357,11 @@ mod tests {
         // After GC, total ≤ max_total_bytes (modulo the active segment's
         // current bytes which are accumulating; we just check that we
         // didn't unboundedly grow).
-        assert!(total <= cfg.max_total_bytes + cfg.segment_max_bytes,
-            "total {total} exceeds cap+1seg {}", cfg.max_total_bytes + cfg.segment_max_bytes);
+        assert!(
+            total <= cfg.max_total_bytes + cfg.segment_max_bytes,
+            "total {total} exceeds cap+1seg {}",
+            cfg.max_total_bytes + cfg.segment_max_bytes
+        );
     }
 
     #[test]
@@ -342,7 +369,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let cfg = RingConfig {
             segment_max_bytes: 1024,
-            max_total_bytes:   2048,   // < 4× segment
+            max_total_bytes: 2048, // < 4× segment
         };
         let err = SegmentWriter::open(tmp.path(), Stream::Spans, cfg).unwrap_err();
         assert!(matches!(err, RingError::CapTooSmall(_)));

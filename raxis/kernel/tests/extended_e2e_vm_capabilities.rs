@@ -98,12 +98,12 @@ use std::sync::Arc;
 use raxis_planner_core::tools::{Tool, ToolContext};
 use raxis_planner_core::tools_vm_capabilities::VmCapabilitiesTool;
 use raxis_planner_core::vm_capabilities::{
-    build_capability_hint, cached_capabilities, is_kernel_private_env,
-    project_manifest, CapabilityCategory, CapabilityFilter,
+    build_capability_hint, cached_capabilities, is_kernel_private_env, project_manifest,
+    CapabilityCategory, CapabilityFilter,
 };
 
-const LIVE_E2E_GATE:    &str = "RAXIS_LIVE_E2E";
-const VM_CAPS_GATE:     &str = "RAXIS_LIVE_E2E_VM_CAPABILITIES";
+const LIVE_E2E_GATE: &str = "RAXIS_LIVE_E2E";
+const VM_CAPS_GATE: &str = "RAXIS_LIVE_E2E_VM_CAPABILITIES";
 
 /// The five Python DB clients the canonical `raxis-executor-starter`
 /// image bakes in per `planner-harness.md §10.6`. Live mode asserts
@@ -114,8 +114,7 @@ const CANONICAL_PY_DB_CLIENTS: &[&str] =
 /// The four credential-proxy URLs the kernel stamps into every
 /// Executor session's env (`v2/credential-proxy.md §3.5`). Live
 /// mode asserts each surfaces verbatim in the manifest.
-const CANONICAL_PROXY_ENV_VARS: &[&str] =
-    &["DATABASE_URL", "MONGO_URL", "REDIS_URL", "SMTP_URL"];
+const CANONICAL_PROXY_ENV_VARS: &[&str] = &["DATABASE_URL", "MONGO_URL", "REDIS_URL", "SMTP_URL"];
 
 // ---------------------------------------------------------------------------
 // Top-level test entry — chooses smoke vs live based on env gates.
@@ -123,8 +122,8 @@ const CANONICAL_PROXY_ENV_VARS: &[&str] =
 
 #[test]
 fn vm_capabilities_lifecycle() {
-    let live_gate_on    = std::env::var(LIVE_E2E_GATE).as_deref()    == Ok("1");
-    let vm_caps_gate_on = std::env::var(VM_CAPS_GATE).as_deref()     == Ok("1");
+    let live_gate_on = std::env::var(LIVE_E2E_GATE).as_deref() == Ok("1");
+    let vm_caps_gate_on = std::env::var(VM_CAPS_GATE).as_deref() == Ok("1");
 
     if !(live_gate_on && vm_caps_gate_on) {
         eprintln!(
@@ -182,22 +181,28 @@ fn smoke_probe_and_cache() {
     let t0 = std::time::Instant::now();
     let m1 = cached_capabilities();
     let elapsed = t0.elapsed();
-    assert!(elapsed < std::time::Duration::from_secs(5),
+    assert!(
+        elapsed < std::time::Duration::from_secs(5),
         "INV-EXEC-DISCOVERY-01 perf budget: first probe MUST be sub-5s; \
          got {elapsed:?}. Sub-second is the warm-VM target; CI runners \
-         get a 5-s ceiling.");
+         get a 5-s ceiling."
+    );
 
-    assert!(!m1.binaries.is_empty(),
+    assert!(
+        !m1.binaries.is_empty(),
         "probe MUST surface at least one binary (any modern host has \
-         /bin/sh); empty binaries array means the PATH walk regressed.");
+         /bin/sh); empty binaries array means the PATH walk regressed."
+    );
 
     // Second call MUST be an Arc clone, not a re-probe — pin
     // pointer equality.
     let m2 = cached_capabilities();
-    assert!(Arc::ptr_eq(&m1, &m2),
+    assert!(
+        Arc::ptr_eq(&m1, &m2),
         "INV-EXEC-DISCOVERY-01 caching: second cached_capabilities() \
          call MUST return the same Arc as the first (per-process \
-         OnceLock semantics); got two distinct allocations.");
+         OnceLock semantics); got two distinct allocations."
+    );
 
     // No-op projection MUST be the identity for byte-equality of
     // the rendered JSON.
@@ -208,9 +213,11 @@ fn smoke_probe_and_cache() {
     );
     let j1 = serde_json::to_string(m1.as_ref()).unwrap();
     let j2 = serde_json::to_string(&projected).unwrap();
-    assert_eq!(j1, j2,
+    assert_eq!(
+        j1, j2,
         "project_manifest(.., [All], default) MUST be the identity \
-         function for byte-equality of the JSON render");
+         function for byte-equality of the JSON render"
+    );
 }
 
 /// `§2` — Pin the kernel-private env var redaction predicate.
@@ -233,28 +240,34 @@ fn smoke_redaction_predicate() {
         "GITHUB_API_KEY",
         "PROVIDER_TOKEN",
     ] {
-        assert!(is_kernel_private_env(k),
+        assert!(
+            is_kernel_private_env(k),
             "INV-EXEC-DISCOVERY-01 redaction: `{k}` MUST be \
              classified as kernel-private and never reach the \
              LLM transcript. The probe wraps it with the literal \
              `<redacted>` sentinel; a regression here would leak \
-             the value verbatim.");
+             the value verbatim."
+        );
     }
 
     // Credential-proxy URLs (MUST NOT redact — model needs them).
     for k in CANONICAL_PROXY_ENV_VARS {
-        assert!(!is_kernel_private_env(k),
+        assert!(
+            !is_kernel_private_env(k),
             "INV-EXEC-DISCOVERY-01 redaction: `{k}` is a \
              credential-proxy URL the LLM legitimately needs to \
              write connection scripts; it MUST NOT be redacted. \
              A regression here would force the model to guess \
-             proxy ports, which are kernel-allocated and unguessable.");
+             proxy ports, which are kernel-allocated and unguessable."
+        );
     }
 
     // Harmless plumbing (MUST NOT redact — model uses these).
     for k in ["PATH", "HOME", "LANG", "LC_ALL", "USER"] {
-        assert!(!is_kernel_private_env(k),
-            "harmless Unix env var `{k}` MUST NOT be redacted");
+        assert!(
+            !is_kernel_private_env(k),
+            "harmless Unix env var `{k}` MUST NOT be redacted"
+        );
     }
 }
 
@@ -264,21 +277,39 @@ fn smoke_redaction_predicate() {
 /// loop hands back to the model.
 fn smoke_tool_returns_parseable_json() {
     let tool = VmCapabilitiesTool;
-    assert_eq!(tool.name(), "vm_capabilities",
+    assert_eq!(
+        tool.name(),
+        "vm_capabilities",
         "INV-EXEC-DISCOVERY-01: the tool registered in every role \
          registry MUST be named `vm_capabilities` so the model can \
-         reference it from the system-prompt hint by name.");
+         reference it from the system-prompt hint by name."
+    );
 
     // Schema MUST advertise the categories enum + filter object.
     let schema = tool.input_schema();
     let s = serde_json::to_string(&schema).unwrap();
-    for tag in ["categories", "filter", "binary_name", "python_package",
-                "node_package", "env_var", "binaries", "python", "node",
-                "rust", "go", "env", "filesystem", "all"] {
-        assert!(s.contains(tag),
+    for tag in [
+        "categories",
+        "filter",
+        "binary_name",
+        "python_package",
+        "node_package",
+        "env_var",
+        "binaries",
+        "python",
+        "node",
+        "rust",
+        "go",
+        "env",
+        "filesystem",
+        "all",
+    ] {
+        assert!(
+            s.contains(tag),
             "vm_capabilities tool schema MUST advertise `{tag}` so \
              the model can address every capability category / filter; \
-             schema:\n{s}");
+             schema:\n{s}"
+        );
     }
 
     // Execute with `categories: ["python", "env"]` (the live-mode
@@ -291,22 +322,32 @@ fn smoke_tool_returns_parseable_json() {
         .enable_all()
         .build()
         .unwrap();
-    let out = rt.block_on(async { tool.execute(&input, &ctx).await })
+    let out = rt
+        .block_on(async { tool.execute(&input, &ctx).await })
         .expect("vm_capabilities tool execute must succeed on a clean tempdir");
-    assert!(out.is_error.is_none(),
+    assert!(
+        out.is_error.is_none(),
         "vm_capabilities tool MUST NOT return a structured error \
-         on a clean tempdir; body:\n{}", out.content);
+         on a clean tempdir; body:\n{}",
+        out.content
+    );
     let parsed: serde_json::Value = serde_json::from_str(&out.content)
         .expect("vm_capabilities tool MUST return parseable JSON");
 
     // python + env present (the requested categories), other
     // sections nulled-out by the projector.
-    assert!(parsed.get("python").is_some(),
+    assert!(
+        parsed.get("python").is_some(),
         "tool output MUST carry `python` section when requested; \
-         body:\n{body}", body = out.content);
-    assert!(parsed.get("env").is_some(),
+         body:\n{body}",
+        body = out.content
+    );
+    assert!(
+        parsed.get("env").is_some(),
         "tool output MUST carry `env` section when requested; \
-         body:\n{body}", body = out.content);
+         body:\n{body}",
+        body = out.content
+    );
 }
 
 /// `§4` — Pin the system-prompt hint formatter. The two
@@ -317,16 +358,22 @@ fn smoke_tool_returns_parseable_json() {
 fn smoke_capability_hint_string_contracts() {
     let m = cached_capabilities();
     let hint = build_capability_hint(m.as_ref());
-    assert!(hint.contains("## VM Environment"),
+    assert!(
+        hint.contains("## VM Environment"),
         "INV-EXEC-DISCOVERY-01 system-prompt hint MUST start with \
          the `## VM Environment` header (downstream tests in \
-         driver.rs grep for this exact string); got:\n{hint}");
-    assert!(hint.contains("No outbound network"),
+         driver.rs grep for this exact string); got:\n{hint}"
+    );
+    assert!(
+        hint.contains("No outbound network"),
         "INV-EXEC-DISCOVERY-01 system-prompt hint MUST carry the \
          `No outbound network` egress reminder so the model never \
-         tries `pip install` / `npm install`; got:\n{hint}");
-    assert!(hint.contains("vm_capabilities"),
+         tries `pip install` / `npm install`; got:\n{hint}"
+    );
+    assert!(
+        hint.contains("vm_capabilities"),
         "INV-EXEC-DISCOVERY-01 system-prompt hint MUST point the \
          model at the `vm_capabilities` tool for finer queries; \
-         got:\n{hint}");
+         got:\n{hint}"
+    );
 }

@@ -115,13 +115,13 @@ pub struct CertOpts {
 impl Default for CertOpts {
     fn default() -> Self {
         Self {
-            kind:                    CertKind::Standard,
-            display_name:            "test-operator".to_owned(),
-            now_unix_secs:           1_700_000_000,
+            kind: CertKind::Standard,
+            display_name: "test-operator".to_owned(),
+            now_unix_secs: 1_700_000_000,
             warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec!["CreateInitiative".to_owned()],
-            contact_info:            None,
+            grace_period_days: 7,
+            permitted_ops: vec!["CreateInitiative".to_owned()],
+            contact_info: None,
         }
     }
 }
@@ -169,32 +169,32 @@ pub fn ephemeral_cert_with_key(signing_key: &SigningKey, opts: CertOpts) -> Oper
     let pubkey = pubkey_hex(signing_key);
     let mut cert = match opts.kind {
         CertKind::Standard => OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            opts.display_name,
-            pubkey_hex:              pubkey,
+            kind: CertKind::Standard,
+            display_name: opts.display_name,
+            pubkey_hex: pubkey,
             // Active zone: span [now - 1d, now + 365d], placing `now`
             // well before the warn window.
-            not_before:              opts.now_unix_secs - 86_400,
-            not_after:               opts.now_unix_secs + 365 * 86_400,
+            not_before: opts.now_unix_secs - 86_400,
+            not_after: opts.now_unix_secs + 365 * 86_400,
             warn_before_expiry_days: opts.warn_before_expiry_days,
-            grace_period_days:       opts.grace_period_days,
-            permitted_ops:           opts.permitted_ops,
-            contact_info:            opts.contact_info,
-            self_sig_hex:            String::new(),
+            grace_period_days: opts.grace_period_days,
+            permitted_ops: opts.permitted_ops,
+            contact_info: opts.contact_info,
+            self_sig_hex: String::new(),
         },
         CertKind::EmergencyRecovery => OperatorCert {
-            kind:                    CertKind::EmergencyRecovery,
-            display_name:            opts.display_name,
-            pubkey_hex:              pubkey,
+            kind: CertKind::EmergencyRecovery,
+            display_name: opts.display_name,
+            pubkey_hex: pubkey,
             // Structurally pinned for emergency certs (see
             // `validate_cert_structurally`).
-            not_before:              0,
-            not_after:               0,
+            not_before: 0,
+            not_after: 0,
             warn_before_expiry_days: 0,
-            grace_period_days:       0,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            opts.contact_info,
-            self_sig_hex:            String::new(),
+            grace_period_days: 0,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: opts.contact_info,
+            self_sig_hex: String::new(),
         },
     };
     cert.self_sig_hex = sign_cert(&cert, signing_key);
@@ -225,19 +225,19 @@ pub fn ephemeral_cert_with_key(signing_key: &SigningKey, opts: CertOpts) -> Oper
 /// to surface "this got into a real validation path by mistake".
 pub fn stub_cert_for_pubkey(pubkey_hex: impl Into<String>) -> OperatorCert {
     OperatorCert {
-        kind:                    CertKind::Standard,
-        display_name:            "test-stub-operator".to_owned(),
-        pubkey_hex:              pubkey_hex.into(),
-        not_before:              0,
-        not_after:               i64::MAX,
+        kind: CertKind::Standard,
+        display_name: "test-stub-operator".to_owned(),
+        pubkey_hex: pubkey_hex.into(),
+        not_before: 0,
+        not_after: i64::MAX,
         warn_before_expiry_days: 0,
-        grace_period_days:       0,
-        permitted_ops:           vec!["CreateInitiative".to_owned()],
-        contact_info:            None,
+        grace_period_days: 0,
+        permitted_ops: vec!["CreateInitiative".to_owned()],
+        contact_info: None,
         // 128 hex zeros: structurally length-valid Ed25519 signature
         // shape, but cannot verify against any real message — surfaces
         // "stub leaked into a real validation path" loudly.
-        self_sig_hex:            "0".repeat(128),
+        self_sig_hex: "0".repeat(128),
     }
 }
 
@@ -261,8 +261,7 @@ mod tests {
             validate_cert_structurally(&cert).is_empty(),
             "default ephemeral cert must be structurally valid"
         );
-        verify_cert_self_signature(&cert)
-            .expect("default ephemeral cert must self-verify");
+        verify_cert_self_signature(&cert).expect("default ephemeral cert must self-verify");
     }
 
     #[test]
@@ -287,7 +286,10 @@ mod tests {
         assert!(validate_cert_structurally(&cert).is_empty());
         verify_cert_self_signature(&cert).expect("emergency cert must self-verify");
         assert_eq!(cert_status(&cert, 0), CertStatus::AlwaysActiveEmergency);
-        assert_eq!(cert_status(&cert, 99_999_999_999), CertStatus::AlwaysActiveEmergency);
+        assert_eq!(
+            cert_status(&cert, 99_999_999_999),
+            CertStatus::AlwaysActiveEmergency
+        );
     }
 
     #[test]
@@ -324,10 +326,14 @@ mod tests {
             },
         );
 
-        assert_eq!(cert1.pubkey_hex, cert2.pubkey_hex,
-            "same key MUST produce certs with the same pubkey_hex");
-        assert_ne!(cert1.self_sig_hex, cert2.self_sig_hex,
-            "different metadata MUST produce different signatures");
+        assert_eq!(
+            cert1.pubkey_hex, cert2.pubkey_hex,
+            "same key MUST produce certs with the same pubkey_hex"
+        );
+        assert_ne!(
+            cert1.self_sig_hex, cert2.self_sig_hex,
+            "different metadata MUST produce different signatures"
+        );
         verify_cert_self_signature(&cert1).expect("cert1 must self-verify");
         verify_cert_self_signature(&cert2).expect("cert2 must self-verify");
     }
@@ -360,8 +366,10 @@ mod tests {
         // accidentally routes it through the real validator notices.
         let key = ephemeral_signing_key([1u8; 32]);
         let stub = stub_cert_for_pubkey(pubkey_hex(&key));
-        assert!(verify_cert_self_signature(&stub).is_err(),
-            "stub_cert_for_pubkey must NOT self-verify (it's a placeholder, not a real cert)");
+        assert!(
+            verify_cert_self_signature(&stub).is_err(),
+            "stub_cert_for_pubkey must NOT self-verify (it's a placeholder, not a real cert)"
+        );
     }
 
     #[test]
@@ -381,7 +389,9 @@ mod tests {
         assert_eq!(cert.permitted_ops, vec!["RotateEpoch".to_owned()]);
         assert_eq!(cert.not_before, 0);
         assert_eq!(cert.not_after, 0);
-        assert!(validate_cert_structurally(&cert).is_empty(),
-            "the helper must structurally validate even when the caller's opts disagree");
+        assert!(
+            validate_cert_structurally(&cert).is_empty(),
+            "the helper must structurally validate even when the caller's opts disagree"
+        );
     }
 }

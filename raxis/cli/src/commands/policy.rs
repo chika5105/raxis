@@ -64,10 +64,7 @@ use crate::GlobalFlags;
 // workflow per `extensibility-traits.md §9A.7C` is paste-driven.
 // ---------------------------------------------------------------------------
 
-pub fn run_generate_sidecar_secret(
-    _flags: &GlobalFlags,
-    args: &[String],
-) -> Result<(), CliError> {
+pub fn run_generate_sidecar_secret(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut json = false;
     let mut annotated = false;
 
@@ -149,10 +146,10 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         match args[i].as_str() {
             "--key" => {
                 i += 1;
-                key_path = Some(PathBuf::from(
-                    args.get(i)
-                        .ok_or_else(|| CliError::Usage("--key requires a path".to_owned()))?,
-                ));
+                key_path =
+                    Some(PathBuf::from(args.get(i).ok_or_else(|| {
+                        CliError::Usage("--key requires a path".to_owned())
+                    })?));
             }
             // Per cli-ceremony.md §4.1 `policy sign --force-misconfig`:
             // operator-explicit acknowledgement that the artifact contains
@@ -166,7 +163,11 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             arg if !arg.starts_with('-') && artifact_path.is_none() => {
                 artifact_path = Some(PathBuf::from(arg));
             }
-            other => return Err(CliError::Usage(format!("unknown policy sign flag: {other:?}"))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown policy sign flag: {other:?}"
+                )))
+            }
         }
         i += 1;
     }
@@ -195,7 +196,9 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // path is `raxis submit plan <plan.toml>`, which signs in memory and
     // submits in the same IPC call — there is no on-disk `plan.sig`.
     if is_v1_plan_artifact_path(&artifact_path) {
-        return Err(CliError::Usage(v1_plan_sign_removal_message(&artifact_path)));
+        return Err(CliError::Usage(v1_plan_sign_removal_message(
+            &artifact_path,
+        )));
     }
 
     // Read artifact bytes verbatim. Whitespace, BOM, trailing newline — the
@@ -221,9 +224,13 @@ pub fn run_sign(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
              the kernel will emit one OperatorCertMisconfigBypassed audit \
              event per relaxed structural rule at boot.",
             artifact_path.display(),
-            n              = bypass_entries.len(),
-            ies_or_y       = if bypass_entries.len() == 1 { "y" } else { "ies" },
-            ops            = bypass_entries.join(", "),
+            n = bypass_entries.len(),
+            ies_or_y = if bypass_entries.len() == 1 {
+                "y"
+            } else {
+                "ies"
+            },
+            ops = bypass_entries.join(", "),
         )));
     }
     if !bypass_entries.is_empty() {
@@ -275,7 +282,11 @@ signed_at      = {signed_at}
         source: e,
     })?;
 
-    println!("✓ Signed {} → {}", artifact_path.display(), sig_path.display());
+    println!(
+        "✓ Signed {} → {}",
+        artifact_path.display(),
+        sig_path.display()
+    );
     println!("  fingerprint:  {fingerprint}");
     println!("  plan_sha256:  {sha256}");
 
@@ -400,7 +411,9 @@ mod tests {
     #[test]
     fn is_v1_plan_artifact_path_matches_canonical_filename() {
         assert!(is_v1_plan_artifact_path(std::path::Path::new("plan.toml")));
-        assert!(is_v1_plan_artifact_path(std::path::Path::new("./plan.toml")));
+        assert!(is_v1_plan_artifact_path(std::path::Path::new(
+            "./plan.toml"
+        )));
         assert!(is_v1_plan_artifact_path(std::path::Path::new(
             "/tmp/initiatives/foo/plan.toml"
         )));
@@ -419,12 +432,8 @@ mod tests {
         )));
         // Case-sensitivity: a deliberately-renamed file is operator's
         // explicit choice and bypasses the safety net (see fn doc).
-        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
-            "Plan.toml"
-        )));
-        assert!(!is_v1_plan_artifact_path(std::path::Path::new(
-            "plan.json"
-        )));
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new("Plan.toml")));
+        assert!(!is_v1_plan_artifact_path(std::path::Path::new("plan.json")));
         // No filename component (e.g. directory path) → not a plan.
         assert!(!is_v1_plan_artifact_path(std::path::Path::new("/tmp/")));
     }
@@ -491,7 +500,10 @@ pubkey_fingerprint = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
 display_name       = "jinanwa"
 force_misconfig_bypass = true
 "#;
-        assert_eq!(scan_for_misconfig_bypass(policy), vec!["jinanwa".to_owned()]);
+        assert_eq!(
+            scan_for_misconfig_bypass(policy),
+            vec!["jinanwa".to_owned()]
+        );
     }
 
     #[test]
@@ -568,8 +580,8 @@ force_misconfig_bypass = true
 
     fn empty_flags() -> GlobalFlags {
         GlobalFlags {
-            data_dir:          std::path::PathBuf::from("/tmp/raxis-test-data-dir"),
-            socket_path:       None,
+            data_dir: std::path::PathBuf::from("/tmp/raxis-test-data-dir"),
+            socket_path: None,
             operator_key_path: None,
         }
     }
@@ -585,11 +597,9 @@ force_misconfig_bypass = true
     #[test]
     fn generate_sidecar_secret_rejects_json_and_annotated_together() {
         let flags = empty_flags();
-        let err = run_generate_sidecar_secret(
-            &flags,
-            &["--json".to_owned(), "--annotated".to_owned()],
-        )
-        .expect_err("--json + --annotated must be a usage error");
+        let err =
+            run_generate_sidecar_secret(&flags, &["--json".to_owned(), "--annotated".to_owned()])
+                .expect_err("--json + --annotated must be a usage error");
         match err {
             CliError::Usage(m) => {
                 assert!(m.contains("mutually exclusive"), "msg = {m:?}")

@@ -9,8 +9,8 @@ use raxis_credential_proxy_mongodb::{
     AuditChannel, AuditEvent, MongodbProxy, OwnedConsumer, ProxyConfig, Restrictions,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 
 use support::{FakeBackend, FakeBsonValue, FakeResponse};
@@ -29,11 +29,23 @@ impl CredentialBackend for StaticBackend {
     ) -> Result<CredentialValue, CredentialError> {
         Ok(CredentialValue::from_bytes(self.url.as_bytes().to_vec()))
     }
-    fn rotate(&self, _: &CredentialName, _: CredentialValue, _: OperatorId)
-        -> Result<(), CredentialError> { Ok(()) }
-    fn exists(&self, _: &CredentialName) -> bool { true }
-    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "test_static" }
+    fn rotate(
+        &self,
+        _: &CredentialName,
+        _: CredentialValue,
+        _: OperatorId,
+    ) -> Result<(), CredentialError> {
+        Ok(())
+    }
+    fn exists(&self, _: &CredentialName) -> bool {
+        true
+    }
+    fn lease(&self, _: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "test_static"
+    }
 }
 
 #[derive(Default, Clone)]
@@ -42,7 +54,9 @@ struct CapturingChannel {
 }
 
 impl CapturingChannel {
-    fn snapshot(&self) -> Vec<AuditEvent> { self.inner.lock().unwrap().clone() }
+    fn snapshot(&self) -> Vec<AuditEvent> {
+        self.inner.lock().unwrap().clone()
+    }
 }
 
 impl AuditChannel for CapturingChannel {
@@ -131,9 +145,13 @@ fn op_msg_int32_field(frame: &[u8], field: &str) -> Option<i32> {
 }
 
 fn bson_lookup_int32(doc: &[u8], field: &str) -> Option<i32> {
-    if doc.len() < 5 { return None; }
+    if doc.len() < 5 {
+        return None;
+    }
     let total = i32::from_le_bytes([doc[0], doc[1], doc[2], doc[3]]) as usize;
-    if total < 5 || total > doc.len() { return None; }
+    if total < 5 || total > doc.len() {
+        return None;
+    }
     let body = &doc[4..total - 1];
     let mut i = 0;
     while i < body.len() {
@@ -145,15 +163,22 @@ fn bson_lookup_int32(doc: &[u8], field: &str) -> Option<i32> {
         let is_match = name == field;
         match type_byte {
             0x10 => {
-                if i + 4 > body.len() { return None; }
-                let v = i32::from_le_bytes([body[i], body[i+1], body[i+2], body[i+3]]);
-                if is_match { return Some(v); }
+                if i + 4 > body.len() {
+                    return None;
+                }
+                let v = i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
+                if is_match {
+                    return Some(v);
+                }
                 i += 4;
             }
             0x01 => i += 8,
             0x02 => {
-                if i + 4 > body.len() { return None; }
-                let l = i32::from_le_bytes([body[i], body[i+1], body[i+2], body[i+3]]) as usize;
+                if i + 4 > body.len() {
+                    return None;
+                }
+                let l =
+                    i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
                 i += 4 + l;
             }
             0x08 => i += 1,
@@ -169,14 +194,14 @@ async fn allowed_command_round_trips_through_real_upstream() {
     let backend = FakeBackend::start(Arc::new(|cmd: &str| {
         if cmd == "find" {
             Some(FakeResponse::Ok {
-                extras: vec![
-                    ("nReturned".into(), FakeBsonValue::Int32(7)),
-                ],
+                extras: vec![("nReturned".into(), FakeBsonValue::Int32(7))],
             })
         } else {
             Some(FakeResponse::Ok { extras: vec![] })
         }
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
     let upstream_addr = backend.addr();
 
     let creds = Arc::new(StaticBackend {
@@ -184,13 +209,14 @@ async fn allowed_command_round_trips_through_real_upstream() {
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-1"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("session", "s-1"),
+        restrictions: Restrictions::default(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
-        .await.unwrap();
+        .await
+        .unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(async move { proxy.serve().await });
 
@@ -198,7 +224,11 @@ async fn allowed_command_round_trips_through_real_upstream() {
     s.write_all(&build_op_msg(42, "find")).await.unwrap();
     let reply = read_op_msg(&mut s).await.unwrap();
     let n = op_msg_int32_field(&reply, "nReturned");
-    assert_eq!(n, Some(7), "expected upstream's nReturned=7 to round trip; got {n:?}");
+    assert_eq!(
+        n,
+        Some(7),
+        "expected upstream's nReturned=7 to round trip; got {n:?}"
+    );
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -217,7 +247,11 @@ async fn allowed_command_round_trips_through_real_upstream() {
                 saw_connected = true;
                 assert!(saw_executed, "Connected before Executed");
             }
-            AuditEvent::DatabaseQueryCompleted { upstream_error, bytes_returned, .. } => {
+            AuditEvent::DatabaseQueryCompleted {
+                upstream_error,
+                bytes_returned,
+                ..
+            } => {
                 assert!(upstream_error.is_none());
                 assert!(*bytes_returned > 0);
                 saw_completed = true;
@@ -228,8 +262,10 @@ async fn allowed_command_round_trips_through_real_upstream() {
             }
         }
     }
-    assert!(saw_executed && saw_connected && saw_completed,
-        "missing one of the expected V2.1 audit events: {events:#?}");
+    assert!(
+        saw_executed && saw_connected && saw_completed,
+        "missing one of the expected V2.1 audit events: {events:#?}"
+    );
 }
 
 #[tokio::test]
@@ -239,20 +275,23 @@ async fn blocked_command_short_circuits_without_upstream_contact() {
     let backend = FakeBackend::start(Arc::new(move |_: &str| -> Option<FakeResponse> {
         *calls.lock().unwrap() += 1;
         Some(FakeResponse::Ok { extras: vec![] })
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
     let creds = Arc::new(StaticBackend {
         url: format!("mongodb://{}/test", backend.addr()),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-2"),
-        restrictions:    Restrictions::read_only(),
+        consumer: OwnedConsumer::new("session", "s-2"),
+        restrictions: Restrictions::read_only(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
-        .await.unwrap();
+        .await
+        .unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(async move { proxy.serve().await });
 
@@ -261,11 +300,19 @@ async fn blocked_command_short_circuits_without_upstream_contact() {
     let reply = read_op_msg(&mut s).await.unwrap();
     // Blocked command → ok=0.0 with code=13.
     let code = op_msg_int32_field(&reply, "code");
-    assert_eq!(code, Some(13), "expected Unauthorized code 13, got {code:?}");
+    assert_eq!(
+        code,
+        Some(13),
+        "expected Unauthorized code 13, got {code:?}"
+    );
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(*backend_calls.lock().unwrap(), 0, "fake upstream was called for a blocked command");
+    assert_eq!(
+        *backend_calls.lock().unwrap(),
+        0,
+        "fake upstream was called for a blocked command"
+    );
     let events = audit.snapshot();
     for ev in &events {
         match ev {
@@ -278,10 +325,12 @@ async fn blocked_command_short_circuits_without_upstream_contact() {
             _ => {}
         }
     }
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AuditEvent::MongoCommandExecuted { blocked: true, .. }
-    )), "expected MongoCommandExecuted with blocked=true: {events:#?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AuditEvent::MongoCommandExecuted { blocked: true, .. })),
+        "expected MongoCommandExecuted with blocked=true: {events:#?}"
+    );
 }
 
 #[tokio::test]
@@ -296,20 +345,23 @@ async fn upstream_error_is_forwarded_and_audited() {
         } else {
             Some(FakeResponse::Ok { extras: vec![] })
         }
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
     let creds = Arc::new(StaticBackend {
         url: format!("mongodb://{}/test", backend.addr()),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-3"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("session", "s-3"),
+        restrictions: Restrictions::default(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
-        .await.unwrap();
+        .await
+        .unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(async move { proxy.serve().await });
 
@@ -317,7 +369,11 @@ async fn upstream_error_is_forwarded_and_audited() {
     s.write_all(&build_op_msg(11, "find")).await.unwrap();
     let reply = read_op_msg(&mut s).await.unwrap();
     let code = op_msg_int32_field(&reply, "code");
-    assert_eq!(code, Some(211), "upstream error code should be relayed verbatim");
+    assert_eq!(
+        code,
+        Some(211),
+        "upstream error code should be relayed verbatim"
+    );
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -340,33 +396,38 @@ async fn scram_sha256_round_trips_against_real_upstream() {
     // round trips, and (c) the upstream's `nReturned` flows back
     // verbatim.
     let backend = support::FakeScramBackend::start(
-        "demo".into(), b"hunter2".to_vec(),
+        "demo".into(),
+        b"hunter2".to_vec(),
         Arc::new(|cmd: &str| {
             if cmd == "find" {
                 Some(FakeResponse::Ok {
-                    extras: vec![
-                        ("nReturned".into(), FakeBsonValue::Int32(11)),
-                    ],
+                    extras: vec![("nReturned".into(), FakeBsonValue::Int32(11))],
                 })
             } else {
                 Some(FakeResponse::Ok { extras: vec![] })
             }
         }),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
     let upstream_addr = backend.addr();
 
     let creds = Arc::new(StaticBackend {
-        url: format!("mongodb://demo:hunter2@{}/test?authSource=admin", upstream_addr),
+        url: format!(
+            "mongodb://demo:hunter2@{}/test?authSource=admin",
+            upstream_addr
+        ),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-scram-ok"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("session", "s-scram-ok"),
+        restrictions: Restrictions::default(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
-        .await.unwrap();
+        .await
+        .unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(async move { proxy.serve().await });
 
@@ -374,22 +435,35 @@ async fn scram_sha256_round_trips_against_real_upstream() {
     s.write_all(&build_op_msg(123, "find")).await.unwrap();
     let reply = read_op_msg(&mut s).await.unwrap();
     let n = op_msg_int32_field(&reply, "nReturned");
-    assert_eq!(n, Some(11),
-        "expected upstream's nReturned=11 to round trip after SCRAM; got {n:?}");
+    assert_eq!(
+        n,
+        Some(11),
+        "expected upstream's nReturned=11 to round trip after SCRAM; got {n:?}"
+    );
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     let events = audit.snapshot();
     assert!(
-        events.iter().any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamConnected { .. })),
+        events
+            .iter()
+            .any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamConnected { .. })),
         "UpstreamConnected (post-SCRAM) audit must fire: {events:#?}",
     );
     assert!(
-        events.iter().any(|e| matches!(e, AuditEvent::DatabaseQueryCompleted { upstream_error: None, .. })),
+        events.iter().any(|e| matches!(
+            e,
+            AuditEvent::DatabaseQueryCompleted {
+                upstream_error: None,
+                ..
+            }
+        )),
         "DatabaseQueryCompleted (success) audit must fire: {events:#?}",
     );
     assert!(
-        !events.iter().any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamFailed { .. })),
+        !events
+            .iter()
+            .any(|e| matches!(e, AuditEvent::CredentialProxyUpstreamFailed { .. })),
         "UpstreamFailed must NOT fire on success path: {events:#?}",
     );
 }
@@ -401,9 +475,12 @@ async fn scram_sha256_with_wrong_password_surfaces_auth_rejected_audit() {
     // `AuthRejected` (not `ProtocolHandshakeFailed`), and the
     // password bytes must never appear in the redacted detail.
     let backend = support::FakeScramBackend::start(
-        "demo".into(), b"correct-password".to_vec(),
+        "demo".into(),
+        b"correct-password".to_vec(),
         Arc::new(|_: &str| Some(FakeResponse::Ok { extras: vec![] })),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let creds = Arc::new(StaticBackend {
         url: format!(
@@ -413,13 +490,14 @@ async fn scram_sha256_with_wrong_password_surfaces_auth_rejected_audit() {
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mongo"),
-        consumer:        OwnedConsumer::new("session", "s-scram-bad"),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("session", "s-scram-bad"),
+        restrictions: Restrictions::default(),
     };
     let proxy = MongodbProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
-        .await.unwrap();
+        .await
+        .unwrap();
     let proxy_addr = proxy.local_addr().unwrap();
     tokio::spawn(async move { proxy.serve().await });
 
@@ -442,8 +520,12 @@ async fn scram_sha256_with_wrong_password_surfaces_auth_rejected_audit() {
         _ => None,
     });
     let (reason, detail) = failed.expect("expected UpstreamFailed audit");
-    assert_eq!(reason, "AuthRejected",
-        "wrong SCRAM password must classify as AuthRejected (not generic Handshake)");
-    assert!(!detail.contains("hunter2"),
-        "password bytes must not leak into audit detail: {detail:?}");
+    assert_eq!(
+        reason, "AuthRejected",
+        "wrong SCRAM password must classify as AuthRejected (not generic Handshake)"
+    );
+    assert!(
+        !detail.contains("hunter2"),
+        "password bytes must not leak into audit detail: {detail:?}"
+    );
 }

@@ -41,8 +41,7 @@ use uuid::Uuid;
 use crate::env_file::EnvMap;
 use crate::require_env;
 
-const GATEWAY_TOKEN: &str =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const GATEWAY_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
 pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     let api_key = require_env(env, "ANTHROPIC-API-DEV-KEY")?;
@@ -54,9 +53,7 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     let data_tmp = crate::slice_gateway_anthropic::build_data_dir_for_egress(api_key)?;
     let data_dir = data_tmp.path().to_owned();
 
-    let kernel_sock = std::env::temp_dir().join(format!(
-        "rxe2e-{}.sock", Uuid::new_v4().simple(),
-    ));
+    let kernel_sock = std::env::temp_dir().join(format!("rxe2e-{}.sock", Uuid::new_v4().simple(),));
     let _ = std::fs::remove_file(&kernel_sock);
     let listener = UnixListener::bind(&kernel_sock)?;
 
@@ -64,16 +61,14 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
         GATEWAY_TOKEN,
         &kernel_sock.display().to_string(),
         &data_dir.display().to_string(),
-    ).map_err(|e| anyhow!("parse_gateway_env: {e:?}"))?;
+    )
+    .map_err(|e| anyhow!("parse_gateway_env: {e:?}"))?;
     let backend: Arc<dyn Backend> = Arc::new(raxis_gateway::HttpBackend::new());
-    let gateway_task = tokio::spawn(async move {
-        run_gateway_with_backend(env_parsed, backend).await
-    });
+    let gateway_task =
+        tokio::spawn(async move { run_gateway_with_backend(env_parsed, backend).await });
 
-    let (mut stream, _addr) = tokio::time::timeout(
-        Duration::from_secs(5),
-        listener.accept(),
-    ).await
+    let (mut stream, _addr) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
         .map_err(|_| anyhow!("gateway never connected within 5s"))?
         .map_err(|e| anyhow!("accept: {e}"))?;
 
@@ -81,9 +76,10 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     let ready = tokio::time::timeout(
         Duration::from_secs(5),
         read_frame::<_, GatewayMessage>(&mut stream),
-    ).await
-        .map_err(|_| anyhow!("handshake timeout"))?
-        .map_err(|e| anyhow!("read handshake: {e}"))?;
+    )
+    .await
+    .map_err(|_| anyhow!("handshake timeout"))?
+    .map_err(|e| anyhow!("read handshake: {e}"))?;
     match ready {
         GatewayMessage::GatewayReady { .. } => {}
         other => return Err(anyhow!("expected GatewayReady, got {other:?}")),
@@ -102,7 +98,7 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
             "POST",
             vec![
                 ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
-                ("content-type".to_owned(),      "application/json".to_owned()),
+                ("content-type".to_owned(), "application/json".to_owned()),
             ],
             body_bytes,
         );
@@ -110,11 +106,14 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
         let resp = tokio::time::timeout(
             Duration::from_secs(40),
             read_frame::<_, GatewayMessage>(&mut stream),
-        ).await
-            .map_err(|_| anyhow!("Anthropic response timeout"))?
-            .map_err(|e| anyhow!("read FetchResponse(allowed): {e}"))?;
+        )
+        .await
+        .map_err(|_| anyhow!("Anthropic response timeout"))?
+        .map_err(|e| anyhow!("read FetchResponse(allowed): {e}"))?;
         match resp {
-            GatewayMessage::FetchResponse { status_code, error, .. } => {
+            GatewayMessage::FetchResponse {
+                status_code, error, ..
+            } => {
                 if let Some(e) = error {
                     return Err(anyhow!("(a) allowed URL returned error {e:?}"));
                 }
@@ -131,21 +130,19 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     // (b) Denied URL — real public host, but outside the policy
     // allowlist. The gateway MUST refuse to forward.
     {
-        let req = build_request(
-            "https://httpbin.org/anything",
-            "GET",
-            vec![],
-            b"".to_vec(),
-        );
+        let req = build_request("https://httpbin.org/anything", "GET", vec![], b"".to_vec());
         write_frame(&mut stream, &req).await?;
         let resp = tokio::time::timeout(
             Duration::from_secs(10),
             read_frame::<_, GatewayMessage>(&mut stream),
-        ).await
-            .map_err(|_| anyhow!("denied response timeout"))?
-            .map_err(|e| anyhow!("read FetchResponse(denied): {e}"))?;
+        )
+        .await
+        .map_err(|_| anyhow!("denied response timeout"))?
+        .map_err(|e| anyhow!("read FetchResponse(denied): {e}"))?;
         match resp {
-            GatewayMessage::FetchResponse { status_code, error, .. } => {
+            GatewayMessage::FetchResponse {
+                status_code, error, ..
+            } => {
                 if status_code.is_some() {
                     return Err(anyhow!(
                         "(b) gateway forwarded a request that should have been denied; \
@@ -156,7 +153,9 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
                 if err != "DomainNotAllowed" {
                     return Err(anyhow!("(b) expected DomainNotAllowed; got {err:?}"));
                 }
-                tracing::info!("slice egress-enforcement: (b) httpbin.org denied → DomainNotAllowed");
+                tracing::info!(
+                    "slice egress-enforcement: (b) httpbin.org denied → DomainNotAllowed"
+                );
             }
             other => return Err(anyhow!("(b) expected FetchResponse, got {other:?}")),
         }
@@ -176,11 +175,14 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
         let resp = tokio::time::timeout(
             Duration::from_secs(20),
             read_frame::<_, GatewayMessage>(&mut stream),
-        ).await
-            .map_err(|_| anyhow!("plain-http response timeout"))?
-            .map_err(|e| anyhow!("read FetchResponse(plain-http): {e}"))?;
+        )
+        .await
+        .map_err(|_| anyhow!("plain-http response timeout"))?
+        .map_err(|e| anyhow!("read FetchResponse(plain-http): {e}"))?;
         match resp {
-            GatewayMessage::FetchResponse { status_code, error, .. } => {
+            GatewayMessage::FetchResponse {
+                status_code, error, ..
+            } => {
                 // We accept either: (1) the gateway denied it as
                 // DomainNotAllowed (host-based allowlist passes,
                 // but a future scheme-aware check could deny);
@@ -213,14 +215,14 @@ fn build_request(
 ) -> GatewayMessage {
     GatewayMessage::FetchRequest {
         gateway_token: GATEWAY_TOKEN.to_owned(),
-        fetch_id:      Uuid::new_v4(),
-        fetch_kind:    FetchKind::DataFetch,
-        url:           url.to_owned(),
-        method:        method.to_owned(),
+        fetch_id: Uuid::new_v4(),
+        fetch_kind: FetchKind::DataFetch,
+        url: url.to_owned(),
+        method: method.to_owned(),
         headers,
         body_bytes,
         timeout_ms: 10_000,
         session_id: None,
-        task_id:    None,
+        task_id: None,
     }
 }

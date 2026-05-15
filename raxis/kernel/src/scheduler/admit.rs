@@ -37,10 +37,10 @@ const TASKS: &str = Table::Tasks.as_str();
 /// those are intent-time fields.
 #[derive(Debug, Clone)]
 pub struct PlanTask {
-    pub task_id:      String,
+    pub task_id: String,
     pub initiative_id: String,
-    pub lane_id:      String,
-    pub name:         String,
+    pub lane_id: String,
+    pub name: String,
     pub dependencies: Vec<String>,
 }
 
@@ -59,13 +59,13 @@ pub struct PlanTask {
 /// rollback of its own — the borrow checker enforces that the transaction
 /// is owned outside).
 pub fn admit_in_tx(
-    conn:         &rusqlite::Connection,
-    task:         PlanTask,
+    conn: &rusqlite::Connection,
+    task: PlanTask,
     policy_epoch: u64,
 ) -> Result<String, SchedulerError> {
     dag::detect_cycle_in(conn, &task.task_id, &task.dependencies)?;
 
-    let now   = unix_now_secs();
+    let now = unix_now_secs();
     let state = TaskState::Admitted.as_sql_str();
 
     // Insert the task row first; the FK on task_dag_edges requires the
@@ -95,7 +95,8 @@ pub fn admit_in_tx(
             policy_epoch as i64,
             now,
         ],
-    ).map_err(SchedulerError::Sql)?;
+    )
+    .map_err(SchedulerError::Sql)?;
 
     dag::insert_edges_in(conn, &task.initiative_id, &task.task_id, &task.dependencies)?;
 
@@ -111,7 +112,7 @@ mod tests {
     use super::*;
     use raxis_store::Store;
 
-    const INITIATIVES:    &str = Table::Initiatives.as_str();
+    const INITIATIVES: &str = Table::Initiatives.as_str();
     const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 
     fn fresh_store_with_initiative(init_id: &str) -> Store {
@@ -127,7 +128,8 @@ mod tests {
                  VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
             ),
             rusqlite::params![init_id, InitiativeState::Draft.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         store
     }
@@ -144,11 +146,11 @@ mod tests {
         tx.execute_batch("PRAGMA defer_foreign_keys = 1;").unwrap();
 
         let task = PlanTask {
-            task_id:       "t1".into(),
+            task_id: "t1".into(),
             initiative_id: "init-x".into(),
-            lane_id:       "default".into(),
-            name:          "first".into(),
-            dependencies:  vec![],
+            lane_id: "default".into(),
+            name: "first".into(),
+            dependencies: vec![],
         };
         admit_in_tx(&tx, task, 7).unwrap();
         tx.commit().unwrap();
@@ -163,13 +165,16 @@ mod tests {
                 ),
                 [],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
-            ).unwrap();
+            )
+            .unwrap();
         assert_eq!(state, TaskState::Admitted.as_sql_str());
         assert_eq!(actor, "kernel");
         assert_eq!(epoch, 7);
         assert!(admitted_at > 0);
-        assert_eq!(admitted_at, transitioned_at,
-                   "transitioned_at and admitted_at must coincide on initial insert");
+        assert_eq!(
+            admitted_at, transitioned_at,
+            "transitioned_at and admitted_at must coincide on initial insert"
+        );
     }
 
     /// Edge insertion must include the initiative_id column (NOT NULL FK
@@ -183,37 +188,49 @@ mod tests {
         tx.execute_batch("PRAGMA defer_foreign_keys = 1;").unwrap();
 
         // First a predecessor with no deps.
-        admit_in_tx(&tx, PlanTask {
-            task_id:       "p1".into(),
-            initiative_id: "init-edges".into(),
-            lane_id:       "default".into(),
-            name:          "pred".into(),
-            dependencies:  vec![],
-        }, 1).unwrap();
+        admit_in_tx(
+            &tx,
+            PlanTask {
+                task_id: "p1".into(),
+                initiative_id: "init-edges".into(),
+                lane_id: "default".into(),
+                name: "pred".into(),
+                dependencies: vec![],
+            },
+            1,
+        )
+        .unwrap();
 
         // Then a successor depending on p1.
-        admit_in_tx(&tx, PlanTask {
-            task_id:       "s1".into(),
-            initiative_id: "init-edges".into(),
-            lane_id:       "default".into(),
-            name:          "succ".into(),
-            dependencies:  vec!["p1".into()],
-        }, 1).unwrap();
+        admit_in_tx(
+            &tx,
+            PlanTask {
+                task_id: "s1".into(),
+                initiative_id: "init-edges".into(),
+                lane_id: "default".into(),
+                name: "succ".into(),
+                dependencies: vec!["p1".into()],
+            },
+            1,
+        )
+        .unwrap();
 
         tx.commit().unwrap();
         drop(conn);
 
         let conn = store.lock_sync();
-        let (init_id, pred, succ): (String, String, String) = conn.query_row(
-            &format!(
-                "SELECT initiative_id, predecessor_task_id, successor_task_id
+        let (init_id, pred, succ): (String, String, String) = conn
+            .query_row(
+                &format!(
+                    "SELECT initiative_id, predecessor_task_id, successor_task_id
                    FROM {TASK_DAG_EDGES}"
-            ),
-            [],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).unwrap();
+                ),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
         assert_eq!(init_id, "init-edges");
-        assert_eq!(pred,    "p1");
-        assert_eq!(succ,    "s1");
+        assert_eq!(pred, "p1");
+        assert_eq!(succ, "s1");
     }
 }

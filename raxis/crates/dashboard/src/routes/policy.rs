@@ -45,7 +45,9 @@ where
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let view = state.data.policy_snapshot()?;
     Ok(Json(view))
@@ -68,7 +70,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::WritePolicy) && !op.has_role(DashboardRole::Admin) {
-        return Err(ApiError::Forbidden { required: "write_policy".into() });
+        return Err(ApiError::Forbidden {
+            required: "write_policy".into(),
+        });
     }
     let body = state.data.policy_toml_bytes()?;
     Ok((
@@ -133,7 +137,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::WritePolicy) && !op.has_role(DashboardRole::Admin) {
-        return Err(ApiError::Forbidden { required: "write_policy".into() });
+        return Err(ApiError::Forbidden {
+            required: "write_policy".into(),
+        });
     }
     if body.toml.trim().is_empty() {
         return Err(ApiError::BadRequest {
@@ -153,8 +159,7 @@ where
     let sig_bytes = base64::engine::general_purpose::STANDARD
         .decode(trimmed_b64.as_bytes())
         .or_else(|_| {
-            base64::engine::general_purpose::STANDARD_NO_PAD
-                .decode(trimmed_b64.as_bytes())
+            base64::engine::general_purpose::STANDARD_NO_PAD.decode(trimmed_b64.as_bytes())
         })
         .map_err(|e| ApiError::BadRequest {
             detail: format!("signature_b64 is not valid base64: {e}"),

@@ -65,10 +65,7 @@ pub enum KernelPush {
     /// this in its KSB to track which sub-tasks are currently running.
     ///
     /// Cross-ref: `kernel-push-protocol.md §9` line 437.
-    SubTaskActivated {
-        task_id:  TaskId,
-        base_sha: String,
-    },
+    SubTaskActivated { task_id: TaskId, base_sha: String },
 
     /// **V2.** Sent to the Orchestrator when a sub-task transitions
     /// `Running → Completed` (i.e., the Executor's `CompleteTask`
@@ -86,8 +83,8 @@ pub enum KernelPush {
     ///
     /// Cross-ref: `kernel-push-protocol.md §9` line 438.
     SubTaskCompleted {
-        task_id:           TaskId,
-        completed_sha:     String,
+        task_id: TaskId,
+        completed_sha: String,
         newly_activatable: Vec<TaskId>,
     },
 
@@ -108,9 +105,7 @@ pub enum KernelPush {
     ///     orthogonal to DAG progression.
     ///
     /// Cross-ref: `kernel-push-protocol.md §9` line 439.
-    AllReviewersPassed {
-        task_id: TaskId,
-    },
+    AllReviewersPassed { task_id: TaskId },
 
     /// **V2.** Sent to the Orchestrator when ANY Reviewer attached to
     /// the named sub-task has returned `approved = false`. The Kernel
@@ -134,8 +129,8 @@ pub enum KernelPush {
     ///
     /// Cross-ref: `kernel-push-protocol.md §9` line 440.
     ReviewRejected {
-        task_id:             TaskId,
-        critique:            String,
+        task_id: TaskId,
+        critique: String,
         reviewer_session_id: SessionId,
     },
 
@@ -154,9 +149,7 @@ pub enum KernelPush {
     /// AND updated `kernel-push-protocol.md §9` so the two specs are
     /// consistent. The parameter set (`task_id` only) matches the
     /// wire shape stipulated by §14 line 588 verbatim.
-    SubTaskSecurityViolation {
-        task_id: TaskId,
-    },
+    SubTaskSecurityViolation { task_id: TaskId },
 }
 
 // ---------------------------------------------------------------------------
@@ -180,10 +173,10 @@ pub enum KernelPush {
 /// `kernel-push-protocol.md §9` line 539).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct KernelPushFrame {
-    pub push_id:     u64,
-    pub session_id:  SessionId,
+    pub push_id: u64,
+    pub session_id: SessionId,
     pub enqueued_at: i64,
-    pub push:        KernelPush,
+    pub push: KernelPush,
 }
 
 // ---------------------------------------------------------------------------
@@ -218,8 +211,7 @@ mod tests {
     // any variant's field order would surface here as a decode failure.
     fn bincode_round_trip(push: KernelPush) -> KernelPush {
         let cfg = bincode::config::standard();
-        let bytes = bincode::serde::encode_to_vec(&push, cfg)
-            .expect("encode KernelPush");
+        let bytes = bincode::serde::encode_to_vec(&push, cfg).expect("encode KernelPush");
         let (decoded, _len) = bincode::serde::decode_from_slice::<KernelPush, _>(&bytes, cfg)
             .expect("decode KernelPush");
         decoded
@@ -228,7 +220,7 @@ mod tests {
     #[test]
     fn sub_task_activated_round_trips_through_bincode() {
         let p = KernelPush::SubTaskActivated {
-            task_id:  task_id("sub-1"),
+            task_id: task_id("sub-1"),
             base_sha: "deadbeefcafebabedeadbeefcafebabedeadbeef".to_owned(),
         };
         assert_eq!(bincode_round_trip(p.clone()), p);
@@ -240,15 +232,21 @@ mod tests {
         // Orchestrator's KSB displays the list in the order it received
         // it (no implicit sort), and bincode is order-preserving.
         let p = KernelPush::SubTaskCompleted {
-            task_id:           task_id("sub-A"),
-            completed_sha:     "0000000000000000000000000000000000000000".to_owned(),
+            task_id: task_id("sub-A"),
+            completed_sha: "0000000000000000000000000000000000000000".to_owned(),
             newly_activatable: vec![task_id("sub-B"), task_id("sub-C"), task_id("sub-D")],
         };
         let decoded = bincode_round_trip(p.clone());
         match (p, decoded) {
             (
-                KernelPush::SubTaskCompleted { newly_activatable: orig, .. },
-                KernelPush::SubTaskCompleted { newly_activatable: got,  .. },
+                KernelPush::SubTaskCompleted {
+                    newly_activatable: orig,
+                    ..
+                },
+                KernelPush::SubTaskCompleted {
+                    newly_activatable: got,
+                    ..
+                },
             ) => assert_eq!(orig, got, "newly_activatable must round-trip in order"),
             _ => unreachable!(),
         }
@@ -259,14 +257,18 @@ mod tests {
         // Pin: an empty list is preserved (NOT collapsed to an Option).
         // The recipient distinguishes "no new work" from "absent field".
         let p = KernelPush::SubTaskCompleted {
-            task_id:           task_id("leaf"),
-            completed_sha:     "1111111111111111111111111111111111111111".to_owned(),
+            task_id: task_id("leaf"),
+            completed_sha: "1111111111111111111111111111111111111111".to_owned(),
             newly_activatable: vec![],
         };
         match bincode_round_trip(p) {
-            KernelPush::SubTaskCompleted { newly_activatable, .. } => {
-                assert!(newly_activatable.is_empty(),
-                        "empty newly_activatable must remain empty after round-trip");
+            KernelPush::SubTaskCompleted {
+                newly_activatable, ..
+            } => {
+                assert!(
+                    newly_activatable.is_empty(),
+                    "empty newly_activatable must remain empty after round-trip"
+                );
             }
             other => panic!("wrong variant after round-trip: {other:?}"),
         }
@@ -274,15 +276,17 @@ mod tests {
 
     #[test]
     fn all_reviewers_passed_round_trips_through_bincode() {
-        let p = KernelPush::AllReviewersPassed { task_id: task_id("sub-rev") };
+        let p = KernelPush::AllReviewersPassed {
+            task_id: task_id("sub-rev"),
+        };
         assert_eq!(bincode_round_trip(p.clone()), p);
     }
 
     #[test]
     fn review_rejected_round_trips_with_critique_and_session_id() {
         let p = KernelPush::ReviewRejected {
-            task_id:             task_id("sub-fail"),
-            critique:            "Insufficient test coverage on src/auth.rs".to_owned(),
+            task_id: task_id("sub-fail"),
+            critique: "Insufficient test coverage on src/auth.rs".to_owned(),
             reviewer_session_id: session_id(0xab),
         };
         assert_eq!(bincode_round_trip(p.clone()), p);
@@ -295,8 +299,8 @@ mod tests {
         // `IntentRequest::SubmitReview`; we re-emit them verbatim here.
         let critique = "x".repeat(crate::MAX_CRITIQUE_BYTES);
         let p = KernelPush::ReviewRejected {
-            task_id:             task_id("sub-large"),
-            critique:            critique.clone(),
+            task_id: task_id("sub-large"),
+            critique: critique.clone(),
             reviewer_session_id: session_id(0x01),
         };
         match bincode_round_trip(p) {
@@ -310,7 +314,9 @@ mod tests {
 
     #[test]
     fn sub_task_security_violation_round_trips_through_bincode() {
-        let p = KernelPush::SubTaskSecurityViolation { task_id: task_id("sub-evil") };
+        let p = KernelPush::SubTaskSecurityViolation {
+            task_id: task_id("sub-evil"),
+        };
         assert_eq!(bincode_round_trip(p.clone()), p);
     }
 
@@ -320,15 +326,17 @@ mod tests {
         // variant, because `raxis-ipc::frame` wraps the whole frame in
         // a length-prefixed bincode payload.
         let frame = KernelPushFrame {
-            push_id:     17,
-            session_id:  session_id(0x42),
+            push_id: 17,
+            session_id: session_id(0x42),
             enqueued_at: 1_700_000_000,
-            push:        KernelPush::AllReviewersPassed { task_id: task_id("sub-z") },
+            push: KernelPush::AllReviewersPassed {
+                task_id: task_id("sub-z"),
+            },
         };
         let cfg = bincode::config::standard();
         let bytes = bincode::serde::encode_to_vec(&frame, cfg).unwrap();
-        let (decoded, _) = bincode::serde::decode_from_slice::<KernelPushFrame, _>(&bytes, cfg)
-            .unwrap();
+        let (decoded, _) =
+            bincode::serde::decode_from_slice::<KernelPushFrame, _>(&bytes, cfg).unwrap();
         assert_eq!(decoded, frame);
     }
 
@@ -359,24 +367,41 @@ mod tests {
         // running kernel (mismatched tags decode as the wrong variant
         // or fail outright). This test is the single point of
         // detection.
-        assert_eq!(discriminant_byte(
-            &KernelPush::SubTaskActivated {
-                task_id: task_id("a"), base_sha: String::new(),
-            }), 0);
-        assert_eq!(discriminant_byte(
-            &KernelPush::SubTaskCompleted {
-                task_id: task_id("a"), completed_sha: String::new(),
+        assert_eq!(
+            discriminant_byte(&KernelPush::SubTaskActivated {
+                task_id: task_id("a"),
+                base_sha: String::new(),
+            }),
+            0
+        );
+        assert_eq!(
+            discriminant_byte(&KernelPush::SubTaskCompleted {
+                task_id: task_id("a"),
+                completed_sha: String::new(),
                 newly_activatable: vec![],
-            }), 1);
-        assert_eq!(discriminant_byte(
-            &KernelPush::AllReviewersPassed { task_id: task_id("a") }), 2);
-        assert_eq!(discriminant_byte(
-            &KernelPush::ReviewRejected {
-                task_id: task_id("a"), critique: String::new(),
+            }),
+            1
+        );
+        assert_eq!(
+            discriminant_byte(&KernelPush::AllReviewersPassed {
+                task_id: task_id("a")
+            }),
+            2
+        );
+        assert_eq!(
+            discriminant_byte(&KernelPush::ReviewRejected {
+                task_id: task_id("a"),
+                critique: String::new(),
                 reviewer_session_id: session_id(0),
-            }), 3);
-        assert_eq!(discriminant_byte(
-            &KernelPush::SubTaskSecurityViolation { task_id: task_id("a") }), 4);
+            }),
+            3
+        );
+        assert_eq!(
+            discriminant_byte(&KernelPush::SubTaskSecurityViolation {
+                task_id: task_id("a")
+            }),
+            4
+        );
     }
 
     // ── JSON projection sanity (operator UI / test harnesses) ────────────
@@ -388,12 +413,13 @@ mod tests {
         // variant names land verbatim (PascalCase) and the field
         // structure is what the spec spells out.
         let p = KernelPush::SubTaskCompleted {
-            task_id:           task_id("sub-2"),
-            completed_sha:     "abc123".to_owned(),
+            task_id: task_id("sub-2"),
+            completed_sha: "abc123".to_owned(),
             newly_activatable: vec![task_id("sub-3")],
         };
         let v = serde_json::to_value(&p).unwrap();
-        let obj = v.get("SubTaskCompleted")
+        let obj = v
+            .get("SubTaskCompleted")
             .expect("variant tag must be present in JSON projection");
         assert_eq!(obj["task_id"], serde_json::json!("sub-2"));
         assert_eq!(obj["completed_sha"], serde_json::json!("abc123"));

@@ -53,8 +53,7 @@ use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::model::{
-    ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError,
-    ToolSpec, Usage,
+    ContentBlock, MessageRequest, MessageResponse, ModelClient, ModelError, ToolSpec, Usage,
 };
 
 // ---------------------------------------------------------------------------
@@ -86,7 +85,9 @@ struct GeminiContent {
 #[derive(Debug, Serialize)]
 #[serde(untagged)]
 enum GeminiPart {
-    Text { text: String },
+    Text {
+        text: String,
+    },
     FunctionCall {
         #[serde(rename = "functionCall")]
         function_call: GeminiFunctionCall,
@@ -207,9 +208,10 @@ fn build_contents(req: &MessageRequest) -> Vec<GeminiContent> {
     for m in &req.messages {
         let role = match m.role.as_str() {
             "assistant" => "model",
-            "user"      => "user",
-            other       => other,
-        }.to_owned();
+            "user" => "user",
+            other => other,
+        }
+        .to_owned();
         let mut parts: Vec<GeminiPart> = Vec::new();
         for b in &m.content {
             match b {
@@ -226,7 +228,11 @@ fn build_contents(req: &MessageRequest) -> Vec<GeminiContent> {
                         },
                     });
                 }
-                ContentBlock::ToolResult { tool_use_id: _, content, .. } => {
+                ContentBlock::ToolResult {
+                    tool_use_id: _,
+                    content,
+                    ..
+                } => {
                     // Gemini's functionResponse needs a structured object.
                     // Wrap the canonical string in `{ "result": <content> }`.
                     let response = serde_json::json!({ "result": content });
@@ -254,13 +260,18 @@ fn build_contents(req: &MessageRequest) -> Vec<GeminiContent> {
 }
 
 fn build_tools<'a>(tools: &'a [ToolSpec]) -> Vec<GeminiTools<'a>> {
-    if tools.is_empty() { return Vec::new(); }
+    if tools.is_empty() {
+        return Vec::new();
+    }
     vec![GeminiTools {
-        function_declarations: tools.iter().map(|t| GeminiFunctionDecl {
-            name: t.name.as_str(),
-            description: t.description.as_str(),
-            parameters: &t.input_schema,
-        }).collect(),
+        function_declarations: tools
+            .iter()
+            .map(|t| GeminiFunctionDecl {
+                name: t.name.as_str(),
+                description: t.description.as_str(),
+                parameters: &t.input_schema,
+            })
+            .collect(),
     }]
 }
 
@@ -284,11 +295,11 @@ fn build_request_body<'a>(req: &'a MessageRequest) -> GeminiRequest<'a> {
 
 fn map_finish_reason(s: &str) -> String {
     match s {
-        "STOP"        => "end_turn".to_owned(),
-        "MAX_TOKENS"  => "max_tokens".to_owned(),
-        "SAFETY"      => "safety".to_owned(),
-        "RECITATION"  => "recitation".to_owned(),
-        other         => other.to_ascii_lowercase(),
+        "STOP" => "end_turn".to_owned(),
+        "MAX_TOKENS" => "max_tokens".to_owned(),
+        "SAFETY" => "safety".to_owned(),
+        "RECITATION" => "recitation".to_owned(),
+        other => other.to_ascii_lowercase(),
     }
 }
 
@@ -323,9 +334,13 @@ fn synthetic_tool_call_id(seq: usize) -> String {
 }
 
 fn parse_response(raw: &GeminiResponse, model_id: &str) -> Result<MessageResponse, ModelError> {
-    let candidate = raw.candidates.first()
+    let candidate = raw
+        .candidates
+        .first()
         .ok_or_else(|| ModelError::Json("Gemini response had no candidates".to_owned()))?;
-    let parts = candidate.content.as_ref()
+    let parts = candidate
+        .content
+        .as_ref()
         .map(|c| &c.parts[..])
         .unwrap_or(&[]);
 
@@ -337,33 +352,41 @@ fn parse_response(raw: &GeminiResponse, model_id: &str) -> Result<MessageRespons
         }
         if let Some(fc) = p.function_call.as_ref() {
             content.push(ContentBlock::ToolUse {
-                id:    synthetic_tool_call_id(tool_call_seq),
-                name:  fc.name.clone(),
+                id: synthetic_tool_call_id(tool_call_seq),
+                name: fc.name.clone(),
                 input: fc.args.clone(),
             });
             tool_call_seq += 1;
         }
     }
 
-    let role = candidate.content.as_ref()
-        .map(|c| if c.role == "model" { "assistant".to_owned() } else { c.role.clone() })
+    let role = candidate
+        .content
+        .as_ref()
+        .map(|c| {
+            if c.role == "model" {
+                "assistant".to_owned()
+            } else {
+                c.role.clone()
+            }
+        })
         .unwrap_or_else(|| "assistant".to_owned());
     let stop_reason = candidate.finish_reason.as_deref().map(map_finish_reason);
     Ok(MessageResponse {
-        id:    synthetic_id(),
-        kind:  "message".to_owned(),
+        id: synthetic_id(),
+        kind: "message".to_owned(),
         role,
         content,
         stop_reason,
         usage: Usage {
-            input_tokens:                raw.usage_metadata.prompt_token_count,
-            output_tokens:               raw.usage_metadata.candidates_token_count,
+            input_tokens: raw.usage_metadata.prompt_token_count,
+            output_tokens: raw.usage_metadata.candidates_token_count,
             cache_creation_input_tokens: 0,
             // Gemini 2.5+ implicit caching surfaces hit counts in
             // `usageMetadata.cachedContentTokenCount`; fold into
             // the canonical `cache_read_input_tokens` so dispatch
             // / operator telemetry is provider-agnostic.
-            cache_read_input_tokens:     raw.usage_metadata.cached_content_token_count,
+            cache_read_input_tokens: raw.usage_metadata.cached_content_token_count,
         },
         model: model_id.to_owned(),
     })
@@ -420,33 +443,33 @@ impl GeminiClient {
 
 #[async_trait]
 impl ModelClient for GeminiClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         let url = format!(
             "{}/v1beta/models/{}:generateContent",
             self.base_url, req.model,
         );
         let body = build_request_body(req);
-        let body_bytes = serde_json::to_vec(&body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let body_bytes = serde_json::to_vec(&body).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "POST",
+            url: &url,
+            method: "POST",
             headers: vec![
                 ("content-type", "application/json".to_owned()),
-                ("accept",       "application/json".to_owned()),
+                ("accept", "application/json".to_owned()),
             ],
-            body:    body_bytes,
+            body: body_bytes,
             timeout: self.request_timeout,
         };
 
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             let snippet = if resp.body.len() <= 4096 {
@@ -458,11 +481,14 @@ impl ModelClient for GeminiClient {
                     resp.body.len() - 4096,
                 )
             };
-            return Err(ModelError::Upstream { status: resp.status, body: snippet });
+            return Err(ModelError::Upstream {
+                status: resp.status,
+                body: snippet,
+            });
         }
 
-        let raw: GeminiResponse = serde_json::from_slice(&resp.body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let raw: GeminiResponse =
+            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
         parse_response(&raw, &req.model)
     }
 }
@@ -485,13 +511,15 @@ mod tests {
             messages: vec![
                 Message {
                     role: "user".to_owned(),
-                    content: vec![ContentBlock::Text { text: "what is 1+1?".to_owned() }],
+                    content: vec![ContentBlock::Text {
+                        text: "what is 1+1?".to_owned(),
+                    }],
                 },
                 Message {
                     role: "assistant".to_owned(),
                     content: vec![ContentBlock::ToolUse {
-                        id:    "call-A".to_owned(),
-                        name:  "calc".to_owned(),
+                        id: "call-A".to_owned(),
+                        name: "calc".to_owned(),
                         input: serde_json::json!({"expr": "1+1"}),
                     }],
                 },
@@ -549,8 +577,11 @@ mod tests {
         });
         let raw: GeminiResponse = serde_json::from_value(raw).unwrap();
         let canonical = parse_response(&raw, "gemini-1.5-pro").unwrap();
-        assert!(canonical.id.starts_with("gemini-resp-"),
-            "synthetic id must carry the gemini-resp- prefix; got {}", canonical.id);
+        assert!(
+            canonical.id.starts_with("gemini-resp-"),
+            "synthetic id must carry the gemini-resp- prefix; got {}",
+            canonical.id
+        );
         assert_eq!(canonical.role, "assistant");
         assert_eq!(canonical.stop_reason.as_deref(), Some("end_turn"));
         assert_eq!(canonical.usage.input_tokens, 10);
@@ -562,8 +593,10 @@ mod tests {
         }
         match &canonical.content[1] {
             ContentBlock::ToolUse { id, name, input } => {
-                assert!(id.starts_with("gemini-tool-"),
-                    "synthetic tool-call id must carry the prefix; got {id}");
+                assert!(
+                    id.starts_with("gemini-tool-"),
+                    "synthetic tool-call id must carry the prefix; got {id}"
+                );
                 assert_eq!(name, "calc");
                 assert_eq!(input["expr"], "1+2");
             }
@@ -577,17 +610,19 @@ mod tests {
         // tiny pause + rerun
         std::thread::sleep(std::time::Duration::from_millis(2));
         let id2 = synthetic_id();
-        assert_ne!(id1, id2,
-            "two consecutive synthetic ids must differ; got {id1} == {id2}");
+        assert_ne!(
+            id1, id2,
+            "two consecutive synthetic ids must differ; got {id1} == {id2}"
+        );
     }
 
     #[test]
     fn finish_reason_table_is_complete() {
-        assert_eq!(map_finish_reason("STOP"),       "end_turn");
+        assert_eq!(map_finish_reason("STOP"), "end_turn");
         assert_eq!(map_finish_reason("MAX_TOKENS"), "max_tokens");
-        assert_eq!(map_finish_reason("SAFETY"),     "safety");
+        assert_eq!(map_finish_reason("SAFETY"), "safety");
         assert_eq!(map_finish_reason("RECITATION"), "recitation");
-        assert_eq!(map_finish_reason("OTHER"),      "other");
+        assert_eq!(map_finish_reason("OTHER"), "other");
     }
 
     /// **Prompt-caching attribution — Gemini implicit caching.**
@@ -614,10 +649,12 @@ mod tests {
         let raw: GeminiResponse = serde_json::from_value(raw).unwrap();
         let canonical = parse_response(&raw, "gemini-2.5-pro").unwrap();
         assert_eq!(canonical.usage.input_tokens, 5000);
-        assert_eq!(canonical.usage.cache_read_input_tokens, 4500,
+        assert_eq!(
+            canonical.usage.cache_read_input_tokens, 4500,
             "Gemini cachedContentTokenCount MUST fold into \
              Usage::cache_read_input_tokens for provider-agnostic \
-             dispatch-side budget accounting");
+             dispatch-side budget accounting"
+        );
         assert_eq!(canonical.usage.cache_creation_input_tokens, 0);
     }
 
@@ -643,9 +680,13 @@ mod tests {
             let mut total = 0;
             loop {
                 let n = sock.read(&mut buf[total..]).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 total += n;
-                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") { break; }
+                if total > 200 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
+                    break;
+                }
             }
             let body = br#"{"candidates":[{"content":{"role":"model","parts":[{"text":"hi"}]},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":3,"candidatesTokenCount":1}}"#;
             let resp = format!(

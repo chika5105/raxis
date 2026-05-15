@@ -69,7 +69,7 @@ const S_IFLNK: u32 = 0o120_000;
 
 /// `c_mode` mask used by the kernel's `init/initramfs.c` to
 /// extract the file-type nibble.
-const S_IFMT:  u32 = 0o170_000;
+const S_IFMT: u32 = 0o170_000;
 
 /// Walk `cpio_gz_path` and return every entry the archive contains.
 ///
@@ -85,7 +85,7 @@ const S_IFMT:  u32 = 0o170_000;
 ///   via `std::io::Error::other` — surfaces as a test panic with
 ///   the malformed offset in the message.
 pub fn list_initramfs_paths(cpio_gz_path: &Path) -> std::io::Result<BTreeMap<String, CpioEntry>> {
-    let f      = std::fs::File::open(cpio_gz_path)?;
+    let f = std::fs::File::open(cpio_gz_path)?;
     let reader = BufReader::new(f);
     let mut gz = GzDecoder::new(reader);
     let mut buf: Vec<u8> = Vec::new();
@@ -139,15 +139,16 @@ fn parse_newc_archive(bytes: &[u8]) -> std::io::Result<BTreeMap<String, CpioEntr
                 &header[0..6],
             )));
         }
-        let mode      = parse_hex8(&header[14..22], cursor + 14)?;
-        let filesize  = parse_hex8(&header[54..62], cursor + 54)?;
-        let namesize  = parse_hex8(&header[94..102], cursor + 94)?;
+        let mode = parse_hex8(&header[14..22], cursor + 14)?;
+        let filesize = parse_hex8(&header[54..62], cursor + 54)?;
+        let namesize = parse_hex8(&header[94..102], cursor + 94)?;
         cursor += 110;
 
         // ── Path ──
         if total - cursor < namesize as usize {
             return Err(std::io::Error::other(format!(
-                "truncated cpio: name at offset {cursor} (needs {} bytes)", namesize,
+                "truncated cpio: name at offset {cursor} (needs {} bytes)",
+                namesize,
             )));
         }
         let raw_name = &bytes[cursor..cursor + namesize as usize];
@@ -173,7 +174,8 @@ fn parse_newc_archive(bytes: &[u8]) -> std::io::Result<BTreeMap<String, CpioEntr
         let mut symlink_target: Option<String> = None;
         if total - cursor < filesize as usize {
             return Err(std::io::Error::other(format!(
-                "truncated cpio: data at offset {cursor} (needs {} bytes)", filesize,
+                "truncated cpio: data at offset {cursor} (needs {} bytes)",
+                filesize,
             )));
         }
         if mode & S_IFMT == S_IFLNK {
@@ -190,7 +192,14 @@ fn parse_newc_archive(bytes: &[u8]) -> std::io::Result<BTreeMap<String, CpioEntr
         // de-duping on path. We keep the LAST occurrence so a manifest
         // that re-emits a file later in the archive (theoretically
         // possible for newc) reflects the post-overwrite state.
-        out.insert(path.clone(), CpioEntry { path, mode, symlink_target });
+        out.insert(
+            path.clone(),
+            CpioEntry {
+                path,
+                mode,
+                symlink_target,
+            },
+        );
     }
 
     Ok(out)
@@ -232,12 +241,20 @@ mod tests {
             use flate2::write::GzEncoder;
             use flate2::Compression;
             use std::io::Write as _;
-            let mut gz = GzEncoder::new(std::fs::File::create(tmp.path()).unwrap(), Compression::default());
+            let mut gz = GzEncoder::new(
+                std::fs::File::create(tmp.path()).unwrap(),
+                Compression::default(),
+            );
             gz.write_all(&buf).unwrap();
             gz.finish().unwrap();
         }
         let entries = list_initramfs_paths(tmp.path()).unwrap();
-        assert_eq!(entries.len(), 2, "got: {:?}", entries.keys().collect::<Vec<_>>());
+        assert_eq!(
+            entries.len(),
+            2,
+            "got: {:?}",
+            entries.keys().collect::<Vec<_>>()
+        );
         let bash = entries.get("bin/bash").expect("bash entry");
         assert_eq!(bash.mode & S_IFMT, 0o100_000);
         assert!(bash.symlink_target.is_none());
@@ -252,26 +269,30 @@ mod tests {
         let filesize = data.len() as u32;
 
         buf.extend_from_slice(b"070701");
-        buf.extend_from_slice(&hex8(0));         // c_ino
-        buf.extend_from_slice(&hex8(mode));      // c_mode
-        buf.extend_from_slice(&hex8(0));         // c_uid
-        buf.extend_from_slice(&hex8(0));         // c_gid
-        buf.extend_from_slice(&hex8(1));         // c_nlink
-        buf.extend_from_slice(&hex8(0));         // c_mtime
-        buf.extend_from_slice(&hex8(filesize));  // c_filesize
-        buf.extend_from_slice(&hex8(0));         // c_devmajor
-        buf.extend_from_slice(&hex8(0));         // c_devminor
-        buf.extend_from_slice(&hex8(0));         // c_rdevmajor
-        buf.extend_from_slice(&hex8(0));         // c_rdevminor
-        buf.extend_from_slice(&hex8(namesize));  // c_namesize
-        buf.extend_from_slice(&hex8(0));         // c_check
+        buf.extend_from_slice(&hex8(0)); // c_ino
+        buf.extend_from_slice(&hex8(mode)); // c_mode
+        buf.extend_from_slice(&hex8(0)); // c_uid
+        buf.extend_from_slice(&hex8(0)); // c_gid
+        buf.extend_from_slice(&hex8(1)); // c_nlink
+        buf.extend_from_slice(&hex8(0)); // c_mtime
+        buf.extend_from_slice(&hex8(filesize)); // c_filesize
+        buf.extend_from_slice(&hex8(0)); // c_devmajor
+        buf.extend_from_slice(&hex8(0)); // c_devminor
+        buf.extend_from_slice(&hex8(0)); // c_rdevmajor
+        buf.extend_from_slice(&hex8(0)); // c_rdevminor
+        buf.extend_from_slice(&hex8(namesize)); // c_namesize
+        buf.extend_from_slice(&hex8(0)); // c_check
         buf.extend_from_slice(&name_with_nul);
         // 4-byte align (header + name).
         let header_and_name = 110 + namesize as usize;
-        for _ in 0..pad_to_4(header_and_name) { buf.push(0); }
+        for _ in 0..pad_to_4(header_and_name) {
+            buf.push(0);
+        }
         buf.extend_from_slice(data);
         // 4-byte align (data).
-        for _ in 0..pad_to_4(data.len()) { buf.push(0); }
+        for _ in 0..pad_to_4(data.len()) {
+            buf.push(0);
+        }
     }
 
     fn hex8(v: u32) -> [u8; 8] {
@@ -283,12 +304,12 @@ mod tests {
 
     #[test]
     fn pad_to_4_table() {
-        assert_eq!(pad_to_4(0),  0);
-        assert_eq!(pad_to_4(1),  3);
-        assert_eq!(pad_to_4(2),  2);
-        assert_eq!(pad_to_4(3),  1);
-        assert_eq!(pad_to_4(4),  0);
-        assert_eq!(pad_to_4(5),  3);
+        assert_eq!(pad_to_4(0), 0);
+        assert_eq!(pad_to_4(1), 3);
+        assert_eq!(pad_to_4(2), 2);
+        assert_eq!(pad_to_4(3), 1);
+        assert_eq!(pad_to_4(4), 0);
+        assert_eq!(pad_to_4(5), 3);
         assert_eq!(pad_to_4(110), 2);
     }
 }

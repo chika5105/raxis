@@ -61,9 +61,7 @@
 use std::io::{IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 
-use raxis_credentials::{
-    CredentialBackend, CredentialName, CredentialValue, OperatorId,
-};
+use raxis_credentials::{CredentialBackend, CredentialName, CredentialValue, OperatorId};
 use raxis_credentials_file::FileCredentialBackend;
 
 use crate::errors::CliError;
@@ -141,13 +139,24 @@ pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         let mode_warn = if e.mode & 0o177 != 0 { "*" } else { " " };
         println!(
             "{:<32}  {:<10}  {:>10}  {:<20}  {:>4o}{mode_warn} {:>6}",
-            e.name, e.kind.as_str(), e.size_bytes, mtime, e.mode & 0o777, e.uid,
+            e.name,
+            e.kind.as_str(),
+            e.size_bytes,
+            mtime,
+            e.mode & 0o777,
+            e.uid,
         );
     }
     if entries.iter().any(|e| e.mode & 0o177 != 0) {
         eprintln!("\nwarning: entries marked `*` are NOT chmod 0600 — fix with:");
-        eprintln!("    chmod 0600 {}/credentials/<name>.env", data_dir.display());
-        eprintln!("    chmod 0600 {}/providers/<name>.toml",   data_dir.display());
+        eprintln!(
+            "    chmod 0600 {}/credentials/<name>.env",
+            data_dir.display()
+        );
+        eprintln!(
+            "    chmod 0600 {}/providers/<name>.toml",
+            data_dir.display()
+        );
     }
     Ok(())
 }
@@ -264,12 +273,14 @@ pub fn run_rotate(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
     let new_value = CredentialValue::from_bytes(new_bytes);
 
     let actor = resolve_actor(flags)?;
-    backend.rotate(&cred_name, new_value, actor.clone()).map_err(|e| {
-        CliError::Policy(format!(
-            "credential rotate failed for {name_str:?}: {e} (code: {})",
-            e.error_code(),
-        ))
-    })?;
+    backend
+        .rotate(&cred_name, new_value, actor.clone())
+        .map_err(|e| {
+            CliError::Policy(format!(
+                "credential rotate failed for {name_str:?}: {e} (code: {})",
+                e.error_code(),
+            ))
+        })?;
 
     println!("Rotated: {name_str}");
     println!(
@@ -298,25 +309,35 @@ impl CredKind {
     fn as_str(self) -> &'static str {
         match self {
             Self::Credential => "credential",
-            Self::Provider   => "provider",
+            Self::Provider => "provider",
         }
     }
 }
 
 #[derive(Debug)]
 struct ListEntry {
-    name:          String,
-    kind:          CredKind,
-    size_bytes:    u64,
+    name: String,
+    kind: CredKind,
+    size_bytes: u64,
     modified_unix: i64,
-    mode:          u32,
-    uid:           u32,
+    mode: u32,
+    uid: u32,
 }
 
 fn collect_entries(data_dir: &Path) -> Result<Vec<ListEntry>, CliError> {
     let mut out = Vec::new();
-    push_dir(&mut out, &data_dir.join("credentials"), CredKind::Credential, "env")?;
-    push_dir(&mut out, &data_dir.join("providers"),   CredKind::Provider,   "toml")?;
+    push_dir(
+        &mut out,
+        &data_dir.join("credentials"),
+        CredKind::Credential,
+        "env",
+    )?;
+    push_dir(
+        &mut out,
+        &data_dir.join("providers"),
+        CredKind::Provider,
+        "toml",
+    )?;
     out.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(out)
 }
@@ -346,19 +367,25 @@ fn push_dir(
             Ok(ft) => ft,
             Err(_) => continue,
         };
-        if !ft.is_file() { continue; }
+        if !ft.is_file() {
+            continue;
+        }
         let path = entry.path();
         let stem_ext = path.extension().and_then(|s| s.to_str());
-        if stem_ext != Some(ext) { continue; }
+        if stem_ext != Some(ext) {
+            continue;
+        }
         let stem = match path.file_stem().and_then(|s| s.to_str()) {
             Some(s) => s,
-            None    => continue,
+            None => continue,
         };
         // Skip rotation tmp files (pattern: <name>.<ext>.tmp.<pid>.<nanos>).
         // The file backend names them under `parent.join(<stem>.<ext>.tmp.<pid>.<nanos>)`,
         // so they end up with a `<stem>.<ext>.tmp.<pid>` *file_stem*. Defensive:
         // skip anything whose stem contains `.tmp.` or `.new`.
-        if stem.contains(".tmp.") || stem.ends_with(".new") { continue; }
+        if stem.contains(".tmp.") || stem.ends_with(".new") {
+            continue;
+        }
 
         let md = match entry.metadata() {
             Ok(m) => m,
@@ -373,12 +400,12 @@ fn push_dir(
             .unwrap_or(0);
         let display_name = match kind {
             CredKind::Credential => stem.to_owned(),
-            CredKind::Provider   => format!("providers.{stem}"),
+            CredKind::Provider => format!("providers.{stem}"),
         };
         out.push(ListEntry {
-            name:          display_name,
+            name: display_name,
             kind,
-            size_bytes:    md.len(),
+            size_bytes: md.len(),
             modified_unix,
             mode,
             uid,
@@ -394,10 +421,14 @@ fn file_mode_and_uid(md: &std::fs::Metadata) -> (u32, u32) {
 }
 
 #[cfg(not(unix))]
-fn file_mode_and_uid(_md: &std::fs::Metadata) -> (u32, u32) { (0o600, 0) }
+fn file_mode_and_uid(_md: &std::fs::Metadata) -> (u32, u32) {
+    (0o600, 0)
+}
 
 fn format_mtime(unix: i64) -> String {
-    if unix <= 0 { return "—".into(); }
+    if unix <= 0 {
+        return "—".into();
+    }
     let secs = unix as u64;
     let days = secs / 86_400;
     let h = (secs % 86_400) / 3_600;
@@ -416,7 +447,11 @@ fn epoch_days_to_ymd(days: i64) -> (i32, u32, u32) {
     // weirdness; we don't care about pre-1970 dates here but the
     // formula handles them correctly.
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u32;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = yoe as i64 + era * 400;
@@ -443,10 +478,12 @@ fn read_new_value(mode: &InputMode) -> Result<Vec<u8>, CliError> {
     match mode {
         InputMode::Stdin => {
             let mut buf = Vec::new();
-            std::io::stdin().read_to_end(&mut buf).map_err(|e| CliError::Io {
-                path: "<stdin>".into(),
-                source: e,
-            })?;
+            std::io::stdin()
+                .read_to_end(&mut buf)
+                .map_err(|e| CliError::Io {
+                    path: "<stdin>".into(),
+                    source: e,
+                })?;
             Ok(strip_trailing_newline(buf))
         }
         InputMode::File(path) => {
@@ -461,8 +498,12 @@ fn read_new_value(mode: &InputMode) -> Result<Vec<u8>, CliError> {
 }
 
 fn strip_trailing_newline(mut buf: Vec<u8>) -> Vec<u8> {
-    if buf.last() == Some(&b'\n') { buf.pop(); }
-    if buf.last() == Some(&b'\r') { buf.pop(); }
+    if buf.last() == Some(&b'\n') {
+        buf.pop();
+    }
+    if buf.last() == Some(&b'\r') {
+        buf.pop();
+    }
     buf
 }
 
@@ -486,7 +527,10 @@ fn read_interactive() -> Result<Vec<u8>, CliError> {
     let read_res = std::io::stdin().read_line(&mut line);
     restore_termios(fd, &saved);
     eprintln!();
-    read_res.map_err(|e| CliError::Io { path: "<stdin>".into(), source: e })?;
+    read_res.map_err(|e| CliError::Io {
+        path: "<stdin>".into(),
+        source: e,
+    })?;
 
     Ok(strip_trailing_newline(line.into_bytes()))
 }
@@ -494,8 +538,7 @@ fn read_interactive() -> Result<Vec<u8>, CliError> {
 #[cfg(not(unix))]
 fn read_interactive() -> Result<Vec<u8>, CliError> {
     Err(CliError::Usage(
-        "credential rotate --interactive is only supported on Unix; use --stdin or --file"
-            .into(),
+        "credential rotate --interactive is only supported on Unix; use --stdin or --file".into(),
     ))
 }
 
@@ -544,7 +587,7 @@ fn resolve_actor(flags: &GlobalFlags) -> Result<OperatorId, CliError> {
     // calling with --operator-key in production runbooks.
     let path = match &flags.operator_key_path {
         Some(p) => p,
-        None    => return Ok(OperatorId(String::new())),
+        None => return Ok(OperatorId(String::new())),
     };
     let signing_key = crate::signing::load_operator_key(path)?;
     let pubkey_bytes = signing_key.verifying_key().to_bytes();
@@ -649,10 +692,10 @@ const CRED_CLI_AUDIT_FILE: &str = "credential-cli.jsonl";
 ///     in the audit event for forensic queries; V2 does not
 ///     dispatch any per-type validators yet.
 pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let mut name:        Option<String> = None;
-    let mut input:       InputMode      = InputMode::Stdin;
+    let mut name: Option<String> = None;
+    let mut input: InputMode = InputMode::Stdin;
     let mut input_explicit = false;
-    let mut proxy_type:  String = String::new();
+    let mut proxy_type: String = String::new();
     let mut environment: String = String::new();
     let mut description: String = String::new();
 
@@ -705,20 +748,29 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             }
             "--type" => {
                 i += 1;
-                proxy_type = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential add: --type requires a label".into()))?
+                proxy_type = args
+                    .get(i)
+                    .ok_or_else(|| {
+                        CliError::Usage("credential add: --type requires a label".into())
+                    })?
                     .clone();
             }
             "--env" => {
                 i += 1;
-                environment = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential add: --env requires a label".into()))?
+                environment = args
+                    .get(i)
+                    .ok_or_else(|| {
+                        CliError::Usage("credential add: --env requires a label".into())
+                    })?
                     .clone();
             }
             "--desc" => {
                 i += 1;
-                description = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential add: --desc requires a string".into()))?
+                description = args
+                    .get(i)
+                    .ok_or_else(|| {
+                        CliError::Usage("credential add: --desc requires a string".into())
+                    })?
                     .clone();
             }
             other if other.starts_with("--") => {
@@ -757,8 +809,8 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
 
     let cred_name = CredentialName::from(name_str.as_str());
-    let data_dir  = flags.data_dir();
-    let backend   = FileCredentialBackend::open(data_dir);
+    let data_dir = flags.data_dir();
+    let backend = FileCredentialBackend::open(data_dir);
 
     if backend.exists(&cred_name) {
         return Err(CliError::Usage(format!(
@@ -808,13 +860,30 @@ pub fn run_add(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     );
 
     println!("Registered: {name_str}");
-    println!("  type:              {}", if proxy_type.is_empty()  { "(unspecified)" } else { proxy_type.as_str() });
-    println!("  environment:       {}", if environment.is_empty() { "(unspecified)" } else { environment.as_str() });
-    println!("  actor_fingerprint: {}", if actor.0.is_empty() {
-        "(no operator key supplied; pass --operator-key for forensic attribution)"
-    } else {
-        actor.0.as_str()
-    });
+    println!(
+        "  type:              {}",
+        if proxy_type.is_empty() {
+            "(unspecified)"
+        } else {
+            proxy_type.as_str()
+        }
+    );
+    println!(
+        "  environment:       {}",
+        if environment.is_empty() {
+            "(unspecified)"
+        } else {
+            environment.as_str()
+        }
+    );
+    println!(
+        "  actor_fingerprint: {}",
+        if actor.0.is_empty() {
+            "(no operator key supplied; pass --operator-key for forensic attribution)"
+        } else {
+            actor.0.as_str()
+        }
+    );
     println!("  on-disk path:      {}", path.display());
     Ok(())
 }
@@ -850,12 +919,11 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         }
     }
 
-    let name_str = name.ok_or_else(|| {
-        CliError::Usage("credential show: <name> is required".into())
-    })?;
+    let name_str =
+        name.ok_or_else(|| CliError::Usage("credential show: <name> is required".into()))?;
     let cred_name = CredentialName::from(name_str.as_str());
-    let data_dir  = flags.data_dir();
-    let path      = raxis_credentials_file::credential_file_path(data_dir, &cred_name);
+    let data_dir = flags.data_dir();
+    let path = raxis_credentials_file::credential_file_path(data_dir, &cred_name);
 
     if !path.exists() {
         return Err(CliError::Usage(format!(
@@ -875,7 +943,11 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
-    let kind_str = if name_str.starts_with("providers.") { "provider" } else { "credential" };
+    let kind_str = if name_str.starts_with("providers.") {
+        "provider"
+    } else {
+        "credential"
+    };
 
     if json {
         let v = serde_json::json!({
@@ -889,7 +961,10 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             "modified_iso":   format_mtime(modified_unix),
             "mode_warn":      mode & 0o177 != 0,
         });
-        println!("{}", serde_json::to_string_pretty(&v).map_err(CliError::from)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(CliError::from)?
+        );
         return Ok(());
     }
 
@@ -897,9 +972,15 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     println!("Kind:          {kind_str}");
     println!("File path:     {}", path.display());
     println!("File size:     {} bytes", md.len());
-    println!("Permissions:   {:04o}{}",
+    println!(
+        "Permissions:   {:04o}{}",
         mode & 0o777,
-        if mode & 0o177 != 0 { "  (warn: not 0600)" } else { "" });
+        if mode & 0o177 != 0 {
+            "  (warn: not 0600)"
+        } else {
+            ""
+        }
+    );
     println!("Owner UID:     {uid}");
     println!("Modified:      {}", format_mtime(modified_unix));
     Ok(())
@@ -912,7 +993,7 @@ pub fn run_show(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 /// command exits non-zero with an explanatory message rather than
 /// silently removing.
 pub fn run_remove(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let mut name:  Option<String> = None;
+    let mut name: Option<String> = None;
     let mut force = false;
     for a in args {
         match a.as_str() {
@@ -937,12 +1018,11 @@ pub fn run_remove(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         }
     }
 
-    let name_str = name.ok_or_else(|| {
-        CliError::Usage("credential remove: <name> is required".into())
-    })?;
+    let name_str =
+        name.ok_or_else(|| CliError::Usage("credential remove: <name> is required".into()))?;
     let cred_name = CredentialName::from(name_str.as_str());
-    let data_dir  = flags.data_dir();
-    let backend   = FileCredentialBackend::open(data_dir);
+    let data_dir = flags.data_dir();
+    let backend = FileCredentialBackend::open(data_dir);
 
     if !backend.exists(&cred_name) {
         return Err(CliError::Usage(format!(
@@ -980,11 +1060,14 @@ pub fn run_remove(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 
     println!("Removed: {name_str}");
     println!("  forced:            {force}");
-    println!("  actor_fingerprint: {}", if actor.0.is_empty() {
-        "(no operator key supplied; pass --operator-key for forensic attribution)"
-    } else {
-        actor.0.as_str()
-    });
+    println!(
+        "  actor_fingerprint: {}",
+        if actor.0.is_empty() {
+            "(no operator key supplied; pass --operator-key for forensic attribution)"
+        } else {
+            actor.0.as_str()
+        }
+    );
     println!("  on-disk path:      {}", path.display());
     Ok(())
 }
@@ -1008,16 +1091,20 @@ pub fn run_verify(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
             }
             "--type" => {
                 i += 1;
-                proxy_type = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential verify: --type requires a label".into()))?
+                proxy_type = args
+                    .get(i)
+                    .ok_or_else(|| {
+                        CliError::Usage("credential verify: --type requires a label".into())
+                    })?
                     .clone();
             }
             "--timeout" => {
                 // Accepted for forward-compat with V3's live probe;
                 // V2 has no network step so the value is ignored.
                 i += 1;
-                let _ = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential verify: --timeout requires a value".into()))?;
+                let _ = args.get(i).ok_or_else(|| {
+                    CliError::Usage("credential verify: --timeout requires a value".into())
+                })?;
             }
             other if other.starts_with("--") => {
                 return Err(CliError::Usage(format!(
@@ -1036,18 +1123,17 @@ pub fn run_verify(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
         i += 1;
     }
 
-    let name_str = name.ok_or_else(|| {
-        CliError::Usage("credential verify: <name> is required".into())
-    })?;
+    let name_str =
+        name.ok_or_else(|| CliError::Usage("credential verify: <name> is required".into()))?;
     let cred_name = CredentialName::from(name_str.as_str());
-    let data_dir  = flags.data_dir();
+    let data_dir = flags.data_dir();
 
     let started = std::time::Instant::now();
     let result = verify_structurally(data_dir, &cred_name, &name_str);
     let latency_ms = started.elapsed().as_millis() as u64;
 
     let success = result.is_ok();
-    let actor   = resolve_actor(flags)?;
+    let actor = resolve_actor(flags)?;
     let _ = append_cli_audit_event(
         data_dir,
         &serde_json::json!({
@@ -1090,9 +1176,9 @@ pub fn run_verify(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> 
 /// whose payload mentions `<name>`. V2 only matches on the `name`
 /// field; structured filtering on event kinds is V3.
 pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let mut name:    Option<String> = None;
-    let mut limit:   usize          = 50;
-    let mut json     = false;
+    let mut name: Option<String> = None;
+    let mut limit: usize = 50;
+    let mut json = false;
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
@@ -1102,10 +1188,13 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             }
             "--limit" => {
                 i += 1;
-                let raw = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential audit: --limit requires a number".into()))?;
+                let raw = args.get(i).ok_or_else(|| {
+                    CliError::Usage("credential audit: --limit requires a number".into())
+                })?;
                 limit = raw.parse().map_err(|_| {
-                    CliError::Usage(format!("credential audit: --limit must be a positive integer, got {raw:?}"))
+                    CliError::Usage(format!(
+                        "credential audit: --limit must be a positive integer, got {raw:?}"
+                    ))
                 })?;
             }
             "--since" => {
@@ -1114,8 +1203,9 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 // `emitted_at` and the operator can pipe through
                 // `awk` if needed.
                 i += 1;
-                let _ = args.get(i)
-                    .ok_or_else(|| CliError::Usage("credential audit: --since requires a duration".into()))?;
+                let _ = args.get(i).ok_or_else(|| {
+                    CliError::Usage("credential audit: --since requires a duration".into())
+                })?;
             }
             "--json" => json = true,
             other if other.starts_with("--") => {
@@ -1135,9 +1225,8 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         i += 1;
     }
 
-    let name_str = name.ok_or_else(|| {
-        CliError::Usage("credential audit: <name> is required".into())
-    })?;
+    let name_str =
+        name.ok_or_else(|| CliError::Usage("credential audit: <name> is required".into()))?;
     let data_dir = flags.data_dir();
 
     let mut hits: Vec<serde_json::Value> = Vec::new();
@@ -1145,32 +1234,49 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
     if hits.is_empty() {
         println!("(no audit events found for {name_str:?})");
-        println!("  searched: {}/audit/{CRED_CLI_AUDIT_FILE}", data_dir.display());
+        println!(
+            "  searched: {}/audit/{CRED_CLI_AUDIT_FILE}",
+            data_dir.display()
+        );
         println!("  searched: {}/audit/segment-*.jsonl", data_dir.display());
         return Ok(());
     }
 
-    if hits.len() > limit { hits.truncate(limit); }
+    if hits.len() > limit {
+        hits.truncate(limit);
+    }
 
     if json {
         let v = serde_json::Value::Array(hits);
-        println!("{}", serde_json::to_string_pretty(&v).map_err(CliError::from)?);
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&v).map_err(CliError::from)?
+        );
         return Ok(());
     }
 
     println!("Credential: {name_str}");
     println!("Events ({} matching, showing up to {limit}):", hits.len());
     for evt in &hits {
-        let when_s = evt.get("emitted_at")
+        let when_s = evt
+            .get("emitted_at")
             .and_then(|v| v.as_i64())
             .map(format_mtime)
             .unwrap_or_else(|| "—".into());
-        let kind = evt.get("kind").and_then(|v| v.as_str()).unwrap_or("UnknownKind");
-        let actor = evt.get("actor_fingerprint")
+        let kind = evt
+            .get("kind")
+            .and_then(|v| v.as_str())
+            .unwrap_or("UnknownKind");
+        let actor = evt
+            .get("actor_fingerprint")
             .and_then(|v| v.as_str())
             .unwrap_or("(no actor)");
         let proxy_type = evt.get("proxy_type").and_then(|v| v.as_str()).unwrap_or("");
-        let extra = if proxy_type.is_empty() { String::new() } else { format!("  type={proxy_type}") };
+        let extra = if proxy_type.is_empty() {
+            String::new()
+        } else {
+            format!("  type={proxy_type}")
+        };
         println!("  {when_s}  {kind:<24}  actor={actor}{extra}");
     }
     Ok(())
@@ -1181,11 +1287,15 @@ pub fn run_audit(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 
 fn write_new_credential(final_path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let parent = final_path.parent()
+    let parent = final_path
+        .parent()
         .ok_or_else(|| std::io::Error::other("credential path has no parent"))?;
     let tmp_name = format!(
         "{}.tmp.{}.{}",
-        final_path.file_name().and_then(|n| n.to_str()).unwrap_or("cred"),
+        final_path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .unwrap_or("cred"),
         std::process::id(),
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -1233,7 +1343,9 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> std::io::Result<()> { Ok(()) }
+fn fsync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}
 
 /// Append a single JSONL record to
 /// `<data_dir>/audit/credential-cli.jsonl`. Best-effort: failure
@@ -1241,11 +1353,8 @@ fn fsync_dir(_dir: &Path) -> std::io::Result<()> { Ok(()) }
 /// command (the on-disk credential write already succeeded; we
 /// surface "audit emit failed" diagnostically rather than
 /// rolling back).
-fn append_cli_audit_event(
-    data_dir: &Path,
-    record: &serde_json::Value,
-) -> std::io::Result<()> {
-    let dir  = data_dir.join("audit");
+fn append_cli_audit_event(data_dir: &Path, record: &serde_json::Value) -> std::io::Result<()> {
+    let dir = data_dir.join("audit");
     std::fs::create_dir_all(&dir)?;
     let path = dir.join(CRED_CLI_AUDIT_FILE);
 
@@ -1288,12 +1397,10 @@ fn unix_seconds() -> i64 {
 fn verify_structurally(
     data_dir: &Path,
     cred_name: &CredentialName,
-    raw_name:  &str,
+    raw_name: &str,
 ) -> Result<Vec<String>, String> {
     let path = raxis_credentials_file::credential_file_path(data_dir, cred_name);
-    let md = std::fs::metadata(&path).map_err(|e| {
-        format!("stat {}: {e}", path.display())
-    })?;
+    let md = std::fs::metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
 
     let mut notes: Vec<String> = Vec::new();
 
@@ -1331,10 +1438,12 @@ fn verify_structurally(
         match std::str::from_utf8(&bytes) {
             Ok(text) => {
                 let mut lines_total = 0usize;
-                let mut lines_kv    = 0usize;
+                let mut lines_kv = 0usize;
                 for line in text.lines() {
                     let trimmed = line.trim();
-                    if trimmed.is_empty() || trimmed.starts_with('#') { continue; }
+                    if trimmed.is_empty() || trimmed.starts_with('#') {
+                        continue;
+                    }
                     lines_total += 1;
                     if let Some((k, _v)) = trimmed.split_once('=') {
                         if !k.trim().is_empty() {
@@ -1365,7 +1474,9 @@ fn current_uid() -> Option<u32> {
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> Option<u32> { None }
+fn current_uid() -> Option<u32> {
+    None
+}
 
 /// Read every JSONL file under `<data_dir>/audit/` and append to
 /// `out` the records whose `name` field equals `target_name`.
@@ -1380,7 +1491,9 @@ fn collect_audit_hits(data_dir: &Path, target_name: &str, out: &mut Vec<serde_js
     if let Ok(text) = std::fs::read_to_string(&cli_trail) {
         for line in text.lines() {
             let line = line.trim();
-            if line.is_empty() { continue; }
+            if line.is_empty() {
+                continue;
+            }
             if let Ok(v) = serde_json::from_str::<serde_json::Value>(line) {
                 if v.get("name").and_then(|n| n.as_str()) == Some(target_name) {
                     out.push(v);
@@ -1395,16 +1508,20 @@ fn collect_audit_hits(data_dir: &Path, target_name: &str, out: &mut Vec<serde_js
             let path = entry.path();
             let name = match path.file_name().and_then(|s| s.to_str()) {
                 Some(s) => s,
-                None    => continue,
+                None => continue,
             };
-            if !(name.starts_with("segment-") && name.ends_with(".jsonl")) { continue; }
+            if !(name.starts_with("segment-") && name.ends_with(".jsonl")) {
+                continue;
+            }
             let text = match std::fs::read_to_string(&path) {
                 Ok(t) => t,
                 Err(_) => continue,
             };
             for line in text.lines() {
                 let line = line.trim();
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 let v: serde_json::Value = match serde_json::from_str(line) {
                     Ok(v) => v,
                     Err(_) => continue,
@@ -1412,9 +1529,11 @@ fn collect_audit_hits(data_dir: &Path, target_name: &str, out: &mut Vec<serde_js
                 let payload = v.get("payload");
                 let mentions = match payload.and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
                     Some(n) => n == target_name,
-                    None    => false,
+                    None => false,
                 };
-                if !mentions { continue; }
+                if !mentions {
+                    continue;
+                }
                 let mut flat = serde_json::json!({
                     "kind":              v.get("event_kind").cloned().unwrap_or(serde_json::Value::Null),
                     "name":              target_name,

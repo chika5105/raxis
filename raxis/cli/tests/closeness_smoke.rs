@@ -46,7 +46,10 @@ fn typo_for_top_level_command_emits_did_you_mean_line() {
     // "ceert" -> "cert" via single-insertion. Output goes to stderr
     // with exit code 1 (see `fn main` in cli/src/main.rs).
     let (code, _stdout, stderr) = run_with_args(&["ceert"]);
-    assert_eq!(code, 1, "raxis should exit 1 on usage error; stderr={stderr:?}");
+    assert_eq!(
+        code, 1,
+        "raxis should exit 1 on usage error; stderr={stderr:?}"
+    );
     assert!(
         stderr.contains("unknown subcommand: \"ceert\""),
         "stderr should label the unknown subcommand verbatim; got {stderr:?}",
@@ -61,7 +64,10 @@ fn typo_for_top_level_command_emits_did_you_mean_line() {
 fn typo_for_cert_subcommand_emits_did_you_mean_line() {
     // `mintt` -> `mint`.
     let (code, _stdout, stderr) = run_with_args(&["cert", "mintt"]);
-    assert_eq!(code, 1, "raxis should exit 1 on usage error; stderr={stderr:?}");
+    assert_eq!(
+        code, 1,
+        "raxis should exit 1 on usage error; stderr={stderr:?}"
+    );
     assert!(
         stderr.contains("unknown cert sub-command: \"mintt\""),
         "stderr should label the unknown sub-command verbatim; got {stderr:?}",
@@ -95,10 +101,7 @@ fn typo_for_plan_subcommand_suggests_approve() {
         stderr.contains("unknown plan sub-command: \"apporve\""),
         "got {stderr:?}",
     );
-    assert!(
-        stderr.contains("`approve`"),
-        "got {stderr:?}",
-    );
+    assert!(stderr.contains("`approve`"), "got {stderr:?}",);
 }
 
 #[test]

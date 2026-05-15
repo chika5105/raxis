@@ -66,16 +66,10 @@ pub fn verify_ed25519(
     signature_bytes: &[u8],
 ) -> Result<(), CryptoError> {
     let pk_arr: [u8; 32] = pubkey_bytes.try_into().map_err(|_| {
-        CryptoError::MalformedPublicKey(format!(
-            "expected 32 bytes, got {}",
-            pubkey_bytes.len()
-        ))
+        CryptoError::MalformedPublicKey(format!("expected 32 bytes, got {}", pubkey_bytes.len()))
     })?;
     let sig_arr: [u8; 64] = signature_bytes.try_into().map_err(|_| {
-        CryptoError::MalformedSignature(format!(
-            "expected 64 bytes, got {}",
-            signature_bytes.len()
-        ))
+        CryptoError::MalformedSignature(format!("expected 64 bytes, got {}", signature_bytes.len()))
     })?;
 
     let verifying_key = VerifyingKey::from_bytes(&pk_arr)?;

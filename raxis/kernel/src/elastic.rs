@@ -63,7 +63,7 @@ impl ScaleDirection {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Up   => "Up",
+            Self::Up => "Up",
             Self::Down => "Down",
         }
     }
@@ -95,9 +95,9 @@ impl ScaleSignal {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::InferenceBurnRate => "InferenceBurnRate",
-            Self::IpcBackpressure   => "IpcBackpressure",
-            Self::MemoryPressure    => "MemoryPressure",
-            Self::ToolTimeoutBurst  => "ToolTimeoutBurst",
+            Self::IpcBackpressure => "IpcBackpressure",
+            Self::MemoryPressure => "MemoryPressure",
+            Self::ToolTimeoutBurst => "ToolTimeoutBurst",
         }
     }
 }
@@ -111,22 +111,30 @@ impl ScaleSignal {
 pub struct ScaleMultiplier {
     /// vCPU multiplier. `2` for both single-signal and multi-signal
     /// scale-up; future tuning may distinguish.
-    pub vcpu_factor:   u32,
+    pub vcpu_factor: u32,
     /// Memory multiplier numerator (denominator is fixed at 2). A
     /// value of `3` ⇒ memory `*= 1.5`; `4` ⇒ memory `*= 2.0`.
     /// Encoded as a fraction so we can express `*= 1.5` without
     /// dragging floating-point into the kernel.
-    pub mem_num:       u32,
+    pub mem_num: u32,
     /// Memory multiplier denominator. Fixed at `2` to keep the
     /// arithmetic exact for the §4.1 single-signal `*= 1.5` case.
-    pub mem_den:       u32,
+    pub mem_den: u32,
 }
 
 impl ScaleMultiplier {
     /// Single-signal scale-up: `vcpus *= 2`, `memory_mb *= 1.5`.
-    pub const SINGLE_SIGNAL: Self = Self { vcpu_factor: 2, mem_num: 3, mem_den: 2 };
+    pub const SINGLE_SIGNAL: Self = Self {
+        vcpu_factor: 2,
+        mem_num: 3,
+        mem_den: 2,
+    };
     /// Multi-signal scale-up: `vcpus *= 2`, `memory_mb *= 2`.
-    pub const MULTI_SIGNAL:  Self = Self { vcpu_factor: 2, mem_num: 4, mem_den: 2 };
+    pub const MULTI_SIGNAL: Self = Self {
+        vcpu_factor: 2,
+        mem_num: 4,
+        mem_den: 2,
+    };
     /// Scale-down on next-spawn (`§4.4`): `vcpus -= 1`,
     /// `memory_mb *= 0.75`. We encode the vCPU rule via a special
     /// sentinel — `vcpu_factor = 0` means "subtract one" — because
@@ -134,12 +142,20 @@ impl ScaleMultiplier {
     /// without invalidating the scale-up arithmetic. The
     /// [`build_scaled_vm_spec`] function recognises this sentinel
     /// when `direction = Down`.
-    pub const NEXT_SPAWN_DOWN: Self = Self { vcpu_factor: 0, mem_num: 3, mem_den: 4 };
+    pub const NEXT_SPAWN_DOWN: Self = Self {
+        vcpu_factor: 0,
+        mem_num: 3,
+        mem_den: 4,
+    };
 
     /// Pick the multiplier matching the firing-signal count.
     #[must_use]
     pub fn for_signal_count(n: usize) -> Self {
-        if n >= 2 { Self::MULTI_SIGNAL } else { Self::SINGLE_SIGNAL }
+        if n >= 2 {
+            Self::MULTI_SIGNAL
+        } else {
+            Self::SINGLE_SIGNAL
+        }
     }
 }
 
@@ -160,10 +176,10 @@ impl ScaleMultiplier {
 pub struct ElasticBounds {
     /// Minimum vCPU count for any spec produced by the chokepoint.
     /// Sourced from plan `min_vcpus` when present, else `1`.
-    pub min_vcpus:     u32,
+    pub min_vcpus: u32,
     /// Maximum vCPU count for any spec produced by the chokepoint.
     /// `min(policy.[elastic].max_vcpus_per_session, plan.max_vcpus)`.
-    pub max_vcpus:     u32,
+    pub max_vcpus: u32,
     /// Minimum memory MiB. Sourced from plan `min_memory_mb` when
     /// present, else the policy `[isolation]` minimum is honoured by
     /// the substrate; this struct just clamps to `min_memory_mb`.
@@ -181,17 +197,17 @@ pub struct ElasticBounds {
 pub struct PlanElasticOverrides {
     /// `[[plan.tasks]] elastic = false` ⇒ `Some(false)`. Plan-level
     /// `false` always wins (plan narrows policy per INV-ELASTIC-01).
-    pub elastic:        Option<bool>,
+    pub elastic: Option<bool>,
     /// `[[plan.tasks]] min_vcpus = N`.
-    pub min_vcpus:      Option<u32>,
+    pub min_vcpus: Option<u32>,
     /// `[[plan.tasks]] max_vcpus = N`. Validated `≤
     /// policy.[elastic].max_vcpus_per_session` at admission.
-    pub max_vcpus:      Option<u32>,
+    pub max_vcpus: Option<u32>,
     /// `[[plan.tasks]] min_memory_mb = N`.
-    pub min_memory_mb:  Option<u32>,
+    pub min_memory_mb: Option<u32>,
     /// `[[plan.tasks]] max_memory_mb = N`. Validated `≤
     /// policy.[elastic].max_memory_mb_per_session` at admission.
-    pub max_memory_mb:  Option<u32>,
+    pub max_memory_mb: Option<u32>,
 }
 
 impl ElasticBounds {
@@ -208,16 +224,18 @@ impl ElasticBounds {
     /// lets a non-conforming plan reach the spawn boundary.
     #[must_use]
     pub fn resolve(elastic: &ElasticConfig, plan: &PlanElasticOverrides) -> Self {
-        let max_vcpus = plan.max_vcpus
+        let max_vcpus = plan
+            .max_vcpus
             .unwrap_or(elastic.max_vcpus_per_session)
             .min(elastic.max_vcpus_per_session);
-        let max_memory_mb = plan.max_memory_mb
+        let max_memory_mb = plan
+            .max_memory_mb
             .unwrap_or(elastic.max_memory_mb_per_session)
             .min(elastic.max_memory_mb_per_session);
-        let min_vcpus     = plan.min_vcpus.unwrap_or(1).max(1);
+        let min_vcpus = plan.min_vcpus.unwrap_or(1).max(1);
         let min_memory_mb = plan.min_memory_mb.unwrap_or(0);
         Self {
-            min_vcpus:     min_vcpus.min(max_vcpus),
+            min_vcpus: min_vcpus.min(max_vcpus),
             max_vcpus,
             min_memory_mb: min_memory_mb.min(max_memory_mb),
             max_memory_mb,
@@ -244,22 +262,22 @@ pub enum ScaleDecision {
     Apply {
         /// New `VmSpec` post-clamping. Already enforces
         /// INV-ELASTIC-05 at the chokepoint.
-        new_spec:        VmSpec,
+        new_spec: VmSpec,
         /// Echo of `prev_spec.vcpu_count` for the audit event.
-        prev_vcpus:      u32,
+        prev_vcpus: u32,
         /// Echo of `new_spec.vcpu_count`.
-        new_vcpus:       u32,
+        new_vcpus: u32,
         /// Echo of `prev_spec.mem_mib`.
-        prev_memory_mb:  u32,
+        prev_memory_mb: u32,
         /// Echo of `new_spec.mem_mib`.
-        new_memory_mb:   u32,
+        new_memory_mb: u32,
         /// Direction (`Up` or `Down`) the caller stamps into the
         /// audit event.
-        direction:       ScaleDirection,
+        direction: ScaleDirection,
         /// Reason tag — for scale-up this is the dominant signal
         /// kind (or `"MultiSignal"` when multiple fired); for
         /// scale-down this is `"NextSpawnUnderUtilised"`.
-        reason:          String,
+        reason: String,
     },
     /// The decision was rejected before reaching the chokepoint.
     /// Stable PascalCase reason — closed set:
@@ -307,11 +325,11 @@ pub enum ScaleDecision {
 /// kernel ↔ guest auth contract survives the respawn.
 #[must_use]
 pub fn build_scaled_vm_spec(
-    baseline:   &VmSpec,
-    direction:  ScaleDirection,
+    baseline: &VmSpec,
+    direction: ScaleDirection,
     multiplier: ScaleMultiplier,
-    bounds:     &ElasticBounds,
-    elastic:    bool,
+    bounds: &ElasticBounds,
+    elastic: bool,
 ) -> VmSpec {
     debug_assert!(
         !(direction == ScaleDirection::Up && !elastic),
@@ -321,12 +339,11 @@ pub fn build_scaled_vm_spec(
     );
 
     let new_vcpus = match direction {
-        ScaleDirection::Up if elastic => {
-            baseline.vcpu_count
-                .saturating_mul(multiplier.vcpu_factor)
-                .min(bounds.max_vcpus)
-                .max(bounds.min_vcpus)
-        }
+        ScaleDirection::Up if elastic => baseline
+            .vcpu_count
+            .saturating_mul(multiplier.vcpu_factor)
+            .min(bounds.max_vcpus)
+            .max(bounds.min_vcpus),
         ScaleDirection::Up => {
             // INV-ELASTIC-05 runtime fallthrough.
             baseline.vcpu_count
@@ -348,29 +365,21 @@ pub fn build_scaled_vm_spec(
 
     let new_memory_mb = match direction {
         ScaleDirection::Up if elastic => {
-            mul_frac_clamped(
-                baseline.mem_mib,
-                multiplier.mem_num,
-                multiplier.mem_den,
-            )
-            .min(bounds.max_memory_mb)
-            .max(bounds.min_memory_mb)
+            mul_frac_clamped(baseline.mem_mib, multiplier.mem_num, multiplier.mem_den)
+                .min(bounds.max_memory_mb)
+                .max(bounds.min_memory_mb)
         }
         ScaleDirection::Up => baseline.mem_mib,
         ScaleDirection::Down => {
-            mul_frac_clamped(
-                baseline.mem_mib,
-                multiplier.mem_num,
-                multiplier.mem_den,
-            )
-            .max(bounds.min_memory_mb)
-            .min(bounds.max_memory_mb)
+            mul_frac_clamped(baseline.mem_mib, multiplier.mem_num, multiplier.mem_den)
+                .max(bounds.min_memory_mb)
+                .min(bounds.max_memory_mb)
         }
     };
 
     let mut spec = baseline.clone();
     spec.vcpu_count = new_vcpus;
-    spec.mem_mib    = new_memory_mb;
+    spec.mem_mib = new_memory_mb;
     spec
 }
 
@@ -412,29 +421,35 @@ fn mul_frac_clamped(value: u32, num: u32, den: u32) -> u32 {
 #[must_use]
 pub fn decide_scale_up(
     baseline: &VmSpec,
-    signals:  &[ScaleSignal],
-    elastic:  &ElasticConfig,
-    plan:     &PlanElasticOverrides,
+    signals: &[ScaleSignal],
+    elastic: &ElasticConfig,
+    plan: &PlanElasticOverrides,
 ) -> ScaleDecision {
     if matches!(plan.elastic, Some(false)) {
-        return ScaleDecision::Skip { reason: "ElasticDisabledPlan".to_owned() };
+        return ScaleDecision::Skip {
+            reason: "ElasticDisabledPlan".to_owned(),
+        };
     }
     if !elastic.enabled {
-        return ScaleDecision::Skip { reason: "ElasticDisabledPolicy".to_owned() };
+        return ScaleDecision::Skip {
+            reason: "ElasticDisabledPolicy".to_owned(),
+        };
     }
     if signals.is_empty() {
-        return ScaleDecision::Skip { reason: "NoSignal".to_owned() };
+        return ScaleDecision::Skip {
+            reason: "NoSignal".to_owned(),
+        };
     }
 
     let bounds = ElasticBounds::resolve(elastic, plan);
-    if baseline.vcpu_count >= bounds.max_vcpus
-        && baseline.mem_mib >= bounds.max_memory_mb
-    {
-        return ScaleDecision::Skip { reason: "AtCeiling".to_owned() };
+    if baseline.vcpu_count >= bounds.max_vcpus && baseline.mem_mib >= bounds.max_memory_mb {
+        return ScaleDecision::Skip {
+            reason: "AtCeiling".to_owned(),
+        };
     }
 
     let multiplier = ScaleMultiplier::for_signal_count(signals.len());
-    let new_spec   = build_scaled_vm_spec(
+    let new_spec = build_scaled_vm_spec(
         baseline,
         ScaleDirection::Up,
         multiplier,
@@ -446,10 +461,10 @@ pub fn decide_scale_up(
     // (already-at-ceiling on every axis after multiplier
     // application), surface that as `AtCeiling` rather than
     // emitting a no-op `SessionVmScaleEvent`.
-    if new_spec.vcpu_count == baseline.vcpu_count
-        && new_spec.mem_mib == baseline.mem_mib
-    {
-        return ScaleDecision::Skip { reason: "AtCeiling".to_owned() };
+    if new_spec.vcpu_count == baseline.vcpu_count && new_spec.mem_mib == baseline.mem_mib {
+        return ScaleDecision::Skip {
+            reason: "AtCeiling".to_owned(),
+        };
     }
 
     let reason = if signals.len() >= 2 {
@@ -458,10 +473,10 @@ pub fn decide_scale_up(
         signals[0].as_str().to_owned()
     };
 
-    let prev_vcpus     = baseline.vcpu_count;
+    let prev_vcpus = baseline.vcpu_count;
     let prev_memory_mb = baseline.mem_mib;
-    let new_vcpus      = new_spec.vcpu_count;
-    let new_memory_mb  = new_spec.mem_mib;
+    let new_vcpus = new_spec.vcpu_count;
+    let new_memory_mb = new_spec.mem_mib;
     ScaleDecision::Apply {
         new_spec,
         prev_vcpus,
@@ -506,8 +521,8 @@ impl RoleKey {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Orchestrator => "Orchestrator",
-            Self::Executor     => "Executor",
-            Self::Reviewer     => "Reviewer",
+            Self::Executor => "Executor",
+            Self::Reviewer => "Reviewer",
         }
     }
 }
@@ -528,7 +543,7 @@ pub struct UtilisationSample {
     /// `terminate_session`.
     pub peak_memory_pct: u8,
     /// Peak vCPU saturation during the session, as a percent.
-    pub peak_vcpu_pct:   u8,
+    pub peak_vcpu_pct: u8,
 }
 
 /// Defaults for the §4.4 down-bias triggers. Constants live here
@@ -543,9 +558,9 @@ pub mod scale_down_thresholds {
     /// Memory utilisation must be `≤ MEMORY_PCT` for every sample
     /// in the window to bias smaller. Per
     /// `elastic-vm-scaling.md §4.4`.
-    pub const MEMORY_PCT:  u8 = 30;
+    pub const MEMORY_PCT: u8 = 30;
     /// vCPU utilisation must be `≤ VCPU_PCT` for every sample.
-    pub const VCPU_PCT:    u8 = 50;
+    pub const VCPU_PCT: u8 = 50;
 }
 
 /// Per-role rolling window of recent utilisation samples.
@@ -595,9 +610,9 @@ impl ScaleDownHistory {
     /// window.
     pub fn record_sample(&self, role: RoleKey, sample: UtilisationSample) {
         let mut guard = self.inner.lock();
-        let queue = guard.entry(role).or_insert_with(|| {
-            VecDeque::with_capacity(self.window_size)
-        });
+        let queue = guard
+            .entry(role)
+            .or_insert_with(|| VecDeque::with_capacity(self.window_size));
         if queue.len() >= self.window_size {
             queue.pop_front();
         }
@@ -625,7 +640,9 @@ impl ScaleDownHistory {
     #[must_use]
     pub fn should_downscale(&self, role: RoleKey) -> bool {
         let guard = self.inner.lock();
-        let Some(queue) = guard.get(&role) else { return false; };
+        let Some(queue) = guard.get(&role) else {
+            return false;
+        };
         if queue.len() < self.window_size {
             return false;
         }
@@ -681,10 +698,10 @@ impl Default for ScaleDownHistory {
 #[must_use]
 pub fn decide_scale_down(
     baseline: &VmSpec,
-    elastic:  &ElasticConfig,
-    plan:     &PlanElasticOverrides,
-    history:  &ScaleDownHistory,
-    role:     RoleKey,
+    elastic: &ElasticConfig,
+    plan: &PlanElasticOverrides,
+    history: &ScaleDownHistory,
+    role: RoleKey,
 ) -> ScaleDecision {
     if !history.should_downscale(role) {
         // Distinguish "not enough samples" from "samples blew
@@ -695,14 +712,16 @@ pub fn decide_scale_down(
         } else {
             "AboveThresholds"
         };
-        return ScaleDecision::Skip { reason: reason.to_owned() };
+        return ScaleDecision::Skip {
+            reason: reason.to_owned(),
+        };
     }
 
     let bounds = ElasticBounds::resolve(elastic, plan);
-    if baseline.vcpu_count <= bounds.min_vcpus
-        && baseline.mem_mib <= bounds.min_memory_mb
-    {
-        return ScaleDecision::Skip { reason: "AtFloor".to_owned() };
+    if baseline.vcpu_count <= bounds.min_vcpus && baseline.mem_mib <= bounds.min_memory_mb {
+        return ScaleDecision::Skip {
+            reason: "AtFloor".to_owned(),
+        };
     }
 
     let new_spec = build_scaled_vm_spec(
@@ -716,16 +735,16 @@ pub fn decide_scale_down(
         true,
     );
 
-    if new_spec.vcpu_count == baseline.vcpu_count
-        && new_spec.mem_mib == baseline.mem_mib
-    {
-        return ScaleDecision::Skip { reason: "AtFloor".to_owned() };
+    if new_spec.vcpu_count == baseline.vcpu_count && new_spec.mem_mib == baseline.mem_mib {
+        return ScaleDecision::Skip {
+            reason: "AtFloor".to_owned(),
+        };
     }
 
-    let prev_vcpus     = baseline.vcpu_count;
+    let prev_vcpus = baseline.vcpu_count;
     let prev_memory_mb = baseline.mem_mib;
-    let new_vcpus      = new_spec.vcpu_count;
-    let new_memory_mb  = new_spec.mem_mib;
+    let new_vcpus = new_spec.vcpu_count;
+    let new_memory_mb = new_spec.mem_mib;
     ScaleDecision::Apply {
         new_spec,
         prev_vcpus,
@@ -733,7 +752,7 @@ pub fn decide_scale_down(
         prev_memory_mb,
         new_memory_mb,
         direction: ScaleDirection::Down,
-        reason:    "NextSpawnUnderUtilised".to_owned(),
+        reason: "NextSpawnUnderUtilised".to_owned(),
     }
 }
 
@@ -779,7 +798,9 @@ impl ScalingRateLimiter {
     /// limiter having to re-read state.
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: Mutex::new(VecDeque::new()) }
+        Self {
+            inner: Mutex::new(VecDeque::new()),
+        }
     }
 
     /// Try to admit a scaling decision at `now_secs` against the
@@ -823,7 +844,9 @@ impl ScalingRateLimiter {
 }
 
 impl Default for ScalingRateLimiter {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 /// Emit `SessionVmScaleDeferred` per `elastic-vm-scaling.md §5`.
@@ -833,20 +856,20 @@ impl Default for ScalingRateLimiter {
 /// (`"RateLimit"` is the only one in V2 GA; new reasons land in
 /// lockstep with this kernel-side decision engine).
 pub fn emit_scale_deferred_audit(
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
-    task_id:         Option<&str>,
-    initiative_id:   &str,
-    direction:       ScaleDirection,
-    reason:          &str,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
+    task_id: Option<&str>,
+    initiative_id: &str,
+    direction: ScaleDirection,
+    reason: &str,
 ) -> Result<(), raxis_audit_tools::AuditWriterError> {
     audit.emit(
         AuditEventKind::SessionVmScaleDeferred {
-            session_id:    session_id.to_owned(),
-            task_id:       task_id.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            task_id: task_id.map(str::to_owned),
             initiative_id: initiative_id.to_owned(),
-            direction:     direction.as_str().to_owned(),
-            reason:        reason.to_owned(),
+            direction: direction.as_str().to_owned(),
+            reason: reason.to_owned(),
         },
         Some(session_id),
         task_id,
@@ -872,28 +895,28 @@ pub fn emit_scale_deferred_audit(
 /// non-fatal (the new VM is already running; the loss of the scale
 /// event is dashboard-visible but does not invalidate the spawn).
 pub fn emit_scale_event_audit(
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
-    task_id:         Option<&str>,
-    initiative_id:   &str,
-    direction:       ScaleDirection,
-    prev_vcpus:      u32,
-    new_vcpus:       u32,
-    prev_memory_mb:  u32,
-    new_memory_mb:   u32,
-    reason:          &str,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
+    task_id: Option<&str>,
+    initiative_id: &str,
+    direction: ScaleDirection,
+    prev_vcpus: u32,
+    new_vcpus: u32,
+    prev_memory_mb: u32,
+    new_memory_mb: u32,
+    reason: &str,
 ) -> Result<(), raxis_audit_tools::AuditWriterError> {
     audit.emit(
         AuditEventKind::SessionVmScaleEvent {
-            session_id:    session_id.to_owned(),
-            task_id:       task_id.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            task_id: task_id.map(str::to_owned),
             initiative_id: initiative_id.to_owned(),
-            direction:     direction.as_str().to_owned(),
+            direction: direction.as_str().to_owned(),
             prev_vcpus,
             new_vcpus,
             prev_memory_mb,
             new_memory_mb,
-            reason:        reason.to_owned(),
+            reason: reason.to_owned(),
         },
         Some(session_id),
         task_id,
@@ -913,30 +936,30 @@ mod tests {
 
     fn baseline_vmspec(vcpu: u32, mem: u32) -> VmSpec {
         VmSpec {
-            vcpu_count:        vcpu,
-            mem_mib:           mem,
-            egress_tier:       EgressTier::Mediated,
-            cgroup_quota:      None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken("token".into()),
-            vsock_cid:         None,
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: vcpu,
+            mem_mib: mem,
+            egress_tier: EgressTier::Mediated,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken("token".into()),
+            vsock_cid: None,
+            virtio_fs_mounts: Vec::new(),
             linux_kernel_path: std::path::PathBuf::new(),
-            env:               std::collections::BTreeMap::new(),
+            env: std::collections::BTreeMap::new(),
             guest_console_log: None,
         }
     }
 
     fn elastic_default() -> ElasticConfig {
         ElasticConfig {
-            enabled:                                  true,
-            max_vcpus_per_session:                    8,
-            max_memory_mb_per_session:                16 * 1024,
+            enabled: true,
+            max_vcpus_per_session: 8,
+            max_memory_mb_per_session: 16 * 1024,
             max_concurrent_scaling_events_per_minute: 6,
-            transient_retry_max_attempts:             3,
-            transient_retry_initial_backoff_ms:       250,
-            transient_retry_max_backoff_ms:           4_000,
+            transient_retry_max_attempts: 3,
+            transient_retry_initial_backoff_ms: 250,
+            transient_retry_max_backoff_ms: 4_000,
         }
     }
 
@@ -948,8 +971,8 @@ mod tests {
     fn scale_up_when_elastic_true_doubles_vcpus_and_mem15x() {
         let base = baseline_vmspec(2, 1024);
         let bounds = ElasticBounds {
-            min_vcpus:     1,
-            max_vcpus:     8,
+            min_vcpus: 1,
+            max_vcpus: 8,
             min_memory_mb: 256,
             max_memory_mb: 16_384,
         };
@@ -961,15 +984,15 @@ mod tests {
             true,
         );
         assert_eq!(spec.vcpu_count, 4);
-        assert_eq!(spec.mem_mib,    1_536); // 1024 * 1.5
+        assert_eq!(spec.mem_mib, 1_536); // 1024 * 1.5
     }
 
     #[test]
     fn scale_up_clamps_to_policy_ceiling() {
         let base = baseline_vmspec(6, 12_000);
         let bounds = ElasticBounds {
-            min_vcpus:     1,
-            max_vcpus:     8,
+            min_vcpus: 1,
+            max_vcpus: 8,
             min_memory_mb: 256,
             max_memory_mb: 16_384,
         };
@@ -980,8 +1003,8 @@ mod tests {
             &bounds,
             true,
         );
-        assert_eq!(spec.vcpu_count, 8);       // 6*2 = 12, clamped to 8
-        assert_eq!(spec.mem_mib,    16_384);  // 12000*1.5 = 18000, clamped
+        assert_eq!(spec.vcpu_count, 8); // 6*2 = 12, clamped to 8
+        assert_eq!(spec.mem_mib, 16_384); // 12000*1.5 = 18000, clamped
     }
 
     #[test]
@@ -990,8 +1013,8 @@ mod tests {
         // verbatim even if a (broken) caller passes Up + elastic=false.
         let base = baseline_vmspec(2, 1024);
         let bounds = ElasticBounds {
-            min_vcpus:     1,
-            max_vcpus:     8,
+            min_vcpus: 1,
+            max_vcpus: 8,
             min_memory_mb: 256,
             max_memory_mb: 16_384,
         };
@@ -1008,7 +1031,7 @@ mod tests {
                 false,
             );
             assert_eq!(spec.vcpu_count, base.vcpu_count);
-            assert_eq!(spec.mem_mib,    base.mem_mib);
+            assert_eq!(spec.mem_mib, base.mem_mib);
         }
     }
 
@@ -1016,8 +1039,8 @@ mod tests {
     fn scale_down_subtracts_one_vcpu_and_drops_mem_to_75pct() {
         let base = baseline_vmspec(4, 2_048);
         let bounds = ElasticBounds {
-            min_vcpus:     1,
-            max_vcpus:     8,
+            min_vcpus: 1,
+            max_vcpus: 8,
             min_memory_mb: 256,
             max_memory_mb: 16_384,
         };
@@ -1028,16 +1051,16 @@ mod tests {
             &bounds,
             true,
         );
-        assert_eq!(spec.vcpu_count, 3);     // 4 - 1
-        assert_eq!(spec.mem_mib,    1_536); // 2048 * 0.75
+        assert_eq!(spec.vcpu_count, 3); // 4 - 1
+        assert_eq!(spec.mem_mib, 1_536); // 2048 * 0.75
     }
 
     #[test]
     fn scale_down_respects_min_floor() {
         let base = baseline_vmspec(1, 256);
         let bounds = ElasticBounds {
-            min_vcpus:     1,
-            max_vcpus:     8,
+            min_vcpus: 1,
+            max_vcpus: 8,
             min_memory_mb: 256,
             max_memory_mb: 16_384,
         };
@@ -1060,16 +1083,20 @@ mod tests {
 
     #[test]
     fn decide_scale_up_admits_single_signal() {
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         let signals = [ScaleSignal::MemoryPressure];
         let dec = decide_scale_up(&base, &signals, &elastic, &plan);
         match dec {
             ScaleDecision::Apply {
-                new_spec, prev_vcpus, new_vcpus,
-                prev_memory_mb, new_memory_mb,
-                direction, reason,
+                new_spec,
+                prev_vcpus,
+                new_vcpus,
+                prev_memory_mb,
+                new_memory_mb,
+                direction,
+                reason,
             } => {
                 assert_eq!(direction, ScaleDirection::Up);
                 assert_eq!(prev_vcpus, 2);
@@ -1085,17 +1112,16 @@ mod tests {
 
     #[test]
     fn decide_scale_up_multi_signal_uses_2x_memory() {
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
-        let signals = [
-            ScaleSignal::MemoryPressure,
-            ScaleSignal::IpcBackpressure,
-        ];
+        let plan = PlanElasticOverrides::default();
+        let signals = [ScaleSignal::MemoryPressure, ScaleSignal::IpcBackpressure];
         match decide_scale_up(&base, &signals, &elastic, &plan) {
-            ScaleDecision::Apply { new_spec, reason, .. } => {
+            ScaleDecision::Apply {
+                new_spec, reason, ..
+            } => {
                 assert_eq!(new_spec.vcpu_count, 4);
-                assert_eq!(new_spec.mem_mib,    2_048); // 1024 * 2
+                assert_eq!(new_spec.mem_mib, 2_048); // 1024 * 2
                 assert_eq!(reason, "MultiSignal");
             }
             other => panic!("expected Apply, got {other:?}"),
@@ -1104,10 +1130,10 @@ mod tests {
 
     #[test]
     fn decide_scale_up_skips_when_policy_disabled() {
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let mut elastic = elastic_default();
         elastic.enabled = false;
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         let signals = [ScaleSignal::MemoryPressure];
         match decide_scale_up(&base, &signals, &elastic, &plan) {
             ScaleDecision::Skip { reason } => assert_eq!(reason, "ElasticDisabledPolicy"),
@@ -1117,9 +1143,9 @@ mod tests {
 
     #[test]
     fn decide_scale_up_skips_when_plan_disabled_even_if_policy_enabled() {
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides {
+        let plan = PlanElasticOverrides {
             elastic: Some(false),
             ..PlanElasticOverrides::default()
         };
@@ -1132,9 +1158,9 @@ mod tests {
 
     #[test]
     fn decide_scale_up_skips_when_no_signal() {
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         let signals: [ScaleSignal; 0] = [];
         match decide_scale_up(&base, &signals, &elastic, &plan) {
             ScaleDecision::Skip { reason } => assert_eq!(reason, "NoSignal"),
@@ -1144,9 +1170,9 @@ mod tests {
 
     #[test]
     fn decide_scale_up_skips_at_ceiling() {
-        let base    = baseline_vmspec(8, 16_384);
+        let base = baseline_vmspec(8, 16_384);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         let signals = [ScaleSignal::MemoryPressure];
         match decide_scale_up(&base, &signals, &elastic, &plan) {
             ScaleDecision::Skip { reason } => assert_eq!(reason, "AtCeiling"),
@@ -1159,9 +1185,9 @@ mod tests {
         // Plan says max_vcpus = 4 (≤ policy 8). After 2*2 = 4, we're
         // at the plan ceiling on vCPU axis but memory still has
         // headroom — Apply with 4 vcpus, 1.5x memory.
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides {
+        let plan = PlanElasticOverrides {
             max_vcpus: Some(4),
             ..PlanElasticOverrides::default()
         };
@@ -1169,7 +1195,7 @@ mod tests {
         match decide_scale_up(&base, &signals, &elastic, &plan) {
             ScaleDecision::Apply { new_spec, .. } => {
                 assert_eq!(new_spec.vcpu_count, 4);
-                assert_eq!(new_spec.mem_mib,    1_536);
+                assert_eq!(new_spec.mem_mib, 1_536);
             }
             other => panic!("expected Apply, got {other:?}"),
         }
@@ -1184,7 +1210,7 @@ mod tests {
         // Plan says max_vcpus = 16 but policy allows only 8.
         // Resolver clamps to 8 (defence-in-depth).
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides {
+        let plan = PlanElasticOverrides {
             max_vcpus: Some(16),
             ..PlanElasticOverrides::default()
         };
@@ -1195,13 +1221,13 @@ mod tests {
     #[test]
     fn bounds_resolve_honours_plan_max_when_narrower() {
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides {
-            max_vcpus:     Some(4),
+        let plan = PlanElasticOverrides {
+            max_vcpus: Some(4),
             max_memory_mb: Some(2_048),
             ..PlanElasticOverrides::default()
         };
         let bounds = ElasticBounds::resolve(&elastic, &plan);
-        assert_eq!(bounds.max_vcpus,     4);
+        assert_eq!(bounds.max_vcpus, 4);
         assert_eq!(bounds.max_memory_mb, 2_048);
     }
 
@@ -1211,24 +1237,36 @@ mod tests {
 
     #[test]
     fn multiplier_for_signal_count_picks_single_or_multi() {
-        assert_eq!(ScaleMultiplier::for_signal_count(0), ScaleMultiplier::SINGLE_SIGNAL);
-        assert_eq!(ScaleMultiplier::for_signal_count(1), ScaleMultiplier::SINGLE_SIGNAL);
-        assert_eq!(ScaleMultiplier::for_signal_count(2), ScaleMultiplier::MULTI_SIGNAL);
-        assert_eq!(ScaleMultiplier::for_signal_count(99), ScaleMultiplier::MULTI_SIGNAL);
+        assert_eq!(
+            ScaleMultiplier::for_signal_count(0),
+            ScaleMultiplier::SINGLE_SIGNAL
+        );
+        assert_eq!(
+            ScaleMultiplier::for_signal_count(1),
+            ScaleMultiplier::SINGLE_SIGNAL
+        );
+        assert_eq!(
+            ScaleMultiplier::for_signal_count(2),
+            ScaleMultiplier::MULTI_SIGNAL
+        );
+        assert_eq!(
+            ScaleMultiplier::for_signal_count(99),
+            ScaleMultiplier::MULTI_SIGNAL
+        );
     }
 
     #[test]
     fn scale_direction_as_str_round_trip() {
-        assert_eq!(ScaleDirection::Up.as_str(),   "Up");
+        assert_eq!(ScaleDirection::Up.as_str(), "Up");
         assert_eq!(ScaleDirection::Down.as_str(), "Down");
     }
 
     #[test]
     fn scale_signal_as_str_round_trip() {
         assert_eq!(ScaleSignal::InferenceBurnRate.as_str(), "InferenceBurnRate");
-        assert_eq!(ScaleSignal::IpcBackpressure.as_str(),   "IpcBackpressure");
-        assert_eq!(ScaleSignal::MemoryPressure.as_str(),    "MemoryPressure");
-        assert_eq!(ScaleSignal::ToolTimeoutBurst.as_str(),  "ToolTimeoutBurst");
+        assert_eq!(ScaleSignal::IpcBackpressure.as_str(), "IpcBackpressure");
+        assert_eq!(ScaleSignal::MemoryPressure.as_str(), "MemoryPressure");
+        assert_eq!(ScaleSignal::ToolTimeoutBurst.as_str(), "ToolTimeoutBurst");
     }
 
     // -----------------------------------------------------------------
@@ -1247,7 +1285,10 @@ mod tests {
         for _ in 0..(scale_down_thresholds::WINDOW_SIZE - 1) {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 10, peak_vcpu_pct: 10 },
+                UtilisationSample {
+                    peak_memory_pct: 10,
+                    peak_vcpu_pct: 10,
+                },
             );
         }
         // Window not yet full → no downscale, even though all
@@ -1261,7 +1302,10 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         assert!(h.should_downscale(RoleKey::Executor));
@@ -1273,13 +1317,19 @@ mod tests {
         for _ in 0..(scale_down_thresholds::WINDOW_SIZE - 1) {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         h.record_sample(
             RoleKey::Executor,
             // Memory at the threshold is fine; just over kicks us out.
-            UtilisationSample { peak_memory_pct: 50, peak_vcpu_pct: 30 },
+            UtilisationSample {
+                peak_memory_pct: 50,
+                peak_vcpu_pct: 30,
+            },
         );
         assert!(!h.should_downscale(RoleKey::Executor));
     }
@@ -1290,7 +1340,10 @@ mod tests {
         for pct in [80, 80, 80] {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: pct, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: pct,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         // Now push three under-threshold samples; the over-threshold
@@ -1298,7 +1351,10 @@ mod tests {
         for _ in 0..3 {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         assert!(h.should_downscale(RoleKey::Executor));
@@ -1310,7 +1366,10 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         // Reviewer has no history; must NOT downscale even though
@@ -1325,18 +1384,25 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             history.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
             ScaleDecision::Apply {
-                new_vcpus, new_memory_mb, direction, reason, ..
+                new_vcpus,
+                new_memory_mb,
+                direction,
+                reason,
+                ..
             } => {
                 assert_eq!(direction, ScaleDirection::Down);
-                assert_eq!(new_vcpus, 1);     // 2 - 1
+                assert_eq!(new_vcpus, 1); // 2 - 1
                 assert_eq!(new_memory_mb, 768); // 1024 * 0.75
                 assert_eq!(reason, "NextSpawnUnderUtilised");
             }
@@ -1347,9 +1413,9 @@ mod tests {
     #[test]
     fn decide_scale_down_skips_when_no_history() {
         let history = ScaleDownHistory::new();
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
             ScaleDecision::Skip { reason } => assert_eq!(reason, "InsufficientHistory"),
             other => panic!("expected Skip, got {other:?}"),
@@ -1361,15 +1427,22 @@ mod tests {
         let history = ScaleDownHistory::new();
         for i in 0..scale_down_thresholds::WINDOW_SIZE {
             // Last sample blows the threshold.
-            let mem = if i + 1 == scale_down_thresholds::WINDOW_SIZE { 90 } else { 20 };
+            let mem = if i + 1 == scale_down_thresholds::WINDOW_SIZE {
+                90
+            } else {
+                20
+            };
             history.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: mem, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: mem,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
             ScaleDecision::Skip { reason } => assert_eq!(reason, "AboveThresholds"),
             other => panic!("expected Skip, got {other:?}"),
@@ -1382,16 +1455,19 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             history.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         // Already at the floor (1 vcpu, 0 memory after applying
         // bounds.min_memory_mb default 0 — we pin a custom plan
         // override to say "min memory = 1024" so the floor is
         // visible).
-        let base    = baseline_vmspec(1, 1024);
+        let base = baseline_vmspec(1, 1024);
         let elastic = elastic_default();
-        let plan    = PlanElasticOverrides {
+        let plan = PlanElasticOverrides {
             min_memory_mb: Some(1024),
             ..PlanElasticOverrides::default()
         };
@@ -1410,15 +1486,21 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             history.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
-        let base    = baseline_vmspec(2, 1024);
+        let base = baseline_vmspec(2, 1024);
         let mut elastic = elastic_default();
         elastic.enabled = false;
-        let plan    = PlanElasticOverrides::default();
+        let plan = PlanElasticOverrides::default();
         match decide_scale_down(&base, &elastic, &plan, &history, RoleKey::Executor) {
-            ScaleDecision::Apply { direction: ScaleDirection::Down, .. } => {}
+            ScaleDecision::Apply {
+                direction: ScaleDirection::Down,
+                ..
+            } => {}
             other => panic!("expected Apply Down, got {other:?}"),
         }
     }
@@ -1429,7 +1511,10 @@ mod tests {
         for _ in 0..scale_down_thresholds::WINDOW_SIZE {
             h.record_sample(
                 RoleKey::Executor,
-                UtilisationSample { peak_memory_pct: 20, peak_vcpu_pct: 30 },
+                UtilisationSample {
+                    peak_memory_pct: 20,
+                    peak_vcpu_pct: 30,
+                },
             );
         }
         assert!(h.should_downscale(RoleKey::Executor));
@@ -1440,8 +1525,8 @@ mod tests {
     #[test]
     fn role_key_as_str_round_trip() {
         assert_eq!(RoleKey::Orchestrator.as_str(), "Orchestrator");
-        assert_eq!(RoleKey::Executor.as_str(),     "Executor");
-        assert_eq!(RoleKey::Reviewer.as_str(),     "Reviewer");
+        assert_eq!(RoleKey::Executor.as_str(), "Executor");
+        assert_eq!(RoleKey::Reviewer.as_str(), "Reviewer");
     }
 
     // -----------------------------------------------------------------

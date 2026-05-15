@@ -338,10 +338,10 @@ pub enum Capabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SessionCapabilityView {
     /// Session id this capability projection was built against.
-    pub session_id:        String,
+    pub session_id: String,
     /// Role string (`"orchestrator"` / `"executor"` / `"reviewer"`).
     /// Mirrors [`KsbSnapshot::role`].
-    pub role:              String,
+    pub role: String,
 
     /// **V2.7 — `INV-KSB-MAX-TURNS-VISIBILITY-01`.** Resolved
     /// per-session planner turn ceiling, populated from the SAME
@@ -374,17 +374,17 @@ pub struct SessionCapabilityView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct InitiativeCapabilityView {
     /// Initiative id.
-    pub initiative_id:                          String,
+    pub initiative_id: String,
     /// Current value of
     /// `initiatives.orchestrator_no_progress_respawn_count`.
     pub orchestrator_no_progress_respawn_count: u32,
     /// Kernel-side ceiling default
     /// (`MAX_ORCH_NO_PROGRESS_RESPAWNS`).
-    pub max_orchestrator_no_progress_respawns:  u32,
+    pub max_orchestrator_no_progress_respawns: u32,
     /// `max - count` saturated at zero. When `0`, the next
     /// orchestrator post-exit respawn trigger will exceed the
     /// ceiling and auto-escalate.
-    pub orchestrator_respawns_remaining:        u32,
+    pub orchestrator_respawns_remaining: u32,
 }
 
 /// Per-task admit-predicate view. The orchestrator carries one row
@@ -395,20 +395,20 @@ pub struct InitiativeCapabilityView {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskCapabilityView {
     /// Task id this view describes.
-    pub task_id:                  String,
+    pub task_id: String,
     /// Most-recent activation's `crash_retry_count` (the executor's
     /// crash / `ReportFailure` count for THIS task).
-    pub crash_retry_count:        u32,
+    pub crash_retry_count: u32,
     /// Most-recent activation's `review_reject_count` (cross-Reviewer
     /// terminal `AtLeastOneRejected` count for THIS task).
-    pub review_reject_count:      u32,
+    pub review_reject_count: u32,
     /// Plan-declared crash-retry ceiling (effective: plan override OR
     /// kernel default).
-    pub max_crash_retries:        u32,
+    pub max_crash_retries: u32,
     /// Plan-declared review-rejection ceiling.
-    pub max_review_rejections:    u32,
+    pub max_review_rejections: u32,
     /// `max_crash_retries - crash_retry_count` saturated at zero.
-    pub crash_retries_remaining:  u32,
+    pub crash_retries_remaining: u32,
     /// `max_review_rejections - review_reject_count` saturated at
     /// zero.
     pub review_retries_remaining: u32,
@@ -420,7 +420,7 @@ pub struct TaskCapabilityView {
     /// rejecting blind-asks (which is what the iter44 leading-
     /// indicator metric `IntentAdmitPredicateEvaluatedTotal{
     /// admissible="false"}` was tracking).
-    pub retry_admissible:           bool,
+    pub retry_admissible: bool,
     /// Human-readable reason when `retry_admissible == false`. Empty
     /// (`None`) when the retry would be admissible. Stable lexemes:
     /// `"prior state {state}; need Failed or Completed-with-rejection"`,
@@ -452,28 +452,28 @@ pub struct TaskCapabilityView {
 pub struct MaxTurnsScalingView {
     /// 1-based attempt index (`subtask_activations.crash_retry_count
     /// + 1`). `1` on first spawn; `>= 2` on every retry.
-    pub max_turns_attempt:       u32,
+    pub max_turns_attempt: u32,
     /// Per-task / per-policy / compiled base ceiling
     /// (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`). Constant across
     /// attempts for the same task.
-    pub max_turns_base:          u32,
+    pub max_turns_base: u32,
     /// Per-task / per-policy / derived scaling step.
-    pub max_turns_step:          u32,
+    pub max_turns_step: u32,
     /// Runtime hard ceiling clamp (`240` by default, overridable via
     /// `RAXIS_PLANNER_MAX_TURNS_HARD_CEILING`).
-    pub max_turns_hard_ceiling:  u32,
+    pub max_turns_hard_ceiling: u32,
 }
 
 /// Orchestrator's full envelope.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OrchestratorCapabilities {
-    pub session:    SessionCapabilityView,
+    pub session: SessionCapabilityView,
     pub initiative: InitiativeCapabilityView,
     /// One row per executor task in the initiative's DAG. Reviewer
     /// rows are intentionally omitted — the orchestrator does not
     /// `retry_subtask` on a reviewer (reviewers are
     /// reactivate-only).
-    pub tasks:      Vec<TaskCapabilityView>,
+    pub tasks: Vec<TaskCapabilityView>,
     /// V3 — progressive scaling view (this session's
     /// per-attempt budget breakdown).
     pub max_turns_scaling: MaxTurnsScalingView,
@@ -485,7 +485,7 @@ pub struct OrchestratorCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ExecutorCapabilities {
     pub session: SessionCapabilityView,
-    pub task:    TaskCapabilityView,
+    pub task: TaskCapabilityView,
     /// V3 — progressive scaling view (this session's
     /// per-attempt budget breakdown).
     pub max_turns_scaling: MaxTurnsScalingView,
@@ -499,7 +499,7 @@ pub struct ExecutorCapabilities {
 /// artifact, not on the executor's budget pressure.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReviewerCapabilities {
-    pub session:          SessionCapabilityView,
+    pub session: SessionCapabilityView,
     /// Task id of the executor artifact under review.
     pub artifact_task_id: String,
 }
@@ -513,16 +513,16 @@ pub struct ReviewerCapabilities {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct DagRow {
     /// Task id of this row.
-    pub task_id:    String,
+    pub task_id: String,
     /// Lowercase state name.
-    pub state:      String,
+    pub state: String,
     /// Optional one-line title. Empty if the operator did not
     /// supply one.
     #[serde(default)]
-    pub title:      String,
+    pub title: String,
     /// Number of reviewers attached to this task.
     #[serde(default)]
-    pub reviewers:  u32,
+    pub reviewers: u32,
     /// 40-char hex SHA the predecessor (Executor) stamped into
     /// `tasks.evaluation_sha` at `CompleteTask`. Empty until the
     /// task completes; populated for every Executor row in the
@@ -635,13 +635,13 @@ pub struct ReviewerVerdict {
     /// Reviewer task id that submitted the verdict.
     pub reviewer_task_id: String,
     /// Evaluation SHA the verdict was rendered against.
-    pub evaluation_sha:   String,
+    pub evaluation_sha: String,
     /// Whether the reviewer approved the executor's commit.
-    pub approved:         bool,
+    pub approved: bool,
     /// Operator-readable critique. Empty if the reviewer did not
     /// supply one.
     #[serde(default)]
-    pub critique:         String,
+    pub critique: String,
 }
 
 /// One pending escalation row visible in the KSB.
@@ -655,10 +655,10 @@ pub struct PendingEscalation {
     /// Escalation row id.
     pub escalation_id: String,
     /// Escalation class (`"MergeConflict"`, `"PolicyOverride"`, …).
-    pub class:         String,
+    pub class: String,
     /// One-line operator-readable summary. Empty if not supplied.
     #[serde(default)]
-    pub summary:       String,
+    pub summary: String,
 }
 
 /// One credential-proxy port assignment visible in the KSB.
@@ -673,9 +673,9 @@ pub struct CredentialPort {
     /// Logical upstream id (`"primary_pg"`, `"redis_cache"`, …).
     pub upstream_id: String,
     /// Proxy kind (`"postgres"`, `"redis"`, `"http"`, …).
-    pub kind:        String,
+    pub kind: String,
     /// Loopback port the in-VM tproxy listens on.
-    pub port:        u16,
+    pub port: u16,
 }
 
 // ---------------------------------------------------------------------------
@@ -751,19 +751,21 @@ pub enum KsbError {
 /// to the end so the prefix remains byte-stable.
 pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     if snapshot.initiative_id.is_empty() {
-        return Err(KsbError::EmptyRequired { field: "initiative_id" });
+        return Err(KsbError::EmptyRequired {
+            field: "initiative_id",
+        });
     }
     if snapshot.role.is_empty() {
         return Err(KsbError::EmptyRequired { field: "role" });
     }
     for (field_name, value) in [
-        ("initiative_id",    snapshot.initiative_id.as_str()),
-        ("task_id",          snapshot.task_id.as_deref().unwrap_or("")),
-        ("role",             snapshot.role.as_str()),
-        ("evaluation_sha",   snapshot.evaluation_sha.as_str()),
+        ("initiative_id", snapshot.initiative_id.as_str()),
+        ("task_id", snapshot.task_id.as_deref().unwrap_or("")),
+        ("role", snapshot.role.as_str()),
+        ("evaluation_sha", snapshot.evaluation_sha.as_str()),
         ("task_description", snapshot.task_description.as_str()),
-        ("target_ref",       snapshot.target_ref.as_str()),
-        ("base_sha",         snapshot.base_sha.as_str()),
+        ("target_ref", snapshot.target_ref.as_str()),
+        ("base_sha", snapshot.base_sha.as_str()),
     ] {
         if value.contains(KSB_DELIMITER_CLOSE) {
             return Err(KsbError::DelimiterInjection { field: field_name });
@@ -771,7 +773,9 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     }
     for p in &snapshot.path_allowlist {
         if p.contains(KSB_DELIMITER_CLOSE) {
-            return Err(KsbError::DelimiterInjection { field: "path_allowlist" });
+            return Err(KsbError::DelimiterInjection {
+                field: "path_allowlist",
+            });
         }
     }
     for row in &snapshot.dag_rows {
@@ -784,21 +788,27 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     for v in &snapshot.reviewer_verdicts {
         for s in [&v.reviewer_task_id, &v.evaluation_sha, &v.critique] {
             if s.contains(KSB_DELIMITER_CLOSE) {
-                return Err(KsbError::DelimiterInjection { field: "reviewer_verdicts" });
+                return Err(KsbError::DelimiterInjection {
+                    field: "reviewer_verdicts",
+                });
             }
         }
     }
     for e in &snapshot.pending_escalations {
         for s in [&e.escalation_id, &e.class, &e.summary] {
             if s.contains(KSB_DELIMITER_CLOSE) {
-                return Err(KsbError::DelimiterInjection { field: "pending_escalations" });
+                return Err(KsbError::DelimiterInjection {
+                    field: "pending_escalations",
+                });
             }
         }
     }
     for c in &snapshot.credential_ports {
         for s in [&c.upstream_id, &c.kind] {
             if s.contains(KSB_DELIMITER_CLOSE) {
-                return Err(KsbError::DelimiterInjection { field: "credential_ports" });
+                return Err(KsbError::DelimiterInjection {
+                    field: "credential_ports",
+                });
             }
         }
     }
@@ -813,10 +823,14 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     buf.push('\n');
 
     push_kv(&mut buf, "initiative_id", &snapshot.initiative_id);
-    push_kv(&mut buf, "task_id",       snapshot.task_id.as_deref().unwrap_or(""));
-    push_kv(&mut buf, "role",          &snapshot.role);
+    push_kv(
+        &mut buf,
+        "task_id",
+        snapshot.task_id.as_deref().unwrap_or(""),
+    );
+    push_kv(&mut buf, "role", &snapshot.role);
     push_kv(&mut buf, "evaluation_sha", &snapshot.evaluation_sha);
-    push_kv(&mut buf, "target_ref",     &snapshot.target_ref);
+    push_kv(&mut buf, "target_ref", &snapshot.target_ref);
     // V2.5 — `base_sha` is the orchestrator's
     // `integration_merge { base_sha, head_sha }` source. We emit
     // the literal `<unset>` (rather than an empty value) when
@@ -844,10 +858,16 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
         }
     }
 
-    push_kv(&mut buf, "token_budget_remaining",
-            &snapshot.token_budget_remaining.to_string());
-    push_kv(&mut buf, "wallclock_budget_remaining_s",
-            &snapshot.wallclock_budget_remaining_s.to_string());
+    push_kv(
+        &mut buf,
+        "token_budget_remaining",
+        &snapshot.token_budget_remaining.to_string(),
+    );
+    push_kv(
+        &mut buf,
+        "wallclock_budget_remaining_s",
+        &snapshot.wallclock_budget_remaining_s.to_string(),
+    );
 
     buf.push_str("credential_ports=\n");
     if snapshot.credential_ports.is_empty() {
@@ -980,37 +1000,47 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
 fn check_capabilities_delimiter(caps: &Capabilities) -> Result<(), KsbError> {
     let session = match caps {
         Capabilities::Orchestrator(o) => &o.session,
-        Capabilities::Executor(e)     => &e.session,
-        Capabilities::Reviewer(r)     => &r.session,
+        Capabilities::Executor(e) => &e.session,
+        Capabilities::Reviewer(r) => &r.session,
     };
     for s in [&session.session_id, &session.role] {
         if s.contains(KSB_DELIMITER_CLOSE) {
-            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+            return Err(KsbError::DelimiterInjection {
+                field: "capabilities",
+            });
         }
     }
     let task_iter: Box<dyn Iterator<Item = &TaskCapabilityView>> = match caps {
         Capabilities::Orchestrator(o) => Box::new(o.tasks.iter()),
-        Capabilities::Executor(e)     => Box::new(std::iter::once(&e.task)),
-        Capabilities::Reviewer(_)     => Box::new(std::iter::empty()),
+        Capabilities::Executor(e) => Box::new(std::iter::once(&e.task)),
+        Capabilities::Reviewer(_) => Box::new(std::iter::empty()),
     };
     for t in task_iter {
         if t.task_id.contains(KSB_DELIMITER_CLOSE) {
-            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+            return Err(KsbError::DelimiterInjection {
+                field: "capabilities",
+            });
         }
         if let Some(reason) = &t.retry_inadmissible_reason {
             if reason.contains(KSB_DELIMITER_CLOSE) {
-                return Err(KsbError::DelimiterInjection { field: "capabilities" });
+                return Err(KsbError::DelimiterInjection {
+                    field: "capabilities",
+                });
             }
         }
     }
     if let Capabilities::Orchestrator(o) = caps {
         if o.initiative.initiative_id.contains(KSB_DELIMITER_CLOSE) {
-            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+            return Err(KsbError::DelimiterInjection {
+                field: "capabilities",
+            });
         }
     }
     if let Capabilities::Reviewer(r) = caps {
         if r.artifact_task_id.contains(KSB_DELIMITER_CLOSE) {
-            return Err(KsbError::DelimiterInjection { field: "capabilities" });
+            return Err(KsbError::DelimiterInjection {
+                field: "capabilities",
+            });
         }
     }
     Ok(())
@@ -1040,9 +1070,17 @@ fn push_capabilities(buf: &mut String, caps: &Capabilities) {
             buf.push_str("  initiative=");
             buf.push_str(&o.initiative.initiative_id);
             buf.push_str(" orch_no_progress_respawns=");
-            buf.push_str(&o.initiative.orchestrator_no_progress_respawn_count.to_string());
+            buf.push_str(
+                &o.initiative
+                    .orchestrator_no_progress_respawn_count
+                    .to_string(),
+            );
             buf.push('/');
-            buf.push_str(&o.initiative.max_orchestrator_no_progress_respawns.to_string());
+            buf.push_str(
+                &o.initiative
+                    .max_orchestrator_no_progress_respawns
+                    .to_string(),
+            );
             buf.push_str(" remaining=");
             buf.push_str(&o.initiative.orchestrator_respawns_remaining.to_string());
             buf.push('\n');
@@ -1112,11 +1150,7 @@ fn push_max_turns_scaling_line(buf: &mut String, v: &MaxTurnsScalingView) {
 /// remaining=M]` preamble (see
 /// `crates/planner-core/src/dispatch.rs::Dispatcher::run`) renders
 /// the live count every turn.
-fn push_session_capability_line(
-    buf:  &mut String,
-    role: &str,
-    sess: &SessionCapabilityView,
-) {
+fn push_session_capability_line(buf: &mut String, role: &str, sess: &SessionCapabilityView) {
     buf.push_str("  role=");
     buf.push_str(role);
     buf.push_str(" session=");
@@ -1169,17 +1203,16 @@ fn push_kv(buf: &mut String, key: &str, value: &str) {
 ///
 /// Returns an error if `nnsp` is empty (a role binary that boots
 /// without an NNSP is a build bug — fail-closed).
-pub fn assemble_system_prompt(
-    nnsp:     &str,
-    snapshot: &KsbSnapshot,
-) -> Result<String, KsbError> {
+pub fn assemble_system_prompt(nnsp: &str, snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     if nnsp.is_empty() {
         return Err(KsbError::EmptyRequired { field: "nnsp" });
     }
     let ksb = render_ksb(snapshot)?;
     let mut out = String::with_capacity(nnsp.len() + ksb.len() + 2);
     out.push_str(nnsp);
-    if !nnsp.ends_with('\n') { out.push('\n'); }
+    if !nnsp.ends_with('\n') {
+        out.push('\n');
+    }
     out.push('\n');
     out.push_str(&ksb);
     Ok(out)
@@ -1196,63 +1229,66 @@ mod tests {
 
     fn fixture_snapshot() -> KsbSnapshot {
         KsbSnapshot {
-            version:                       1,
-            initiative_id:                 "init-7".to_owned(),
-            task_id:                       Some("task-42".to_owned()),
-            role:                          "executor".to_owned(),
-            evaluation_sha:                "abcdef0123456789abcdef0123456789abcdef01".to_owned(),
-            path_allowlist:                vec![
-                "src/lib.rs".to_owned(),
-                "src/tools.rs".to_owned(),
-            ],
-            token_budget_remaining:        12345,
-            wallclock_budget_remaining_s:  600,
-            dag_rows:                      vec![
+            version: 1,
+            initiative_id: "init-7".to_owned(),
+            task_id: Some("task-42".to_owned()),
+            role: "executor".to_owned(),
+            evaluation_sha: "abcdef0123456789abcdef0123456789abcdef01".to_owned(),
+            path_allowlist: vec!["src/lib.rs".to_owned(), "src/tools.rs".to_owned()],
+            token_budget_remaining: 12345,
+            wallclock_budget_remaining_s: 600,
+            dag_rows: vec![
                 DagRow {
-                    task_id:           "task-42".to_owned(),
-                    state:             "in_progress".to_owned(),
-                    title:             "First sub-task".to_owned(),
-                    reviewers:         2,
-                    evaluation_sha:    String::new(),
+                    task_id: "task-42".to_owned(),
+                    state: "in_progress".to_owned(),
+                    title: "First sub-task".to_owned(),
+                    reviewers: 2,
+                    evaluation_sha: String::new(),
                     aggregate_verdict: String::new(),
-                    preds_ready:       true,
+                    preds_ready: true,
                 },
                 DagRow {
-                    task_id:           "task-43".to_owned(),
-                    state:             "pending".to_owned(),
-                    title:             String::new(),
-                    reviewers:         1,
-                    evaluation_sha:    String::new(),
+                    task_id: "task-43".to_owned(),
+                    state: "pending".to_owned(),
+                    title: String::new(),
+                    reviewers: 1,
+                    evaluation_sha: String::new(),
                     aggregate_verdict: String::new(),
-                    preds_ready:       false,
+                    preds_ready: false,
                 },
             ],
-            task_description:              "Make the executor land a commit.".to_owned(),
-            target_ref:                    "refs/heads/main".to_owned(),
-            base_sha:                      "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".to_owned(),
-            reviewer_verdicts:             vec![],
-            pending_escalations:           vec![],
-            credential_ports:              vec![],
-            capabilities:                  None,
+            task_description: "Make the executor land a commit.".to_owned(),
+            target_ref: "refs/heads/main".to_owned(),
+            base_sha: "f3d21a09f3d21a09f3d21a09f3d21a09f3d21a09".to_owned(),
+            reviewer_verdicts: vec![],
+            pending_escalations: vec![],
+            credential_ports: vec![],
+            capabilities: None,
         }
     }
 
     #[test]
     fn render_emits_open_and_close_delimiters() {
         let s = render_ksb(&fixture_snapshot()).unwrap();
-        assert!(s.starts_with(KSB_DELIMITER_OPEN),
-            "rendered block must start with the open delimiter, got: {s}");
-        assert!(s.contains(KSB_DELIMITER_CLOSE),
-            "rendered block must end with the close delimiter, got: {s}");
+        assert!(
+            s.starts_with(KSB_DELIMITER_OPEN),
+            "rendered block must start with the open delimiter, got: {s}"
+        );
+        assert!(
+            s.contains(KSB_DELIMITER_CLOSE),
+            "rendered block must end with the close delimiter, got: {s}"
+        );
     }
 
     #[test]
     fn render_is_deterministic_for_identical_inputs() {
         let a = render_ksb(&fixture_snapshot()).unwrap();
         let b = render_ksb(&fixture_snapshot()).unwrap();
-        assert_eq!(a, b,
+        assert_eq!(
+            a, b,
             "two renders of the same snapshot MUST be byte-identical \
-             (the audit chain hashes the rendered KSB)");
+             (the audit chain hashes the rendered KSB)"
+        );
     }
 
     #[test]
@@ -1269,7 +1305,9 @@ mod tests {
         assert!(s.contains("token_budget_remaining=12345"));
         assert!(s.contains("wallclock_budget_remaining_s=600"));
         assert!(s.contains("Make the executor land a commit."));
-        assert!(s.contains("- task-42 in_progress reviewers=2 preds_ready=true sha=<none> \"First sub-task\""));
+        assert!(s.contains(
+            "- task-42 in_progress reviewers=2 preds_ready=true sha=<none> \"First sub-task\""
+        ));
         assert!(s.contains("- task-43 pending reviewers=1 preds_ready=false sha=<none> \"\""));
     }
 
@@ -1278,8 +1316,10 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.path_allowlist.clear();
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("path_allowlist=\n  <empty>"),
-            "empty path_allowlist must render as <empty> placeholder, got: {s}");
+        assert!(
+            s.contains("path_allowlist=\n  <empty>"),
+            "empty path_allowlist must render as <empty> placeholder, got: {s}"
+        );
     }
 
     #[test]
@@ -1287,18 +1327,22 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.dag_rows.clear();
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("dag=\n  <empty>"),
-            "empty dag must render as <empty> placeholder, got: {s}");
+        assert!(
+            s.contains("dag=\n  <empty>"),
+            "empty dag must render as <empty> placeholder, got: {s}"
+        );
     }
 
     #[test]
     fn render_with_orchestrator_task_id_none() {
         let mut snap = fixture_snapshot();
         snap.task_id = None;
-        snap.role    = "orchestrator".to_owned();
+        snap.role = "orchestrator".to_owned();
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("task_id=\n"),
-            "orchestrator's KSB must render task_id with empty value, got: {s}");
+        assert!(
+            s.contains("task_id=\n"),
+            "orchestrator's KSB must render task_id with empty value, got: {s}"
+        );
     }
 
     #[test]
@@ -1306,12 +1350,14 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.credential_ports.push(CredentialPort {
             upstream_id: "primary_pg".to_owned(),
-            kind:        "postgres".to_owned(),
-            port:        5432,
+            kind: "postgres".to_owned(),
+            port: 5432,
         });
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("credential_ports=\n  - primary_pg postgres :5432"),
-            "credential port row missing or malformed: {s}");
+        assert!(
+            s.contains("credential_ports=\n  - primary_pg postgres :5432"),
+            "credential port row missing or malformed: {s}"
+        );
     }
 
     #[test]
@@ -1319,9 +1365,9 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.reviewer_verdicts.push(ReviewerVerdict {
             reviewer_task_id: "task-99".to_owned(),
-            evaluation_sha:   "abc12".to_owned(),
-            approved:         false,
-            critique:         "needs typed enum".to_owned(),
+            evaluation_sha: "abc12".to_owned(),
+            approved: false,
+            critique: "needs typed enum".to_owned(),
         });
         let s = render_ksb(&snap).unwrap();
         assert!(s.contains("reviewer_verdicts=\n  - reviewer=task-99 sha=abc12 approved=false \"needs typed enum\""),
@@ -1339,9 +1385,11 @@ mod tests {
     #[test]
     fn render_omits_aggregate_when_unset() {
         let s = render_ksb(&fixture_snapshot()).unwrap();
-        assert!(!s.contains("aggregate="),
+        assert!(
+            !s.contains("aggregate="),
             "renderer must not emit `aggregate=` when no DagRow \
-             carries a value; got: {s}");
+             carries a value; got: {s}"
+        );
     }
 
     /// The renderer MUST emit `aggregate=<value>` between
@@ -1356,8 +1404,7 @@ mod tests {
         // Hydrate the first row with `AtLeastOneRejected` to
         // simulate the post-aggregator state the NNSP rule 3a
         // pivots on.
-        snap.dag_rows[0].aggregate_verdict =
-            "AtLeastOneRejected".to_owned();
+        snap.dag_rows[0].aggregate_verdict = "AtLeastOneRejected".to_owned();
         let s = render_ksb(&snap).unwrap();
         assert!(
             s.contains("reviewers=2 preds_ready=true aggregate=AtLeastOneRejected sha="),
@@ -1375,8 +1422,7 @@ mod tests {
     #[test]
     fn render_rejects_close_delimiter_in_aggregate_verdict() {
         let mut snap = fixture_snapshot();
-        snap.dag_rows[0].aggregate_verdict =
-            format!("evil{}", KSB_DELIMITER_CLOSE);
+        snap.dag_rows[0].aggregate_verdict = format!("evil{}", KSB_DELIMITER_CLOSE);
         match render_ksb(&snap).unwrap_err() {
             KsbError::DelimiterInjection { field } => {
                 assert_eq!(field, "dag_rows");
@@ -1390,12 +1436,16 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.pending_escalations.push(PendingEscalation {
             escalation_id: "esc-7".to_owned(),
-            class:         "MergeConflict".to_owned(),
-            summary:       "operator must rebase main".to_owned(),
+            class: "MergeConflict".to_owned(),
+            summary: "operator must rebase main".to_owned(),
         });
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("pending_escalations=\n  - esc-7 MergeConflict \"operator must rebase main\""),
-            "pending escalation row missing or malformed: {s}");
+        assert!(
+            s.contains(
+                "pending_escalations=\n  - esc-7 MergeConflict \"operator must rebase main\""
+            ),
+            "pending escalation row missing or malformed: {s}"
+        );
     }
 
     #[test]
@@ -1425,9 +1475,7 @@ mod tests {
     #[test]
     fn render_rejects_close_delimiter_in_task_description() {
         let mut snap = fixture_snapshot();
-        snap.task_description = format!(
-            "fake close: {} extra text", KSB_DELIMITER_CLOSE,
-        );
+        snap.task_description = format!("fake close: {} extra text", KSB_DELIMITER_CLOSE,);
         match render_ksb(&snap).unwrap_err() {
             KsbError::DelimiterInjection { field } => {
                 assert_eq!(field, "task_description");
@@ -1439,7 +1487,8 @@ mod tests {
     #[test]
     fn render_rejects_close_delimiter_in_path_allowlist() {
         let mut snap = fixture_snapshot();
-        snap.path_allowlist.push(format!("evil/path{}", KSB_DELIMITER_CLOSE));
+        snap.path_allowlist
+            .push(format!("evil/path{}", KSB_DELIMITER_CLOSE));
         match render_ksb(&snap).unwrap_err() {
             KsbError::DelimiterInjection { field } => {
                 assert_eq!(field, "path_allowlist");
@@ -1465,8 +1514,8 @@ mod tests {
         let mut snap = fixture_snapshot();
         snap.credential_ports.push(CredentialPort {
             upstream_id: format!("evil{}", KSB_DELIMITER_CLOSE),
-            kind:        "postgres".to_owned(),
-            port:        5432,
+            kind: "postgres".to_owned(),
+            port: 5432,
         });
         match render_ksb(&snap).unwrap_err() {
             KsbError::DelimiterInjection { field } => {
@@ -1481,12 +1530,16 @@ mod tests {
         let snap = fixture_snapshot();
         let nnsp = "You are an executor. Stay in your lane.";
         let s = assemble_system_prompt(nnsp, &snap).unwrap();
-        assert!(s.starts_with(nnsp),
-            "system prompt must begin with the NNSP verbatim");
+        assert!(
+            s.starts_with(nnsp),
+            "system prompt must begin with the NNSP verbatim"
+        );
         assert!(s.contains(KSB_DELIMITER_OPEN));
         assert!(s.contains(KSB_DELIMITER_CLOSE));
-        assert!(s.contains(&format!("\n\n{}", KSB_DELIMITER_OPEN)),
-            "NNSP and KSB must be separated by a blank line, got: {s}");
+        assert!(
+            s.contains(&format!("\n\n{}", KSB_DELIMITER_OPEN)),
+            "NNSP and KSB must be separated by a blank line, got: {s}"
+        );
     }
 
     #[test]
@@ -1505,8 +1558,10 @@ mod tests {
         let snap = fixture_snapshot();
         let nnsp = "You are an executor.\n";
         let s = assemble_system_prompt(nnsp, &snap).unwrap();
-        assert!(!s.contains("\n\n\n"),
-            "assemble must not emit triple newlines, got: {s:?}");
+        assert!(
+            !s.contains("\n\n\n"),
+            "assemble must not emit triple newlines, got: {s:?}"
+        );
     }
 
     #[test]
@@ -1523,12 +1578,14 @@ mod tests {
         ];
         let mut last_idx = 0;
         for key in &prefix_order {
-            let idx = s.find(key).unwrap_or_else(|| {
-                panic!("missing key {key:?} in rendered KSB: {s}")
-            });
-            assert!(idx >= last_idx,
+            let idx = s
+                .find(key)
+                .unwrap_or_else(|| panic!("missing key {key:?} in rendered KSB: {s}"));
+            assert!(
+                idx >= last_idx,
                 "field order regression: {key:?} appears before earlier field, \
-                 idx={idx} last_idx={last_idx}, full output:\n{s}");
+                 idx={idx} last_idx={last_idx}, full output:\n{s}"
+            );
             last_idx = idx;
         }
     }
@@ -1541,13 +1598,17 @@ mod tests {
         let original = fixture_snapshot();
         let json = serde_json::to_string(&original).unwrap();
         let decoded: KsbSnapshot = serde_json::from_str(&json).unwrap();
-        assert_eq!(original, decoded,
+        assert_eq!(
+            original, decoded,
             "JSON round-trip MUST preserve every field — drift here \
-             corrupts the system prompt seen by the model");
+             corrupts the system prompt seen by the model"
+        );
         let render_a = render_ksb(&original).unwrap();
         let render_b = render_ksb(&decoded).unwrap();
-        assert_eq!(render_a, render_b,
-            "render MUST be byte-stable across JSON round-trip");
+        assert_eq!(
+            render_a, render_b,
+            "render MUST be byte-stable across JSON round-trip"
+        );
     }
 
     /// V2 `v2_extended_gaps.md §2.4` — adding a field is a
@@ -1564,11 +1625,11 @@ mod tests {
         });
         let snap: KsbSnapshot = serde_json::from_value(legacy).unwrap();
         assert_eq!(snap.initiative_id, "init-x");
-        assert_eq!(snap.role,          "executor");
+        assert_eq!(snap.role, "executor");
         assert!(snap.task_id.is_none());
         assert!(snap.path_allowlist.is_empty());
         assert!(snap.dag_rows.is_empty());
-        assert_eq!(snap.token_budget_remaining,        0);
+        assert_eq!(snap.token_budget_remaining, 0);
         assert_eq!(snap.wallclock_budget_remaining_s, 0);
         assert!(snap.evaluation_sha.is_empty());
         assert!(snap.target_ref.is_empty());
@@ -1587,8 +1648,8 @@ mod tests {
 
     fn caps_session_view(role: &str, max_turns: u32) -> SessionCapabilityView {
         SessionCapabilityView {
-            session_id:        format!("sess-{role}-test"),
-            role:              role.to_owned(),
+            session_id: format!("sess-{role}-test"),
+            role: role.to_owned(),
             planner_max_turns: max_turns,
         }
     }
@@ -1597,73 +1658,83 @@ mod tests {
     fn inv_ksb_max_turns_visibility_01_renderer_emits_planner_max_turns_for_all_roles() {
         // Orchestrator envelope.
         let mut snap = fixture_snapshot();
-        snap.role     = "orchestrator".to_owned();
-        snap.task_id  = None;
+        snap.role = "orchestrator".to_owned();
+        snap.task_id = None;
         snap.capabilities = Some(Capabilities::Orchestrator(OrchestratorCapabilities {
-            session:    caps_session_view("orchestrator", 77),
+            session: caps_session_view("orchestrator", 77),
             initiative: InitiativeCapabilityView {
-                initiative_id:                          snap.initiative_id.clone(),
+                initiative_id: snap.initiative_id.clone(),
                 orchestrator_no_progress_respawn_count: 0,
-                max_orchestrator_no_progress_respawns:  3,
-                orchestrator_respawns_remaining:        3,
+                max_orchestrator_no_progress_respawns: 3,
+                orchestrator_respawns_remaining: 3,
             },
-            tasks:      Vec::new(),
+            tasks: Vec::new(),
             max_turns_scaling: MaxTurnsScalingView {
-                max_turns_attempt:       1,
-                max_turns_base:          77,
-                max_turns_step:          40,
-                max_turns_hard_ceiling:  240,
+                max_turns_attempt: 1,
+                max_turns_base: 77,
+                max_turns_step: 40,
+                max_turns_hard_ceiling: 240,
             },
         }));
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("role=orchestrator"),
-            "orchestrator capabilities line MUST emit `role=orchestrator`; got: {s}");
-        assert!(s.contains("planner_max_turns=77"),
-            "orchestrator capabilities line MUST carry `planner_max_turns=77`; got: {s}");
+        assert!(
+            s.contains("role=orchestrator"),
+            "orchestrator capabilities line MUST emit `role=orchestrator`; got: {s}"
+        );
+        assert!(
+            s.contains("planner_max_turns=77"),
+            "orchestrator capabilities line MUST carry `planner_max_turns=77`; got: {s}"
+        );
 
         // Executor envelope.
         let mut snap = fixture_snapshot();
         snap.role = "executor".to_owned();
         snap.capabilities = Some(Capabilities::Executor(ExecutorCapabilities {
             session: caps_session_view("executor", 25),
-            task:    TaskCapabilityView {
-                task_id:                  "task-42".to_owned(),
-                crash_retry_count:        0,
-                review_reject_count:      0,
-                max_crash_retries:        3,
-                max_review_rejections:    3,
-                crash_retries_remaining:  3,
+            task: TaskCapabilityView {
+                task_id: "task-42".to_owned(),
+                crash_retry_count: 0,
+                review_reject_count: 0,
+                max_crash_retries: 3,
+                max_review_rejections: 3,
+                crash_retries_remaining: 3,
                 review_retries_remaining: 3,
-                retry_admissible:         false,
-                retry_inadmissible_reason: Some(
-                    "no prior activation".to_owned(),
-                ),
+                retry_admissible: false,
+                retry_inadmissible_reason: Some("no prior activation".to_owned()),
             },
             max_turns_scaling: MaxTurnsScalingView {
-                max_turns_attempt:       1,
-                max_turns_base:          25,
-                max_turns_step:          15,
-                max_turns_hard_ceiling:  240,
+                max_turns_attempt: 1,
+                max_turns_base: 25,
+                max_turns_step: 15,
+                max_turns_hard_ceiling: 240,
             },
         }));
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("role=executor"),
-            "executor capabilities line MUST emit `role=executor`; got: {s}");
-        assert!(s.contains("planner_max_turns=25"),
-            "executor capabilities line MUST carry `planner_max_turns=25`; got: {s}");
+        assert!(
+            s.contains("role=executor"),
+            "executor capabilities line MUST emit `role=executor`; got: {s}"
+        );
+        assert!(
+            s.contains("planner_max_turns=25"),
+            "executor capabilities line MUST carry `planner_max_turns=25`; got: {s}"
+        );
 
         // Reviewer envelope.
         let mut snap = fixture_snapshot();
-        snap.role    = "reviewer".to_owned();
+        snap.role = "reviewer".to_owned();
         snap.task_id = Some("rev-A".to_owned());
         snap.capabilities = Some(Capabilities::Reviewer(ReviewerCapabilities {
-            session:          caps_session_view("reviewer", 5),
+            session: caps_session_view("reviewer", 5),
             artifact_task_id: "task-42".to_owned(),
         }));
         let s = render_ksb(&snap).unwrap();
-        assert!(s.contains("role=reviewer"),
-            "reviewer capabilities line MUST emit `role=reviewer`; got: {s}");
-        assert!(s.contains("planner_max_turns=5"),
-            "reviewer capabilities line MUST carry `planner_max_turns=5`; got: {s}");
+        assert!(
+            s.contains("role=reviewer"),
+            "reviewer capabilities line MUST emit `role=reviewer`; got: {s}"
+        );
+        assert!(
+            s.contains("planner_max_turns=5"),
+            "reviewer capabilities line MUST carry `planner_max_turns=5`; got: {s}"
+        );
     }
 }

@@ -100,12 +100,15 @@ pub fn build_and_locate_kernel() -> PathBuf {
 /// pubkey-only file because the kernel no longer accepts one.
 fn write_operator_cert(dir: &Path) -> PathBuf {
     let key = SigningKey::from_bytes(&[0xA5u8; 32]);
-    let cert = ephemeral_cert_with_key(&key, CertOpts {
-        // Same fixed `now` every harness run produces ⇒ same cert
-        // bytes, which keeps integration-test fixtures byte-stable.
-        now_unix_secs: 1_700_000_000,
-        ..CertOpts::default()
-    });
+    let cert = ephemeral_cert_with_key(
+        &key,
+        CertOpts {
+            // Same fixed `now` every harness run produces ⇒ same cert
+            // bytes, which keeps integration-test fixtures byte-stable.
+            now_unix_secs: 1_700_000_000,
+            ..CertOpts::default()
+        },
+    );
     let path = dir.join("operator.cert.toml");
     let toml_body = toml::to_string(&cert).expect("serialise cert");
     std::fs::write(&path, toml_body).expect("write operator cert toml");
@@ -140,7 +143,11 @@ fn bootstrap_data_dir(kernel_bin: &Path) -> tempfile::TempDir {
     assert!(
         output.status.success(),
         "kernel bootstrap failed (exit code {}):\n--- stdout ---\n{}\n--- stderr ---\n{}",
-        output.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
+        output
+            .status
+            .code()
+            .map(|c| c.to_string())
+            .unwrap_or_else(|| "<signalled>".to_owned()),
         String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr),
     );

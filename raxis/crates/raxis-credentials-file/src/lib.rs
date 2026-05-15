@@ -112,7 +112,10 @@ impl FileCredentialBackend {
     pub fn open(data_dir: impl Into<PathBuf>) -> Self {
         let data_dir = data_dir.into();
         let expected_uid = current_uid();
-        Self { data_dir, expected_uid }
+        Self {
+            data_dir,
+            expected_uid,
+        }
     }
 
     /// Construct a backend without the uid check. Tests use this
@@ -151,15 +154,15 @@ impl CredentialBackend for FileCredentialBackend {
         _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         let final_path = credential_file_path(&self.data_dir, name);
-        let parent = final_path.parent().ok_or_else(|| {
-            CredentialError::Malformed {
+        let parent = final_path
+            .parent()
+            .ok_or_else(|| CredentialError::Malformed {
                 name: name.clone(),
                 reason: format!(
                     "computed credential path {} has no parent directory",
                     final_path.display(),
                 ),
-            }
-        })?;
+            })?;
 
         // Step 1: write `<path>.tmp.<pid>.<rand>` with mode 0600.
         // We use `pid + nanos` rather than uuid to keep the deps
@@ -214,7 +217,9 @@ impl CredentialBackend for FileCredentialBackend {
 
     fn exists(&self, name: &CredentialName) -> bool {
         let path = credential_file_path(&self.data_dir, name);
-        if !path.exists() { return false; }
+        if !path.exists() {
+            return false;
+        }
         validate_path_security(&path, name, self.expected_uid).is_ok()
     }
 
@@ -225,7 +230,9 @@ impl CredentialBackend for FileCredentialBackend {
         Lease::Forever
     }
 
-    fn backend_kind(&self) -> &'static str { "file" }
+    fn backend_kind(&self) -> &'static str {
+        "file"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -241,7 +248,9 @@ fn current_uid() -> Option<u32> {
 }
 
 #[cfg(not(unix))]
-fn current_uid() -> Option<u32> { None }
+fn current_uid() -> Option<u32> {
+    None
+}
 
 /// Write `bytes` to `path` with mode 0600, fsync, and close.
 /// Used by `rotate`. On Unix we set the mode at create time via
@@ -282,4 +291,6 @@ fn fsync_dir(dir: &Path) -> std::io::Result<()> {
 }
 
 #[cfg(not(unix))]
-fn fsync_dir(_dir: &Path) -> std::io::Result<()> { Ok(()) }
+fn fsync_dir(_dir: &Path) -> std::io::Result<()> {
+    Ok(())
+}

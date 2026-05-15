@@ -19,8 +19,8 @@
 
 use thiserror::Error;
 
-use crate::audit::CloudForwardingDenialReason;
 use crate::allowlist::AllowlistError;
+use crate::audit::CloudForwardingDenialReason;
 
 /// Failure modes from a forwarding upstream call. Maps 1:1
 /// onto [`CloudForwardingDenialReason`] for audit emission.
@@ -84,14 +84,14 @@ impl UpstreamError {
     /// with the closed-enum reason.
     pub fn denial_reason(&self) -> CloudForwardingDenialReason {
         match self {
-            Self::EgressAllowlist(_)   => CloudForwardingDenialReason::EgressAllowlist,
+            Self::EgressAllowlist(_) => CloudForwardingDenialReason::EgressAllowlist,
             Self::MissingCredential(_) => CloudForwardingDenialReason::MissingCredential,
-            Self::Misconfigured(_)     => CloudForwardingDenialReason::Misconfigured,
-            Self::Upstream5xx(_)       => CloudForwardingDenialReason::Upstream5xx,
-            Self::Upstream4xx(_)       => CloudForwardingDenialReason::Upstream4xx,
+            Self::Misconfigured(_) => CloudForwardingDenialReason::Misconfigured,
+            Self::Upstream5xx(_) => CloudForwardingDenialReason::Upstream5xx,
+            Self::Upstream4xx(_) => CloudForwardingDenialReason::Upstream4xx,
             Self::UpstreamMalformed(_) => CloudForwardingDenialReason::UpstreamMalformed,
-            Self::Timeout              => CloudForwardingDenialReason::Timeout,
-            Self::Network(_)           => CloudForwardingDenialReason::Network,
+            Self::Timeout => CloudForwardingDenialReason::Timeout,
+            Self::Network(_) => CloudForwardingDenialReason::Network,
         }
     }
 
@@ -195,7 +195,7 @@ mod tests {
     fn status_code_is_present_only_for_4xx_5xx() {
         assert_eq!(UpstreamError::Upstream4xx(400).status_code(), Some(400));
         assert_eq!(UpstreamError::Upstream5xx(503).status_code(), Some(503));
-        assert_eq!(UpstreamError::Timeout.status_code(),          None);
+        assert_eq!(UpstreamError::Timeout.status_code(), None);
         assert_eq!(UpstreamError::Network("x".into()).status_code(), None);
     }
 }

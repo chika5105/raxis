@@ -46,11 +46,11 @@ const KIND_STR: &str = "TaskAutoResumedAfterSupervisorRestart";
 
 fn sample() -> AuditEventKind {
     AuditEventKind::TaskAutoResumedAfterSupervisorRestart {
-        task_id:                 "task-abc".to_owned(),
-        initiative_id:           "init-xyz".to_owned(),
-        prior_state:             "Running".to_owned(),
+        task_id: "task-abc".to_owned(),
+        initiative_id: "init-xyz".to_owned(),
+        prior_state: "Running".to_owned(),
         witness_count_preserved: 3,
-        supervisor_restart_id:   "supervisor-restart-1700000000-1".to_owned(),
+        supervisor_restart_id: "supervisor-restart-1700000000-1".to_owned(),
     }
 }
 

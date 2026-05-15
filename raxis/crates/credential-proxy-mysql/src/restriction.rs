@@ -67,20 +67,25 @@ impl Default for Restrictions {
     fn default() -> Self {
         Self {
             allow_only_select: false,
-            allowed_tables:    Vec::new(),
-            forbidden_tables:  Vec::new(),
-            max_result_rows:   0,
-            enforce:           true,
+            allowed_tables: Vec::new(),
+            forbidden_tables: Vec::new(),
+            max_result_rows: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_enforce_true() -> bool { true }
+fn default_enforce_true() -> bool {
+    true
+}
 
 impl Restrictions {
     /// Convenience constructor for tests.
     pub fn select_only() -> Self {
-        Self { allow_only_select: true, ..Self::default() }
+        Self {
+            allow_only_select: true,
+            ..Self::default()
+        }
     }
 
     /// Returns `true` if the verb-class restriction blocks the
@@ -105,10 +110,7 @@ impl Restrictions {
     /// mirrors it verbatim.
     pub fn check(&self, sql: &str, op: &OperationKind) -> RestrictionDecision {
         if self.is_blocked(op) {
-            return self.block_or_audit_only(
-                RestrictionReason::AllowOnlySelect,
-                Vec::new(),
-            );
+            return self.block_or_audit_only(RestrictionReason::AllowOnlySelect, Vec::new());
         }
         if !self.has_table_lists() {
             return RestrictionDecision::Admit {
@@ -119,32 +121,32 @@ impl Restrictions {
         match relations {
             RelationList::Ambiguous { reason } => self.block_or_audit_only(
                 match reason {
-                    AmbiguityReason::MultiStatementBatch =>
-                        RestrictionReason::AmbiguousSqlMultiStatement,
-                    AmbiguityReason::DynamicSql =>
-                        RestrictionReason::AmbiguousSqlDynamic,
-                    AmbiguityReason::Malformed =>
-                        RestrictionReason::AmbiguousSqlMalformed,
+                    AmbiguityReason::MultiStatementBatch => {
+                        RestrictionReason::AmbiguousSqlMultiStatement
+                    }
+                    AmbiguityReason::DynamicSql => RestrictionReason::AmbiguousSqlDynamic,
+                    AmbiguityReason::Malformed => RestrictionReason::AmbiguousSqlMalformed,
                 },
                 Vec::new(),
             ),
             RelationList::Resolved(tables) => {
                 let qual_strs: Vec<String> = tables.iter().map(|t| t.to_string()).collect();
-                if tables.iter().any(|t| matches_any(t, &self.forbidden_tables)) {
-                    return self.block_or_audit_only(
-                        RestrictionReason::TableInForbiddenList,
-                        qual_strs,
-                    );
+                if tables
+                    .iter()
+                    .any(|t| matches_any(t, &self.forbidden_tables))
+                {
+                    return self
+                        .block_or_audit_only(RestrictionReason::TableInForbiddenList, qual_strs);
                 }
                 if !self.allowed_tables.is_empty()
                     && tables.iter().any(|t| !matches_any(t, &self.allowed_tables))
                 {
-                    return self.block_or_audit_only(
-                        RestrictionReason::TableNotInAllowedList,
-                        qual_strs,
-                    );
+                    return self
+                        .block_or_audit_only(RestrictionReason::TableNotInAllowedList, qual_strs);
                 }
-                RestrictionDecision::Admit { tables_referenced: qual_strs }
+                RestrictionDecision::Admit {
+                    tables_referenced: qual_strs,
+                }
             }
         }
     }
@@ -155,9 +157,15 @@ impl Restrictions {
         tables_referenced: Vec<String>,
     ) -> RestrictionDecision {
         if self.enforce {
-            RestrictionDecision::Block { reason, tables_referenced }
+            RestrictionDecision::Block {
+                reason,
+                tables_referenced,
+            }
         } else {
-            RestrictionDecision::AuditOnly { reason, tables_referenced }
+            RestrictionDecision::AuditOnly {
+                reason,
+                tables_referenced,
+            }
         }
     }
 }
@@ -186,12 +194,12 @@ impl RestrictionReason {
     /// Stable grep key for the audit chain.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AllowOnlySelect            => "allow_only_select",
-            Self::TableNotInAllowedList      => "table_not_in_allowed_list",
-            Self::TableInForbiddenList       => "table_in_forbidden_list",
+            Self::AllowOnlySelect => "allow_only_select",
+            Self::TableNotInAllowedList => "table_not_in_allowed_list",
+            Self::TableInForbiddenList => "table_in_forbidden_list",
             Self::AmbiguousSqlMultiStatement => "ambiguous_sql_multi_statement",
-            Self::AmbiguousSqlDynamic        => "ambiguous_sql_dynamic",
-            Self::AmbiguousSqlMalformed      => "ambiguous_sql_malformed",
+            Self::AmbiguousSqlDynamic => "ambiguous_sql_dynamic",
+            Self::AmbiguousSqlMalformed => "ambiguous_sql_malformed",
         }
     }
 }
@@ -254,7 +262,7 @@ pub struct QualifiedName {
     /// `None` when the SQL referenced the relation by bare name.
     pub schema: Option<String>,
     /// Table component, case preserved per `§3 D3`.
-    pub table:  String,
+    pub table: String,
 }
 
 impl QualifiedName {
@@ -264,7 +272,7 @@ impl QualifiedName {
     pub fn to_string(&self) -> String {
         match &self.schema {
             Some(s) => format!("{}.{}", s.to_ascii_lowercase(), self.table),
-            None    => self.table.clone(),
+            None => self.table.clone(),
         }
     }
 }
@@ -293,17 +301,17 @@ pub fn classify_first_operation(sql: &str) -> OperationKind {
     let s = strip_leading_whitespace_and_comments(sql.as_bytes());
     let first_word: String = first_keyword(s);
     match first_word.as_str() {
-        "SELECT"  => OperationKind::Select,
-        "WITH"    => classify_after_cte(&s[first_word.len()..]),
-        "SHOW"    => OperationKind::Select,
-        "VALUES"  => OperationKind::Select,
-        "TABLE"   => OperationKind::Select,
-        "DESCRIBE"| "DESC" | "EXPLAIN" => classify_after_explain(&s[first_word.len()..]),
-        "INSERT"  => OperationKind::Insert,
-        "UPDATE"  => OperationKind::Update,
-        "DELETE"  => OperationKind::Delete,
-        ""        => OperationKind::Other(String::new()),
-        other     => OperationKind::Other(other.to_owned()),
+        "SELECT" => OperationKind::Select,
+        "WITH" => classify_after_cte(&s[first_word.len()..]),
+        "SHOW" => OperationKind::Select,
+        "VALUES" => OperationKind::Select,
+        "TABLE" => OperationKind::Select,
+        "DESCRIBE" | "DESC" | "EXPLAIN" => classify_after_explain(&s[first_word.len()..]),
+        "INSERT" => OperationKind::Insert,
+        "UPDATE" => OperationKind::Update,
+        "DELETE" => OperationKind::Delete,
+        "" => OperationKind::Other(String::new()),
+        other => OperationKind::Other(other.to_owned()),
     }
 }
 
@@ -319,17 +327,21 @@ pub fn extract_relations(sql: &str, op: &OperationKind) -> RelationList {
     let bytes = strip_leading_whitespace_and_comments(bytes);
 
     if has_dangerous_multi_statement(bytes) {
-        return RelationList::Ambiguous { reason: AmbiguityReason::MultiStatementBatch };
+        return RelationList::Ambiguous {
+            reason: AmbiguityReason::MultiStatementBatch,
+        };
     }
     if matches!(op, OperationKind::Other(verb) if is_dynamic_verb(verb)) {
-        return RelationList::Ambiguous { reason: AmbiguityReason::DynamicSql };
+        return RelationList::Ambiguous {
+            reason: AmbiguityReason::DynamicSql,
+        };
     }
     let mut walker = Walker::new(bytes);
     let outcome = match op {
-        OperationKind::Select  => walker.walk_select_like(&[]),
-        OperationKind::Insert  => walker.walk_insert(),
-        OperationKind::Update  => walker.walk_update(),
-        OperationKind::Delete  => walker.walk_delete(),
+        OperationKind::Select => walker.walk_select_like(&[]),
+        OperationKind::Insert => walker.walk_insert(),
+        OperationKind::Update => walker.walk_update(),
+        OperationKind::Delete => walker.walk_delete(),
         OperationKind::Other(verb) => {
             let v = verb.to_uppercase();
             if v == "WITH" || v == "EXPLAIN" || v == "DESCRIBE" || v == "DESC" {
@@ -352,8 +364,16 @@ pub fn extract_relations(sql: &str, op: &OperationKind) -> RelationList {
 fn is_dynamic_verb(verb: &str) -> bool {
     matches!(
         verb,
-        "EXEC" | "EXECUTE" | "PREPARE" | "DO" | "CALL" | "DEALLOCATE"
-        | "DECLARE" | "FETCH" | "HANDLER" | "LOAD"
+        "EXEC"
+            | "EXECUTE"
+            | "PREPARE"
+            | "DO"
+            | "CALL"
+            | "DEALLOCATE"
+            | "DECLARE"
+            | "FETCH"
+            | "HANDLER"
+            | "LOAD"
     )
 }
 
@@ -367,17 +387,29 @@ fn has_dangerous_multi_statement(sql: &[u8]) -> bool {
     while i < sql.len() {
         match sql[i] {
             b'\'' if !in_double && !in_backtick => in_single = !in_single,
-            b'"'  if !in_single && !in_backtick => in_double = !in_double,
-            b'`'  if !in_single && !in_double   => in_backtick = !in_backtick,
-            b'-' if !in_single && !in_double && !in_backtick
-                && i + 1 < sql.len() && sql[i + 1] == b'-' => {
-                while i < sql.len() && sql[i] != b'\n' { i += 1; }
+            b'"' if !in_single && !in_backtick => in_double = !in_double,
+            b'`' if !in_single && !in_double => in_backtick = !in_backtick,
+            b'-' if !in_single
+                && !in_double
+                && !in_backtick
+                && i + 1 < sql.len()
+                && sql[i + 1] == b'-' =>
+            {
+                while i < sql.len() && sql[i] != b'\n' {
+                    i += 1;
+                }
             }
             b'#' if !in_single && !in_double && !in_backtick => {
-                while i < sql.len() && sql[i] != b'\n' { i += 1; }
+                while i < sql.len() && sql[i] != b'\n' {
+                    i += 1;
+                }
             }
-            b'/' if !in_single && !in_double && !in_backtick
-                && i + 1 < sql.len() && sql[i + 1] == b'*' => {
+            b'/' if !in_single
+                && !in_double
+                && !in_backtick
+                && i + 1 < sql.len()
+                && sql[i + 1] == b'*' =>
+            {
                 i += 2;
                 while i + 1 < sql.len() && !(sql[i] == b'*' && sql[i + 1] == b'/') {
                     i += 1;
@@ -402,18 +434,27 @@ fn has_dangerous_multi_statement(sql: &[u8]) -> bool {
 /// verbatim.
 struct Walker<'a> {
     bytes: &'a [u8],
-    pos:   usize,
+    pos: usize,
     cte_names: Vec<String>,
     tables: Vec<QualifiedName>,
 }
 
 impl<'a> Walker<'a> {
     fn new(bytes: &'a [u8]) -> Self {
-        Self { bytes, pos: 0, cte_names: Vec::new(), tables: Vec::new() }
+        Self {
+            bytes,
+            pos: 0,
+            cte_names: Vec::new(),
+            tables: Vec::new(),
+        }
     }
 
     fn rest(&self) -> &[u8] {
-        if self.pos > self.bytes.len() { &[] } else { &self.bytes[self.pos..] }
+        if self.pos > self.bytes.len() {
+            &[]
+        } else {
+            &self.bytes[self.pos..]
+        }
     }
 
     fn skip_ws(&mut self) {
@@ -427,7 +468,10 @@ impl<'a> Walker<'a> {
     }
 
     fn add_table(&mut self, qn: QualifiedName) {
-        if self.cte_names.iter().any(|n| n.eq_ignore_ascii_case(&qn.table))
+        if self
+            .cte_names
+            .iter()
+            .any(|n| n.eq_ignore_ascii_case(&qn.table))
             && qn.schema.is_none()
         {
             return;
@@ -442,11 +486,13 @@ impl<'a> Walker<'a> {
     fn read_identifier(&mut self) -> Option<String> {
         self.skip_ws();
         let rest = self.rest();
-        if rest.is_empty() { return None; }
+        if rest.is_empty() {
+            return None;
+        }
         match rest[0] {
-            b'"'  => self.read_delimited_identifier(b'"',  b'"'),
-            b'`'  => self.read_delimited_identifier(b'`',  b'`'),
-            b'['  => self.read_delimited_identifier(b'[',  b']'),
+            b'"' => self.read_delimited_identifier(b'"', b'"'),
+            b'`' => self.read_delimited_identifier(b'`', b'`'),
+            b'[' => self.read_delimited_identifier(b'[', b']'),
             b if b.is_ascii_alphabetic() || b == b'_' => {
                 let mut end = 0;
                 while end < rest.len() && (rest[end].is_ascii_alphanumeric() || rest[end] == b'_') {
@@ -462,10 +508,16 @@ impl<'a> Walker<'a> {
 
     fn read_delimited_identifier(&mut self, open: u8, close: u8) -> Option<String> {
         let rest = self.rest();
-        if rest.is_empty() || rest[0] != open { return None; }
+        if rest.is_empty() || rest[0] != open {
+            return None;
+        }
         let mut end = 1;
-        while end < rest.len() && rest[end] != close { end += 1; }
-        if end >= rest.len() { return None; }
+        while end < rest.len() && rest[end] != close {
+            end += 1;
+        }
+        if end >= rest.len() {
+            return None;
+        }
         let body = std::str::from_utf8(&rest[1..end]).ok()?.to_owned();
         self.pos += end + 1;
         Some(body)
@@ -480,26 +532,33 @@ impl<'a> Walker<'a> {
         loop {
             self.skip_ws();
             let rest = self.rest();
-            if rest.first().copied() != Some(b'.') { break; }
+            if rest.first().copied() != Some(b'.') {
+                break;
+            }
             let saved = self.pos;
             self.pos += 1;
             match self.read_identifier() {
                 Some(id) => parts.push(id),
-                None => { self.pos = saved; break; }
+                None => {
+                    self.pos = saved;
+                    break;
+                }
             }
-            if parts.len() >= 3 { break; }
+            if parts.len() >= 3 {
+                break;
+            }
         }
         let (schema, table) = match parts.len() {
             1 => (None, parts.pop().unwrap()),
             2 => {
-                let table  = parts.pop().unwrap();
+                let table = parts.pop().unwrap();
                 let schema = parts.pop().unwrap();
                 (Some(schema), table)
             }
             3 => {
-                let table  = parts.pop().unwrap();
+                let table = parts.pop().unwrap();
                 let schema = parts.pop().unwrap();
-                let _db    = parts.pop().unwrap();
+                let _db = parts.pop().unwrap();
                 (Some(schema), table)
             }
             _ => return None,
@@ -515,21 +574,28 @@ impl<'a> Walker<'a> {
             self.skip_ws();
         }
         let kw2 = first_keyword(self.rest());
-        if !kw2.is_empty() && !is_clause_boundary(&kw2)
-            && (self.rest().first().copied().map_or(false, |b|
-                b.is_ascii_alphabetic() || b == b'_' || b == b'"' || b == b'`'))
+        if !kw2.is_empty()
+            && !is_clause_boundary(&kw2)
+            && (self.rest().first().copied().map_or(false, |b| {
+                b.is_ascii_alphabetic() || b == b'_' || b == b'"' || b == b'`'
+            }))
         {
             let _ = self.read_identifier();
         }
     }
 
-    fn walk_select_like(&mut self, extra_cte: &[String]) -> Result<Vec<QualifiedName>, AmbiguityReason> {
+    fn walk_select_like(
+        &mut self,
+        extra_cte: &[String],
+    ) -> Result<Vec<QualifiedName>, AmbiguityReason> {
         let kw = self.peek_keyword();
         if kw.eq_ignore_ascii_case("WITH") {
             self.pos += "WITH".len();
             self.parse_cte_bindings()?;
         }
-        for n in extra_cte { self.cte_names.push(n.clone()); }
+        for n in extra_cte {
+            self.cte_names.push(n.clone());
+        }
         let next = self.peek_keyword();
         match next.to_ascii_uppercase().as_str() {
             "SELECT" | "VALUES" | "TABLE" | "SHOW" => {
@@ -572,13 +638,22 @@ impl<'a> Walker<'a> {
     fn walk_select_body(&mut self) -> Result<(), AmbiguityReason> {
         while self.pos < self.bytes.len() {
             self.skip_ws();
-            let b = match self.bytes.get(self.pos).copied() { Some(b) => b, None => break };
+            let b = match self.bytes.get(self.pos).copied() {
+                Some(b) => b,
+                None => break,
+            };
             if b == b'(' {
                 self.walk_paren()?;
                 continue;
             }
-            if b == b'\'' { self.skip_string_literal(b'\''); continue; }
-            if b == b';' { self.pos += 1; continue; }
+            if b == b'\'' {
+                self.skip_string_literal(b'\'');
+                continue;
+            }
+            if b == b';' {
+                self.pos += 1;
+                continue;
+            }
             let kw = first_keyword(self.rest());
             if kw.is_empty() {
                 self.pos += 1;
@@ -622,7 +697,9 @@ impl<'a> Walker<'a> {
         loop {
             self.skip_ws();
             let rest = self.rest();
-            if rest.is_empty() { return Ok(()); }
+            if rest.is_empty() {
+                return Ok(());
+            }
             if rest[0] == b'(' {
                 self.walk_paren()?;
             } else if let Some(rel) = self.read_qualified_relation() {
@@ -650,7 +727,7 @@ impl<'a> Walker<'a> {
         let start = self.pos;
         let end = match find_matching_close_paren(self.bytes, start) {
             Some(e) => e,
-            None    => return Err(AmbiguityReason::Malformed),
+            None => return Err(AmbiguityReason::Malformed),
         };
         let inner = &self.bytes[start + 1..end];
         let inner_str = std::str::from_utf8(inner).unwrap_or("");
@@ -662,14 +739,20 @@ impl<'a> Walker<'a> {
             tables: Vec::new(),
         };
         let result = match op {
-            OperationKind::Select  => child.walk_select_like(&[]),
-            OperationKind::Insert  => child.walk_insert(),
-            OperationKind::Update  => child.walk_update(),
-            OperationKind::Delete  => child.walk_delete(),
-            OperationKind::Other(v) if v == "VALUES" || v == "SHOW" || v == "TABLE" => Ok(Vec::new()),
-            _ => child.walk_select_body().map(|_| std::mem::take(&mut child.tables)),
+            OperationKind::Select => child.walk_select_like(&[]),
+            OperationKind::Insert => child.walk_insert(),
+            OperationKind::Update => child.walk_update(),
+            OperationKind::Delete => child.walk_delete(),
+            OperationKind::Other(v) if v == "VALUES" || v == "SHOW" || v == "TABLE" => {
+                Ok(Vec::new())
+            }
+            _ => child
+                .walk_select_body()
+                .map(|_| std::mem::take(&mut child.tables)),
         };
-        for t in result? { self.add_table(t); }
+        for t in result? {
+            self.add_table(t);
+        }
         self.pos = end + 1;
         Ok(())
     }
@@ -684,9 +767,10 @@ impl<'a> Walker<'a> {
         // [IGNORE] [INTO]`. Skip those modifiers.
         loop {
             let modifier = first_keyword(self.rest()).to_ascii_uppercase();
-            if matches!(modifier.as_str(),
-                "LOW_PRIORITY" | "DELAYED" | "HIGH_PRIORITY" | "IGNORE")
-            {
+            if matches!(
+                modifier.as_str(),
+                "LOW_PRIORITY" | "DELAYED" | "HIGH_PRIORITY" | "IGNORE"
+            ) {
                 self.pos += modifier.len();
                 self.skip_ws();
                 continue;
@@ -810,7 +894,9 @@ impl<'a> Walker<'a> {
                 self.skip_ws();
             }
             let as_kw = first_keyword(self.rest());
-            if !as_kw.eq_ignore_ascii_case("AS") { return Err(AmbiguityReason::Malformed); }
+            if !as_kw.eq_ignore_ascii_case("AS") {
+                return Err(AmbiguityReason::Malformed);
+            }
             self.pos += as_kw.len();
             self.skip_ws();
             if self.rest().first().copied() != Some(b'(') {
@@ -834,9 +920,10 @@ impl<'a> Walker<'a> {
         loop {
             self.skip_ws();
             let kw = first_keyword(self.rest());
-            if matches!(kw.to_ascii_uppercase().as_str(),
-                "EXTENDED" | "PARTITIONS" | "FORMAT" | "ANALYZE" | "VERBOSE")
-            {
+            if matches!(
+                kw.to_ascii_uppercase().as_str(),
+                "EXTENDED" | "PARTITIONS" | "FORMAT" | "ANALYZE" | "VERBOSE"
+            ) {
                 self.pos += kw.len();
             } else {
                 break;
@@ -868,22 +955,52 @@ impl<'a> Walker<'a> {
 fn is_clause_boundary(kw: &str) -> bool {
     matches!(
         kw.to_ascii_uppercase().as_str(),
-        "WHERE" | "GROUP" | "HAVING" | "ORDER" | "LIMIT" | "OFFSET"
-        | "WINDOW" | "ON" | "INNER" | "LEFT" | "RIGHT" | "FULL"
-        | "CROSS" | "NATURAL" | "JOIN" | "FROM" | "INTO" | "USING"
-        | "SET" | "VALUES" | "RETURNING" | "AS" | "WITH" | "UNION"
-        | "INTERSECT" | "EXCEPT" | "FOR" | "FETCH" | "LATERAL"
-        | "STRAIGHT_JOIN"
+        "WHERE"
+            | "GROUP"
+            | "HAVING"
+            | "ORDER"
+            | "LIMIT"
+            | "OFFSET"
+            | "WINDOW"
+            | "ON"
+            | "INNER"
+            | "LEFT"
+            | "RIGHT"
+            | "FULL"
+            | "CROSS"
+            | "NATURAL"
+            | "JOIN"
+            | "FROM"
+            | "INTO"
+            | "USING"
+            | "SET"
+            | "VALUES"
+            | "RETURNING"
+            | "AS"
+            | "WITH"
+            | "UNION"
+            | "INTERSECT"
+            | "EXCEPT"
+            | "FOR"
+            | "FETCH"
+            | "LATERAL"
+            | "STRAIGHT_JOIN"
     )
 }
 
 fn parse_entry(entry: &str) -> QualifiedName {
     if let Some(idx) = entry.rfind('.') {
         let schema = entry[..idx].to_ascii_lowercase();
-        let table  = entry[idx + 1..].to_owned();
-        QualifiedName { schema: Some(schema), table }
+        let table = entry[idx + 1..].to_owned();
+        QualifiedName {
+            schema: Some(schema),
+            table,
+        }
     } else {
-        QualifiedName { schema: None, table: entry.to_owned() }
+        QualifiedName {
+            schema: None,
+            table: entry.to_owned(),
+        }
     }
 }
 
@@ -891,8 +1008,7 @@ fn matches_any(t: &QualifiedName, list: &[String]) -> bool {
     list.iter().any(|entry| {
         let e = parse_entry(entry);
         match (&e.schema, &t.schema) {
-            (Some(es), Some(ts)) =>
-                es.eq_ignore_ascii_case(ts) && e.table == t.table,
+            (Some(es), Some(ts)) => es.eq_ignore_ascii_case(ts) && e.table == t.table,
             (Some(_), None) => false,
             (None, _) => e.table == t.table,
         }
@@ -914,7 +1030,10 @@ fn strip_leading_whitespace_and_comments(mut s: &[u8]) -> &[u8] {
     loop {
         let trimmed = strip_ascii_whitespace(s);
         if trimmed.starts_with(b"--") || trimmed.starts_with(b"#") {
-            let nl = trimmed.iter().position(|&b| b == b'\n').unwrap_or(trimmed.len());
+            let nl = trimmed
+                .iter()
+                .position(|&b| b == b'\n')
+                .unwrap_or(trimmed.len());
             s = &trimmed[nl..];
             continue;
         }
@@ -948,7 +1067,9 @@ fn classify_after_cte(after_with: &[u8]) -> OperationKind {
     while i < bytes.len() {
         let rest = strip_ascii_whitespace(&bytes[i..]);
         i = bytes.len() - rest.len();
-        if i >= bytes.len() { break; }
+        if i >= bytes.len() {
+            break;
+        }
         while i < bytes.len() && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_') {
             i += 1;
         }
@@ -961,7 +1082,8 @@ fn classify_after_cte(after_with: &[u8]) -> OperationKind {
         i = bytes.len() - rest.len();
         if i + 2 <= bytes.len()
             && (&bytes[i..i + 2] == b"AS" || &bytes[i..i + 2] == b"as")
-            && (i + 2 == bytes.len() || !(bytes[i + 2].is_ascii_alphanumeric() || bytes[i + 2] == b'_'))
+            && (i + 2 == bytes.len()
+                || !(bytes[i + 2].is_ascii_alphanumeric() || bytes[i + 2] == b'_'))
         {
             i += 2;
         }
@@ -995,7 +1117,9 @@ fn find_matching_close_paren(bytes: &[u8], start: usize) -> Option<usize> {
             b'(' => depth += 1,
             b')' => {
                 depth -= 1;
-                if depth == 0 { return Some(i); }
+                if depth == 0 {
+                    return Some(i);
+                }
             }
             b'\'' => {
                 i += 1;
@@ -1052,12 +1176,15 @@ fn classify_after_explain(after_explain: &[u8]) -> OperationKind {
     }
     loop {
         let trimmed = strip_ascii_whitespace(bytes);
-        let next_word: String = trimmed.iter()
+        let next_word: String = trimmed
+            .iter()
             .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_')
             .map(|&b| b.to_ascii_uppercase() as char)
             .collect();
-        if matches!(next_word.as_str(),
-            "EXTENDED" | "PARTITIONS" | "FORMAT" | "ANALYZE" | "VERBOSE") {
+        if matches!(
+            next_word.as_str(),
+            "EXTENDED" | "PARTITIONS" | "FORMAT" | "ANALYZE" | "VERBOSE"
+        ) {
             bytes = &trimmed[next_word.len()..];
             continue;
         }
@@ -1076,17 +1203,24 @@ mod tests {
     use super::*;
 
     fn qn(table: &str) -> QualifiedName {
-        QualifiedName { schema: None, table: table.to_owned() }
+        QualifiedName {
+            schema: None,
+            table: table.to_owned(),
+        }
     }
     fn qns(schema: &str, table: &str) -> QualifiedName {
-        QualifiedName { schema: Some(schema.to_owned()), table: table.to_owned() }
+        QualifiedName {
+            schema: Some(schema.to_owned()),
+            table: table.to_owned(),
+        }
     }
     fn relations(sql: &str) -> Vec<QualifiedName> {
         let op = classify_first_operation(sql);
         match extract_relations(sql, &op) {
             RelationList::Resolved(r) => r,
-            RelationList::Ambiguous { reason } =>
-                panic!("expected Resolved, got Ambiguous({reason:?}) for {sql:?}"),
+            RelationList::Ambiguous { reason } => {
+                panic!("expected Resolved, got Ambiguous({reason:?}) for {sql:?}")
+            }
         }
     }
 
@@ -1095,14 +1229,26 @@ mod tests {
     #[test]
     fn select_classified() {
         assert_eq!(classify_first_operation("SELECT 1"), OperationKind::Select);
-        assert_eq!(classify_first_operation("  select 1"), OperationKind::Select);
+        assert_eq!(
+            classify_first_operation("  select 1"),
+            OperationKind::Select
+        );
     }
 
     #[test]
     fn insert_update_delete() {
-        assert_eq!(classify_first_operation("INSERT INTO t VALUES (1)"), OperationKind::Insert);
-        assert_eq!(classify_first_operation("UPDATE t SET x=1"), OperationKind::Update);
-        assert_eq!(classify_first_operation("DELETE FROM t"), OperationKind::Delete);
+        assert_eq!(
+            classify_first_operation("INSERT INTO t VALUES (1)"),
+            OperationKind::Insert
+        );
+        assert_eq!(
+            classify_first_operation("UPDATE t SET x=1"),
+            OperationKind::Update
+        );
+        assert_eq!(
+            classify_first_operation("DELETE FROM t"),
+            OperationKind::Delete
+        );
     }
 
     #[test]
@@ -1156,9 +1302,7 @@ mod tests {
 
     #[test]
     fn select_with_subquery_in_where() {
-        let r = relations(
-            "SELECT * FROM users WHERE id IN (SELECT user_id FROM banned)",
-        );
+        let r = relations("SELECT * FROM users WHERE id IN (SELECT user_id FROM banned)");
         assert!(r.contains(&qn("users")), "missing users in {r:?}");
         assert!(r.contains(&qn("banned")), "missing banned in {r:?}");
     }
@@ -1173,11 +1317,9 @@ mod tests {
 
     #[test]
     fn insert_into_with_select_picks_up_both() {
-        let r = relations(
-            "INSERT INTO orders (user_id) SELECT id FROM users WHERE active",
-        );
+        let r = relations("INSERT INTO orders (user_id) SELECT id FROM users WHERE active");
         assert!(r.contains(&qn("orders")), "missing orders in {r:?}");
-        assert!(r.contains(&qn("users")),  "missing users in {r:?}");
+        assert!(r.contains(&qn("users")), "missing users in {r:?}");
     }
 
     #[test]
@@ -1188,28 +1330,23 @@ mod tests {
 
     #[test]
     fn update_multi_table() {
-        let r = relations(
-            "UPDATE orders o, users u SET o.total = 0 WHERE o.user_id = u.id",
-        );
+        let r = relations("UPDATE orders o, users u SET o.total = 0 WHERE o.user_id = u.id");
         assert!(r.contains(&qn("orders")), "missing orders in {r:?}");
-        assert!(r.contains(&qn("users")),  "missing users in {r:?}");
+        assert!(r.contains(&qn("users")), "missing users in {r:?}");
     }
 
     #[test]
     fn delete_with_using_clause() {
-        let r = relations(
-            "DELETE FROM orders USING orders JOIN users ON orders.user_id = users.id",
-        );
+        let r =
+            relations("DELETE FROM orders USING orders JOIN users ON orders.user_id = users.id");
         assert!(r.contains(&qn("orders")), "missing orders in {r:?}");
-        assert!(r.contains(&qn("users")),  "missing users in {r:?}");
+        assert!(r.contains(&qn("users")), "missing users in {r:?}");
     }
 
     #[test]
     fn delete_multi_table_t1_t2_form() {
-        let r = relations(
-            "DELETE t1, t2 FROM users t1 INNER JOIN orders t2 ON t1.id = t2.user_id",
-        );
-        assert!(r.contains(&qn("users")),  "missing users in {r:?}");
+        let r = relations("DELETE t1, t2 FROM users t1 INNER JOIN orders t2 ON t1.id = t2.user_id");
+        assert!(r.contains(&qn("users")), "missing users in {r:?}");
         assert!(r.contains(&qn("orders")), "missing orders in {r:?}");
     }
 
@@ -1237,7 +1374,9 @@ mod tests {
     fn multi_statement_is_ambiguous() {
         let op = classify_first_operation("SELECT 1; DROP TABLE users");
         match extract_relations("SELECT 1; DROP TABLE users", &op) {
-            RelationList::Ambiguous { reason: AmbiguityReason::MultiStatementBatch } => {}
+            RelationList::Ambiguous {
+                reason: AmbiguityReason::MultiStatementBatch,
+            } => {}
             other => panic!("expected MultiStatementBatch, got {other:?}"),
         }
     }
@@ -1255,7 +1394,9 @@ mod tests {
     fn dynamic_sql_is_ambiguous() {
         let op = classify_first_operation("EXECUTE my_prepared_stmt");
         match extract_relations("EXECUTE my_prepared_stmt", &op) {
-            RelationList::Ambiguous { reason: AmbiguityReason::DynamicSql } => {}
+            RelationList::Ambiguous {
+                reason: AmbiguityReason::DynamicSql,
+            } => {}
             other => panic!("expected DynamicSql, got {other:?}"),
         }
     }
@@ -1277,7 +1418,10 @@ mod tests {
         };
         let decision = r.check("SELECT * FROM mydb.users", &OperationKind::Select);
         match decision {
-            RestrictionDecision::Block { reason, tables_referenced } => {
+            RestrictionDecision::Block {
+                reason,
+                tables_referenced,
+            } => {
                 assert_eq!(reason.as_str(), "table_not_in_allowed_list");
                 assert_eq!(tables_referenced, vec!["mydb.users".to_owned()]);
             }
@@ -1298,7 +1442,7 @@ mod tests {
     #[test]
     fn block_table_in_forbidden_list_short_circuits_allowed() {
         let r = Restrictions {
-            allowed_tables:   vec!["mydb.users".into()],
+            allowed_tables: vec!["mydb.users".into()],
             forbidden_tables: vec!["mydb.users".into()],
             ..Default::default()
         };
@@ -1320,7 +1464,10 @@ mod tests {
         };
         let decision = r.check("SELECT * FROM mydb.users", &OperationKind::Select);
         match decision {
-            RestrictionDecision::AuditOnly { reason, tables_referenced } => {
+            RestrictionDecision::AuditOnly {
+                reason,
+                tables_referenced,
+            } => {
                 assert_eq!(reason.as_str(), "table_not_in_allowed_list");
                 assert_eq!(tables_referenced, vec!["mydb.users".to_owned()]);
             }
@@ -1332,7 +1479,7 @@ mod tests {
     fn allow_only_select_short_circuits_walker() {
         let r = Restrictions {
             allow_only_select: true,
-            allowed_tables:    vec!["mydb.users".into()],
+            allowed_tables: vec!["mydb.users".into()],
             ..Default::default()
         };
         let decision = r.check("INSERT INTO mydb.users VALUES (1)", &OperationKind::Insert);
@@ -1368,26 +1515,38 @@ mod tests {
 
     #[test]
     fn restriction_reason_strings_pinned() {
-        assert_eq!(RestrictionReason::AllowOnlySelect.as_str(),
-            "allow_only_select");
-        assert_eq!(RestrictionReason::TableNotInAllowedList.as_str(),
-            "table_not_in_allowed_list");
-        assert_eq!(RestrictionReason::TableInForbiddenList.as_str(),
-            "table_in_forbidden_list");
-        assert_eq!(RestrictionReason::AmbiguousSqlMultiStatement.as_str(),
-            "ambiguous_sql_multi_statement");
-        assert_eq!(RestrictionReason::AmbiguousSqlDynamic.as_str(),
-            "ambiguous_sql_dynamic");
-        assert_eq!(RestrictionReason::AmbiguousSqlMalformed.as_str(),
-            "ambiguous_sql_malformed");
+        assert_eq!(
+            RestrictionReason::AllowOnlySelect.as_str(),
+            "allow_only_select"
+        );
+        assert_eq!(
+            RestrictionReason::TableNotInAllowedList.as_str(),
+            "table_not_in_allowed_list"
+        );
+        assert_eq!(
+            RestrictionReason::TableInForbiddenList.as_str(),
+            "table_in_forbidden_list"
+        );
+        assert_eq!(
+            RestrictionReason::AmbiguousSqlMultiStatement.as_str(),
+            "ambiguous_sql_multi_statement"
+        );
+        assert_eq!(
+            RestrictionReason::AmbiguousSqlDynamic.as_str(),
+            "ambiguous_sql_dynamic"
+        );
+        assert_eq!(
+            RestrictionReason::AmbiguousSqlMalformed.as_str(),
+            "ambiguous_sql_malformed"
+        );
     }
 
     #[test]
     fn select_only_blocks_dml_via_is_blocked() {
         let r = Restrictions::select_only();
         assert!(!r.is_blocked(&OperationKind::Select));
-        assert!( r.is_blocked(&OperationKind::Insert));
-        assert!( r.is_blocked(&OperationKind::Other("DROP".into())));
+        assert!(r.is_blocked(&OperationKind::Insert));
+        assert!(r.is_blocked(&OperationKind::Other("DROP".into())));
     }
 
     #[test]

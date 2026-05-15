@@ -148,16 +148,16 @@ pub struct ImageSignature(pub Vec<u8>);
 #[derive(Debug, Clone)]
 pub struct VerifiedImage {
     /// The image family (rootfs / enclave / Wasm).
-    pub kind:      ImageKind,
+    pub kind: ImageKind,
     /// On-disk path or inline bytes.
-    pub body:      ImageBody,
+    pub body: ImageBody,
     /// Detached signature over `(kind || sha256(body))`.
     pub signature: ImageSignature,
     /// Stable identifier for this image (e.g. `"raxis-orchestrator-core-v2.0"`).
     /// Logged into the kernel's session-boot audit event so an external
     /// auditor can correlate the booted image with the policy bundle's
     /// allowlist.
-    pub image_id:  String,
+    pub image_id: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -198,12 +198,12 @@ pub struct ContentHash(pub [u8; 32]);
 #[derive(Debug, Clone)]
 pub struct WorkspaceMount {
     /// Host directory the kernel staged via Step 24 / Step 24b.
-    pub host_path:    PathBuf,
+    pub host_path: PathBuf,
     /// Path inside the guest filesystem (e.g. `"/workspace"`,
     /// `"/raxis"`).
-    pub guest_path:   String,
+    pub guest_path: String,
     /// Read-only vs read-write.
-    pub mode:         MountMode,
+    pub mode: MountMode,
     /// Optional content digest at spawn time.
     pub content_hash: Option<ContentHash>,
 }
@@ -281,25 +281,25 @@ pub struct SessionToken(pub String);
 #[derive(Debug, Clone)]
 pub struct VmSpec {
     /// Number of virtual CPUs to expose.
-    pub vcpu_count:       u32,
+    pub vcpu_count: u32,
     /// Guest memory ceiling, mebibytes.
-    pub mem_mib:          u32,
+    pub mem_mib: u32,
     /// Egress tier enforced by the substrate (microVM backends wire
     /// this to a tap device + nftables; mock substrates ignore).
-    pub egress_tier:      EgressTier,
+    pub egress_tier: EgressTier,
     /// Optional Linux cgroup v2 quota.
-    pub cgroup_quota:     Option<CgroupQuota>,
+    pub cgroup_quota: Option<CgroupQuota>,
     /// Kernel boot args (microVM only). Platform substrates that don't
     /// boot a Linux kernel ignore.
-    pub boot_args:        Vec<String>,
+    pub boot_args: Vec<String>,
     /// Argv passed to PID 1 inside the guest.
-    pub entrypoint_argv:  Vec<String>,
+    pub entrypoint_argv: Vec<String>,
     /// Per-session secret used by the guest to authenticate every
     /// intent frame.
-    pub session_token:    SessionToken,
+    pub session_token: SessionToken,
     /// VSock CID assigned to this guest. `None` for non-VSock
     /// substrates (Wasm, mock).
-    pub vsock_cid:        Option<u32>,
+    pub vsock_cid: Option<u32>,
     /// Host directories to mount into the guest. Empty for backends
     /// that route filesystem access elsewhere (Wasm preopen-dirs,
     /// SGX shared pages).
@@ -692,11 +692,11 @@ impl IsolationError {
     #[must_use]
     pub fn classify(&self) -> IsolationFailureClass {
         match self {
-            Self::SpawnFailed(_)     => IsolationFailureClass::Transient,
-            Self::PeerClosed         => IsolationFailureClass::Transient,
-            Self::TransportFault(_)  => IsolationFailureClass::Transient,
-            Self::SignatureMismatch  => IsolationFailureClass::Permanent,
-            Self::ResourceLimit(_)   => IsolationFailureClass::Transient,
+            Self::SpawnFailed(_) => IsolationFailureClass::Transient,
+            Self::PeerClosed => IsolationFailureClass::Transient,
+            Self::TransportFault(_) => IsolationFailureClass::Transient,
+            Self::SignatureMismatch => IsolationFailureClass::Permanent,
+            Self::ResourceLimit(_) => IsolationFailureClass::Transient,
             Self::BackendInternal(_) => IsolationFailureClass::Permanent,
         }
     }
@@ -778,9 +778,9 @@ pub trait Backend: Send + Sync + 'static {
     /// upstream image resolver.
     fn spawn(
         &self,
-        image:     &VerifiedImage,
+        image: &VerifiedImage,
         workspace: &[WorkspaceMount],
-        spec:      &VmSpec,
+        spec: &VmSpec,
     ) -> Result<Box<dyn Session>, IsolationError>;
 
     /// Verify that this backend satisfies `R-1` at the host-hardware
@@ -908,7 +908,7 @@ pub trait Session: Send + 'static {
     /// session that declared credentials.
     fn register_loopback_listener(
         &mut self,
-        _vsock_port:         u32,
+        _vsock_port: u32,
         _host_loopback_port: u16,
     ) -> Result<(), IsolationError> {
         Err(IsolationError::BackendInternal(
@@ -959,12 +959,13 @@ pub fn verify_admission_tier(level: IsolationLevel) -> AdmissionDecision {
         IsolationLevel::R1Conformant | IsolationLevel::R1ConformantStrong => {
             AdmissionDecision::Admit
         }
-        IsolationLevel::WasmSandbox  => AdmissionDecision::AdmitWasmIfPolicyAllows,
+        IsolationLevel::WasmSandbox => AdmissionDecision::AdmitWasmIfPolicyAllows,
         IsolationLevel::FallbackOnly => AdmissionDecision::AdmitFallbackIfFlagSet,
         IsolationLevel::TestOnly => AdmissionDecision::Refuse(
             "TestOnly isolation tier is never admitted in production builds; \
              test substrates live in `raxis-test-support` and require the \
-             `RAXIS_TEST_HARNESS=1` opt-in plus a debug/test build".to_owned(),
+             `RAXIS_TEST_HARNESS=1` opt-in plus a debug/test build"
+                .to_owned(),
         ),
     }
 }
@@ -1045,8 +1046,7 @@ mod tests {
             serde_json::to_string(&IsolationLevel::R1ConformantStrong).unwrap(),
             r#""R1ConformantStrong""#,
         );
-        let parsed: IsolationLevel =
-            serde_json::from_str(r#""FallbackOnly""#).unwrap();
+        let parsed: IsolationLevel = serde_json::from_str(r#""FallbackOnly""#).unwrap();
         assert_eq!(parsed, IsolationLevel::FallbackOnly);
     }
 
@@ -1059,7 +1059,7 @@ mod tests {
             CapabilityValue::Tier(IsolationLevel::R1Conformant),
         ];
         for case in cases {
-            let json    = serde_json::to_string(&case).unwrap();
+            let json = serde_json::to_string(&case).unwrap();
             let parsed: CapabilityValue = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, case, "round-trip failed: {json}");
         }
@@ -1074,7 +1074,7 @@ mod tests {
             SessionTransportId::Process { pid: 12345 },
         ];
         for case in cases {
-            let json    = serde_json::to_string(&case).unwrap();
+            let json = serde_json::to_string(&case).unwrap();
             let parsed: SessionTransportId = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, case);
         }
@@ -1089,7 +1089,7 @@ mod tests {
             ExitStatus::BackendError("vmm crashed".to_owned()),
         ];
         for case in cases {
-            let json    = serde_json::to_string(&case).unwrap();
+            let json = serde_json::to_string(&case).unwrap();
             let parsed: ExitStatus = serde_json::from_str(&json).unwrap();
             assert_eq!(parsed, case);
         }

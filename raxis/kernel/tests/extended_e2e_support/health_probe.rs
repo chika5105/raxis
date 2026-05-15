@@ -52,14 +52,11 @@ use std::net::TcpStream;
 use std::process::Command;
 use std::time::Duration;
 
-use super::harness_timeout::{
-    run_command_output_timeout, BoundedWaitError, HEALTH_PROBE_TIMEOUT,
-};
+use super::harness_timeout::{run_command_output_timeout, BoundedWaitError, HEALTH_PROBE_TIMEOUT};
 use super::service_evidence::{
-    ENV_LIVE_MSSQL_URL, ENV_LIVE_MYSQL_URL, SE_MONGO_DATABASE, SE_MONGO_HOST,
-    SE_MONGO_PASSWORD, SE_MONGO_PORT, SE_MONGO_USER, SE_PG_DATABASE, SE_PG_HOST,
-    SE_PG_PASSWORD, SE_PG_PORT, SE_PG_USER, SE_REDIS_HOST, SE_REDIS_PASSWORD,
-    SE_REDIS_PORT, SE_SMTP_HOST, SE_SMTP_PORT,
+    ENV_LIVE_MSSQL_URL, ENV_LIVE_MYSQL_URL, SE_MONGO_DATABASE, SE_MONGO_HOST, SE_MONGO_PASSWORD,
+    SE_MONGO_PORT, SE_MONGO_USER, SE_PG_DATABASE, SE_PG_HOST, SE_PG_PASSWORD, SE_PG_PORT,
+    SE_PG_USER, SE_REDIS_HOST, SE_REDIS_PASSWORD, SE_REDIS_PORT, SE_SMTP_HOST, SE_SMTP_PORT,
 };
 
 /// Per-protocol upstream-side timeout. The Rust `Duration` is
@@ -119,11 +116,16 @@ pub fn probe_postgres() -> Result<(), HealthProbeError> {
     );
     let mut cmd = Command::new("pg_isready");
     cmd.env("PGPASSWORD", SE_PG_PASSWORD)
-        .arg("-h").arg(SE_PG_HOST)
-        .arg("-p").arg(SE_PG_PORT.to_string())
-        .arg("-U").arg(SE_PG_USER)
-        .arg("-d").arg(SE_PG_DATABASE)
-        .arg("-t").arg(UPSTREAM_PROBE_SECS.to_string());
+        .arg("-h")
+        .arg(SE_PG_HOST)
+        .arg("-p")
+        .arg(SE_PG_PORT.to_string())
+        .arg("-U")
+        .arg(SE_PG_USER)
+        .arg("-d")
+        .arg(SE_PG_DATABASE)
+        .arg("-t")
+        .arg(UPSTREAM_PROBE_SECS.to_string());
     let out = run_command_output_timeout(&mut cmd, HEALTH_PROBE_TIMEOUT, "pg_isready")
         .map_err(|e| lift_probe_error(e, "postgres", &target))?;
     if !out.status.success() {
@@ -188,11 +190,15 @@ pub fn probe_mongodb() -> Result<(), HealthProbeError> {
 pub fn probe_redis() -> Result<(), HealthProbeError> {
     let target = format!("redis://{}:{}", SE_REDIS_HOST, SE_REDIS_PORT);
     let mut cmd = Command::new("redis-cli");
-    cmd.arg("-h").arg(SE_REDIS_HOST)
-        .arg("-p").arg(SE_REDIS_PORT.to_string())
-        .arg("-a").arg(SE_REDIS_PASSWORD)
+    cmd.arg("-h")
+        .arg(SE_REDIS_HOST)
+        .arg("-p")
+        .arg(SE_REDIS_PORT.to_string())
+        .arg("-a")
+        .arg(SE_REDIS_PASSWORD)
         .arg("--no-auth-warning")
-        .arg("-t").arg(UPSTREAM_PROBE_SECS.to_string())
+        .arg("-t")
+        .arg(UPSTREAM_PROBE_SECS.to_string())
         .arg("PING");
     let out = run_command_output_timeout(&mut cmd, HEALTH_PROBE_TIMEOUT, "redis-cli-ping")
         .map_err(|e| lift_probe_error(e, "redis", &target))?;
@@ -282,12 +288,17 @@ pub fn probe_mssql() -> Result<(), HealthProbeError> {
     }
     let target = "mssql://sa@127.0.0.1:14399/master".to_owned();
     let mut cmd = Command::new("sqlcmd");
-    cmd.arg("-S").arg("127.0.0.1,14399")
-        .arg("-U").arg("sa")
-        .arg("-P").arg("raxis_Test_Pass1!")
+    cmd.arg("-S")
+        .arg("127.0.0.1,14399")
+        .arg("-U")
+        .arg("sa")
+        .arg("-P")
+        .arg("raxis_Test_Pass1!")
         .arg("-C")
-        .arg("-l").arg(UPSTREAM_PROBE_SECS.to_string())
-        .arg("-Q").arg("SELECT 1");
+        .arg("-l")
+        .arg(UPSTREAM_PROBE_SECS.to_string())
+        .arg("-Q")
+        .arg("SELECT 1");
     let out = run_command_output_timeout(&mut cmd, HEALTH_PROBE_TIMEOUT, "sqlcmd-ping")
         .map_err(|e| lift_probe_error(e, "mssql", &target))?;
     if !out.status.success() {
@@ -320,8 +331,7 @@ mod tests {
         // we can't shadow them; instead we drive the public TCP
         // probe directly against an unused localhost port.
         let started = Instant::now();
-        let parsed: std::net::SocketAddr =
-            "127.0.0.1:1".parse().expect("static literal parses");
+        let parsed: std::net::SocketAddr = "127.0.0.1:1".parse().expect("static literal parses");
         let r = TcpStream::connect_timeout(&parsed, Duration::from_secs(2));
         assert!(r.is_err(), "TCP connect to 127.0.0.1:1 must fail");
         assert!(

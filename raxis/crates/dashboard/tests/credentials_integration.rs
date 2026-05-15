@@ -32,9 +32,7 @@ use std::time::Duration;
 use raxis_audit_tools::AuditEventKind;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
-use raxis_dashboard::data::{
-    CredentialFixture, CredentialMetadata, InMemoryDashboardData,
-};
+use raxis_dashboard::data::{CredentialFixture, CredentialMetadata, InMemoryDashboardData};
 use raxis_dashboard::routes::auth::operator_fingerprint_hex;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};
 
@@ -55,10 +53,10 @@ async fn serve_with_role(
     String, // operator fingerprint
 ) {
     let cfg = DashboardConfig {
-        enabled:      true,
+        enabled: true,
         bind_address: "127.0.0.1".into(),
-        bind_port:    0,
-        static_dir:   None,
+        bind_port: 0,
+        static_dir: None,
         ..Default::default()
     };
     // Stable seed so the fingerprint doesn't drift across runs;
@@ -66,9 +64,9 @@ async fn serve_with_role(
     // fingerprints (handy for the rate-limiter test below
     // which needs to ensure two operators don't share a bucket).
     let seed: [u8; 32] = match role {
-        DashboardRole::Admin       => [0xA1; 32],
+        DashboardRole::Admin => [0xA1; 32],
         DashboardRole::WritePolicy => [0xB2; 32],
-        DashboardRole::Read        => [0xC3; 32],
+        DashboardRole::Read => [0xC3; 32],
     };
     let signing_key = ed25519_dalek::SigningKey::from_bytes(&seed);
     let pubkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
@@ -97,8 +95,7 @@ async fn mint_jwt(base: &str, signing_key: &ed25519_dalek::SigningKey) -> String
         .await
         .expect("challenge send");
     assert_eq!(challenge_resp.status(), 200);
-    let challenge_json: serde_json::Value =
-        challenge_resp.json().await.expect("challenge json");
+    let challenge_json: serde_json::Value = challenge_resp.json().await.expect("challenge json");
     let challenge_hex = challenge_json["challenge"]
         .as_str()
         .expect("challenge string")
@@ -129,16 +126,16 @@ async fn mint_jwt(base: &str, signing_key: &ed25519_dalek::SigningKey) -> String
 /// Helper: build a credential fixture with conventional defaults.
 fn fixture(name: &str, plaintext: &str) -> CredentialFixture {
     CredentialFixture {
-        metadata:  CredentialMetadata {
-            name:                 name.to_owned(),
-            proxy_type:           "postgres".into(),
-            mount_as:             Some("DATABASE_URL".into()),
-            format_hint:          "libpq URL".into(),
-            upstream_host_port:   Some("127.0.0.1:5432".into()),
-            byte_size:            plaintext.len() as u64,
-            sha256_prefix:        Some("deadbeef".into()),
-            loaded_from_path:     Some(format!("/tmp/{name}.env")),
-            is_revealable:        true,
+        metadata: CredentialMetadata {
+            name: name.to_owned(),
+            proxy_type: "postgres".into(),
+            mount_as: Some("DATABASE_URL".into()),
+            format_hint: "libpq URL".into(),
+            upstream_host_port: Some("127.0.0.1:5432".into()),
+            byte_size: plaintext.len() as u64,
+            sha256_prefix: Some("deadbeef".into()),
+            loaded_from_path: Some(format!("/tmp/{name}.env")),
+            is_revealable: true,
             reveal_required_role: "admin".into(),
         },
         plaintext: plaintext.to_owned(),
@@ -151,8 +148,7 @@ fn fixture(name: &str, plaintext: &str) -> CredentialFixture {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_initiative_credentials_returns_metadata_only_no_plaintext_field() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Read).await;
     data.push_initiative_credential(
         "init-1",
         fixture("test-pg-dev", "postgres://user:hunter2@db:5432/app"),
@@ -196,8 +192,7 @@ async fn list_initiative_credentials_returns_metadata_only_no_plaintext_field() 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(deprecated)] // pattern-matches the deprecated variant on purpose
 async fn listing_does_not_emit_operator_listed_credentials_audit() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Read).await;
     data.push_initiative_credential("init-1", fixture("a", "x"))
         .push_initiative_credential("init-1", fixture("b", "y"));
 
@@ -224,8 +219,7 @@ async fn listing_does_not_emit_operator_listed_credentials_audit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_initiative_credentials_unknown_initiative_returns_404() {
-    let (handle, base, token, _data, _fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, _data, _fp) = serve_with_role(DashboardRole::Read).await;
     let client = reqwest::Client::new();
     let res = client
         .get(format!("{base}/api/initiatives/init-missing/credentials"))
@@ -251,8 +245,7 @@ async fn list_initiative_credentials_unknown_initiative_returns_404() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(deprecated)] // pattern-matches the deprecated variant on purpose
 async fn list_system_credentials_metadata_visible_to_read_role() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Read).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-…"));
 
     let client = reqwest::Client::new();
@@ -279,9 +272,9 @@ async fn list_system_credentials_metadata_visible_to_read_role() {
     );
 
     let audits = data.recorded_operator_audits();
-    let any_listing = audits.iter().any(|e| {
-        matches!(e, AuditEventKind::OperatorListedSystemCredentials { .. })
-    });
+    let any_listing = audits
+        .iter()
+        .any(|e| matches!(e, AuditEventKind::OperatorListedSystemCredentials { .. }));
     assert!(
         !any_listing,
         "Expected no OperatorListedSystemCredentials row after a \
@@ -292,8 +285,7 @@ async fn list_system_credentials_metadata_visible_to_read_role() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn list_system_credentials_admin_returns_metadata() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-…"));
 
     let client = reqwest::Client::new();
@@ -316,8 +308,7 @@ async fn list_system_credentials_admin_returns_metadata() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_rejects_read_role_with_403_and_audits() {
-    let (handle, base, token, data, fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Read).await;
     data.push_initiative_credential("init-1", fixture("test-pg-dev", "secret"));
 
     let client = reqwest::Client::new();
@@ -349,8 +340,7 @@ async fn reveal_initiative_credential_rejects_read_role_with_403_and_audits() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_rejects_write_policy_role_with_403() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::WritePolicy).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::WritePolicy).await;
     data.push_initiative_credential("init-1", fixture("test-pg-dev", "secret"));
 
     let client = reqwest::Client::new();
@@ -376,8 +366,7 @@ async fn reveal_initiative_credential_rejects_write_policy_role_with_403() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_admin_path_returns_plaintext_and_audits_first() {
-    let (handle, base, token, data, fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_initiative_credential(
         "init-1",
         fixture("test-pg-dev", "postgres://user:hunter2@db/app"),
@@ -430,8 +419,7 @@ async fn reveal_initiative_credential_admin_path_returns_plaintext_and_audits_fi
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_unknown_name_returns_404() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_initiative_credential("init-1", fixture("known", "x"));
 
     let client = reqwest::Client::new();
@@ -455,8 +443,7 @@ async fn reveal_initiative_credential_unknown_name_returns_404() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_system_anthropic_credential_emits_critical_severity_audit() {
-    let (handle, base, token, data, fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-test"));
 
     let client = reqwest::Client::new();
@@ -503,8 +490,7 @@ async fn reveal_system_anthropic_credential_emits_critical_severity_audit() {
 /// (no UI feedback, no audit row) is forbidden.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_system_credential_read_role_returns_403_with_audited_denial() {
-    let (handle, base, token, data, fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Read).await;
     data.push_system_credential(fixture("providers.anthropic", "sk-ant-test"));
 
     let client = reqwest::Client::new();
@@ -557,8 +543,7 @@ async fn reveal_initiative_credential_emits_high_severity_audit() {
     // This test pins the per-initiative severity floor — a future
     // refactor that drops it to "low" or omits the field would be
     // a forensics regression.
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Admin).await;
     data.push_initiative_credential("init-1", fixture("test-pg-dev", "secret"));
 
     let client = reqwest::Client::new();
@@ -592,8 +577,7 @@ async fn reveal_initiative_credential_emits_high_severity_audit() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn reveal_initiative_credential_rate_limit_kicks_in_after_threshold() {
-    let (handle, base, token, data, fp) =
-        serve_with_role(DashboardRole::Admin).await;
+    let (handle, base, token, data, fp) = serve_with_role(DashboardRole::Admin).await;
     data.with_reveal_rate_limit(3, Duration::from_secs(60));
     data.push_initiative_credential("init-1", fixture("c1", "v1"));
 
@@ -695,8 +679,7 @@ async fn reveal_credential_without_auth_yields_401_not_500() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(deprecated)] // pattern-matches the deprecated variants on purpose
 async fn list_initiatives_does_not_emit_operator_viewed_initiative_list_audit() {
-    let (handle, base, token, data, _fp) =
-        serve_with_role(DashboardRole::Read).await;
+    let (handle, base, token, data, _fp) = serve_with_role(DashboardRole::Read).await;
     let client = reqwest::Client::new();
     let res = client
         .get(format!("{base}/api/initiatives"))

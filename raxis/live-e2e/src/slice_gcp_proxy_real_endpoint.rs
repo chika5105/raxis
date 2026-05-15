@@ -87,11 +87,11 @@
 //!   4. Assert: status is 4xx, body parses as JSON with an
 //!      `error` field in the RFC 6749 §5.2 closed enum.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, CloudUpstreamHost, TokenCache};
 use raxis_credential_proxy_gcp::{
@@ -115,30 +115,39 @@ const REAL_ENDPOINT: &str = "https://oauth2.googleapis.com/token";
 /// succeeds; the `client_email` points at a non-existent
 /// service account so the upstream rejects the exchange.
 struct SyntheticSaBackend {
-    body:     Vec<u8>,
+    body: Vec<u8>,
     resolves: AtomicU32,
 }
 
 impl CredentialBackend for SyntheticSaBackend {
     fn resolve(
         &self,
-        _name:     &CredentialName,
+        _name: &CredentialName,
         _consumer: ConsumerIdentity<'_>,
     ) -> std::result::Result<CredentialValue, CredentialError> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         Ok(CredentialValue::from_bytes(self.body.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+        &self,
+        name: &CredentialName,
+        _v: CredentialValue,
+        _a: OperatorId,
     ) -> std::result::Result<(), CredentialError> {
         Err(CredentialError::Malformed {
-            name:   name.clone(),
+            name: name.clone(),
             reason: "live-e2e V3 GCP witness does not rotate".to_owned(),
         })
     }
-    fn exists(&self, _name: &CredentialName) -> bool { true }
-    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e-v3-gcp-witness" }
+    fn exists(&self, _name: &CredentialName) -> bool {
+        true
+    }
+    fn lease(&self, _: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e-v3-gcp-witness"
+    }
 }
 
 /// RFC 6749 §5.2 closed enum of OAuth2 error codes. The slice
@@ -291,20 +300,20 @@ async fn run_v3_forwarding_witness() -> Result<()> {
 
     let fwd = GcpForwardingConfig {
         upstream,
-        scopes:              vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()],
-        jwt_lifetime:        Duration::from_secs(3600),
+        scopes: vec!["https://www.googleapis.com/auth/cloud-platform".to_owned()],
+        jwt_lifetime: Duration::from_secs(3600),
         cache_safety_window: Duration::from_secs(300),
     };
 
     let cfg = ProxyConfig {
-        listen_addr:        "127.0.0.1:0".to_owned(),
-        credential_name:    CredentialName::new("live-e2e-v3-gcp"),
-        consumer:           OwnedConsumer::new("live-e2e-gcp-slice", "v3-witness"),
-        lease_seconds:      3600,
-        project_id:         "raxis-v3-witness-project".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
+        credential_name: CredentialName::new("live-e2e-v3-gcp"),
+        consumer: OwnedConsumer::new("live-e2e-gcp-slice", "v3-witness"),
+        lease_seconds: 3600,
+        project_id: "raxis-v3-witness-project".to_owned(),
         numeric_project_id: Some(123_456_789),
-        forwarding:         Some(fwd),
-        restrictions:       Restrictions::default(),
+        forwarding: Some(fwd),
+        restrictions: Restrictions::default(),
     };
 
     let proxy = GcpProxy::bind_v3(
@@ -318,23 +327,25 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     .await
     .context("bind GcpProxy V3")?;
     let addr = proxy.local_addr().context("GcpProxy local_addr")?;
-    tokio::spawn(async move { proxy.serve().await; });
+    tokio::spawn(async move {
+        proxy.serve().await;
+    });
 
-    let url = format!(
-        "http://{addr}/computeMetadata/v1/instance/service-accounts/default/token",
-    );
+    let url = format!("http://{addr}/computeMetadata/v1/instance/service-accounts/default/token",);
     let client = reqwest::Client::builder()
         .user_agent("raxis-live-e2e/gcp-proxy-real-endpoint-v3")
         .timeout(Duration::from_secs(20))
         .no_proxy()
         .build()
         .context("build reqwest client")?;
-    let resp = client.get(&url)
+    let resp = client
+        .get(&url)
         .header("Metadata-Flavor", "Google")
-        .send().await
+        .send()
+        .await
         .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
-    let body   = resp.text().await.context("read response body")?;
+    let body = resp.text().await.context("read response body")?;
 
     if status.is_success() {
         return Err(anyhow!(
@@ -350,11 +361,12 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     }
     let parsed: JsonValue = serde_json::from_str(&body)
         .with_context(|| format!("parse V3 envelope JSON: {body:.500}"))?;
-    let error_field = parsed.get("error").and_then(|v| v.as_str()).ok_or_else(|| {
-        anyhow!(
-            "V3-forwarding response body has no `error` field; body={body:.500}",
-        )
-    })?;
+    let error_field = parsed
+        .get("error")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| {
+            anyhow!("V3-forwarding response body has no `error` field; body={body:.500}",)
+        })?;
     if !RFC6749_ERROR_CODES.contains(&error_field) {
         return Err(anyhow!(
             "V3-forwarding response `error` = {error_field:?} not in RFC 6749 §5.2 \

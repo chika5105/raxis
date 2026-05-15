@@ -42,12 +42,35 @@ use errors::CliError;
 // ---------------------------------------------------------------------------
 
 const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
-    "genesis", "policy", "plan", "initiative", "operator", "task", "session",
-    "delegation", "escalation", "epoch", "cert", "credential", "kernel",
-    "submit", "providers",
-    "status", "log", "verify-chain", "queue", "inspect",
-    "sessions", "escalations", "inbox", "doctor", "verifiers", "witnesses",
-    "budget", "explain", "top",
+    "genesis",
+    "policy",
+    "plan",
+    "initiative",
+    "operator",
+    "task",
+    "session",
+    "delegation",
+    "escalation",
+    "epoch",
+    "cert",
+    "credential",
+    "kernel",
+    "submit",
+    "providers",
+    "status",
+    "log",
+    "verify-chain",
+    "queue",
+    "inspect",
+    "sessions",
+    "escalations",
+    "inbox",
+    "doctor",
+    "verifiers",
+    "witnesses",
+    "budget",
+    "explain",
+    "top",
     // V2_GAPS §C10 / §12.6 — non-interactive first-run scaffolding.
     "setup",
     // V2 §4.2 — operator-dashboard auth helper (`raxis auth sign`).
@@ -59,23 +82,29 @@ const TOP_LEVEL_SUBCOMMANDS: &[&str] = &[
     "dashboard",
 ];
 
-const POLICY_SUBCOMMANDS:      &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
-const PLAN_SUBCOMMANDS:        &[&str] = &["approve", "reject", "validate", "fmt", "init"];
+const POLICY_SUBCOMMANDS: &[&str] = &["sign", "show", "diff", "generate-sidecar-secret"];
+const PLAN_SUBCOMMANDS: &[&str] = &["approve", "reject", "validate", "fmt", "init"];
 /// V2.1 atomic plan-bundle submit. Spec: plan-bundle-sealing.md §4.
 /// Currently exposes only `plan`; future sub-commands (`policy`,
 /// `operator-cert`) will plug in here without a third rename.
-const SUBMIT_SUBCOMMANDS:      &[&str] = &["plan"];
-const INITIATIVE_SUBCOMMANDS:  &[&str] = &["abort", "list", "quarantine", "show", "watch"];
-const OPERATOR_SUBCOMMANDS:    &[&str] = &["quarantine-plans-by"];
-const TASK_SUBCOMMANDS:        &[&str] = &["abort", "resume", "retry", "outputs"];
-const SESSION_SUBCOMMANDS:     &[&str] = &["create", "revoke"];
-const DELEGATION_SUBCOMMANDS:  &[&str] = &["grant"];
-const ESCALATION_SUBCOMMANDS:  &[&str] = &["approve", "deny"];
-const EPOCH_SUBCOMMANDS:       &[&str] = &["advance"];
-const CERT_SUBCOMMANDS:        &[&str] = &[
-    "mint", "mint-emergency", "show", "verify", "list", "install",
+const SUBMIT_SUBCOMMANDS: &[&str] = &["plan"];
+const INITIATIVE_SUBCOMMANDS: &[&str] = &["abort", "list", "quarantine", "show", "watch"];
+const OPERATOR_SUBCOMMANDS: &[&str] = &["quarantine-plans-by"];
+const TASK_SUBCOMMANDS: &[&str] = &["abort", "resume", "retry", "outputs"];
+const SESSION_SUBCOMMANDS: &[&str] = &["create", "revoke"];
+const DELEGATION_SUBCOMMANDS: &[&str] = &["grant"];
+const ESCALATION_SUBCOMMANDS: &[&str] = &["approve", "deny"];
+const EPOCH_SUBCOMMANDS: &[&str] = &["advance"];
+const CERT_SUBCOMMANDS: &[&str] = &[
+    "mint",
+    "mint-emergency",
+    "show",
+    "verify",
+    "list",
+    "install",
     // V2_GAPS §D1 — operator-cert revocation (admission-time MVP).
-    "revoke", "list-revocations",
+    "revoke",
+    "list-revocations",
 ];
 /// V2 §extensibility-traits.md §4 — local-only credential ops.
 /// MVP scope (V2 GA) is the seven-command catalogue from
@@ -84,26 +113,25 @@ const CERT_SUBCOMMANDS:        &[&str] = &[
 /// validators (kubeconfig / AWS JSON / postgres URI parse) and
 /// live-network `verify` probes are V3 — V2 stores bytes
 /// verbatim and verifies structurally.
-const CREDENTIAL_SUBCOMMANDS:  &[&str] = &[
-    "list", "rotate", "add", "show", "remove", "verify", "audit",
-];
+const CREDENTIAL_SUBCOMMANDS: &[&str] =
+    &["list", "rotate", "add", "show", "remove", "verify", "audit"];
 /// V2 §kernel-lifecycle.md §3 — daemon mode. The MVP ships
 /// `install` and `uninstall` (template + place / remove the
 /// platform unit file). The full surface (`start --daemon`,
 /// `stop`, `status`, `restart` with sd_notify and single-instance
 /// enforcement) is a follow-up phase per kernel-lifecycle.md
 /// §"Implementation checklist".
-const KERNEL_SUBCOMMANDS:      &[&str] = &["install", "uninstall"];
+const KERNEL_SUBCOMMANDS: &[&str] = &["install", "uninstall"];
 /// provider-failure-handling.md §6.6 — circuit breaker operator surface.
-const PROVIDERS_SUBCOMMANDS:   &[&str] = &["status", "reset"];
+const PROVIDERS_SUBCOMMANDS: &[&str] = &["status", "reset"];
 /// V2 §4.2 — operator-dashboard auth helper (challenge-response signing).
-const AUTH_SUBCOMMANDS:        &[&str] = &["sign"];
+const AUTH_SUBCOMMANDS: &[&str] = &["sign"];
 /// V2.5 self-healing-supervisor.md §10 / dashboard-hardening.md
 /// §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01 — dashboard-side
 /// maintenance ops. `rotate-jwt-secret` is the explicit "kick
 /// everyone out" lever; future entries (e.g. a `clear-revocations`
 /// op for after a kernel forensic event) plug in here.
-const DASHBOARD_SUBCOMMANDS:   &[&str] = &["rotate-jwt-secret"];
+const DASHBOARD_SUBCOMMANDS: &[&str] = &["rotate-jwt-secret"];
 
 // ---------------------------------------------------------------------------
 // Global CLI flags
@@ -121,9 +149,9 @@ impl GlobalFlags {
     }
 
     fn socket_path(&self) -> PathBuf {
-        self.socket_path.clone().unwrap_or_else(|| {
-            self.data_dir.join("sockets").join("operator.sock")
-        })
+        self.socket_path
+            .clone()
+            .unwrap_or_else(|| self.data_dir.join("sockets").join("operator.sock"))
     }
 }
 
@@ -167,8 +195,7 @@ fn run() -> Result<(), CliError> {
             }
             "--operator-key" => {
                 pos += 1;
-                operator_key_path =
-                    Some(PathBuf::from(require_arg(&args, pos, "--operator-key")?));
+                operator_key_path = Some(PathBuf::from(require_arg(&args, pos, "--operator-key")?));
             }
             _ => break,
         }
@@ -211,33 +238,39 @@ fn run() -> Result<(), CliError> {
                     commands::policy::run_generate_sidecar_secret(&flags, &rest[1..])
                 }
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "policy sub-command", sub2, POLICY_SUBCOMMANDS,
+                    "policy sub-command",
+                    sub2,
+                    POLICY_SUBCOMMANDS,
                 ))),
             }
         }
         "plan" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "approve"  => commands::plan::run_approve(&flags, &rest[1..]),
-                "reject"   => commands::plan::run_reject(&flags, &rest[1..]),
+                "approve" => commands::plan::run_approve(&flags, &rest[1..]),
+                "reject" => commands::plan::run_reject(&flags, &rest[1..]),
                 "validate" => commands::plan_validate::run(&flags, &rest[1..]),
-                "fmt"      => commands::plan_fmt::run(&flags, &rest[1..]),
-                "init"     => commands::plan_init::run(&flags, &rest[1..]),
+                "fmt" => commands::plan_fmt::run(&flags, &rest[1..]),
+                "init" => commands::plan_init::run(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "plan sub-command", sub2, PLAN_SUBCOMMANDS,
+                    "plan sub-command",
+                    sub2,
+                    PLAN_SUBCOMMANDS,
                 ))),
             }
         }
         "initiative" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "abort"      => commands::initiative::run_abort(&flags, &rest[1..]),
-                "list"       => commands::initiatives::run(&flags, &rest[1..]),
+                "abort" => commands::initiative::run_abort(&flags, &rest[1..]),
+                "list" => commands::initiatives::run(&flags, &rest[1..]),
                 "quarantine" => commands::initiative::run_quarantine(&flags, &rest[1..]),
-                "show"       => commands::initiative_show::run(&flags, &rest[1..]),
-                "watch"      => commands::initiative::run_watch(&flags, &rest[1..]),
+                "show" => commands::initiative_show::run(&flags, &rest[1..]),
+                "watch" => commands::initiative::run_watch(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "initiative sub-command", sub2, INITIATIVE_SUBCOMMANDS,
+                    "initiative sub-command",
+                    sub2,
+                    INITIATIVE_SUBCOMMANDS,
                 ))),
             }
         }
@@ -248,7 +281,9 @@ fn run() -> Result<(), CliError> {
                     commands::operator::run_quarantine_plans_by(&flags, &rest[1..])
                 }
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "operator sub-command", sub2, OPERATOR_SUBCOMMANDS,
+                    "operator sub-command",
+                    sub2,
+                    OPERATOR_SUBCOMMANDS,
                 ))),
             }
         }
@@ -260,7 +295,9 @@ fn run() -> Result<(), CliError> {
                 "retry" => commands::task::run_retry(&flags, &rest[1..]),
                 "outputs" => commands::task::run_outputs(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "task sub-command", sub2, TASK_SUBCOMMANDS,
+                    "task sub-command",
+                    sub2,
+                    TASK_SUBCOMMANDS,
                 ))),
             }
         }
@@ -270,7 +307,9 @@ fn run() -> Result<(), CliError> {
                 "create" => commands::session::run_create(&flags, &rest[1..]),
                 "revoke" => commands::session::run_revoke(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "session sub-command", sub2, SESSION_SUBCOMMANDS,
+                    "session sub-command",
+                    sub2,
+                    SESSION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -279,7 +318,9 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "grant" => commands::delegation::run_grant(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "delegation sub-command", sub2, DELEGATION_SUBCOMMANDS,
+                    "delegation sub-command",
+                    sub2,
+                    DELEGATION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -289,7 +330,9 @@ fn run() -> Result<(), CliError> {
                 "approve" => commands::escalation::run_approve(&flags, &rest[1..]),
                 "deny" => commands::escalation::run_deny(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "escalation sub-command", sub2, ESCALATION_SUBCOMMANDS,
+                    "escalation sub-command",
+                    sub2,
+                    ESCALATION_SUBCOMMANDS,
                 ))),
             }
         }
@@ -298,23 +341,27 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "advance" => commands::epoch::run_advance(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "epoch sub-command", sub2, EPOCH_SUBCOMMANDS,
+                    "epoch sub-command",
+                    sub2,
+                    EPOCH_SUBCOMMANDS,
                 ))),
             }
         }
         "cert" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "mint"             => commands::cert::run_mint(&flags, &rest[1..]),
-                "mint-emergency"   => commands::cert::run_mint_emergency(&flags, &rest[1..]),
-                "show"             => commands::cert::run_show(&flags, &rest[1..]),
-                "verify"           => commands::cert::run_verify(&flags, &rest[1..]),
-                "list"             => commands::cert::run_list(&flags, &rest[1..]),
-                "install"          => commands::cert::run_install(&flags, &rest[1..]),
-                "revoke"           => commands::cert::run_revoke(&flags, &rest[1..]),
+                "mint" => commands::cert::run_mint(&flags, &rest[1..]),
+                "mint-emergency" => commands::cert::run_mint_emergency(&flags, &rest[1..]),
+                "show" => commands::cert::run_show(&flags, &rest[1..]),
+                "verify" => commands::cert::run_verify(&flags, &rest[1..]),
+                "list" => commands::cert::run_list(&flags, &rest[1..]),
+                "install" => commands::cert::run_install(&flags, &rest[1..]),
+                "revoke" => commands::cert::run_revoke(&flags, &rest[1..]),
                 "list-revocations" => commands::cert::run_list_revocations(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "cert sub-command", sub2, CERT_SUBCOMMANDS,
+                    "cert sub-command",
+                    sub2,
+                    CERT_SUBCOMMANDS,
                 ))),
             }
         }
@@ -323,32 +370,38 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "plan" => commands::submit::run_plan(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "submit sub-command", sub2, SUBMIT_SUBCOMMANDS,
+                    "submit sub-command",
+                    sub2,
+                    SUBMIT_SUBCOMMANDS,
                 ))),
             }
         }
         "credential" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "list"   => commands::credential::run_list  (&flags, &rest[1..]),
+                "list" => commands::credential::run_list(&flags, &rest[1..]),
                 "rotate" => commands::credential::run_rotate(&flags, &rest[1..]),
-                "add"    => commands::credential::run_add   (&flags, &rest[1..]),
-                "show"   => commands::credential::run_show  (&flags, &rest[1..]),
+                "add" => commands::credential::run_add(&flags, &rest[1..]),
+                "show" => commands::credential::run_show(&flags, &rest[1..]),
                 "remove" => commands::credential::run_remove(&flags, &rest[1..]),
                 "verify" => commands::credential::run_verify(&flags, &rest[1..]),
-                "audit"  => commands::credential::run_audit (&flags, &rest[1..]),
+                "audit" => commands::credential::run_audit(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "credential sub-command", sub2, CREDENTIAL_SUBCOMMANDS,
+                    "credential sub-command",
+                    sub2,
+                    CREDENTIAL_SUBCOMMANDS,
                 ))),
             }
         }
         "kernel" => {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
-                "install"   => commands::kernel::run_install(&flags, &rest[1..]),
+                "install" => commands::kernel::run_install(&flags, &rest[1..]),
                 "uninstall" => commands::kernel::run_uninstall(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "kernel sub-command", sub2, KERNEL_SUBCOMMANDS,
+                    "kernel sub-command",
+                    sub2,
+                    KERNEL_SUBCOMMANDS,
                 ))),
             }
         }
@@ -356,9 +409,11 @@ fn run() -> Result<(), CliError> {
             let sub2 = rest.first().map(|s| s.as_str()).unwrap_or("");
             match sub2 {
                 "status" => commands::providers::run_status(&flags, &rest[1..]),
-                "reset"  => commands::providers::run_reset(&flags, &rest[1..]),
+                "reset" => commands::providers::run_reset(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "providers sub-command", sub2, PROVIDERS_SUBCOMMANDS,
+                    "providers sub-command",
+                    sub2,
+                    PROVIDERS_SUBCOMMANDS,
                 ))),
             }
         }
@@ -367,7 +422,9 @@ fn run() -> Result<(), CliError> {
             match sub2 {
                 "sign" => commands::auth::run_sign(&flags, &rest[1..]),
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "auth sub-command", sub2, AUTH_SUBCOMMANDS,
+                    "auth sub-command",
+                    sub2,
+                    AUTH_SUBCOMMANDS,
                 ))),
             }
         }
@@ -378,7 +435,9 @@ fn run() -> Result<(), CliError> {
                     commands::dashboard::run_rotate_jwt_secret(&flags, &rest[1..])
                 }
                 _ => Err(CliError::Usage(unknown_with_suggestion(
-                    "dashboard sub-command", sub2, DASHBOARD_SUBCOMMANDS,
+                    "dashboard sub-command",
+                    sub2,
+                    DASHBOARD_SUBCOMMANDS,
                 ))),
             }
         }
@@ -402,7 +461,9 @@ fn run() -> Result<(), CliError> {
             Ok(())
         }
         other => Err(CliError::Usage(unknown_with_suggestion(
-            "subcommand", other, TOP_LEVEL_SUBCOMMANDS,
+            "subcommand",
+            other,
+            TOP_LEVEL_SUBCOMMANDS,
         ))),
     }
 }
@@ -948,16 +1009,15 @@ mod catalog_consistency_tests {
                     let lit = &body[start..end];
                     let after = body[end + 1..].trim_start();
                     if after.starts_with("=>") || after.starts_with("|") {
-                        if !lit.is_empty()
-                            && lit != "--help"
-                            && lit != "-h"
-                            && !lit.contains(' ')
-                        {
+                        if !lit.is_empty() && lit != "--help" && lit != "-h" && !lit.contains(' ') {
                             out.insert(lit.to_owned());
                         }
                     }
                     while let Some(&(_, ch)) = chars.peek() {
-                        if ch == '"' { chars.next(); break; }
+                        if ch == '"' {
+                            chars.next();
+                            break;
+                        }
                         chars.next();
                     }
                 }
@@ -991,10 +1051,8 @@ mod catalog_consistency_tests {
             .iter()
             .map(|s| (*s).to_owned())
             .collect();
-        let only_in_dispatcher: Vec<&String> =
-            from_dispatcher.difference(&from_catalog).collect();
-        let only_in_catalog: Vec<&String> =
-            from_catalog.difference(&from_dispatcher).collect();
+        let only_in_dispatcher: Vec<&String> = from_dispatcher.difference(&from_catalog).collect();
+        let only_in_catalog: Vec<&String> = from_catalog.difference(&from_dispatcher).collect();
         assert!(
             only_in_dispatcher.is_empty() && only_in_catalog.is_empty(),
             "TOP_LEVEL_SUBCOMMANDS drift!\n  in dispatcher only: {only_in_dispatcher:?}\n  in catalog only:    {only_in_catalog:?}"
@@ -1007,23 +1065,23 @@ mod catalog_consistency_tests {
     #[test]
     fn per_parent_catalogs_are_non_empty() {
         for (name, list) in [
-            ("policy",     POLICY_SUBCOMMANDS),
-            ("plan",       PLAN_SUBCOMMANDS),
+            ("policy", POLICY_SUBCOMMANDS),
+            ("plan", PLAN_SUBCOMMANDS),
             ("initiative", INITIATIVE_SUBCOMMANDS),
-            ("operator",   OPERATOR_SUBCOMMANDS),
-            ("task",       TASK_SUBCOMMANDS),
-            ("session",    SESSION_SUBCOMMANDS),
+            ("operator", OPERATOR_SUBCOMMANDS),
+            ("task", TASK_SUBCOMMANDS),
+            ("session", SESSION_SUBCOMMANDS),
             ("delegation", DELEGATION_SUBCOMMANDS),
             ("escalation", ESCALATION_SUBCOMMANDS),
-            ("epoch",      EPOCH_SUBCOMMANDS),
-            ("cert",       CERT_SUBCOMMANDS),
+            ("epoch", EPOCH_SUBCOMMANDS),
+            ("cert", CERT_SUBCOMMANDS),
             ("credential", CREDENTIAL_SUBCOMMANDS),
-            ("kernel",     KERNEL_SUBCOMMANDS),
-            ("submit",     SUBMIT_SUBCOMMANDS),
-            ("auth",       AUTH_SUBCOMMANDS),
-            ("providers",  PROVIDERS_SUBCOMMANDS),
-            ("task",       TASK_SUBCOMMANDS),
-            ("dashboard",  DASHBOARD_SUBCOMMANDS),
+            ("kernel", KERNEL_SUBCOMMANDS),
+            ("submit", SUBMIT_SUBCOMMANDS),
+            ("auth", AUTH_SUBCOMMANDS),
+            ("providers", PROVIDERS_SUBCOMMANDS),
+            ("task", TASK_SUBCOMMANDS),
+            ("dashboard", DASHBOARD_SUBCOMMANDS),
         ] {
             assert!(!list.is_empty(), "{name}_SUBCOMMANDS is empty");
         }
@@ -1044,30 +1102,27 @@ mod catalog_consistency_tests {
         // the top-level dispatcher arm even when the same literal
         // (e.g. `"submit"`) is also used as an inner arm name.
         let pairs: &[(&str, &[&str])] = &[
-            ("\"policy\" => {",     POLICY_SUBCOMMANDS),
-            ("\"plan\" => {",       PLAN_SUBCOMMANDS),
+            ("\"policy\" => {", POLICY_SUBCOMMANDS),
+            ("\"plan\" => {", PLAN_SUBCOMMANDS),
             ("\"initiative\" => {", INITIATIVE_SUBCOMMANDS),
-            ("\"operator\" => {",   OPERATOR_SUBCOMMANDS),
-            ("\"task\" => {",       TASK_SUBCOMMANDS),
-            ("\"session\" => {",    SESSION_SUBCOMMANDS),
+            ("\"operator\" => {", OPERATOR_SUBCOMMANDS),
+            ("\"task\" => {", TASK_SUBCOMMANDS),
+            ("\"session\" => {", SESSION_SUBCOMMANDS),
             ("\"delegation\" => {", DELEGATION_SUBCOMMANDS),
             ("\"escalation\" => {", ESCALATION_SUBCOMMANDS),
-            ("\"epoch\" => {",      EPOCH_SUBCOMMANDS),
-            ("\"cert\" => {",       CERT_SUBCOMMANDS),
+            ("\"epoch\" => {", EPOCH_SUBCOMMANDS),
+            ("\"cert\" => {", CERT_SUBCOMMANDS),
             ("\"credential\" => {", CREDENTIAL_SUBCOMMANDS),
-            ("\"kernel\" => {",     KERNEL_SUBCOMMANDS),
-            ("\"submit\" => {",     SUBMIT_SUBCOMMANDS),
-            ("\"dashboard\" => {",  DASHBOARD_SUBCOMMANDS),
+            ("\"kernel\" => {", KERNEL_SUBCOMMANDS),
+            ("\"submit\" => {", SUBMIT_SUBCOMMANDS),
+            ("\"dashboard\" => {", DASHBOARD_SUBCOMMANDS),
         ];
 
         for (anchor, catalog) in pairs {
             let arms = scrape_inner_match_arms(&src, anchor);
-            let want: BTreeSet<String> =
-                catalog.iter().map(|s| (*s).to_owned()).collect();
-            let only_in_dispatcher: Vec<&String> =
-                arms.difference(&want).collect();
-            let only_in_catalog: Vec<&String> =
-                want.difference(&arms).collect();
+            let want: BTreeSet<String> = catalog.iter().map(|s| (*s).to_owned()).collect();
+            let only_in_dispatcher: Vec<&String> = arms.difference(&want).collect();
+            let only_in_catalog: Vec<&String> = want.difference(&arms).collect();
             assert!(
                 only_in_dispatcher.is_empty() && only_in_catalog.is_empty(),
                 "{anchor} catalog drift!\n  in dispatcher only: {only_in_dispatcher:?}\n  in catalog only:    {only_in_catalog:?}"
@@ -1098,7 +1153,9 @@ mod catalog_consistency_tests {
                 '"' if depth == 0 => {
                     let start = i + 1;
                     let rest = &body[start..];
-                    let Some(end_off) = rest.find('"') else { continue };
+                    let Some(end_off) = rest.find('"') else {
+                        continue;
+                    };
                     let lit = &rest[..end_off];
                     let after_lit = body[start + end_off + 1..].trim_start();
                     if after_lit.starts_with("=>") && !lit.is_empty() {

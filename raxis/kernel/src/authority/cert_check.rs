@@ -88,9 +88,9 @@ pub enum CertGuard {
     Deny {
         /// Stable error code for the operator response — one of:
         ///   `FAIL_CERT_EXPIRED`, `FAIL_CERT_NOT_YET_VALID`.
-        wire_code:    &'static str,
+        wire_code: &'static str,
         /// Human-readable detail; safe to surface to the CLI directly.
-        wire_detail:  String,
+        wire_detail: String,
     },
 }
 
@@ -127,13 +127,15 @@ pub struct CertEnforcer {
 }
 
 impl Default for CertEnforcer {
-    fn default() -> Self { Self::new() }
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl CertEnforcer {
     pub fn new() -> Self {
         Self {
-            warned:      Mutex::new(HashSet::new()),
+            warned: Mutex::new(HashSet::new()),
             revocations: None,
         }
     }
@@ -162,10 +164,10 @@ impl CertEnforcer {
     pub fn enforce(
         &self,
         operator_fingerprint: &str,
-        op_name:              &str,
-        bundle:               &PolicyBundle,
-        audit:                &dyn AuditSink,
-        now_unix_secs:        i64,
+        op_name: &str,
+        bundle: &PolicyBundle,
+        audit: &dyn AuditSink,
+        now_unix_secs: i64,
     ) -> CertGuard {
         let epoch_id = bundle.epoch();
         let entry = match bundle.operator_entry(operator_fingerprint) {
@@ -199,28 +201,34 @@ impl CertEnforcer {
 
             CertStatus::Expiring { secs_until_expiry } => {
                 self.maybe_emit_warn(
-                    audit, operator_fingerprint, epoch_id,
+                    audit,
+                    operator_fingerprint,
+                    epoch_id,
                     AuditEventKind::OperatorCertExpiringSoon {
                         pubkey_fingerprint: operator_fingerprint.to_owned(),
                         epoch_id,
-                        op:                 op_name.to_owned(),
-                        not_after:          cert.not_after,
-                        days_remaining:     secs_until_expiry / 86_400,
+                        op: op_name.to_owned(),
+                        not_after: cert.not_after,
+                        days_remaining: secs_until_expiry / 86_400,
                     },
                     "OperatorCertExpiringSoon",
                 );
                 CertGuard::Allow
             }
 
-            CertStatus::Grace { secs_until_grace_end } => {
+            CertStatus::Grace {
+                secs_until_grace_end,
+            } => {
                 self.maybe_emit_warn(
-                    audit, operator_fingerprint, epoch_id,
+                    audit,
+                    operator_fingerprint,
+                    epoch_id,
                     AuditEventKind::OperatorCertInGracePeriod {
                         pubkey_fingerprint: operator_fingerprint.to_owned(),
                         epoch_id,
-                        op:                 op_name.to_owned(),
-                        not_after:          cert.not_after,
-                        grace_ends_at:      now_unix_secs + secs_until_grace_end,
+                        op: op_name.to_owned(),
+                        not_after: cert.not_after,
+                        grace_ends_at: now_unix_secs + secs_until_grace_end,
                     },
                     "OperatorCertInGracePeriod",
                 );
@@ -228,15 +236,19 @@ impl CertEnforcer {
             }
 
             CertStatus::Expired { secs_since_expiry } => {
-                emit_or_log(audit, AuditEventKind::OperatorCertExpiredOpDenied {
-                    pubkey_fingerprint: operator_fingerprint.to_owned(),
-                    epoch_id,
-                    op:                 op_name.to_owned(),
-                    not_after:          cert.not_after,
-                    expired_at:         cert.not_after + (secs_since_expiry / 86_400) * 86_400,
-                }, "OperatorCertExpiredOpDenied");
+                emit_or_log(
+                    audit,
+                    AuditEventKind::OperatorCertExpiredOpDenied {
+                        pubkey_fingerprint: operator_fingerprint.to_owned(),
+                        epoch_id,
+                        op: op_name.to_owned(),
+                        not_after: cert.not_after,
+                        expired_at: cert.not_after + (secs_since_expiry / 86_400) * 86_400,
+                    },
+                    "OperatorCertExpiredOpDenied",
+                );
                 CertGuard::Deny {
-                    wire_code:   "FAIL_CERT_EXPIRED",
+                    wire_code: "FAIL_CERT_EXPIRED",
                     wire_detail: format!(
                         "operator cert for {operator_fingerprint} expired {} day(s) ago; \
                          rotate via the cert-mint flow",
@@ -252,15 +264,19 @@ impl CertEnforcer {
                 // cert window did not include `now`". `expired_at`
                 // is set to `not_before` so the record names the
                 // boundary the cert was outside of.
-                emit_or_log(audit, AuditEventKind::OperatorCertExpiredOpDenied {
-                    pubkey_fingerprint: operator_fingerprint.to_owned(),
-                    epoch_id,
-                    op:                 op_name.to_owned(),
-                    not_after:          cert.not_after,
-                    expired_at:         cert.not_before,
-                }, "OperatorCertExpiredOpDenied");
+                emit_or_log(
+                    audit,
+                    AuditEventKind::OperatorCertExpiredOpDenied {
+                        pubkey_fingerprint: operator_fingerprint.to_owned(),
+                        epoch_id,
+                        op: op_name.to_owned(),
+                        not_after: cert.not_after,
+                        expired_at: cert.not_before,
+                    },
+                    "OperatorCertExpiredOpDenied",
+                );
                 CertGuard::Deny {
-                    wire_code:   "FAIL_CERT_NOT_YET_VALID",
+                    wire_code: "FAIL_CERT_NOT_YET_VALID",
                     wire_detail: format!(
                         "operator cert for {operator_fingerprint} not yet valid \
                          (active in {secs_until_active}s)",
@@ -273,12 +289,16 @@ impl CertEnforcer {
                 // attacker who steals the emergency key cannot use it
                 // silently. No dedupe.
                 debug_assert!(matches!(cert.kind, CertKind::EmergencyRecovery));
-                emit_or_log(audit, AuditEventKind::EmergencyOperatorUsed {
-                    pubkey_fingerprint: operator_fingerprint.to_owned(),
-                    epoch_id,
-                    op:                 op_name.to_owned(),
-                }, "EmergencyOperatorUsed");
-                let _ = cert;  // suppress unused-binding when debug_asserts off
+                emit_or_log(
+                    audit,
+                    AuditEventKind::EmergencyOperatorUsed {
+                        pubkey_fingerprint: operator_fingerprint.to_owned(),
+                        epoch_id,
+                        op: op_name.to_owned(),
+                    },
+                    "EmergencyOperatorUsed",
+                );
+                let _ = cert; // suppress unused-binding when debug_asserts off
                 CertGuard::Allow
             }
 
@@ -289,18 +309,22 @@ impl CertEnforcer {
                 // attacker tried to reuse a revoked cert. Same
                 // shape as `OperatorCertExpiredOpDenied` for ease
                 // of pattern-matching in operator dashboards.
-                emit_or_log(audit, AuditEventKind::OperatorCertRevokedOpDenied {
-                    pubkey_fingerprint: operator_fingerprint.to_owned(),
-                    epoch_id,
-                    op:                 op_name.to_owned(),
-                    reason:             match reason {
-                        RevocationReason::Rotation   => "Rotation".into(),
-                        RevocationReason::Compromise => "Compromise".into(),
+                emit_or_log(
+                    audit,
+                    AuditEventKind::OperatorCertRevokedOpDenied {
+                        pubkey_fingerprint: operator_fingerprint.to_owned(),
+                        epoch_id,
+                        op: op_name.to_owned(),
+                        reason: match reason {
+                            RevocationReason::Rotation => "Rotation".into(),
+                            RevocationReason::Compromise => "Compromise".into(),
+                        },
+                        revoked_at,
                     },
-                    revoked_at,
-                }, "OperatorCertRevokedOpDenied");
+                    "OperatorCertRevokedOpDenied",
+                );
                 CertGuard::Deny {
-                    wire_code:   "FAIL_CERT_REVOKED",
+                    wire_code: "FAIL_CERT_REVOKED",
                     wire_detail: format!(
                         "operator cert for {operator_fingerprint} was revoked \
                          (reason={reason:?}, revoked_at={revoked_at}); rotate by minting \
@@ -316,18 +340,20 @@ impl CertEnforcer {
     /// the lock, then emits to the sink (which may block on disk).
     fn maybe_emit_warn(
         &self,
-        audit:                &dyn AuditSink,
+        audit: &dyn AuditSink,
         operator_fingerprint: &str,
-        epoch_id:             u64,
-        ev:                   AuditEventKind,
-        label:                &'static str,
+        epoch_id: u64,
+        ev: AuditEventKind,
+        label: &'static str,
     ) {
         let key = (operator_fingerprint.to_owned(), epoch_id);
         let already = {
             let mut set = self.warned.lock().expect("warned-set mutex poisoned");
             !set.insert(key)
         };
-        if already { return; }
+        if already {
+            return;
+        }
         emit_or_log(audit, ev, label);
     }
 
@@ -365,19 +391,23 @@ fn _doc_anchor(_: &OperatorCert) {}
 mod tests {
     use super::*;
     use ed25519_dalek::SigningKey;
-    use raxis_test_support::FakeAuditSink;
     use raxis_crypto::cert::sign_cert;
     use raxis_policy::{OperatorEntry, PolicyBundle};
+    use raxis_test_support::FakeAuditSink;
     use sha2::{Digest, Sha256};
 
     const TEST_SEED: [u8; 32] = [0x11u8; 32];
     const NOT_BEFORE: i64 = 1_700_000_000;
-    const NOT_AFTER:  i64 = 1_731_536_000; // ~365 days later
-    const WARN_DAYS:  u32 = 30;
+    const NOT_AFTER: i64 = 1_731_536_000; // ~365 days later
+    const WARN_DAYS: u32 = 30;
     const GRACE_DAYS: u32 = 7;
 
-    fn signing_key() -> SigningKey { SigningKey::from_bytes(&TEST_SEED) }
-    fn pk_hex() -> String { hex::encode(signing_key().verifying_key().to_bytes()) }
+    fn signing_key() -> SigningKey {
+        SigningKey::from_bytes(&TEST_SEED)
+    }
+    fn pk_hex() -> String {
+        hex::encode(signing_key().verifying_key().to_bytes())
+    }
     fn fp() -> String {
         let mut h = Sha256::new();
         h.update(hex::decode(pk_hex()).unwrap());
@@ -386,16 +416,16 @@ mod tests {
 
     fn signed_standard() -> OperatorCert {
         let mut c = OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            "chika".to_owned(),
-            pubkey_hex:              pk_hex(),
-            not_before:              NOT_BEFORE,
-            not_after:               NOT_AFTER,
+            kind: CertKind::Standard,
+            display_name: "chika".to_owned(),
+            pubkey_hex: pk_hex(),
+            not_before: NOT_BEFORE,
+            not_after: NOT_AFTER,
             warn_before_expiry_days: WARN_DAYS,
-            grace_period_days:       GRACE_DAYS,
-            permitted_ops:           vec!["AbortTask".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
+            grace_period_days: GRACE_DAYS,
+            permitted_ops: vec!["AbortTask".to_owned()],
+            contact_info: None,
+            self_sig_hex: String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &signing_key());
         c
@@ -403,16 +433,16 @@ mod tests {
 
     fn signed_emergency() -> OperatorCert {
         let mut c = OperatorCert {
-            kind:                    CertKind::EmergencyRecovery,
-            display_name:            "break-glass".to_owned(),
-            pubkey_hex:              pk_hex(),
-            not_before:              0,
-            not_after:               0,
+            kind: CertKind::EmergencyRecovery,
+            display_name: "break-glass".to_owned(),
+            pubkey_hex: pk_hex(),
+            not_before: 0,
+            not_after: 0,
             warn_before_expiry_days: 0,
-            grace_period_days:       0,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
+            grace_period_days: 0,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: None,
+            self_sig_hex: String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &signing_key());
         c
@@ -420,10 +450,10 @@ mod tests {
 
     fn entry(cert: OperatorCert) -> OperatorEntry {
         OperatorEntry {
-            pubkey_fingerprint:     fp(),
-            display_name:           "chika".to_owned(),
-            pubkey_hex:             pk_hex(),
-            permitted_ops:          vec!["AbortTask".to_owned()],
+            pubkey_fingerprint: fp(),
+            display_name: "chika".to_owned(),
+            pubkey_hex: pk_hex(),
+            permitted_ops: vec!["AbortTask".to_owned()],
             cert,
             force_misconfig_bypass: false,
         }
@@ -447,8 +477,11 @@ mod tests {
         let now = NOT_AFTER - 60 * 86_400; // 60 days before expiry; outside warn window
         let g = enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now);
         assert_eq!(g, CertGuard::Allow);
-        assert!(sink.event_kinds().is_empty(),
-            "Active zone must not emit any audit; got {:?}", sink.event_kinds());
+        assert!(
+            sink.event_kinds().is_empty(),
+            "Active zone must not emit any audit; got {:?}",
+            sink.event_kinds()
+        );
     }
 
     // ── Expiring zone (deduped) ───────────────────────────────────
@@ -461,13 +494,24 @@ mod tests {
         let now = NOT_AFTER - 14 * 86_400;
 
         // First call: emits.
-        assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now), CertGuard::Allow);
+        assert_eq!(
+            enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now),
+            CertGuard::Allow
+        );
         // Second call (same epoch + same operator): dedupes.
-        assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now), CertGuard::Allow);
+        assert_eq!(
+            enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now),
+            CertGuard::Allow
+        );
         // Third call (different op, same epoch + operator): still dedupes.
-        assert_eq!(enf.enforce(&fp(), "ApprovePlan", &b, sink.as_ref(), now), CertGuard::Allow);
+        assert_eq!(
+            enf.enforce(&fp(), "ApprovePlan", &b, sink.as_ref(), now),
+            CertGuard::Allow
+        );
 
-        let n_warn = sink.event_kinds().iter()
+        let n_warn = sink
+            .event_kinds()
+            .iter()
             .filter(|k| **k == "OperatorCertExpiringSoon")
             .count();
         assert_eq!(n_warn, 1,
@@ -484,9 +528,17 @@ mod tests {
         let b = bundle(signed_standard());
         // 1 day past expiry → inside 7-day grace window.
         let now = NOT_AFTER + 86_400;
-        assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now), CertGuard::Allow);
-        assert_eq!(enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now), CertGuard::Allow);
-        let n = sink.event_kinds().iter()
+        assert_eq!(
+            enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now),
+            CertGuard::Allow
+        );
+        assert_eq!(
+            enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now),
+            CertGuard::Allow
+        );
+        let n = sink
+            .event_kinds()
+            .iter()
             .filter(|k| **k == "OperatorCertInGracePeriod")
             .count();
         assert_eq!(n, 1, "Grace zone must emit exactly once per (fp, epoch)");
@@ -501,21 +553,31 @@ mod tests {
         // 14 days past expiry → past 7-day grace window.
         let now = NOT_AFTER + 14 * 86_400;
         match enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now) {
-            CertGuard::Deny { wire_code, wire_detail } => {
+            CertGuard::Deny {
+                wire_code,
+                wire_detail,
+            } => {
                 assert_eq!(wire_code, "FAIL_CERT_EXPIRED");
-                assert!(wire_detail.contains("expired"),
-                    "deny detail should mention expiry; got {wire_detail:?}");
+                assert!(
+                    wire_detail.contains("expired"),
+                    "deny detail should mention expiry; got {wire_detail:?}"
+                );
             }
             other => panic!("expected Deny; got {other:?}"),
         }
         // Second call: still denies AND emits a second audit (no dedupe).
         let _ = enf.enforce(&fp(), "AbortTask", &b, sink.as_ref(), now);
-        let n = sink.event_kinds().iter()
+        let n = sink
+            .event_kinds()
+            .iter()
             .filter(|k| **k == "OperatorCertExpiredOpDenied")
             .count();
-        assert_eq!(n, 2,
+        assert_eq!(
+            n,
+            2,
             "Expired zone MUST emit one audit per op (no dedupe); got {n} for {:?}",
-            sink.event_kinds());
+            sink.event_kinds()
+        );
     }
 
     // ── NotYetValid zone (denies; reuses expired audit kind) ──────
@@ -537,8 +599,10 @@ mod tests {
         // expired_at = cert.not_before so an auditor can see the
         // boundary the request was on the wrong side of.
         let kinds = sink.event_kinds();
-        assert!(kinds.iter().any(|k| *k == "OperatorCertExpiredOpDenied"),
-            "expected OperatorCertExpiredOpDenied in {kinds:?}");
+        assert!(
+            kinds.iter().any(|k| *k == "OperatorCertExpiredOpDenied"),
+            "expected OperatorCertExpiredOpDenied in {kinds:?}"
+        );
     }
 
     // ── EmergencyRecovery cert ────────────────────────────────────
@@ -550,15 +614,22 @@ mod tests {
         // Time of day doesn't matter for emergency certs; pick anything.
         let now = NOT_AFTER + 365 * 86_400;
         for _ in 0..3 {
-            assert_eq!(enf.enforce(&fp(), "RotateEpoch", &b, sink.as_ref(), now),
-                CertGuard::Allow);
+            assert_eq!(
+                enf.enforce(&fp(), "RotateEpoch", &b, sink.as_ref(), now),
+                CertGuard::Allow
+            );
         }
-        let n = sink.event_kinds().iter()
+        let n = sink
+            .event_kinds()
+            .iter()
             .filter(|k| **k == "EmergencyOperatorUsed")
             .count();
-        assert_eq!(n, 3,
+        assert_eq!(
+            n,
+            3,
             "EmergencyOperatorUsed MUST emit once per op (no dedupe); got {n} for {:?}",
-            sink.event_kinds());
+            sink.event_kinds()
+        );
     }
 
     // ── Unknown fingerprint (kernel invariant — fail-open) ─────────
@@ -567,8 +638,10 @@ mod tests {
     fn unknown_fingerprint_returns_allow_so_handler_can_surface_real_error() {
         let (enf, sink) = enforcer_with_sink();
         let b = PolicyBundle::for_tests_with_operators(vec![]);
-        assert_eq!(enf.enforce("no-such-fp", "AbortTask", &b, sink.as_ref(), 0),
-            CertGuard::Allow);
+        assert_eq!(
+            enf.enforce("no-such-fp", "AbortTask", &b, sink.as_ref(), 0),
+            CertGuard::Allow
+        );
         assert!(sink.event_kinds().is_empty());
     }
 }

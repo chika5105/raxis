@@ -103,13 +103,13 @@ pub fn evaluate_dispatch(
         // ── V1 backward-compat row (NULL `session_agent_type`) ────────
         // Pre-Migration-5 sessions carry the four V1 intent kinds;
         // V2 sub-task kinds are unauthorized.
-        (SingleCommit,     None) => Authorized,
+        (SingleCommit, None) => Authorized,
         (IntegrationMerge, None) => Authorized,
-        (CompleteTask,     None) => Authorized,
-        (ReportFailure,    None) => Authorized,
-        (ActivateSubTask,  None) => Unauthorized,
-        (RetrySubTask,     None) => Unauthorized,
-        (SubmitReview,     None) => Unauthorized,
+        (CompleteTask, None) => Authorized,
+        (ReportFailure, None) => Authorized,
+        (ActivateSubTask, None) => Unauthorized,
+        (RetrySubTask, None) => Unauthorized,
+        (SubmitReview, None) => Unauthorized,
         // V2 §3.2: V1 sessions cannot emit StructuredOutput.
         (StructuredOutput, None) => Unauthorized,
 
@@ -124,13 +124,13 @@ pub fn evaluate_dispatch(
         // surfaces a ceiling breach. CompleteTask is allowed for
         // the orchestrator's own task closure.
         // SubmitReview is Reviewer-only.
-        (SingleCommit,     Some(Orchestrator)) => Unauthorized,
+        (SingleCommit, Some(Orchestrator)) => Unauthorized,
         (IntegrationMerge, Some(Orchestrator)) => Authorized,
-        (CompleteTask,     Some(Orchestrator)) => Authorized,
-        (ReportFailure,    Some(Orchestrator)) => Authorized,
-        (ActivateSubTask,  Some(Orchestrator)) => Authorized,
-        (RetrySubTask,     Some(Orchestrator)) => Authorized,
-        (SubmitReview,     Some(Orchestrator)) => Unauthorized,
+        (CompleteTask, Some(Orchestrator)) => Authorized,
+        (ReportFailure, Some(Orchestrator)) => Authorized,
+        (ActivateSubTask, Some(Orchestrator)) => Authorized,
+        (RetrySubTask, Some(Orchestrator)) => Authorized,
+        (SubmitReview, Some(Orchestrator)) => Unauthorized,
         // V2 §3.2: Orchestrator can emit a TaskSummary handoff /
         // ProgressReport / DiagnosticFlag mid-DAG.
         (StructuredOutput, Some(Orchestrator)) => Authorized,
@@ -141,13 +141,13 @@ pub fn evaluate_dispatch(
         // RetrySubTask) and it does NOT integrate
         // (Step 8 — IntegrationMerge is Orchestrator-only). Reviewer
         // intent is also off-limits.
-        (SingleCommit,     Some(Executor)) => Authorized,
+        (SingleCommit, Some(Executor)) => Authorized,
         (IntegrationMerge, Some(Executor)) => Unauthorized,
-        (CompleteTask,     Some(Executor)) => Authorized,
-        (ReportFailure,    Some(Executor)) => Authorized,
-        (ActivateSubTask,  Some(Executor)) => Unauthorized,
-        (RetrySubTask,     Some(Executor)) => Unauthorized,
-        (SubmitReview,     Some(Executor)) => Unauthorized,
+        (CompleteTask, Some(Executor)) => Authorized,
+        (ReportFailure, Some(Executor)) => Authorized,
+        (ActivateSubTask, Some(Executor)) => Unauthorized,
+        (RetrySubTask, Some(Executor)) => Unauthorized,
+        (SubmitReview, Some(Executor)) => Unauthorized,
         // V2 §3.2: Executor emits ProgressReport / DiagnosticFlag /
         // TaskSummary mid-task.
         (StructuredOutput, Some(Executor)) => Authorized,
@@ -162,13 +162,13 @@ pub fn evaluate_dispatch(
         // ReportFailure (the canonical "I cannot review this" path is
         // SubmitReview { approved: false, critique: ... }, NOT a
         // V1-style failure self-report).
-        (SingleCommit,     Some(Reviewer)) => Unauthorized,
+        (SingleCommit, Some(Reviewer)) => Unauthorized,
         (IntegrationMerge, Some(Reviewer)) => Unauthorized,
-        (CompleteTask,     Some(Reviewer)) => Unauthorized,
-        (ReportFailure,    Some(Reviewer)) => Unauthorized,
-        (ActivateSubTask,  Some(Reviewer)) => Unauthorized,
-        (RetrySubTask,     Some(Reviewer)) => Unauthorized,
-        (SubmitReview,     Some(Reviewer)) => Authorized,
+        (CompleteTask, Some(Reviewer)) => Unauthorized,
+        (ReportFailure, Some(Reviewer)) => Unauthorized,
+        (ActivateSubTask, Some(Reviewer)) => Unauthorized,
+        (RetrySubTask, Some(Reviewer)) => Unauthorized,
+        (SubmitReview, Some(Reviewer)) => Authorized,
         // V2 §3.2 / INV-PLANNER-HARNESS-02: Reviewer is a
         // Pure-Static actor and NEVER emits structured output.
         (StructuredOutput, Some(Reviewer)) => Unauthorized,
@@ -193,56 +193,153 @@ mod tests {
         // (kind, agent_type, expected_verdict)
         let expectations = [
             // V1 NULL row
-            (IntentKind::SingleCommit,     None, true),
+            (IntentKind::SingleCommit, None, true),
             (IntentKind::IntegrationMerge, None, true),
-            (IntentKind::CompleteTask,     None, true),
-            (IntentKind::ReportFailure,    None, true),
-            (IntentKind::ActivateSubTask,  None, false),
-            (IntentKind::RetrySubTask,     None, false),
-            (IntentKind::SubmitReview,     None, false),
+            (IntentKind::CompleteTask, None, true),
+            (IntentKind::ReportFailure, None, true),
+            (IntentKind::ActivateSubTask, None, false),
+            (IntentKind::RetrySubTask, None, false),
+            (IntentKind::SubmitReview, None, false),
             (IntentKind::StructuredOutput, None, false),
-
             // Orchestrator
-            (IntentKind::SingleCommit,     Some(SessionAgentType::Orchestrator), false),
-            (IntentKind::IntegrationMerge, Some(SessionAgentType::Orchestrator), true),
-            (IntentKind::CompleteTask,     Some(SessionAgentType::Orchestrator), true),
-            (IntentKind::ReportFailure,    Some(SessionAgentType::Orchestrator), true),
-            (IntentKind::ActivateSubTask,  Some(SessionAgentType::Orchestrator), true),
-            (IntentKind::RetrySubTask,     Some(SessionAgentType::Orchestrator), true),
-            (IntentKind::SubmitReview,     Some(SessionAgentType::Orchestrator), false),
-            (IntentKind::StructuredOutput, Some(SessionAgentType::Orchestrator), true),
-
+            (
+                IntentKind::SingleCommit,
+                Some(SessionAgentType::Orchestrator),
+                false,
+            ),
+            (
+                IntentKind::IntegrationMerge,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::CompleteTask,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::ReportFailure,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::ActivateSubTask,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::RetrySubTask,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
+            (
+                IntentKind::SubmitReview,
+                Some(SessionAgentType::Orchestrator),
+                false,
+            ),
+            (
+                IntentKind::StructuredOutput,
+                Some(SessionAgentType::Orchestrator),
+                true,
+            ),
             // Executor
-            (IntentKind::SingleCommit,     Some(SessionAgentType::Executor), true),
-            (IntentKind::IntegrationMerge, Some(SessionAgentType::Executor), false),
-            (IntentKind::CompleteTask,     Some(SessionAgentType::Executor), true),
-            (IntentKind::ReportFailure,    Some(SessionAgentType::Executor), true),
-            (IntentKind::ActivateSubTask,  Some(SessionAgentType::Executor), false),
-            (IntentKind::RetrySubTask,     Some(SessionAgentType::Executor), false),
-            (IntentKind::SubmitReview,     Some(SessionAgentType::Executor), false),
-            (IntentKind::StructuredOutput, Some(SessionAgentType::Executor), true),
-
+            (
+                IntentKind::SingleCommit,
+                Some(SessionAgentType::Executor),
+                true,
+            ),
+            (
+                IntentKind::IntegrationMerge,
+                Some(SessionAgentType::Executor),
+                false,
+            ),
+            (
+                IntentKind::CompleteTask,
+                Some(SessionAgentType::Executor),
+                true,
+            ),
+            (
+                IntentKind::ReportFailure,
+                Some(SessionAgentType::Executor),
+                true,
+            ),
+            (
+                IntentKind::ActivateSubTask,
+                Some(SessionAgentType::Executor),
+                false,
+            ),
+            (
+                IntentKind::RetrySubTask,
+                Some(SessionAgentType::Executor),
+                false,
+            ),
+            (
+                IntentKind::SubmitReview,
+                Some(SessionAgentType::Executor),
+                false,
+            ),
+            (
+                IntentKind::StructuredOutput,
+                Some(SessionAgentType::Executor),
+                true,
+            ),
             // Reviewer
-            (IntentKind::SingleCommit,     Some(SessionAgentType::Reviewer), false),
-            (IntentKind::IntegrationMerge, Some(SessionAgentType::Reviewer), false),
-            (IntentKind::CompleteTask,     Some(SessionAgentType::Reviewer), false),
-            (IntentKind::ReportFailure,    Some(SessionAgentType::Reviewer), false),
-            (IntentKind::ActivateSubTask,  Some(SessionAgentType::Reviewer), false),
-            (IntentKind::RetrySubTask,     Some(SessionAgentType::Reviewer), false),
-            (IntentKind::SubmitReview,     Some(SessionAgentType::Reviewer), true),
-            (IntentKind::StructuredOutput, Some(SessionAgentType::Reviewer), false),
+            (
+                IntentKind::SingleCommit,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::IntegrationMerge,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::CompleteTask,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::ReportFailure,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::ActivateSubTask,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::RetrySubTask,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
+            (
+                IntentKind::SubmitReview,
+                Some(SessionAgentType::Reviewer),
+                true,
+            ),
+            (
+                IntentKind::StructuredOutput,
+                Some(SessionAgentType::Reviewer),
+                false,
+            ),
         ];
 
         // 8 kinds × (3 agent types + 1 NULL) = 32 cells.
-        assert_eq!(expectations.len(), 8 * 4,
+        assert_eq!(
+            expectations.len(),
+            8 * 4,
             "matrix coverage: 8 IntentKind variants × 4 agent-type \
              buckets (Orchestrator/Executor/Reviewer/None) = 32 cells. \
-             A mismatch here is a test-data drift, not a matrix bug.");
+             A mismatch here is a test-data drift, not a matrix bug."
+        );
 
         for (kind, agent_type, expected) in expectations {
             let v = evaluate_dispatch(kind, agent_type);
             assert_eq!(
-                v.is_authorized(), expected,
+                v.is_authorized(),
+                expected,
                 "matrix({kind:?}, {agent_type:?}) = {v:?}; expected \
                  authorized={expected}",
             );
@@ -268,14 +365,20 @@ mod tests {
         // Pin both enum lengths so a future variant addition trips
         // this test rather than silently expanding the table outside
         // the explicit coverage above.
-        assert_eq!(IntentKind::ALL.len(), 8,
+        assert_eq!(
+            IntentKind::ALL.len(),
+            8,
             "matrix sized for 8 IntentKind variants (V2 base 7 + V2.5 \
              `StructuredOutput`); bumping requires a new row in \
              `evaluate_dispatch` AND a new line in \
-             `matrix_authorizes_exactly_the_expected_cells`.");
-        assert_eq!(SessionAgentType::ALL.len(), 3,
+             `matrix_authorizes_exactly_the_expected_cells`."
+        );
+        assert_eq!(
+            SessionAgentType::ALL.len(),
+            3,
             "matrix sized for 3 SessionAgentType variants; bumping \
-             requires a new column.");
+             requires a new column."
+        );
     }
 
     /// INV-DISPATCH structural property: the Reviewer's authorized
@@ -289,9 +392,12 @@ mod tests {
         for &k in &IntentKind::ALL {
             let v = evaluate_dispatch(k, Some(SessionAgentType::Reviewer));
             let expected = matches!(k, IntentKind::SubmitReview);
-            assert_eq!(v.is_authorized(), expected,
+            assert_eq!(
+                v.is_authorized(),
+                expected,
                 "Reviewer authorization for {k:?}: got {v:?}, expected \
-                 authorized={expected}");
+                 authorized={expected}"
+            );
         }
     }
 
@@ -305,14 +411,19 @@ mod tests {
             for &a in &SessionAgentType::ALL {
                 let v = evaluate_dispatch(delegation, Some(a));
                 let expected = matches!(a, SessionAgentType::Orchestrator);
-                assert_eq!(v.is_authorized(), expected,
+                assert_eq!(
+                    v.is_authorized(),
+                    expected,
                     "Delegation kind {delegation:?} authorization for \
-                     agent {a:?}: got {v:?}, expected authorized={expected}");
+                     agent {a:?}: got {v:?}, expected authorized={expected}"
+                );
             }
             // V1 NULL row also rejects delegation.
-            assert!(!evaluate_dispatch(delegation, None).is_authorized(),
+            assert!(
+                !evaluate_dispatch(delegation, None).is_authorized(),
                 "V1 NULL session must not submit V2 delegation kind \
-                 {delegation:?}");
+                 {delegation:?}"
+            );
         }
     }
 
@@ -325,9 +436,12 @@ mod tests {
         for &a in &SessionAgentType::ALL {
             let v = evaluate_dispatch(IntentKind::IntegrationMerge, Some(a));
             let expected = matches!(a, SessionAgentType::Orchestrator);
-            assert_eq!(v.is_authorized(), expected,
+            assert_eq!(
+                v.is_authorized(),
+                expected,
                 "IntegrationMerge for {a:?}: got {v:?}, expected \
-                 authorized={expected}");
+                 authorized={expected}"
+            );
         }
         // V1 row: NULL keeps IntegrationMerge.
         assert!(evaluate_dispatch(IntentKind::IntegrationMerge, None).is_authorized());

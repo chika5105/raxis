@@ -86,9 +86,9 @@ pub struct Restrictions {
 impl Default for Restrictions {
     fn default() -> Self {
         Self {
-            allowed_paths:  default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_scopes: Vec::new(),
-            project:        String::new(),
+            project: String::new(),
         }
     }
 }
@@ -123,9 +123,14 @@ impl Restrictions {
             }
         }
         if !self.project.is_empty()
-            && !self.project.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            && !self
+                .project
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
         {
-            return Err(RestrictionValidationError::MalformedProject(self.project.clone()));
+            return Err(RestrictionValidationError::MalformedProject(
+                self.project.clone(),
+            ));
         }
         Ok(())
     }
@@ -165,9 +170,9 @@ mod tests {
     #[test]
     fn empty_allowlist_blocks_everything() {
         let r = Restrictions {
-            allowed_paths:  vec![],
+            allowed_paths: vec![],
             allowed_scopes: vec![],
-            project:        String::new(),
+            project: String::new(),
         };
         assert!(!r.allows_path("/computeMetadata/v1/project/project-id"));
     }
@@ -180,12 +185,12 @@ mod tests {
     #[test]
     fn validate_accepts_well_formed_scopes_and_project() {
         let r = Restrictions {
-            allowed_paths:  default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_scopes: vec![
                 "https://www.googleapis.com/auth/devstorage.read_only".into(),
                 "https://www.googleapis.com/auth/cloud-platform".into(),
             ],
-            project:        "my-staging-1".into(),
+            project: "my-staging-1".into(),
         };
         r.validate().unwrap();
     }
@@ -193,9 +198,9 @@ mod tests {
     #[test]
     fn validate_rejects_non_https_scope() {
         let r = Restrictions {
-            allowed_paths:  default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_scopes: vec!["http://insecure.example/auth".into()],
-            project:        String::new(),
+            project: String::new(),
         };
         assert_eq!(
             r.validate(),
@@ -208,9 +213,9 @@ mod tests {
     #[test]
     fn validate_rejects_uppercase_project() {
         let r = Restrictions {
-            allowed_paths:  default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_scopes: vec![],
-            project:        "My-Project".into(),
+            project: "My-Project".into(),
         };
         assert_eq!(
             r.validate(),

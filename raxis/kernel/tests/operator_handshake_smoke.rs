@@ -31,7 +31,9 @@ async fn handshake_byte_format_round_trips() {
     let (mut kernel_side, mut cli_side) = tokio::io::duplex(8 * 1024);
 
     let challenge = deterministic_challenge();
-    write_json_frame_async(&mut kernel_side, &challenge).await.unwrap();
+    write_json_frame_async(&mut kernel_side, &challenge)
+        .await
+        .unwrap();
     drop(kernel_side); // signal EOF after one frame
 
     let received: serde_json::Value = read_json_frame_async(&mut cli_side).await.unwrap();
@@ -84,11 +86,8 @@ async fn signing_the_hex_string_instead_of_bytes_is_rejected() {
     // BUG path: sign the UTF-8 of the hex string, not the decoded bytes.
     let bad_sig = key.sign(challenge_hex.as_bytes());
 
-    let result = raxis_crypto::verify::verify_ed25519(
-        &pk_bytes,
-        &challenge_bytes,
-        &bad_sig.to_bytes(),
-    );
+    let result =
+        raxis_crypto::verify::verify_ed25519(&pk_bytes, &challenge_bytes, &bad_sig.to_bytes());
     assert!(
         result.is_err(),
         "kernel must reject a signature over the hex string (regression guard)"
@@ -108,7 +107,9 @@ async fn kernel_async_writer_to_cli_sync_reader_round_trip() {
         "status": "Ok",
         "details": "auth complete",
     });
-    write_json_frame_async(&mut kernel_side, &payload).await.unwrap();
+    write_json_frame_async(&mut kernel_side, &payload)
+        .await
+        .unwrap();
     drop(kernel_side);
 
     // Drain the duplex into a Vec so we can hand it to the SYNC reader the

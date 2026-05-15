@@ -34,7 +34,7 @@ pub trait ImageResolver: Send + Sync {
     /// hint.
     async fn resolve(
         &self,
-        oci_digest:    &OciDigest,
+        oci_digest: &OciDigest,
         registry_hint: Option<&RegistryRef>,
     ) -> Result<ResolvedImage, ImageResolverError>;
 

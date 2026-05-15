@@ -56,7 +56,7 @@ pub struct DeadlockDump {
     /// Cross-references the kernel binary that produced the
     /// cycle; useful when post-hoc analysis spans multiple
     /// kernel versions.
-    pub kernel_version:        String,
+    pub kernel_version: String,
     /// Wall-clock unix-seconds when the watcher's
     /// `parking_lot::deadlock::check_deadlock()` returned a
     /// non-empty result.
@@ -64,15 +64,15 @@ pub struct DeadlockDump {
     /// Number of distinct deadlock cycles in the same detection.
     /// Almost always `1` in practice; recorded for forensic
     /// completeness in the rare multi-cycle case.
-    pub cycle_count:           u32,
+    pub cycle_count: u32,
     /// Total threads across all cycles. Lifted to the top level
     /// so the synthesised audit event can carry a flat counter.
-    pub thread_count:          u32,
+    pub thread_count: u32,
     /// Total lock acquisitions across all cycles. Lifted to the
     /// top level for the audit event's flat counter.
-    pub lock_count:            u32,
+    pub lock_count: u32,
     /// Per-cycle thread + backtrace listing.
-    pub cycles:                Vec<DeadlockCycle>,
+    pub cycles: Vec<DeadlockCycle>,
 }
 
 /// One detected deadlock cycle.
@@ -81,7 +81,7 @@ pub struct DeadlockCycle {
     /// 0-indexed cycle number within the detection.
     pub cycle_index: u32,
     /// Threads that participate in this cycle.
-    pub threads:     Vec<DeadlockThread>,
+    pub threads: Vec<DeadlockThread>,
 }
 
 /// One thread participating in a detected cycle.
@@ -194,14 +194,12 @@ pub fn read_dump(path: &Path) -> std::io::Result<DeadlockDump> {
 pub fn move_to_consumed(data_dir: &Path, dump_path: &Path) -> std::io::Result<PathBuf> {
     let consumed = consumed_dir(data_dir);
     fs::create_dir_all(&consumed)?;
-    let name = dump_path
-        .file_name()
-        .ok_or_else(|| {
-            std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "dump path has no filename",
-            )
-        })?;
+    let name = dump_path.file_name().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "dump path has no filename",
+        )
+    })?;
     let target = consumed.join(name);
     fs::rename(dump_path, &target)?;
     Ok(target)
@@ -255,7 +253,7 @@ mod tests {
             lock_count: 2,
             cycles: vec![DeadlockCycle {
                 cycle_index: 0,
-                threads:     vec![
+                threads: vec![
                     DeadlockThread {
                         thread_id: "ThreadId(7)".to_owned(),
                         backtrace: "frame_a\nframe_b\n".to_owned(),
@@ -320,11 +318,7 @@ mod tests {
         write_dump(dir.path(), &fixture(10)).unwrap();
         write_dump(dir.path(), &fixture(30)).unwrap();
         std::fs::write(dir.path().join("kernel.db"), b"not ours").unwrap();
-        std::fs::write(
-            dir.path().join(".deadlock_dump_99.json.tmp"),
-            b"partial",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".deadlock_dump_99.json.tmp"), b"partial").unwrap();
         let found = scan_pending_dumps(dir.path()).unwrap();
         let names: Vec<String> = found
             .iter()

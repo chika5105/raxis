@@ -41,7 +41,6 @@ pub enum IntentKind {
     ReportFailure,
 
     // ── V2 hierarchical orchestration (v2-deep-spec.md §1.2) ──────────────
-
     /// **V2.** Orchestrator-only. Requests that the Kernel admit and spawn
     /// the sub-task identified by `task_id` (an Executor or Reviewer
     /// sub-task declared in the operator-signed plan).
@@ -111,13 +110,13 @@ pub enum IntentKind {
 impl IntentKind {
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::SingleCommit     => "SingleCommit",
+            Self::SingleCommit => "SingleCommit",
             Self::IntegrationMerge => "IntegrationMerge",
-            Self::CompleteTask     => "CompleteTask",
-            Self::ReportFailure    => "ReportFailure",
-            Self::ActivateSubTask  => "ActivateSubTask",
-            Self::RetrySubTask     => "RetrySubTask",
-            Self::SubmitReview     => "SubmitReview",
+            Self::CompleteTask => "CompleteTask",
+            Self::ReportFailure => "ReportFailure",
+            Self::ActivateSubTask => "ActivateSubTask",
+            Self::RetrySubTask => "RetrySubTask",
+            Self::SubmitReview => "SubmitReview",
             Self::StructuredOutput => "StructuredOutput",
         }
     }
@@ -264,7 +263,6 @@ pub struct IntentRequest {
     pub approval_token: Option<ApprovalToken>,
 
     // ── V2 SubmitReview payload (v2-deep-spec.md §Step 22) ────────────────
-
     /// **V2 SubmitReview only.** The Reviewer's verdict on the
     /// Executor's `evaluation_sha`. Required when `intent_kind =
     /// SubmitReview`; ignored for every other kind.
@@ -321,7 +319,6 @@ pub struct IntentRequest {
     pub critique: Option<String>,
 
     // ── V2 IntegrationMerge attribution payload (v2-deep-spec.md §Step 30) ──
-
     /// **V2 IntegrationMerge only.** When `Some(id)`, this merge was
     /// produced via operator escalation: either Path 1 (operator
     /// hint guided the LLM's re-attempt) or Path 2 (operator
@@ -352,7 +349,6 @@ pub struct IntentRequest {
     pub resolved_via_escalation: Option<EscalationId>,
 
     // ── V2 §2.5 token-limit enforcement (per-intent token reporting) ──
-
     /// **V2 `v2_extended_gaps.md §2.5` per-intent token report.**
     ///
     /// The cumulative token usage the planner has consumed in its
@@ -386,7 +382,6 @@ pub struct IntentRequest {
     pub tokens_used: Option<TokensReport>,
 
     // ── V2 §3.2 StructuredOutput payload ───────────────────────────────
-
     /// **V2 `v2_extended_gaps.md §3.2` typed mid-session output.**
     ///
     /// Required to be `Some(_)` when `intent_kind = StructuredOutput`
@@ -418,14 +413,14 @@ pub struct IntentRequest {
 pub struct TokensReport {
     /// Cumulative input tokens (prompt + tool output) the planner
     /// has consumed in this session.
-    pub input_tokens:          u64,
+    pub input_tokens: u64,
     /// Cumulative output tokens (model-generated text + tool calls)
     /// the planner has emitted in this session.
-    pub output_tokens:         u64,
+    pub output_tokens: u64,
     /// Cumulative cache-read tokens (Anthropic prompt-caching). 0
     /// when the provider does not surface this counter.
     #[serde(default)]
-    pub cache_read_tokens:     u64,
+    pub cache_read_tokens: u64,
     /// Cumulative cache-creation tokens (Anthropic prompt-caching).
     /// 0 when the provider does not surface this counter.
     #[serde(default)]
@@ -437,7 +432,7 @@ pub struct TokensReport {
     /// when the planner did not route through the gateway (e.g.
     /// reviewer that short-circuited on a deterministic check).
     #[serde(default)]
-    pub provider_id:           String,
+    pub provider_id: String,
 }
 
 /// V2 hard cap on `IntentRequest.critique` byte length
@@ -569,13 +564,16 @@ mod tests {
     /// or store mapping regresses.
     #[test]
     fn intent_kind_variant_count_is_pinned_to_v25() {
-        assert_eq!(IntentKind::ALL.len(), 8,
+        assert_eq!(
+            IntentKind::ALL.len(),
+            8,
             "V2.5 has exactly 8 IntentKind variants \
              (4 V1: SingleCommit, IntegrationMerge, CompleteTask, \
              ReportFailure; 3 V2: ActivateSubTask, RetrySubTask, \
              SubmitReview; 1 V2.5: StructuredOutput). Bumping this \
              requires the static dispatch matrix \
-             (v2-deep-spec.md §Step 20) to gain a matching row.");
+             (v2-deep-spec.md §Step 20) to gain a matching row."
+        );
     }
 
     /// `as_str` round-trip: every variant maps to a non-empty
@@ -589,18 +587,20 @@ mod tests {
         for &k in &IntentKind::ALL {
             let s = k.as_str();
             assert!(!s.is_empty());
-            assert!(seen.insert(s),
-                "IntentKind::as_str collision detected at {k:?}: {s}");
+            assert!(
+                seen.insert(s),
+                "IntentKind::as_str collision detected at {k:?}: {s}"
+            );
         }
         // Pin the exact strings — these are wire-stable.
-        assert_eq!(IntentKind::SingleCommit.as_str(),     "SingleCommit");
+        assert_eq!(IntentKind::SingleCommit.as_str(), "SingleCommit");
         assert_eq!(IntentKind::IntegrationMerge.as_str(), "IntegrationMerge");
-        assert_eq!(IntentKind::CompleteTask.as_str(),     "CompleteTask");
-        assert_eq!(IntentKind::ReportFailure.as_str(),    "ReportFailure");
-        assert_eq!(IntentKind::ActivateSubTask.as_str(),  "ActivateSubTask");
-        assert_eq!(IntentKind::RetrySubTask.as_str(),     "RetrySubTask");
-        assert_eq!(IntentKind::SubmitReview.as_str(),     "SubmitReview");
-        assert_eq!(IntentKind::StructuredOutput.as_str(),  "StructuredOutput");
+        assert_eq!(IntentKind::CompleteTask.as_str(), "CompleteTask");
+        assert_eq!(IntentKind::ReportFailure.as_str(), "ReportFailure");
+        assert_eq!(IntentKind::ActivateSubTask.as_str(), "ActivateSubTask");
+        assert_eq!(IntentKind::RetrySubTask.as_str(), "RetrySubTask");
+        assert_eq!(IntentKind::SubmitReview.as_str(), "SubmitReview");
+        assert_eq!(IntentKind::StructuredOutput.as_str(), "StructuredOutput");
     }
 
     /// V2 sub-task kinds do NOT carry a SHA range. The kernel
@@ -636,8 +636,10 @@ mod tests {
             IntentKind::CompleteTask,
             IntentKind::ReportFailure,
         ] {
-            assert!(!k.is_v2_subtask_kind(),
-                "V1 kind {k:?} must NOT be a V2 sub-task kind");
+            assert!(
+                !k.is_v2_subtask_kind(),
+                "V1 kind {k:?} must NOT be a V2 sub-task kind"
+            );
         }
     }
 
@@ -654,8 +656,10 @@ mod tests {
             IntentKind::ActivateSubTask,
             IntentKind::RetrySubTask,
         ] {
-            assert!(!k.requires_approved(),
-                "{k:?} must NOT require the `approved` field");
+            assert!(
+                !k.requires_approved(),
+                "{k:?} must NOT require the `approved` field"
+            );
         }
     }
 
@@ -676,34 +680,34 @@ mod tests {
     ///      (regression caught by the kernel full-lifecycle E2E suite).
     #[test]
     fn v1_intent_request_under_v2_codebase_round_trips_through_bincode() {
-        use uuid::Uuid;
         use crate::TaskId;
+        use uuid::Uuid;
 
         let req = IntentRequest {
-            session_token:   "tok".into(),
+            session_token: "tok".into(),
             sequence_number: 1,
-            envelope_nonce:  "0".repeat(32),
-            intent_kind:     IntentKind::SingleCommit,
-            task_id:         TaskId::parse("t-1").unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::SingleCommit,
+            task_id: TaskId::parse("t-1").unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   None,
+            justification: None,
             idempotency_key: Some(Uuid::nil()),
-            approval_token:  None,
-            approved:        None,
-            critique:        None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         };
 
         // 1. bincode round-trip on the canonical wire shape.
         let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
             .expect("bincode encode");
-        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
-            &bytes, bincode::config::standard(),
-        ).expect("bincode decode");
+        let (back, _): (IntentRequest, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("bincode decode");
         assert_eq!(back.intent_kind, IntentKind::SingleCommit);
         assert!(back.approved.is_none());
         assert!(back.critique.is_none());
@@ -713,8 +717,10 @@ mod tests {
         //    not on absence-of-key.
         let v = serde_json::to_value(&req).unwrap();
         let obj = v.as_object().unwrap();
-        assert!(obj.contains_key("approved"),
-            "approved present (as null) in JSON projection");
+        assert!(
+            obj.contains_key("approved"),
+            "approved present (as null) in JSON projection"
+        );
         assert!(obj.get("approved").unwrap().is_null());
         assert!(obj.contains_key("critique"));
         assert!(obj.get("critique").unwrap().is_null());
@@ -728,28 +734,27 @@ mod tests {
         use crate::TaskId;
 
         let req = IntentRequest {
-            session_token:   "tok".into(),
+            session_token: "tok".into(),
             sequence_number: 1,
-            envelope_nonce:  "1".repeat(32),
-            intent_kind:     IntentKind::SubmitReview,
-            task_id:         TaskId::parse("rev-task-1").unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: "1".repeat(32),
+            intent_kind: IntentKind::SubmitReview,
+            task_id: TaskId::parse("rev-task-1").unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   None,
+            justification: None,
             idempotency_key: None,
-            approval_token:  None,
-            approved:        Some(false),
-            critique:        Some("the auth check is missing".to_owned()),
+            approval_token: None,
+            approved: Some(false),
+            critique: Some("the auth check is missing".to_owned()),
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         };
         let s = serde_json::to_string(&req).unwrap();
         let back: IntentRequest = serde_json::from_str(&s).unwrap();
         assert_eq!(back.approved, Some(false));
-        assert_eq!(back.critique.as_deref(),
-            Some("the auth check is missing"));
+        assert_eq!(back.critique.as_deref(), Some("the auth check is missing"));
         assert_eq!(back.intent_kind, IntentKind::SubmitReview);
     }
 
@@ -758,9 +763,12 @@ mod tests {
     /// review to reconfirm the context-flooding-DoS analysis.
     #[test]
     fn max_critique_bytes_is_pinned_at_32_kib() {
-        assert_eq!(MAX_CRITIQUE_BYTES, 32 * 1024,
+        assert_eq!(
+            MAX_CRITIQUE_BYTES,
+            32 * 1024,
             "MAX_CRITIQUE_BYTES is wire-load-bearing per \
-             v2-deep-spec.md §Step 22; bumping requires a spec amend.");
+             v2-deep-spec.md §Step 22; bumping requires a spec amend."
+        );
     }
 
     /// V2 Step 30: `IntegrationMerge` carries an optional
@@ -772,43 +780,46 @@ mod tests {
     /// the kernel's Check 6b verification would never see the link.
     #[test]
     fn v2_integration_merge_round_trips_resolved_via_escalation() {
-        use crate::TaskId;
         use crate::id::EscalationId;
+        use crate::TaskId;
         // Fixed UUID — round-trip identity check below depends on
         // observing exactly this id on the decoded side.
-        let escalation_id = EscalationId::parse(
-            "4f3a4f3a-4f3a-4f3a-4f3a-4f3a4f3a4f3a"
-        ).expect("fixed UUID v4 fixture parses");
+        let escalation_id = EscalationId::parse("4f3a4f3a-4f3a-4f3a-4f3a-4f3a4f3a4f3a")
+            .expect("fixed UUID v4 fixture parses");
         let req = IntentRequest {
-            session_token:    "tok".into(),
-            sequence_number:  1,
-            envelope_nonce:   "2".repeat(32),
-            intent_kind:      IntentKind::IntegrationMerge,
-            task_id:          TaskId::parse("merge-1").unwrap(),
-            base_sha:         None,
-            head_sha:         None,
+            session_token: "tok".into(),
+            sequence_number: 1,
+            envelope_nonce: "2".repeat(32),
+            intent_kind: IntentKind::IntegrationMerge,
+            task_id: TaskId::parse("merge-1").unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:    None,
-            idempotency_key:  None,
-            approval_token:   None,
-            approved:         None,
-            critique:         None,
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: Some(escalation_id.clone()),
-            tokens_used:      None,
+            tokens_used: None,
             structured_output: None,
         };
 
         // Canonical IPC wire — bincode standard().
-        let bytes = bincode::serde::encode_to_vec(
-            &req, bincode::config::standard()).expect("bincode encode");
-        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
-            &bytes, bincode::config::standard()).expect("bincode decode");
-        assert_eq!(back.resolved_via_escalation.as_ref(), Some(&escalation_id),
+        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
+            .expect("bincode encode");
+        let (back, _): (IntentRequest, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("bincode decode");
+        assert_eq!(
+            back.resolved_via_escalation.as_ref(),
+            Some(&escalation_id),
             "bincode wire MUST preserve resolved_via_escalation: \
-             without it, Step 30 attribution fails silently");
+             without it, Step 30 attribution fails silently"
+        );
 
         // Operator JSON projection — round-trip through serde JSON.
-        let s    = serde_json::to_string(&req).unwrap();
+        let s = serde_json::to_string(&req).unwrap();
         let back = serde_json::from_str::<IntentRequest>(&s).unwrap();
         assert_eq!(back.resolved_via_escalation.as_ref(), Some(&escalation_id));
 
@@ -817,9 +828,11 @@ mod tests {
         // name without depending on serde's representation rules.
         let v = serde_json::to_value(&req).unwrap();
         let obj = v.as_object().unwrap();
-        assert!(obj.contains_key("resolved_via_escalation"),
+        assert!(
+            obj.contains_key("resolved_via_escalation"),
             "JSON projection MUST surface `resolved_via_escalation` for \
-             operator UIs that scan the wire frame");
+             operator UIs that scan the wire frame"
+        );
     }
 
     /// V2 Step 30: when the field is `None` (the standard merge path),
@@ -828,39 +841,42 @@ mod tests {
     /// consumers can match on the same key in both branches.
     #[test]
     fn v2_integration_merge_round_trips_with_no_escalation() {
-        use uuid::Uuid;
         use crate::TaskId;
+        use uuid::Uuid;
 
         let req = IntentRequest {
-            session_token:    "tok".into(),
-            sequence_number:  1,
-            envelope_nonce:   "3".repeat(32),
-            intent_kind:      IntentKind::IntegrationMerge,
-            task_id:          TaskId::parse("merge-1").unwrap(),
-            base_sha:         None,
-            head_sha:         None,
+            session_token: "tok".into(),
+            sequence_number: 1,
+            envelope_nonce: "3".repeat(32),
+            intent_kind: IntentKind::IntegrationMerge,
+            task_id: TaskId::parse("merge-1").unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:    None,
-            idempotency_key:  Some(Uuid::nil()),
-            approval_token:   None,
-            approved:         None,
-            critique:         None,
+            justification: None,
+            idempotency_key: Some(Uuid::nil()),
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:      None,
+            tokens_used: None,
             structured_output: None,
         };
-        let bytes = bincode::serde::encode_to_vec(
-            &req, bincode::config::standard()).expect("bincode encode");
-        let (back, _): (IntentRequest, _) = bincode::serde::decode_from_slice(
-            &bytes, bincode::config::standard()).expect("bincode decode");
+        let bytes = bincode::serde::encode_to_vec(&req, bincode::config::standard())
+            .expect("bincode encode");
+        let (back, _): (IntentRequest, _) =
+            bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
+                .expect("bincode decode");
         assert!(back.resolved_via_escalation.is_none());
 
         let v = serde_json::to_value(&req).unwrap();
         let obj = v.as_object().unwrap();
-        assert!(obj.contains_key("resolved_via_escalation"),
+        assert!(
+            obj.contains_key("resolved_via_escalation"),
             "JSON projection MUST surface `resolved_via_escalation` even \
              when None — operator UIs key off the field name, not serde \
-             elision");
+             elision"
+        );
         assert!(obj.get("resolved_via_escalation").unwrap().is_null());
     }
 }

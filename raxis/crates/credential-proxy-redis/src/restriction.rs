@@ -34,7 +34,9 @@ impl Restrictions {
             return true;
         }
         let upper = verb.to_ascii_uppercase();
-        self.allowed_commands.iter().any(|c| c.eq_ignore_ascii_case(&upper))
+        self.allowed_commands
+            .iter()
+            .any(|c| c.eq_ignore_ascii_case(&upper))
     }
 }
 
@@ -51,7 +53,9 @@ mod tests {
 
     #[test]
     fn non_empty_allowlist_is_case_insensitive() {
-        let r = Restrictions { allowed_commands: vec!["GET".into(), "set".into()] };
+        let r = Restrictions {
+            allowed_commands: vec!["GET".into(), "set".into()],
+        };
         assert!(r.allows_command("get"));
         assert!(r.allows_command("Set"));
         assert!(!r.allows_command("DEL"));

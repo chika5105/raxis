@@ -36,8 +36,8 @@ pub mod sentinel;
 pub mod signal;
 pub mod supervisor;
 
-pub use classify::{Outcome, classify_exit_status};
 pub use circuit_breaker::{CircuitBreaker, CircuitBreakerState};
+pub use classify::{classify_exit_status, Outcome};
 pub use sentinel::{Sentinel, SentinelStatus, SentinelSubState};
 pub use supervisor::{SupervisorConfig, SupervisorRunReport};
 

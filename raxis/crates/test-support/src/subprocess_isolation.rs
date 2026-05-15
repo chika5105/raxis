@@ -73,15 +73,15 @@ use raxis_isolation::{
 pub struct SubprocessIsolation {
     /// Per-instance backend identifier suffix (lets tests run multiple
     /// substrates in parallel and tell them apart in audit logs).
-    instance_tag:  &'static str,
+    instance_tag: &'static str,
     /// Override the path of the binary the child runs. When `None`,
     /// the substrate launches `cat` (`/bin/cat`) which echoes pushed
     /// frames back as intent frames — sufficient for round-trip
     /// framing tests. Pass `Some(path)` to drive a real planner-shaped
     /// helper binary.
-    child_binary:  Option<std::path::PathBuf>,
+    child_binary: Option<std::path::PathBuf>,
     /// Per-VM environment variables passed to the child.
-    extra_env:     HashMap<String, String>,
+    extra_env: HashMap<String, String>,
 }
 
 impl SubprocessIsolation {
@@ -99,8 +99,8 @@ impl SubprocessIsolation {
         }
         Ok(Self {
             instance_tag,
-            child_binary:  None,
-            extra_env:     HashMap::new(),
+            child_binary: None,
+            extra_env: HashMap::new(),
         })
     }
 
@@ -125,9 +125,9 @@ impl SubprocessIsolation {
 impl Backend for SubprocessIsolation {
     fn spawn(
         &self,
-        _image:    &VerifiedImage,
-        _mounts:   &[WorkspaceMount],
-        spec:      &VmSpec,
+        _image: &VerifiedImage,
+        _mounts: &[WorkspaceMount],
+        spec: &VmSpec,
     ) -> Result<Box<dyn Session>, IsolationError> {
         let binary = self
             .child_binary
@@ -173,9 +173,9 @@ impl Backend for SubprocessIsolation {
 
         let pid = child.id();
         Ok(Box::new(SubprocessSession {
-            child:        Some(child),
+            child: Some(child),
             pid,
-            terminated:   false,
+            terminated: false,
         }))
     }
 
@@ -190,11 +190,11 @@ impl Backend for SubprocessIsolation {
 
     fn capability(&self, kind: CapabilityKind) -> CapabilityValue {
         match kind {
-            CapabilityKind::KvmAvailable        => CapabilityValue::Bool(false),
+            CapabilityKind::KvmAvailable => CapabilityValue::Bool(false),
             CapabilityKind::AttestationSupported => CapabilityValue::Bool(false),
-            CapabilityKind::BootLatencyMs        => CapabilityValue::Int(5),
-            CapabilityKind::MaxConcurrentVms     => CapabilityValue::Int(64),
-            CapabilityKind::MemoryEncryption     => CapabilityValue::Bool(false),
+            CapabilityKind::BootLatencyMs => CapabilityValue::Int(5),
+            CapabilityKind::MaxConcurrentVms => CapabilityValue::Int(64),
+            CapabilityKind::MemoryEncryption => CapabilityValue::Bool(false),
         }
     }
 
@@ -217,8 +217,8 @@ pub struct SubprocessSession {
     /// `None` after `terminate` / `shutdown` reaps the child. The
     /// pipes' lifetimes are bound to the child's stdin/stdout owner —
     /// dropping the `Child` closes them.
-    child:      Option<Child>,
-    pid:        u32,
+    child: Option<Child>,
+    pid: u32,
     terminated: bool,
 }
 
@@ -229,12 +229,12 @@ impl Session for SubprocessSession {
             .as_mut()
             .and_then(|c| c.stdin.as_mut())
             .ok_or(IsolationError::PeerClosed)?;
-        stdin.write_all(&frame.bytes).map_err(|e| {
-            IsolationError::TransportFault(format!("subprocess stdin write: {e}"))
-        })?;
-        stdin.flush().map_err(|e| {
-            IsolationError::TransportFault(format!("subprocess stdin flush: {e}"))
-        })?;
+        stdin
+            .write_all(&frame.bytes)
+            .map_err(|e| IsolationError::TransportFault(format!("subprocess stdin write: {e}")))?;
+        stdin
+            .flush()
+            .map_err(|e| IsolationError::TransportFault(format!("subprocess stdin flush: {e}")))?;
         Ok(())
     }
 
@@ -251,9 +251,9 @@ impl Session for SubprocessSession {
             .and_then(|c| c.stdout.as_mut())
             .ok_or(IsolationError::PeerClosed)?;
         let mut buf = vec![0u8; 4096];
-        let n = stdout.read(&mut buf).map_err(|e| {
-            IsolationError::TransportFault(format!("subprocess stdout read: {e}"))
-        })?;
+        let n = stdout
+            .read(&mut buf)
+            .map_err(|e| IsolationError::TransportFault(format!("subprocess stdout read: {e}")))?;
         if n == 0 {
             return Err(IsolationError::PeerClosed);
         }
@@ -334,7 +334,7 @@ impl Session for SubprocessSession {
     /// for the production fix.
     fn register_loopback_listener(
         &mut self,
-        _vsock_port:         u32,
+        _vsock_port: u32,
         _host_loopback_port: u16,
     ) -> Result<(), IsolationError> {
         Ok(())
@@ -374,40 +374,39 @@ pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 mod tests {
     use super::*;
     use raxis_isolation::{
-        ContentHash, EgressTier, ImageBody, ImageKind, ImageSignature, MountMode,
-        SessionToken,
+        ContentHash, EgressTier, ImageBody, ImageKind, ImageSignature, MountMode, SessionToken,
     };
 
     fn fixture_image() -> VerifiedImage {
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path("/tmp/raxis-fixture-image".into()),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path("/tmp/raxis-fixture-image".into()),
             signature: ImageSignature(vec![0xAA; 64]),
-            image_id:  "raxis-test-fixture-1".into(),
+            image_id: "raxis-test-fixture-1".into(),
         }
     }
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:        1,
-            mem_mib:           64,
-            egress_tier:       EgressTier::None,
-            cgroup_quota:     None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken("tok-test-1".into()),
-            vsock_cid:         Some(0xC1D_FACE),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 64,
+            egress_tier: EgressTier::None,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken("tok-test-1".into()),
+            vsock_cid: Some(0xC1D_FACE),
+            virtio_fs_mounts: Vec::new(),
             linux_kernel_path: std::path::PathBuf::new(),
-            env:               Default::default(),
+            env: Default::default(),
             guest_console_log: None,
         }
     }
 
     fn fixture_mount(host_path: &str, guest_path: &str, mode: MountMode) -> WorkspaceMount {
         WorkspaceMount {
-            host_path:    host_path.into(),
-            guest_path:   guest_path.to_owned(),
+            host_path: host_path.into(),
+            guest_path: guest_path.to_owned(),
             mode,
             content_hash: Some(ContentHash([0u8; 32])),
         }
@@ -467,16 +466,24 @@ mod tests {
         // KVM is unavailable in user-space subprocesses by definition
         // — pinning this prevents a future refactor from accidentally
         // promoting the substrate to claim KVM access.
-        assert_eq!(s.capability(CapabilityKind::KvmAvailable),
-            CapabilityValue::Bool(false));
-        assert_eq!(s.capability(CapabilityKind::AttestationSupported),
-            CapabilityValue::Bool(false));
-        assert_eq!(s.capability(CapabilityKind::MemoryEncryption),
-            CapabilityValue::Bool(false));
+        assert_eq!(
+            s.capability(CapabilityKind::KvmAvailable),
+            CapabilityValue::Bool(false)
+        );
+        assert_eq!(
+            s.capability(CapabilityKind::AttestationSupported),
+            CapabilityValue::Bool(false)
+        );
+        assert_eq!(
+            s.capability(CapabilityKind::MemoryEncryption),
+            CapabilityValue::Bool(false)
+        );
         // Concrete int-shaped values — round-trip through the wire
         // shape so consumers can assert on them.
-        assert_eq!(s.capability(CapabilityKind::BootLatencyMs),
-            CapabilityValue::Int(5));
+        assert_eq!(
+            s.capability(CapabilityKind::BootLatencyMs),
+            CapabilityValue::Int(5)
+        );
     }
 
     #[test]
@@ -491,7 +498,9 @@ mod tests {
         let s = SubprocessIsolation::new("roundtrip").unwrap();
         let mut session = s.spawn(&fixture_image(), &[], &fixture_spec()).unwrap();
 
-        let frame = PushFrame { bytes: b"hello-substrate\n".to_vec() };
+        let frame = PushFrame {
+            bytes: b"hello-substrate\n".to_vec(),
+        };
         session.push(&frame).unwrap();
 
         // `/bin/cat` echoes stdin → stdout, so the next intent frame
@@ -530,7 +539,9 @@ mod tests {
         let s = SubprocessIsolation::new("term").unwrap();
         let mut session = s.spawn(&fixture_image(), &[], &fixture_spec()).unwrap();
         session.terminate().expect("first terminate must succeed");
-        session.terminate().expect("second terminate must be idempotent");
+        session
+            .terminate()
+            .expect("second terminate must be idempotent");
     }
 
     #[test]

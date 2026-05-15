@@ -189,10 +189,10 @@ pub enum RequestedEscalationScope {
     /// pathologically long intent shape can't blow the audit row
     /// size.
     LogicalDeadlock {
-        initiative_id:         crate::InitiativeId,
-        attempts:              u32,
-        window_secs:           u64,
-        last_intent_kind:      String,
+        initiative_id: crate::InitiativeId,
+        attempts: u32,
+        window_secs: u64,
+        last_intent_kind: String,
         last_rejection_reason: String,
     },
 }
@@ -303,14 +303,10 @@ pub enum EscalationResponse {
 
     /// An escalation with the same (task_id, class, idempotency_key) already exists.
     /// Treat as Submitted with the same escalation_id.
-    AlreadyPending {
-        escalation_id: crate::EscalationId,
-    },
+    AlreadyPending { escalation_id: crate::EscalationId },
 
     /// The kernel refused to record the escalation.
-    Rejected {
-        reason: EscalationRejectionReason,
-    },
+    Rejected { reason: EscalationRejectionReason },
 }
 
 /// Why the kernel refused to record the escalation.
@@ -440,27 +436,27 @@ mod tests {
     #[test]
     fn logical_deadlock_scope_round_trips_through_serde_json() {
         let scope = RequestedEscalationScope::LogicalDeadlock {
-            initiative_id:         crate::InitiativeId::new_v4(),
-            attempts:              4,
-            window_secs:           120,
-            last_intent_kind:      "RetrySubTask".into(),
+            initiative_id: crate::InitiativeId::new_v4(),
+            attempts: 4,
+            window_secs: 120,
+            last_intent_kind: "RetrySubTask".into(),
             last_rejection_reason: "RetrySubTaskRejectedNotRetryable".into(),
         };
         assert_eq!(scope.class(), EscalationClass::LogicalDeadlock);
-        let s    = serde_json::to_string(&scope).expect("serde encode");
-        let back = serde_json::from_str::<RequestedEscalationScope>(&s)
-            .expect("serde decode");
+        let s = serde_json::to_string(&scope).expect("serde encode");
+        let back = serde_json::from_str::<RequestedEscalationScope>(&s).expect("serde decode");
         match back {
             RequestedEscalationScope::LogicalDeadlock {
-                attempts, window_secs, last_intent_kind, last_rejection_reason, ..
+                attempts,
+                window_secs,
+                last_intent_kind,
+                last_rejection_reason,
+                ..
             } => {
                 assert_eq!(attempts, 4);
                 assert_eq!(window_secs, 120);
                 assert_eq!(last_intent_kind, "RetrySubTask");
-                assert_eq!(
-                    last_rejection_reason,
-                    "RetrySubTaskRejectedNotRetryable"
-                );
+                assert_eq!(last_rejection_reason, "RetrySubTaskRejectedNotRetryable");
             }
             other => panic!("unexpected scope variant after round-trip: {other:?}"),
         }
@@ -489,9 +485,8 @@ mod tests {
         let scope = RequestedEscalationScope::MergeConflict {
             conflicts: vec!["src/a.rs".into(), "src/b.rs".into()],
         };
-        let s    = serde_json::to_string(&scope).expect("serde encode");
-        let back = serde_json::from_str::<RequestedEscalationScope>(&s)
-            .expect("serde decode");
+        let s = serde_json::to_string(&scope).expect("serde encode");
+        let back = serde_json::from_str::<RequestedEscalationScope>(&s).expect("serde decode");
         match back {
             RequestedEscalationScope::MergeConflict { conflicts } => {
                 assert_eq!(conflicts, vec!["src/a.rs", "src/b.rs"]);
@@ -506,7 +501,7 @@ mod tests {
     /// chain budget. Pin the values so a future bump is visible.
     #[test]
     fn merge_conflict_caps_are_pinned() {
-        assert_eq!(MAX_MERGE_CONFLICT_PATHS,    64);
+        assert_eq!(MAX_MERGE_CONFLICT_PATHS, 64);
         assert_eq!(MAX_MERGE_CONFLICT_PATH_LEN, 1024);
     }
 }

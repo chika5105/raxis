@@ -82,7 +82,7 @@ impl Default for Restrictions {
     fn default() -> Self {
         Self {
             allowed_resources: Vec::new(),
-            allowed_actions:   Vec::new(),
+            allowed_actions: Vec::new(),
         }
     }
 }
@@ -96,7 +96,8 @@ impl Restrictions {
     /// the equality check.
     pub fn allows_resource(&self, resource: &str) -> bool {
         let want = resource.trim_end_matches('/');
-        self.allowed_resources.iter()
+        self.allowed_resources
+            .iter()
             .any(|p| p.trim_end_matches('/') == want)
     }
 
@@ -132,7 +133,7 @@ impl Restrictions {
                 }) {
                     return Err(RestrictionValidationError::MalformedAction {
                         resource: ra.resource.clone(),
-                        action:   a.clone(),
+                        action: a.clone(),
                     });
                 }
             }
@@ -158,7 +159,7 @@ pub enum RestrictionValidationError {
         /// Resource URI the malformed action belonged to.
         resource: String,
         /// The malformed action verb.
-        action:   String,
+        action: String,
     },
 }
 
@@ -169,7 +170,7 @@ mod tests {
     fn r_with(resources: &[&str]) -> Restrictions {
         Restrictions {
             allowed_resources: resources.iter().map(|s| (*s).to_owned()).collect(),
-            allowed_actions:   Vec::new(),
+            allowed_actions: Vec::new(),
         }
     }
 
@@ -198,9 +199,9 @@ mod tests {
     fn actions_for_returns_declared_set() {
         let r = Restrictions {
             allowed_resources: vec!["https://management.azure.com/".into()],
-            allowed_actions:   vec![ResourceActions {
+            allowed_actions: vec![ResourceActions {
                 resource: "https://management.azure.com/".into(),
-                actions:  vec![
+                actions: vec![
                     "Microsoft.Storage/storageAccounts/read".into(),
                     "Microsoft.Storage/storageAccounts/listKeys/action".into(),
                 ],
@@ -208,10 +209,12 @@ mod tests {
         };
         assert_eq!(
             r.actions_for("https://management.azure.com"),
-            Some(&[
-                "Microsoft.Storage/storageAccounts/read".to_owned(),
-                "Microsoft.Storage/storageAccounts/listKeys/action".to_owned(),
-            ][..]),
+            Some(
+                &[
+                    "Microsoft.Storage/storageAccounts/read".to_owned(),
+                    "Microsoft.Storage/storageAccounts/listKeys/action".to_owned(),
+                ][..]
+            ),
         );
         assert_eq!(r.actions_for("https://database.windows.net/"), None);
     }
@@ -220,9 +223,9 @@ mod tests {
     fn validate_rejects_action_resource_not_in_allowed_resources() {
         let r = Restrictions {
             allowed_resources: vec!["https://management.azure.com/".into()],
-            allowed_actions:   vec![ResourceActions {
+            allowed_actions: vec![ResourceActions {
                 resource: "https://database.windows.net/".into(),
-                actions:  vec!["Microsoft.Sql/servers/read".into()],
+                actions: vec!["Microsoft.Sql/servers/read".into()],
             }],
         };
         assert_eq!(
@@ -242,9 +245,9 @@ mod tests {
     fn validate_accepts_well_formed_actions() {
         let r = Restrictions {
             allowed_resources: vec!["https://management.azure.com/".into()],
-            allowed_actions:   vec![ResourceActions {
+            allowed_actions: vec![ResourceActions {
                 resource: "https://management.azure.com/".into(),
-                actions:  vec![
+                actions: vec![
                     "Microsoft.Storage/storageAccounts/read".into(),
                     "Microsoft.Storage/storageAccounts/listKeys/action".into(),
                 ],

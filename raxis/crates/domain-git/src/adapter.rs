@@ -35,13 +35,12 @@ use std::sync::Arc;
 
 use async_trait::async_trait;
 use raxis_domain::{
-    AdmissionContext, Bundle, CommitContext, ContentHash,
-    CredentialProxyHandle, DomainAdapter, DomainCommitReceipt,
-    DomainError, ResourceOp, SessionContext, Snapshot,
-    TouchedResource, TouchedResources, WorkspaceHandle,
+    AdmissionContext, Bundle, CommitContext, ContentHash, CredentialProxyHandle, DomainAdapter,
+    DomainCommitReceipt, DomainError, ResourceOp, SessionContext, Snapshot, TouchedResource,
+    TouchedResources, WorkspaceHandle,
 };
-use sha2::{Digest, Sha256};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 
 use crate::{commit_merge_to_main, MainAdvance, MainMergeError};
 
@@ -86,9 +85,9 @@ pub enum SeIntentKind {
 #[derive(Debug, Clone)]
 pub struct SeTerminalArtefact {
     /// 40-char hex SHA-1 commit id.
-    pub commit_sha:        String,
+    pub commit_sha: String,
     /// SHA-256 over the head-tree bytes (Merkle anchor).
-    pub head_tree_sha256:  ContentHash,
+    pub head_tree_sha256: ContentHash,
 }
 
 // ---------------------------------------------------------------------------
@@ -107,10 +106,10 @@ pub struct GitAdapter {
     pub main_repo_path: Arc<PathBuf>,
     /// Path under which per-session worktrees are provisioned. SE:
     /// `<data_dir>/worktrees/`.
-    pub sessions_root:    Arc<PathBuf>,
+    pub sessions_root: Arc<PathBuf>,
     /// Path under which inter-session bundles are staged. SE:
     /// `<data_dir>/transfer/`.
-    pub transfer_root:    Arc<PathBuf>,
+    pub transfer_root: Arc<PathBuf>,
 }
 
 impl GitAdapter {
@@ -118,15 +117,11 @@ impl GitAdapter {
     /// Each path may already exist or may be created lazily by the
     /// adapter on first use; the kernel's `setup wizard` lays down
     /// canonical zero-mode parent dirs at install time.
-    pub fn new(
-        main_repo_path: PathBuf,
-        sessions_root:    PathBuf,
-        transfer_root:    PathBuf,
-    ) -> Self {
+    pub fn new(main_repo_path: PathBuf, sessions_root: PathBuf, transfer_root: PathBuf) -> Self {
         Self {
             main_repo_path: Arc::new(main_repo_path),
-            sessions_root:    Arc::new(sessions_root),
-            transfer_root:    Arc::new(transfer_root),
+            sessions_root: Arc::new(sessions_root),
+            transfer_root: Arc::new(transfer_root),
         }
     }
 }
@@ -137,8 +132,8 @@ impl GitAdapter {
 
 #[async_trait]
 impl DomainAdapter for GitAdapter {
-    type IntentKind        = SeIntentKind;
-    type TerminalArtefact  = SeTerminalArtefact;
+    type IntentKind = SeIntentKind;
+    type TerminalArtefact = SeTerminalArtefact;
 
     async fn provision_workspace(
         &self,
@@ -162,10 +157,7 @@ impl DomainAdapter for GitAdapter {
         // case for idempotency (Property #1 of the conformance kit).
         if !host_path.exists() {
             std::fs::create_dir_all(&host_path).map_err(|e| {
-                DomainError::Permanent(format!(
-                    "create_dir_all({}): {e}",
-                    host_path.display(),
-                ))
+                DomainError::Permanent(format!("create_dir_all({}): {e}", host_path.display(),))
             })?;
         }
 
@@ -198,8 +190,8 @@ impl DomainAdapter for GitAdapter {
         // contract (Property #2): two calls in a row, with no
         // intervening agent-side mutation, produce the same hash.
         Ok(Snapshot {
-            content_hash:  workspace.content_hash.clone(),
-            parent_hash:   None,
+            content_hash: workspace.content_hash.clone(),
+            parent_hash: None,
             adapter_state: Box::new(()),
         })
     }
@@ -218,9 +210,11 @@ impl DomainAdapter for GitAdapter {
         // file so the host_path is deterministic on retry; the
         // kernel-side bundle-routing crate replaces the bytes on the
         // first call.
-        let host_path = self
-            .transfer_root
-            .join(format!("{}-{}.bundle", dst.session_id, snapshot.content_hash.as_hex()));
+        let host_path = self.transfer_root.join(format!(
+            "{}-{}.bundle",
+            dst.session_id,
+            snapshot.content_hash.as_hex()
+        ));
 
         if !self.transfer_root.exists() {
             std::fs::create_dir_all(self.transfer_root.as_ref())
@@ -235,9 +229,7 @@ impl DomainAdapter for GitAdapter {
                 ))
             })?;
         }
-        let byte_len = std::fs::metadata(&host_path)
-            .map(|m| m.len())
-            .unwrap_or(0);
+        let byte_len = std::fs::metadata(&host_path).map(|m| m.len()).unwrap_or(0);
 
         Ok(Bundle {
             host_path,
@@ -272,14 +264,16 @@ impl DomainAdapter for GitAdapter {
             commit_merge_to_main(&main, &orch_worktree, &commit_sha)
         })
         .await
-        .map_err(|e| {
-            DomainError::Transient(format!("commit join error: {e}"))
-        })?;
+        .map_err(|e| DomainError::Transient(format!("commit join error: {e}")))?;
 
         match result {
-            Ok(MainAdvance { current_sha, already_at_target, .. }) => {
+            Ok(MainAdvance {
+                current_sha,
+                already_at_target,
+                ..
+            }) => {
                 let receipt = DomainCommitReceipt {
-                    receipt_id:   current_sha.clone(),
+                    receipt_id: current_sha.clone(),
                     external_ref: None,
                     committed_at: chrono::Utc::now(),
                     adapter_state: Box::new(()),
@@ -295,9 +289,9 @@ impl DomainAdapter for GitAdapter {
                     "commit_sha {sha} not present in orchestrator worktree ODB"
                 )))
             }
-            Err(MainMergeError::FetchFailed(reason)) => {
-                Err(DomainError::Transient(format!("git fetch failed: {reason}")))
-            }
+            Err(MainMergeError::FetchFailed(reason)) => Err(DomainError::Transient(format!(
+                "git fetch failed: {reason}"
+            ))),
             Err(MainMergeError::MainRepoUnopenable { path, reason }) => {
                 Err(DomainError::Permanent(format!(
                     "main repo at {} unopenable: {reason}",
@@ -310,14 +304,12 @@ impl DomainAdapter for GitAdapter {
                     path.display(),
                 )))
             }
-            Err(MainMergeError::RefUpdateFailed(reason)) => {
-                Err(DomainError::Transient(format!("ref update failed: {reason}")))
-            }
-            Err(MainMergeError::InvalidSha { sha, reason }) => {
-                Err(DomainError::PreconditionFailed(format!(
-                    "invalid commit_sha {sha}: {reason}"
-                )))
-            }
+            Err(MainMergeError::RefUpdateFailed(reason)) => Err(DomainError::Transient(format!(
+                "ref update failed: {reason}"
+            ))),
+            Err(MainMergeError::InvalidSha { sha, reason }) => Err(
+                DomainError::PreconditionFailed(format!("invalid commit_sha {sha}: {reason}")),
+            ),
         }
     }
 
@@ -334,11 +326,10 @@ impl DomainAdapter for GitAdapter {
         // worktree at HEAD vs. its parent — the algorithmic content
         // is identical, just relocated.
         let workspace_root = ctx.workspace_host_path.to_path_buf();
-        let resources = tokio::task::spawn_blocking(move || {
-            compute_touched_via_gix(&workspace_root)
-        })
-        .await
-        .map_err(|e| DomainError::Transient(format!("touched join: {e}")))??;
+        let resources =
+            tokio::task::spawn_blocking(move || compute_touched_via_gix(&workspace_root))
+                .await
+                .map_err(|e| DomainError::Transient(format!("touched join: {e}")))??;
         Ok(TouchedResources { resources })
     }
 
@@ -346,7 +337,7 @@ impl DomainAdapter for GitAdapter {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<bool, DomainError> {
         let p = parent_state_ref.to_owned();
         let t = target_state_ref.to_owned();
@@ -360,7 +351,7 @@ impl DomainAdapter for GitAdapter {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<(), DomainError> {
         let p = parent_state_ref.to_owned();
         let t = target_state_ref.to_owned();
@@ -374,7 +365,7 @@ impl DomainAdapter for GitAdapter {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<TouchedResources, DomainError> {
         let p = parent_state_ref.to_owned();
         let t = target_state_ref.to_owned();
@@ -394,10 +385,7 @@ impl DomainAdapter for GitAdapter {
         ]
     }
 
-    async fn teardown_workspace(
-        &self,
-        _workspace: &WorkspaceHandle,
-    ) -> Result<(), DomainError> {
+    async fn teardown_workspace(&self, _workspace: &WorkspaceHandle) -> Result<(), DomainError> {
         // Reviewer / Executor VMs are torn down by the kernel's
         // session-revoke handler; the adapter has no per-call work
         // beyond the trait's "release VM-mounted resources" contract.
@@ -406,10 +394,7 @@ impl DomainAdapter for GitAdapter {
         Ok(())
     }
 
-    async fn purge_workspace(
-        &self,
-        workspace: &WorkspaceHandle,
-    ) -> Result<(), DomainError> {
+    async fn purge_workspace(&self, workspace: &WorkspaceHandle) -> Result<(), DomainError> {
         // Permanent purge — only after the audit-retention window
         // has closed. The kernel's V2 audit-retention GC calls this
         // exactly once per workspace.
@@ -433,8 +418,8 @@ impl DomainAdapter for GitAdapter {
 /// the spec calls out as the determinism anchor: `(session_id,
 /// initiative_id, parent_state_ref)`.
 fn compute_provision_hash(
-    initiative_id:   &str,
-    session_id:      &str,
+    initiative_id: &str,
+    session_id: &str,
     parent_state_ref: &str,
 ) -> ContentHash {
     let mut hasher = Sha256::new();
@@ -471,32 +456,30 @@ fn compute_touched_via_gix(
     workspace_root: &std::path::Path,
 ) -> Result<Vec<TouchedResource>, DomainError> {
     let repo = gix::open(workspace_root).map_err(|e| {
-        DomainError::Permanent(format!(
-            "gix::open({}): {e}",
-            workspace_root.display(),
-        ))
+        DomainError::Permanent(format!("gix::open({}): {e}", workspace_root.display(),))
     })?;
 
     let mut head = match repo.head() {
-        Ok(h)  => h,
+        Ok(h) => h,
         Err(_) => return Ok(Vec::new()),
     };
     let head_id = match head.try_peel_to_id() {
-        Ok(Some(id))  => id,
-        Ok(None)      => return Ok(Vec::new()),
-        Err(_)        => return Ok(Vec::new()),
+        Ok(Some(id)) => id,
+        Ok(None) => return Ok(Vec::new()),
+        Err(_) => return Ok(Vec::new()),
     };
     let head_obj = match repo.find_object(head_id) {
-        Ok(o)  => o,
+        Ok(o) => o,
         Err(_) => return Ok(Vec::new()),
     };
     let head_commit = match head_obj.try_into_commit() {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(_) => return Ok(Vec::new()),
     };
-    let head_tree_id = head_commit.decode().map_err(|e| {
-        DomainError::Permanent(format!("decode head commit: {e}"))
-    })?.tree();
+    let head_tree_id = head_commit
+        .decode()
+        .map_err(|e| DomainError::Permanent(format!("decode head commit: {e}")))?
+        .tree();
 
     // Resolve the parent tree, if any. Touched-set against root
     // commit yields every file as `Create`.
@@ -508,34 +491,36 @@ fn compute_touched_via_gix(
         .and_then(|obj| obj.try_into_commit().ok())
         .and_then(|c| c.decode().map(|r| r.tree()).ok());
 
-    let head_tree_obj = repo.find_object(head_tree_id).map_err(|e| {
-        DomainError::Permanent(format!("find head tree: {e}"))
-    })?;
-    let head_tree = head_tree_obj.try_into_tree().map_err(|e| {
-        DomainError::Permanent(format!("head object is not a tree: {e}"))
-    })?;
+    let head_tree_obj = repo
+        .find_object(head_tree_id)
+        .map_err(|e| DomainError::Permanent(format!("find head tree: {e}")))?;
+    let head_tree = head_tree_obj
+        .try_into_tree()
+        .map_err(|e| DomainError::Permanent(format!("head object is not a tree: {e}")))?;
     let parent_tree = parent_tree_id.and_then(|tid| {
-        repo.find_object(tid).ok().and_then(|o| o.try_into_tree().ok())
+        repo.find_object(tid)
+            .ok()
+            .and_then(|o| o.try_into_tree().ok())
     });
 
     // Walk both trees as flat paths and compute the set difference.
     let head_files = flatten_tree(&head_tree)?;
     let parent_files = match &parent_tree {
         Some(t) => flatten_tree(t)?,
-        None    => Default::default(),
+        None => Default::default(),
     };
 
     let mut out: Vec<TouchedResource> = Vec::new();
     for (path, head_oid) in &head_files {
         match parent_files.get(path) {
             None => out.push(TouchedResource {
-                uri:  format!("path:///{path}"),
-                op:   ResourceOp::Create,
+                uri: format!("path:///{path}"),
+                op: ResourceOp::Create,
                 size: None,
             }),
             Some(parent_oid) if parent_oid != head_oid => out.push(TouchedResource {
-                uri:  format!("path:///{path}"),
-                op:   ResourceOp::Modify,
+                uri: format!("path:///{path}"),
+                op: ResourceOp::Modify,
                 size: None,
             }),
             Some(_) => {} // unchanged
@@ -544,8 +529,8 @@ fn compute_touched_via_gix(
     for (path, _) in &parent_files {
         if !head_files.contains_key(path) {
             out.push(TouchedResource {
-                uri:  format!("path:///{path}"),
-                op:   ResourceOp::Delete,
+                uri: format!("path:///{path}"),
+                op: ResourceOp::Delete,
                 size: None,
             });
         }
@@ -560,14 +545,13 @@ fn flatten_tree(
     tree: &gix::Tree<'_>,
 ) -> Result<std::collections::BTreeMap<String, gix::ObjectId>, DomainError> {
     use gix::objs::tree::EntryKind;
-    let mut out: std::collections::BTreeMap<String, gix::ObjectId>
-        = std::collections::BTreeMap::new();
-    let mut stack: Vec<(String, gix::Tree<'_>)> =
-        vec![(String::new(), tree.clone())];
+    let mut out: std::collections::BTreeMap<String, gix::ObjectId> =
+        std::collections::BTreeMap::new();
+    let mut stack: Vec<(String, gix::Tree<'_>)> = vec![(String::new(), tree.clone())];
     while let Some((prefix, t)) = stack.pop() {
-        let decoded = t.decode().map_err(|e| {
-            DomainError::Permanent(format!("decode tree: {e}"))
-        })?;
+        let decoded = t
+            .decode()
+            .map_err(|e| DomainError::Permanent(format!("decode tree: {e}")))?;
         for entry in decoded.entries.iter() {
             let name = entry.filename.to_string();
             let path = if prefix.is_empty() {
@@ -581,12 +565,13 @@ fn flatten_tree(
                     out.insert(path, oid);
                 }
                 EntryKind::Tree => {
-                    let sub_obj = t.repo.find_object(oid).map_err(|e| {
-                        DomainError::Permanent(format!("find sub-tree: {e}"))
-                    })?;
-                    let sub = sub_obj.try_into_tree().map_err(|e| {
-                        DomainError::Permanent(format!("not a tree: {e}"))
-                    })?;
+                    let sub_obj = t
+                        .repo
+                        .find_object(oid)
+                        .map_err(|e| DomainError::Permanent(format!("find sub-tree: {e}")))?;
+                    let sub = sub_obj
+                        .try_into_tree()
+                        .map_err(|e| DomainError::Permanent(format!("not a tree: {e}")))?;
                     stack.push((path, sub));
                 }
                 EntryKind::Commit => {
@@ -647,10 +632,10 @@ mod tests {
             tmp.path().join("transfer"),
         );
         let session = SessionContext {
-            session_id:       "sess-A",
-            initiative_id:    "init-X",
+            session_id: "sess-A",
+            initiative_id: "init-X",
             parent_state_ref: "0000000000000000000000000000000000000000",
-            policy_epoch_id:  1,
+            policy_epoch_id: 1,
         };
         let h = adapter.provision_workspace(session.clone()).await.unwrap();
         assert!(h.host_path.exists());
@@ -670,10 +655,10 @@ mod tests {
             tmp.path().join("transfer"),
         );
         let session = SessionContext {
-            session_id:       "sess-B",
-            initiative_id:    "init-Y",
+            session_id: "sess-B",
+            initiative_id: "init-Y",
             parent_state_ref: "1111111111111111111111111111111111111111",
-            policy_epoch_id:  1,
+            policy_epoch_id: 1,
         };
         let h = adapter.provision_workspace(session.clone()).await.unwrap();
         let s1 = adapter.snapshot(session.clone(), &h).await.unwrap();
@@ -690,10 +675,10 @@ mod tests {
             tmp.path().join("transfer"),
         );
         let session = SessionContext {
-            session_id:       "sess-C",
-            initiative_id:    "init-Z",
+            session_id: "sess-C",
+            initiative_id: "init-Z",
             parent_state_ref: "2222222222222222222222222222222222222222",
-            policy_epoch_id:  1,
+            policy_epoch_id: 1,
         };
         let h = adapter.provision_workspace(session).await.unwrap();
         assert!(h.host_path.exists());

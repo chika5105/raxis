@@ -19,8 +19,7 @@ use serde_json::{json, Value};
 /// Helper: serialise → JSON value → deserialise → equality.
 fn round_trip(req: OperatorRequest) -> Value {
     let v: Value = serde_json::to_value(&req).expect("serialise");
-    let parsed: OperatorRequest = serde_json::from_value(v.clone())
-        .expect("deserialise");
+    let parsed: OperatorRequest = serde_json::from_value(v.clone()).expect("deserialise");
     assert_eq!(parsed, req, "round-trip mismatch");
     v
 }
@@ -33,7 +32,7 @@ fn round_trip(req: OperatorRequest) -> Value {
 #[test]
 fn approve_plan_round_trips_without_pubkey_field() {
     let v = round_trip(OperatorRequest::ApprovePlan {
-        initiative_id:      "init-xyz".into(),
+        initiative_id: "init-xyz".into(),
         approving_operator: "op-prime".into(),
     });
     assert_eq!(v["op"], "ApprovePlan");
@@ -48,12 +47,12 @@ fn approve_plan_round_trips_without_pubkey_field() {
 #[test]
 fn create_session_emits_null_for_unset_optionals() {
     let v = round_trip(OperatorRequest::CreateSession {
-        role:              "planner".into(),
-        worktree_root:     None,
-        base_sha:          None,
+        role: "planner".into(),
+        worktree_root: None,
+        base_sha: None,
         base_tracking_ref: None,
-        lineage_id:        "lin-1".into(),
-        task_id:           None,
+        lineage_id: "lin-1".into(),
+        task_id: None,
     });
     assert!(v["payload"]["worktree_root"].is_null());
     assert!(v["payload"]["base_sha"].is_null());
@@ -67,20 +66,26 @@ fn create_session_emits_null_for_unset_optionals() {
 #[test]
 fn grant_delegation_uses_ttl_secs_not_expires_at() {
     let v = round_trip(OperatorRequest::GrantDelegation {
-        session_id:       "sess-1".into(),
-        delegation_id:    "del-1".into(),
+        session_id: "sess-1".into(),
+        delegation_id: "del-1".into(),
         capability_class: "FsRead".into(),
-        scope_json:       None,
-        ttl_secs:         3600,
-        max_uses:         None,
-        signature_hex:    "deadbeef".into(),
+        scope_json: None,
+        ttl_secs: 3600,
+        max_uses: None,
+        signature_hex: "deadbeef".into(),
     });
-    assert!(v["payload"].get("ttl_secs").is_some(),
-            "wire MUST carry ttl_secs (kernel-side OperatorRequest field)");
-    assert!(v["payload"].get("expires_at").is_none(),
-            "wire MUST NOT carry expires_at (CLI-only computed value)");
-    assert!(v["payload"].get("granted_by").is_none(),
-            "wire MUST NOT carry granted_by (kernel infers from auth)");
+    assert!(
+        v["payload"].get("ttl_secs").is_some(),
+        "wire MUST carry ttl_secs (kernel-side OperatorRequest field)"
+    );
+    assert!(
+        v["payload"].get("expires_at").is_none(),
+        "wire MUST NOT carry expires_at (CLI-only computed value)"
+    );
+    assert!(
+        v["payload"].get("granted_by").is_none(),
+        "wire MUST NOT carry granted_by (kernel infers from auth)"
+    );
     assert_eq!(v["payload"]["ttl_secs"], 3600);
 }
 
@@ -93,8 +98,8 @@ fn approve_escalation_uses_typed_payload() {
     let req = OperatorRequest::ApproveEscalation {
         escalation_id: "esc-1".into(),
         approval_scope: ApprovalScopeWire {
-            capability_class:  "WriteSecrets".into(),
-            max_uses:          1,
+            capability_class: "WriteSecrets".into(),
+            max_uses: 1,
             valid_for_seconds: 3600,
         },
         operator_sig_hex: "deadbeef".into(),
@@ -102,7 +107,10 @@ fn approve_escalation_uses_typed_payload() {
     let v = round_trip(req);
     assert_eq!(v["op"], "ApproveEscalation");
     assert_eq!(v["payload"]["escalation_id"], "esc-1");
-    assert_eq!(v["payload"]["approval_scope"]["capability_class"], "WriteSecrets");
+    assert_eq!(
+        v["payload"]["approval_scope"]["capability_class"],
+        "WriteSecrets"
+    );
     assert_eq!(v["payload"]["approval_scope"]["max_uses"], 1);
     assert_eq!(v["payload"]["approval_scope"]["valid_for_seconds"], 3600);
     assert_eq!(v["payload"]["operator_sig_hex"], "deadbeef");
@@ -113,7 +121,7 @@ fn approve_escalation_uses_typed_payload() {
 fn deny_escalation_uses_typed_payload_with_optional_reason() {
     let req = OperatorRequest::DenyEscalation {
         escalation_id: "esc-1".into(),
-        reason:        Some("scope too broad".into()),
+        reason: Some("scope too broad".into()),
     };
     let v = round_trip(req);
     assert_eq!(v["op"], "DenyEscalation");
@@ -125,11 +133,13 @@ fn deny_escalation_uses_typed_payload_with_optional_reason() {
 fn deny_escalation_emits_null_reason_when_unset() {
     let req = OperatorRequest::DenyEscalation {
         escalation_id: "esc-1".into(),
-        reason:        None,
+        reason: None,
     };
     let v = round_trip(req);
-    assert!(v["payload"]["reason"].is_null(),
-        "reason MUST serialise as explicit null when unset (matches the optional-field convention)");
+    assert!(
+        v["payload"]["reason"].is_null(),
+        "reason MUST serialise as explicit null when unset (matches the optional-field convention)"
+    );
 }
 
 // ── OperatorResponse parsing — every status variant decodes back to type.
@@ -146,24 +156,23 @@ fn every_response_status_variant_decodes() {
             "lineage_id": "lin-1"
         }
     });
-    let parsed: OperatorResponse = serde_json::from_value(session_created)
-        .expect("SessionCreated must decode");
+    let parsed: OperatorResponse =
+        serde_json::from_value(session_created).expect("SessionCreated must decode");
     assert!(matches!(parsed, OperatorResponse::SessionCreated { .. }));
 
     let plan_approved = json!({
         "status": "PlanApproved",
         "payload": { "initiative_id": "i1", "tasks_admitted": 3 }
     });
-    let parsed: OperatorResponse = serde_json::from_value(plan_approved)
-        .expect("PlanApproved must decode");
+    let parsed: OperatorResponse =
+        serde_json::from_value(plan_approved).expect("PlanApproved must decode");
     assert!(matches!(parsed, OperatorResponse::PlanApproved { .. }));
 
     let err = json!({
         "status": "Error",
         "payload": { "code": "FAIL_X", "detail": "oops" }
     });
-    let parsed: OperatorResponse = serde_json::from_value(err)
-        .expect("Error must decode");
+    let parsed: OperatorResponse = serde_json::from_value(err).expect("Error must decode");
     assert!(matches!(parsed, OperatorResponse::Error { .. }));
 
     let approved = json!({
@@ -175,16 +184,19 @@ fn every_response_status_variant_decodes() {
             "expires_at":         1_700_000_000_i64
         }
     });
-    let parsed: OperatorResponse = serde_json::from_value(approved)
-        .expect("EscalationApproved must decode");
-    assert!(matches!(parsed, OperatorResponse::EscalationApproved { .. }));
+    let parsed: OperatorResponse =
+        serde_json::from_value(approved).expect("EscalationApproved must decode");
+    assert!(matches!(
+        parsed,
+        OperatorResponse::EscalationApproved { .. }
+    ));
 
     let denied = json!({
         "status": "EscalationDenied",
         "payload": { "escalation_id": "esc-1", "denied_at": 1_700_000_000_i64 }
     });
-    let parsed: OperatorResponse = serde_json::from_value(denied)
-        .expect("EscalationDenied must decode");
+    let parsed: OperatorResponse =
+        serde_json::from_value(denied).expect("EscalationDenied must decode");
     assert!(matches!(parsed, OperatorResponse::EscalationDenied { .. }));
 
     let advanced = json!({
@@ -198,8 +210,8 @@ fn every_response_status_variant_decodes() {
             "advanced_at":                1_700_000_000_i64
         }
     });
-    let parsed: OperatorResponse = serde_json::from_value(advanced)
-        .expect("EpochAdvanced must decode");
+    let parsed: OperatorResponse =
+        serde_json::from_value(advanced).expect("EpochAdvanced must decode");
     assert!(matches!(parsed, OperatorResponse::EpochAdvanced { .. }));
 }
 
@@ -210,16 +222,20 @@ fn every_response_status_variant_decodes() {
 fn rotate_epoch_uses_typed_paths_payload() {
     let req = OperatorRequest::RotateEpoch {
         policy_path: "/var/lib/raxis/policy/policy.epoch-2.toml".into(),
-        sig_path:    "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
+        sig_path: "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
     };
     let v = round_trip(req);
     assert_eq!(v["op"], "RotateEpoch");
     assert!(v["payload"].get("policy_path").is_some());
     assert!(v["payload"].get("sig_path").is_some());
-    assert!(v["payload"].get("payload").is_none(),
-        "wire MUST NOT carry the legacy opaque `payload` field");
-    assert!(v["payload"].get("triggered_by").is_none(),
-        "wire MUST NOT carry triggered_by — kernel takes operator from auth");
+    assert!(
+        v["payload"].get("payload").is_none(),
+        "wire MUST NOT carry the legacy opaque `payload` field"
+    );
+    assert!(
+        v["payload"].get("triggered_by").is_none(),
+        "wire MUST NOT carry triggered_by — kernel takes operator from auth"
+    );
 }
 
 // ── Negative case: a flat (un-tagged) shape MUST NOT decode.
@@ -232,6 +248,8 @@ fn flat_request_shape_does_not_decode_into_typed_enum() {
         "session_id": "s1"  // top-level instead of under "payload"
     });
     let parsed: Result<OperatorRequest, _> = serde_json::from_value(flat);
-    assert!(parsed.is_err(),
-        "flat-shape JSON MUST be rejected — typed enum requires `payload` envelope");
+    assert!(
+        parsed.is_err(),
+        "flat-shape JSON MUST be rejected — typed enum requires `payload` envelope"
+    );
 }

@@ -30,26 +30,21 @@ const DEFAULT_LIMIT: usize = 50;
 
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
-    let conn = open_ro(flags.data_dir()).map_err(|e| {
-        CliError::Policy(format!("kernel.db open failed: {e}"))
-    })?;
+    let conn = open_ro(flags.data_dir())
+        .map_err(|e| CliError::Policy(format!("kernel.db open failed: {e}")))?;
 
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
 
     if opts.blocked_only {
-        let edges = blocking_edges(&conn).map_err(|e| {
-            CliError::Policy(format!("blocking_edges read failed: {e}"))
-        })?;
+        let edges = blocking_edges(&conn)
+            .map_err(|e| CliError::Policy(format!("blocking_edges read failed: {e}")))?;
         render_blocked(&mut out, &edges, opts.limit);
     } else {
-        let ready =
-            ready_set(&conn, opts.lane.as_deref(), opts.limit).map_err(|e| {
-                CliError::Policy(format!("ready_set read failed: {e}"))
-            })?;
-        let edges = blocking_edges(&conn).map_err(|e| {
-            CliError::Policy(format!("blocking_edges read failed: {e}"))
-        })?;
+        let ready = ready_set(&conn, opts.lane.as_deref(), opts.limit)
+            .map_err(|e| CliError::Policy(format!("ready_set read failed: {e}")))?;
+        let edges = blocking_edges(&conn)
+            .map_err(|e| CliError::Policy(format!("blocking_edges read failed: {e}")))?;
         render_ready(&mut out, &ready, opts.lane.as_deref());
         let _ = writeln!(out);
         render_blocked(&mut out, &edges, opts.limit);
@@ -194,9 +189,9 @@ fn parse_args(args: &[String]) -> Result<QueueOpts, CliError> {
         match args[i].as_str() {
             "--lane" => {
                 i += 1;
-                let v = args.get(i).ok_or_else(|| {
-                    CliError::Usage("--lane requires a lane id".to_owned())
-                })?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--lane requires a lane id".to_owned()))?;
                 opts.lane = Some(v.clone());
             }
             "--blocked-only" => opts.blocked_only = true,
@@ -269,10 +264,13 @@ mod tests {
     #[test]
     fn parse_args_accepts_lane_blocked_only_limit() {
         let opts = parse_args(&[
-            "--lane".to_owned(), "default".to_owned(),
+            "--lane".to_owned(),
+            "default".to_owned(),
             "--blocked-only".to_owned(),
-            "--limit".to_owned(), "5".to_owned(),
-        ]).unwrap();
+            "--limit".to_owned(),
+            "5".to_owned(),
+        ])
+        .unwrap();
         assert_eq!(opts.lane.as_deref(), Some("default"));
         assert!(opts.blocked_only);
         assert_eq!(opts.limit, 5);

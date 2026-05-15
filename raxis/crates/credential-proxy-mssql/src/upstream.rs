@@ -43,14 +43,12 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use bytes::{BufMut, BytesMut};
-use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, ConsumerIdentity,
-};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::wire::{frame_packet, pkt, status, PacketHeader, HEADER_LEN, MAX_PACKET_LEN};
 use crate::OwnedConsumer;
-use crate::wire::{HEADER_LEN, MAX_PACKET_LEN, PacketHeader, frame_packet, pkt, status};
 
 /// Default upstream connect timeout.
 pub const DEFAULT_CONNECT_TIMEOUT: Duration = Duration::from_secs(8);
@@ -151,8 +149,10 @@ pub fn redact_for_audit(msg: &str) -> String {
             out.push_str("password=[REDACTED]");
             i += b"password=".len();
             while i < bytes.len()
-                && bytes[i] != b'&' && bytes[i] != b' '
-                && bytes[i] != b'"' && bytes[i] != b'\''
+                && bytes[i] != b'&'
+                && bytes[i] != b' '
+                && bytes[i] != b'"'
+                && bytes[i] != b'\''
                 && bytes[i] != b'\n'
             {
                 i += 1;
@@ -162,9 +162,12 @@ pub fn redact_for_audit(msg: &str) -> String {
         if i + 3 <= bytes.len() && &bytes[i..i + 3] == b"://" {
             let mut auth_end = i + 3;
             while auth_end < bytes.len()
-                && bytes[auth_end] != b'/' && bytes[auth_end] != b'?'
-                && bytes[auth_end] != b' ' && bytes[auth_end] != b'\n'
-                && bytes[auth_end] != b'"' && bytes[auth_end] != b'\''
+                && bytes[auth_end] != b'/'
+                && bytes[auth_end] != b'?'
+                && bytes[auth_end] != b' '
+                && bytes[auth_end] != b'\n'
+                && bytes[auth_end] != b'"'
+                && bytes[auth_end] != b'\''
             {
                 auth_end += 1;
             }
@@ -189,11 +192,17 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 { 1 }
-    else if lead < 0xc0 { 1 }
-    else if lead < 0xe0 { 2 }
-    else if lead < 0xf0 { 3 }
-    else { 4 }
+    if lead < 0x80 {
+        1
+    } else if lead < 0xc0 {
+        1
+    } else if lead < 0xe0 {
+        2
+    } else if lead < 0xf0 {
+        3
+    } else {
+        4
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +265,9 @@ impl ParsedUpstreamUrl {
         let (host, port) = match authority.rfind(':') {
             Some(colon) => {
                 let h = &authority[..colon];
-                let p = authority[colon + 1..].parse::<u16>().map_err(|_| {
-                    UpstreamError::InvalidUrl("port is not a valid u16".into())
-                })?;
+                let p = authority[colon + 1..]
+                    .parse::<u16>()
+                    .map_err(|_| UpstreamError::InvalidUrl("port is not a valid u16".into()))?;
                 (h.to_owned(), p)
             }
             None => (authority.to_owned(), 1433u16),
@@ -370,13 +379,13 @@ pub struct ForwardOutcome {
 
 /// One live upstream session.
 pub struct UpstreamSession {
-    stream:          TcpStream,
+    stream: TcpStream,
     /// Hostname the audit envelope reports.
-    pub host:        String,
+    pub host: String,
     /// Port the audit envelope reports.
-    pub port:        u16,
+    pub port: u16,
     /// True if the URL requested TLS (V2.1 fails fast in this case).
-    pub tls:         bool,
+    pub tls: bool,
     /// Wall-clock for the connect step.
     pub handshake_ms: u32,
 }
@@ -395,25 +404,31 @@ impl UpstreamSession {
         if url.require_tls {
             return Err(UpstreamError::Handshake(
                 "?encrypt=true is not supported by the V2.1 MVP — \
-                 plaintext TDS only; TLS upstream lands in V3".into(),
+                 plaintext TDS only; TLS upstream lands in V3"
+                    .into(),
             ));
         }
         if url.user.is_empty() {
             return Err(UpstreamError::Handshake(
                 "MSSQL upstream URL must carry SQL Authentication \
-                 username (Windows Auth + Entra ID are V3 work)".into(),
+                 username (Windows Auth + Entra ID are V3 work)"
+                    .into(),
             ));
         }
         let started = Instant::now();
         let connect_fut = async {
             let addr = format!("{}:{}", url.host, url.port);
-            let mut stream = TcpStream::connect(&addr).await
+            let mut stream = TcpStream::connect(&addr)
+                .await
                 .map_err(|e| UpstreamError::TcpConnect(redact_for_audit(&e.to_string())))?;
             // Drive PRELOGIN.
-            stream.write_all(&frame_packet(pkt::PRELOGIN, &build_prelogin_request_body())).await
+            stream
+                .write_all(&frame_packet(pkt::PRELOGIN, &build_prelogin_request_body()))
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
             stream.flush().await.ok();
-            let (header, body) = read_one_packet(&mut stream).await
+            let (header, body) = read_one_packet(&mut stream)
+                .await
                 .map_err(|e| UpstreamError::Handshake(format!("read PRELOGIN response: {e}")))?;
             if header.packet_type != pkt::TABULAR_RESULT {
                 return Err(UpstreamError::Handshake(format!(
@@ -440,17 +455,16 @@ impl UpstreamSession {
                 }
             }
             // Drive LOGIN7.
-            let login = build_login7(
-                &url.user,
-                url.password_bytes(),
-                url.database.as_deref(),
-            );
-            stream.write_all(&frame_packet(pkt::LOGIN7, &login)).await
+            let login = build_login7(&url.user, url.password_bytes(), url.database.as_deref());
+            stream
+                .write_all(&frame_packet(pkt::LOGIN7, &login))
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
             stream.flush().await.ok();
             // Read TABULAR_RESULT (LOGINACK + DONE on success, or
             // ERROR + DONE on failure).
-            let frames = read_until_eom(&mut stream).await
+            let frames = read_until_eom(&mut stream)
+                .await
                 .map_err(|e| UpstreamError::Handshake(format!("read LOGIN7 response: {e}")))?;
             classify_login_response(&frames)?;
             Ok::<_, UpstreamError>(stream)
@@ -468,7 +482,7 @@ impl UpstreamSession {
             stream,
             host: url.host.clone(),
             port: url.port,
-            tls:  url.require_tls,
+            tls: url.require_tls,
             handshake_ms,
         })
     }
@@ -509,10 +523,13 @@ impl UpstreamSession {
     ) -> Result<ForwardOutcome, UpstreamError> {
         let started = Instant::now();
         let rewritten = rewrite_sql_batch_for_upstream(agent_packet)?;
-        self.stream.write_all(&rewritten).await
+        self.stream
+            .write_all(&rewritten)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
-        let frames = read_until_eom(&mut self.stream).await
+        let frames = read_until_eom(&mut self.stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read SQLBatch response: {e}")))?;
         let bytes_returned = frames.len() as u64;
         let upstream_error = scan_for_error_token(&frames);
@@ -547,10 +564,8 @@ impl UpstreamSession {
 /// ```
 ///
 /// Returns the wire bytes ready to write to the upstream.
-fn rewrite_sql_batch_for_upstream(agent_packet: &[u8])
-    -> Result<Vec<u8>, UpstreamError>
-{
-    use crate::wire::{HEADER_LEN as TDS_HEADER, PacketHeader, status, pkt};
+fn rewrite_sql_batch_for_upstream(agent_packet: &[u8]) -> Result<Vec<u8>, UpstreamError> {
+    use crate::wire::{pkt, status, PacketHeader, HEADER_LEN as TDS_HEADER};
     if agent_packet.len() < TDS_HEADER {
         return Err(UpstreamError::RelayFailed(
             "agent SQLBatch packet shorter than TDS header".into(),
@@ -562,7 +577,8 @@ fn rewrite_sql_batch_for_upstream(agent_packet: &[u8])
     if h.packet_type != pkt::SQL_BATCH {
         return Err(UpstreamError::RelayFailed(format!(
             "expected SQLBatch (0x{:02x}) header from agent, got 0x{:02x}",
-            pkt::SQL_BATCH, h.packet_type,
+            pkt::SQL_BATCH,
+            h.packet_type,
         )));
     }
     let body = &agent_packet[TDS_HEADER..];
@@ -571,17 +587,15 @@ fn rewrite_sql_batch_for_upstream(agent_packet: &[u8])
     // Transaction Descriptor header for TDS 7.4 — see
     // `[MS-TDS] 2.2.5.3.1 ALL_HEADERS` and 2.2.5.3.2
     // `Transaction Descriptor`.
-    const ALL_HEADERS_LEN: u32 = 4 + 4 + 2 + 8 + 4;     // 22
+    const ALL_HEADERS_LEN: u32 = 4 + 4 + 2 + 8 + 4; // 22
     const TXN_DESC_HEADER_LEN: u32 = ALL_HEADERS_LEN - 4; // 18
     const TXN_DESC_HEADER_TYPE: u16 = 0x0002;
-    let mut new_body = Vec::with_capacity(
-        ALL_HEADERS_LEN as usize + sql_text_bytes.len(),
-    );
+    let mut new_body = Vec::with_capacity(ALL_HEADERS_LEN as usize + sql_text_bytes.len());
     new_body.extend_from_slice(&ALL_HEADERS_LEN.to_le_bytes());
     new_body.extend_from_slice(&TXN_DESC_HEADER_LEN.to_le_bytes());
     new_body.extend_from_slice(&TXN_DESC_HEADER_TYPE.to_le_bytes());
-    new_body.extend_from_slice(&0u64.to_le_bytes());     // descriptor
-    new_body.extend_from_slice(&1u32.to_le_bytes());     // outstanding-req
+    new_body.extend_from_slice(&0u64.to_le_bytes()); // descriptor
+    new_body.extend_from_slice(&1u32.to_le_bytes()); // outstanding-req
     new_body.extend_from_slice(sql_text_bytes);
     // Re-frame the packet with the new body.  Total length must
     // include the 8-byte header.
@@ -596,11 +610,11 @@ fn rewrite_sql_batch_for_upstream(agent_packet: &[u8])
     }
     let header = PacketHeader {
         packet_type: pkt::SQL_BATCH,
-        status:      h.status | status::EOM,
-        length:      total as u16,
-        spid:        0,
-        packet_id:   1,
-        window:      0,
+        status: h.status | status::EOM,
+        length: total as u16,
+        spid: 0,
+        packet_id: 1,
+        window: 0,
     };
     let mut out = Vec::with_capacity(total);
     out.extend_from_slice(&header.encode());
@@ -617,8 +631,7 @@ fn extract_sql_text_bytes(body: &[u8]) -> &[u8] {
     if body.len() < 4 {
         return body;
     }
-    let total_headers =
-        u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
+    let total_headers = u32::from_le_bytes([body[0], body[1], body[2], body[3]]) as usize;
     // Defensive: a real client always emits `total_headers >= 4`,
     // but the proxy is lenient about both extremes:
     //
@@ -678,21 +691,27 @@ async fn read_one_packet(stream: &mut TcpStream) -> std::io::Result<(PacketHeade
 /// into success / auth-rejected.
 fn classify_login_response(frames: &[u8]) -> Result<(), UpstreamError> {
     if frames.is_empty() {
-        return Err(UpstreamError::Handshake(
-            "empty LOGIN7 response".into(),
-        ));
+        return Err(UpstreamError::Handshake("empty LOGIN7 response".into()));
     }
     // Walk packets; for each, scan body for ERROR / LOGINACK tokens.
     let mut i = 0;
     let mut saw_loginack = false;
     while i + HEADER_LEN <= frames.len() {
         let h = PacketHeader::parse([
-            frames[i], frames[i+1], frames[i+2], frames[i+3],
-            frames[i+4], frames[i+5], frames[i+6], frames[i+7],
+            frames[i],
+            frames[i + 1],
+            frames[i + 2],
+            frames[i + 3],
+            frames[i + 4],
+            frames[i + 5],
+            frames[i + 6],
+            frames[i + 7],
         ]);
         let body_start = i + HEADER_LEN;
         let body_end = i + h.length as usize;
-        if body_end > frames.len() { break; }
+        if body_end > frames.len() {
+            break;
+        }
         let body = &frames[body_start..body_end];
         if let Some((number, message)) = scan_first_error_token(body) {
             return Err(UpstreamError::AuthRejected(format!(
@@ -704,7 +723,9 @@ fn classify_login_response(frames: &[u8]) -> Result<(), UpstreamError> {
             saw_loginack = true;
         }
         i = body_end;
-        if h.status & status::EOM != 0 { break; }
+        if h.status & status::EOM != 0 {
+            break;
+        }
     }
     if saw_loginack {
         Ok(())
@@ -720,12 +741,20 @@ fn scan_for_error_token(frames: &[u8]) -> bool {
     let mut i = 0;
     while i + HEADER_LEN <= frames.len() {
         let h = PacketHeader::parse([
-            frames[i], frames[i+1], frames[i+2], frames[i+3],
-            frames[i+4], frames[i+5], frames[i+6], frames[i+7],
+            frames[i],
+            frames[i + 1],
+            frames[i + 2],
+            frames[i + 3],
+            frames[i + 4],
+            frames[i + 5],
+            frames[i + 6],
+            frames[i + 7],
         ]);
         let body_start = i + HEADER_LEN;
         let body_end = i + h.length as usize;
-        if body_end > frames.len() { break; }
+        if body_end > frames.len() {
+            break;
+        }
         let body = &frames[body_start..body_end];
         if scan_first_error_token(body).is_some() {
             return true;
@@ -754,15 +783,22 @@ fn scan_first_error_token(body: &[u8]) -> Option<(i32, String)> {
             if i + 3 + inner_len <= body.len() && inner_len >= 4 + 1 + 1 + 2 {
                 let token_body = &body[i + 3..i + 3 + inner_len];
                 let number = i32::from_le_bytes([
-                    token_body[0], token_body[1], token_body[2], token_body[3],
+                    token_body[0],
+                    token_body[1],
+                    token_body[2],
+                    token_body[3],
                 ]);
                 // Skip state(1) + class(1).
                 let mut j = 4 + 1 + 1;
-                if j + 2 > token_body.len() { return None; }
+                if j + 2 > token_body.len() {
+                    return None;
+                }
                 let msg_chars = u16::from_le_bytes([token_body[j], token_body[j + 1]]) as usize;
                 j += 2;
                 let msg_byte_len = msg_chars * 2;
-                if j + msg_byte_len > token_body.len() { return None; }
+                if j + msg_byte_len > token_body.len() {
+                    return None;
+                }
                 let units: Vec<u16> = token_body[j..j + msg_byte_len]
                     .chunks_exact(2)
                     .map(|c| u16::from_le_bytes([c[0], c[1]]))
@@ -811,7 +847,9 @@ fn build_prelogin_request_body() -> Vec<u8> {
 fn parse_prelogin_encryption(body: &[u8]) -> Option<u8> {
     let mut i = 0;
     while i < body.len() && body[i] != 0xff {
-        if i + 5 > body.len() { return None; }
+        if i + 5 > body.len() {
+            return None;
+        }
         let opt_type = body[i];
         let offset = u16::from_be_bytes([body[i + 1], body[i + 2]]) as usize;
         let length = u16::from_be_bytes([body[i + 3], body[i + 4]]) as usize;
@@ -847,16 +885,16 @@ fn parse_prelogin_encryption(body: &[u8]) -> Option<u8> {
 fn build_login7(user: &str, password: &[u8], database: Option<&str>) -> Vec<u8> {
     // UTF-16 LE encoded variable-length fields.
     let client_name = utf16_le("raxis-mssql-proxy");
-    let user_utf16  = utf16_le(user);
-    let pw_obf      = obfuscate_password(password);
-    let app_name    = utf16_le("raxis-proxy-v2");
+    let user_utf16 = utf16_le(user);
+    let pw_obf = obfuscate_password(password);
+    let app_name = utf16_le("raxis-proxy-v2");
     let server_name = utf16_le("");
-    let unused      = utf16_le("");
-    let lib_name    = utf16_le("raxis-tds");
-    let language    = utf16_le("");
-    let db_name     = utf16_le(database.unwrap_or(""));
+    let unused = utf16_le("");
+    let lib_name = utf16_le("raxis-tds");
+    let language = utf16_le("");
+    let db_name = utf16_le(database.unwrap_or(""));
     let attach_file = utf16_le("");
-    let change_pw   = utf16_le("");
+    let change_pw = utf16_le("");
 
     // Per `[MS-TDS] 2.2.6.4`, LOGIN7 has:
     //   * 36-byte fixed header (Length .. ClientLCID).
@@ -882,24 +920,23 @@ fn build_login7(user: &str, password: &[u8], database: Option<&str>) -> Vec<u8> 
         buf.extend_from_slice(var);
         (off as u16, chars as u16)
     };
-    let t_host  = push(&mut variable, &client_name);
-    let t_user  = push(&mut variable, &user_utf16);
+    let t_host = push(&mut variable, &client_name);
+    let t_user = push(&mut variable, &user_utf16);
     // Password's "char count" tuple counts UTF-16 code units, not
     // bytes (the obf has 2 bytes per code unit, so chars = bytes/2,
     // which is what `push()` already returns).
-    let t_pwd   = push(&mut variable, &pw_obf);
-    let t_app   = push(&mut variable, &app_name);
-    let t_srv   = push(&mut variable, &server_name);
+    let t_pwd = push(&mut variable, &pw_obf);
+    let t_app = push(&mut variable, &app_name);
+    let t_srv = push(&mut variable, &server_name);
     let t_unused = push(&mut variable, &unused);
-    let t_lib   = push(&mut variable, &lib_name);
-    let t_lang  = push(&mut variable, &language);
-    let t_db    = push(&mut variable, &db_name);
-    let t_sspi  = push(&mut variable, &[][..]);
+    let t_lib = push(&mut variable, &lib_name);
+    let t_lang = push(&mut variable, &language);
+    let t_db = push(&mut variable, &db_name);
+    let t_sspi = push(&mut variable, &[][..]);
     let t_attach = push(&mut variable, &attach_file);
     let t_chgpw = push(&mut variable, &change_pw);
     let tuples = [
-        t_host, t_user, t_pwd, t_app, t_srv, t_unused,
-        t_lib, t_lang, t_db,
+        t_host, t_user, t_pwd, t_app, t_srv, t_unused, t_lib, t_lang, t_db,
     ];
     let tail_tuples = [t_sspi, t_attach, t_chgpw];
 
@@ -919,17 +956,17 @@ fn build_login7(user: &str, password: &[u8], database: Option<&str>) -> Vec<u8> 
     //   client_lcid:u32 LE
     out.extend_from_slice(&(total_len as u32).to_le_bytes());
     out.extend_from_slice(&0x74_00_00_04u32.to_le_bytes()); // TDS 7.4
-    out.extend_from_slice(&4096u32.to_le_bytes());          // PacketSize
-    out.extend_from_slice(&0u32.to_le_bytes());             // ClientProgVer
+    out.extend_from_slice(&4096u32.to_le_bytes()); // PacketSize
+    out.extend_from_slice(&0u32.to_le_bytes()); // ClientProgVer
     out.extend_from_slice(&(std::process::id() as u32).to_le_bytes()); // ClientPID
-    out.extend_from_slice(&0u32.to_le_bytes());             // ConnectionID
+    out.extend_from_slice(&0u32.to_le_bytes()); // ConnectionID
     out.push(0x00); // option_flags1
     out.push(0x03); // option_flags2: ODBC=1, USER_SQL_AUTH (high bits 0)
     out.push(0x00); // type_flags
     out.push(0x00); // option_flags3
     out.extend_from_slice(&0i32.to_le_bytes()); // ClientTimZone
     out.extend_from_slice(&0u32.to_le_bytes()); // ClientLCID
-    // 9 OffsetLength tuples (HostName .. Database).
+                                                // 9 OffsetLength tuples (HostName .. Database).
     for (off, len) in &tuples {
         out.extend_from_slice(&off.to_le_bytes());
         out.extend_from_slice(&len.to_le_bytes());
@@ -1009,9 +1046,7 @@ mod tests {
 
     #[test]
     fn parse_url_encrypt_true_marks_tls() {
-        let p = ParsedUpstreamUrl::parse(
-            "mssql://sa:hunter2@db/test?encrypt=true",
-        ).unwrap();
+        let p = ParsedUpstreamUrl::parse("mssql://sa:hunter2@db/test?encrypt=true").unwrap();
         assert!(p.require_tls);
     }
 
@@ -1138,14 +1173,18 @@ mod tests {
         // TotalLength = 22.
         let rewritten_body = &rewritten[8..];
         let total = u32::from_le_bytes([
-            rewritten_body[0], rewritten_body[1],
-            rewritten_body[2], rewritten_body[3],
+            rewritten_body[0],
+            rewritten_body[1],
+            rewritten_body[2],
+            rewritten_body[3],
         ]);
         assert_eq!(total, 22, "ALL_HEADERS TotalLength must be 22");
         // HeaderLength = 18.
         let hlen = u32::from_le_bytes([
-            rewritten_body[4], rewritten_body[5],
-            rewritten_body[6], rewritten_body[7],
+            rewritten_body[4],
+            rewritten_body[5],
+            rewritten_body[6],
+            rewritten_body[7],
         ]);
         assert_eq!(hlen, 18, "Transaction Descriptor HeaderLength must be 18");
         // HeaderType = 0x0002 (Transaction Descriptor).
@@ -1155,8 +1194,10 @@ mod tests {
         assert_eq!(&rewritten_body[10..18], &[0u8; 8]);
         // OutstandingRequestCount bytes 18..22 = 1.
         let ors = u32::from_le_bytes([
-            rewritten_body[18], rewritten_body[19],
-            rewritten_body[20], rewritten_body[21],
+            rewritten_body[18],
+            rewritten_body[19],
+            rewritten_body[20],
+            rewritten_body[21],
         ]);
         assert_eq!(ors, 1, "OutstandingRequestCount must be 1");
         // SQL text "SELECT 1" UTF-16 LE follows the ALL_HEADERS.
@@ -1208,8 +1249,10 @@ mod tests {
         let res = rewrite_sql_batch_for_upstream(&truncated);
         match res {
             Err(UpstreamError::RelayFailed(msg)) => {
-                assert!(msg.contains("shorter than TDS header"),
-                    "unexpected error message: {msg}");
+                assert!(
+                    msg.contains("shorter than TDS header"),
+                    "unexpected error message: {msg}"
+                );
             }
             other => panic!("expected RelayFailed, got {other:?}"),
         }
@@ -1226,8 +1269,10 @@ mod tests {
         let res = rewrite_sql_batch_for_upstream(&pkt);
         match res {
             Err(UpstreamError::RelayFailed(msg)) => {
-                assert!(msg.contains("expected SQLBatch"),
-                    "unexpected error message: {msg}");
+                assert!(
+                    msg.contains("expected SQLBatch"),
+                    "unexpected error message: {msg}"
+                );
             }
             other => panic!("expected RelayFailed, got {other:?}"),
         }

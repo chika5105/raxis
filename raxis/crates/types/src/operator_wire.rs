@@ -46,12 +46,12 @@ use serde::{Deserialize, Serialize};
 pub enum OperatorRequest {
     // ── session management ────────────────────────────────────────────
     CreateSession {
-        role:              String,
-        worktree_root:     Option<String>,
-        base_sha:          Option<String>,
+        role: String,
+        worktree_root: Option<String>,
+        base_sha: Option<String>,
         base_tracking_ref: Option<String>,
-        lineage_id:        String,
-        task_id:           Option<String>,
+        lineage_id: String,
+        task_id: Option<String>,
     },
     RevokeSession {
         session_id: String,
@@ -59,13 +59,13 @@ pub enum OperatorRequest {
 
     // ── delegation ────────────────────────────────────────────────────
     GrantDelegation {
-        session_id:       String,
-        delegation_id:    String,
+        session_id: String,
+        delegation_id: String,
         capability_class: String,
-        scope_json:       Option<String>,
-        ttl_secs:         u64,
-        max_uses:         Option<i64>,
-        signature_hex:    String,
+        scope_json: Option<String>,
+        ttl_secs: u64,
+        max_uses: Option<i64>,
+        signature_hex: String,
     },
 
     // ── initiative lifecycle ──────────────────────────────────────────
@@ -123,42 +123,42 @@ pub enum OperatorRequest {
     CreateInitiative {
         /// CLI-chosen UUIDv7. Rejected with
         /// `FAIL_INITIATIVE_ID_COLLISION` on collision.
-        initiative_id:    String,
+        initiative_id: String,
         /// canonical_input bytes per §3.2. Hex-encoded on the wire so
         /// the JSON frame stays string-only; the kernel decodes back
         /// to bytes before calling `canonical_decode`.
-        plan_bundle_hex:  String,
+        plan_bundle_hex: String,
         /// SHA-256 of `plan_bundle` (the decoded canonical_input
         /// bytes). 64-char lowercase hex.
         bundle_sha256_hex: String,
         /// Ed25519 signature over `signing_input` per §3.2.
         /// 128-char lowercase hex.
-        signature_hex:    String,
+        signature_hex: String,
         /// Operator's pubkey fingerprint — 16-char lowercase hex of
         /// the 8-byte SHA-256[:16] fingerprint.
-        signed_by_hex:    String,
+        signed_by_hex: String,
     },
     ApprovePlan {
-        initiative_id:      String,
+        initiative_id: String,
         approving_operator: String,
     },
     RejectPlan {
         initiative_id: String,
-        rejected_by:   String,
-        reason:        Option<String>,
+        rejected_by: String,
+        reason: Option<String>,
     },
     AbortInitiative {
         initiative_id: String,
-        aborted_by:    String,
+        aborted_by: String,
     },
 
     // ── task state ops ────────────────────────────────────────────────
     AbortTask {
-        task_id:    String,
+        task_id: String,
         aborted_by: String,
     },
     ResumeTask {
-        task_id:    String,
+        task_id: String,
         resumed_by: String,
     },
     RetryTask {
@@ -177,8 +177,8 @@ pub enum OperatorRequest {
     // (see authority::escalation::approval_signing_input — the kernel
     // and CLI MUST agree on this exact byte layout).
     ApproveEscalation {
-        escalation_id:    String,
-        approval_scope:   ApprovalScopeWire,
+        escalation_id: String,
+        approval_scope: ApprovalScopeWire,
         operator_sig_hex: String,
     },
     DenyEscalation {
@@ -205,7 +205,7 @@ pub enum OperatorRequest {
         policy_path: String,
         /// Filesystem path to the corresponding 64-byte raw Ed25519
         /// signature file. Same containment rule as `policy_path`.
-        sig_path:    String,
+        sig_path: String,
     },
 
     // ── initiative quarantine (kernel-store.md §2.5.8) ────────────────
@@ -218,14 +218,13 @@ pub enum OperatorRequest {
     // rejected with `FAIL_INITIATIVE_QUARANTINED` by the planner
     // intent gate. v1 has no "unquarantine" wire op — the operator
     // recovers from a false positive by aborting the initiative.
-
     /// Quarantine a single initiative.
     QuarantineInitiative {
         /// UUID-shaped initiative_id to freeze.
-        initiative_id:  String,
+        initiative_id: String,
         /// Free-form reason (e.g. "compromised plan signer"). Capped
         /// to 512 bytes by the CLI before submission.
-        reason:         Option<String>,
+        reason: Option<String>,
     },
 
     /// Sweep every initiative whose plan was approved by
@@ -237,7 +236,7 @@ pub enum OperatorRequest {
         /// approved plans should be swept.
         target_fingerprint: String,
         /// Same shape as the single-initiative `reason` field.
-        reason:             Option<String>,
+        reason: Option<String>,
     },
 
     // -----------------------------------------------------------------
@@ -264,17 +263,17 @@ pub enum OperatorRequest {
     /// `operator-ergonomics.md §11.3` (`raxis plan cost-estimate`).
     /// Heuristic upper-bound dollar cost. V2 stub.
     EstimateCost {
-        plan_toml:        String,
-        plan_sig_hex:     String,
+        plan_toml: String,
+        plan_sig_hex: String,
     },
 
     /// `operator-ergonomics.md §12.3`
     /// (`raxis submit plan --dry-run`). Runs admission validation
     /// pipeline without persisting state. V2 stub.
     DryRunAdmit {
-        plan_toml:        String,
-        plan_sig_hex:     String,
-        submitted_by:     String,
+        plan_toml: String,
+        plan_sig_hex: String,
+        submitted_by: String,
     },
 
     /// `operator-ergonomics.md §13.4` (`raxis initiative watch`).
@@ -316,7 +315,7 @@ pub struct ApprovalScopeWire {
     pub capability_class: String,
     /// Maximum number of times the issued token may be presented.
     /// `0` is rejected by the kernel — issue at least one use.
-    pub max_uses:         i64,
+    pub max_uses: i64,
     /// Lifetime of the issued token, in seconds from `issued_at`.
     /// `0` is rejected by the kernel.
     pub valid_for_seconds: u64,
@@ -333,7 +332,7 @@ pub struct ApprovalScopeWire {
 /// normalised at admission time).
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct TaskOutputWire {
-    pub output_id:     String,
+    pub output_id: String,
     pub initiative_id: String,
     /// `Some(task_id)` for outputs emitted by an Executor or Reviewer
     /// session bound to a specific sub-task; `None` for
@@ -342,12 +341,12 @@ pub struct TaskOutputWire {
     /// `serde(default)` keeps older operator clients that omit the
     /// field on the wire deserialising cleanly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub task_id:       Option<String>,
-    pub session_id:    String,
-    pub kind:          String,
-    pub severity:      Option<String>,
-    pub payload_json:  String,
-    pub emitted_at:    i64,
+    pub task_id: Option<String>,
+    pub session_id: String,
+    pub kind: String,
+    pub severity: Option<String>,
+    pub payload_json: String,
+    pub emitted_at: i64,
 }
 
 // ---------------------------------------------------------------------------
@@ -365,12 +364,12 @@ pub struct TaskOutputWire {
 #[serde(tag = "status", content = "payload")]
 pub enum OperatorResponse {
     SessionCreated {
-        session_id:    String,
+        session_id: String,
         session_token: String,
-        role:          String,
+        role: String,
         worktree_root: Option<String>,
-        base_sha:      Option<String>,
-        lineage_id:    String,
+        base_sha: Option<String>,
+        lineage_id: String,
     },
     SessionRevoked {
         session_id: String,
@@ -381,10 +380,10 @@ pub enum OperatorResponse {
     },
     InitiativeCreated {
         initiative_id: String,
-        status:        String,
+        status: String,
     },
     PlanApproved {
-        initiative_id:  String,
+        initiative_id: String,
         tasks_admitted: usize,
     },
     /// Issued by the kernel after a successful `ApproveEscalation`.
@@ -396,19 +395,19 @@ pub enum OperatorResponse {
     /// planner presents the token on its next intent, the kernel
     /// re-derives the hash and looks it up to authorise the action.
     EscalationApproved {
-        escalation_id:      String,
-        approval_token_id:  String,
+        escalation_id: String,
+        approval_token_id: String,
         /// Hex-encoded high-entropy token (32 bytes → 64 hex chars).
         /// Operators MUST treat this value as a secret.
         approval_token_raw: String,
-        expires_at:         i64,
+        expires_at: i64,
     },
     /// Issued by the kernel after a successful `DenyEscalation`.
     /// No durable approval artifact is written — the audit event is
     /// the only record (kernel-store.md §2.5.5 — `DenyEscalation`).
     EscalationDenied {
         escalation_id: String,
-        denied_at:     i64,
+        denied_at: i64,
     },
     /// Issued by the kernel after a successful `RotateEpoch`.
     ///
@@ -423,16 +422,18 @@ pub enum OperatorResponse {
     /// a UUID to strictly enforce linear time (preventing replay attacks with old
     /// policies) and to provide human-readable sequence numbers for operators.
     EpochAdvanced {
-        new_epoch_id:                u64,
-        policy_sha256:               String,
-        signed_by_authority:         String,
-        n_delegations_marked_stale:  u64,
-        n_sessions_invalidated:      u64,
-        advanced_at:                 i64,
+        new_epoch_id: u64,
+        policy_sha256: String,
+        signed_by_authority: String,
+        n_delegations_marked_stale: u64,
+        n_sessions_invalidated: u64,
+        advanced_at: i64,
     },
     /// Generic acknowledgement for handlers that have no structured
     /// success payload (today: stubs, abort/retry/resume responses).
-    Ack { message: String },
+    Ack {
+        message: String,
+    },
 
     /// Issued after a successful `QuarantineInitiative`. Carries the
     /// initiative_id back so the CLI can echo it verbatim, plus
@@ -441,8 +442,8 @@ pub enum OperatorResponse {
     /// because someone else already quarantined it" without parsing
     /// the audit chain.
     InitiativeQuarantined {
-        initiative_id:           String,
-        quarantined_at:          i64,
+        initiative_id: String,
+        quarantined_at: i64,
         was_already_quarantined: bool,
     },
 
@@ -451,9 +452,9 @@ pub enum OperatorResponse {
     /// `target_fingerprint` for echo. Empty list ⇒ no plans by that
     /// operator OR all of them were already quarantined.
     QuarantineSwept {
-        target_fingerprint:     String,
-        newly_quarantined_ids:  Vec<String>,
-        quarantined_at:         i64,
+        target_fingerprint: String,
+        newly_quarantined_ids: Vec<String>,
+        quarantined_at: i64,
     },
     // -----------------------------------------------------------------
     // V2_GAPS §12.4 — Operator-ergonomics IPC success envelopes. Wire
@@ -475,14 +476,14 @@ pub enum OperatorResponse {
     /// on the wire envelope; the CLI divides by 100 for display.
     CostEstimated {
         upper_bound_usd_cents: i64,
-        breakdown_json:        String,
+        breakdown_json: String,
     },
     /// Response to `DryRunAdmit`. `target_ref` is the resolved
     /// initial integration ref; `warnings` are non-fatal admission
     /// warnings the operator should review before the real submit.
     DryRunAdmitted {
         target_ref: String,
-        warnings:   Vec<String>,
+        warnings: Vec<String>,
     },
     /// Response to `SubscribeInitiative`. The kernel ack'd the
     /// subscription; subsequent `KernelPush` frames flow over the
@@ -492,9 +493,9 @@ pub enum OperatorResponse {
     },
     /// Response to `DescribeInitiativePause`.
     InitiativePauseDescribed {
-        initiative_id:           String,
-        is_paused:               bool,
-        paused_at:               Option<i64>,
+        initiative_id: String,
+        is_paused: bool,
+        paused_at: Option<i64>,
         outstanding_escalations: Vec<String>,
     },
 
@@ -516,7 +517,7 @@ pub enum OperatorResponse {
     /// the CLI keys off (e.g. `"FAIL_APPROVE_PLAN"`); `detail` is a
     /// human-readable explanation.
     Error {
-        code:   String,
+        code: String,
         detail: String,
     },
 }
@@ -541,9 +542,10 @@ mod tests {
     {
         // 1. Serialise the typed value and check it produces the
         //    expected JSON document — pins the on-the-wire shape.
-        let serialised: Value = serde_json::to_value(value)
-            .expect("serialisation must succeed");
-        assert_eq!(serialised, expected,
+        let serialised: Value = serde_json::to_value(value).expect("serialisation must succeed");
+        assert_eq!(
+            serialised,
+            expected,
             "wire shape regression — value:\n{value:?}\nproduced JSON:\n{}\nexpected:\n{}",
             serde_json::to_string_pretty(&serialised).unwrap(),
             serde_json::to_string_pretty(&expected).unwrap(),
@@ -554,7 +556,8 @@ mod tests {
         //    side.
         let parsed: T = serde_json::from_value(expected.clone())
             .expect("expected JSON must parse back into the type");
-        assert_eq!(&parsed, value,
+        assert_eq!(
+            &parsed, value,
             "round-trip mismatch — expected:\n{value:?}\ngot:\n{parsed:?}",
         );
     }
@@ -565,12 +568,12 @@ mod tests {
     fn create_session_wire_shape() {
         round_trip(
             &OperatorRequest::CreateSession {
-                role:              "planner".into(),
-                worktree_root:     Some("/srv/work".into()),
-                base_sha:          Some("abcdef".into()),
+                role: "planner".into(),
+                worktree_root: Some("/srv/work".into()),
+                base_sha: Some("abcdef".into()),
                 base_tracking_ref: Some("refs/heads/main".into()),
-                lineage_id:        "lin-1".into(),
-                task_id:           None,
+                lineage_id: "lin-1".into(),
+                task_id: None,
             },
             json!({
                 "op": "CreateSession",
@@ -589,7 +592,9 @@ mod tests {
     #[test]
     fn revoke_session_wire_shape() {
         round_trip(
-            &OperatorRequest::RevokeSession { session_id: "sess-1".into() },
+            &OperatorRequest::RevokeSession {
+                session_id: "sess-1".into(),
+            },
             json!({
                 "op": "RevokeSession",
                 "payload": { "session_id": "sess-1" }
@@ -601,13 +606,13 @@ mod tests {
     fn grant_delegation_wire_shape() {
         round_trip(
             &OperatorRequest::GrantDelegation {
-                session_id:       "sess-1".into(),
-                delegation_id:    "del-1".into(),
+                session_id: "sess-1".into(),
+                delegation_id: "del-1".into(),
                 capability_class: "FsRead".into(),
-                scope_json:       Some(r#"{"paths":["src/"]}"#.into()),
-                ttl_secs:         3600,
-                max_uses:         Some(10),
-                signature_hex:    "deadbeef".into(),
+                scope_json: Some(r#"{"paths":["src/"]}"#.into()),
+                ttl_secs: 3600,
+                max_uses: Some(10),
+                signature_hex: "deadbeef".into(),
             },
             json!({
                 "op": "GrantDelegation",
@@ -642,11 +647,11 @@ mod tests {
         let bundle_sha_hex = "01".repeat(32);
         round_trip(
             &OperatorRequest::CreateInitiative {
-                initiative_id:     "0192a8f0-1234-7abc-9000-000000000001".into(),
-                plan_bundle_hex:   "deadbeef".into(),
+                initiative_id: "0192a8f0-1234-7abc-9000-000000000001".into(),
+                plan_bundle_hex: "deadbeef".into(),
                 bundle_sha256_hex: bundle_sha_hex.clone(),
-                signature_hex:     sig_hex.clone(),
-                signed_by_hex:     "0303030303030303".into(),
+                signature_hex: sig_hex.clone(),
+                signed_by_hex: "0303030303030303".into(),
             },
             json!({
                 "op": "CreateInitiative",
@@ -665,7 +670,7 @@ mod tests {
     fn approve_plan_wire_shape() {
         round_trip(
             &OperatorRequest::ApprovePlan {
-                initiative_id:      "init-1".into(),
+                initiative_id: "init-1".into(),
                 approving_operator: "op-prime".into(),
             },
             json!({
@@ -683,8 +688,8 @@ mod tests {
         round_trip(
             &OperatorRequest::RejectPlan {
                 initiative_id: "init-1".into(),
-                rejected_by:   "op-prime".into(),
-                reason:        Some("spec violation".into()),
+                rejected_by: "op-prime".into(),
+                reason: Some("spec violation".into()),
             },
             json!({
                 "op": "RejectPlan",
@@ -702,7 +707,7 @@ mod tests {
         round_trip(
             &OperatorRequest::AbortInitiative {
                 initiative_id: "init-1".into(),
-                aborted_by:    "op-prime".into(),
+                aborted_by: "op-prime".into(),
             },
             json!({
                 "op": "AbortInitiative",
@@ -718,7 +723,7 @@ mod tests {
     fn abort_task_wire_shape() {
         round_trip(
             &OperatorRequest::AbortTask {
-                task_id:    "t1".into(),
+                task_id: "t1".into(),
                 aborted_by: "op-prime".into(),
             },
             json!({
@@ -732,7 +737,7 @@ mod tests {
     fn resume_task_wire_shape() {
         round_trip(
             &OperatorRequest::ResumeTask {
-                task_id:    "t1".into(),
+                task_id: "t1".into(),
                 resumed_by: "op-prime".into(),
             },
             json!({
@@ -745,7 +750,9 @@ mod tests {
     #[test]
     fn retry_task_wire_shape() {
         round_trip(
-            &OperatorRequest::RetryTask { task_id: "t1".into() },
+            &OperatorRequest::RetryTask {
+                task_id: "t1".into(),
+            },
             json!({
                 "op": "RetryTask",
                 "payload": { "task_id": "t1" }
@@ -757,10 +764,10 @@ mod tests {
     fn approve_escalation_wire_shape() {
         round_trip(
             &OperatorRequest::ApproveEscalation {
-                escalation_id:    "esc-1".into(),
-                approval_scope:   ApprovalScopeWire {
-                    capability_class:  "WriteSecrets".into(),
-                    max_uses:          1,
+                escalation_id: "esc-1".into(),
+                approval_scope: ApprovalScopeWire {
+                    capability_class: "WriteSecrets".into(),
+                    max_uses: 1,
                     valid_for_seconds: 3600,
                 },
                 operator_sig_hex: "deadbeef".into(),
@@ -785,7 +792,7 @@ mod tests {
         round_trip(
             &OperatorRequest::DenyEscalation {
                 escalation_id: "esc-1".into(),
-                reason:        Some("scope too broad".into()),
+                reason: Some("scope too broad".into()),
             },
             json!({
                 "op": "DenyEscalation",
@@ -805,7 +812,7 @@ mod tests {
         round_trip(
             &OperatorRequest::DenyEscalation {
                 escalation_id: "esc-1".into(),
-                reason:        None,
+                reason: None,
             },
             json!({
                 "op": "DenyEscalation",
@@ -821,10 +828,10 @@ mod tests {
     fn escalation_approved_response_wire_shape() {
         round_trip(
             &OperatorResponse::EscalationApproved {
-                escalation_id:      "esc-1".into(),
-                approval_token_id:  "atk-1".into(),
+                escalation_id: "esc-1".into(),
+                approval_token_id: "atk-1".into(),
                 approval_token_raw: "ff".repeat(32),
-                expires_at:         1_700_000_000,
+                expires_at: 1_700_000_000,
             },
             json!({
                 "status": "EscalationApproved",
@@ -843,7 +850,7 @@ mod tests {
         round_trip(
             &OperatorRequest::RotateEpoch {
                 policy_path: "/var/lib/raxis/policy/policy.epoch-2.toml".into(),
-                sig_path:    "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
+                sig_path: "/var/lib/raxis/policy/policy.epoch-2.sig".into(),
             },
             json!({
                 "op": "RotateEpoch",
@@ -859,12 +866,12 @@ mod tests {
     fn epoch_advanced_response_wire_shape() {
         round_trip(
             &OperatorResponse::EpochAdvanced {
-                new_epoch_id:               2,
-                policy_sha256:              "ab".repeat(32),
-                signed_by_authority:        "ff".repeat(16),
+                new_epoch_id: 2,
+                policy_sha256: "ab".repeat(32),
+                signed_by_authority: "ff".repeat(16),
                 n_delegations_marked_stale: 7,
-                n_sessions_invalidated:     3,
-                advanced_at:                1_700_000_000,
+                n_sessions_invalidated: 3,
+                advanced_at: 1_700_000_000,
             },
             json!({
                 "status": "EpochAdvanced",
@@ -885,7 +892,7 @@ mod tests {
         round_trip(
             &OperatorResponse::EscalationDenied {
                 escalation_id: "esc-1".into(),
-                denied_at:     1_700_000_000,
+                denied_at: 1_700_000_000,
             },
             json!({
                 "status": "EscalationDenied",
@@ -903,12 +910,12 @@ mod tests {
     fn session_created_wire_shape() {
         round_trip(
             &OperatorResponse::SessionCreated {
-                session_id:    "sess-1".into(),
+                session_id: "sess-1".into(),
                 session_token: "deadbeef".into(),
-                role:          "planner".into(),
+                role: "planner".into(),
                 worktree_root: Some("/srv/work".into()),
-                base_sha:      Some("abcdef".into()),
-                lineage_id:    "lin-1".into(),
+                base_sha: Some("abcdef".into()),
+                lineage_id: "lin-1".into(),
             },
             json!({
                 "status": "SessionCreated",
@@ -928,7 +935,7 @@ mod tests {
     fn plan_approved_wire_shape() {
         round_trip(
             &OperatorResponse::PlanApproved {
-                initiative_id:  "init-1".into(),
+                initiative_id: "init-1".into(),
                 tasks_admitted: 3,
             },
             json!({
@@ -941,7 +948,9 @@ mod tests {
     #[test]
     fn ack_wire_shape() {
         round_trip(
-            &OperatorResponse::Ack { message: "ok".into() },
+            &OperatorResponse::Ack {
+                message: "ok".into(),
+            },
             json!({
                 "status": "Ack",
                 "payload": { "message": "ok" }
@@ -953,7 +962,7 @@ mod tests {
     fn error_wire_shape() {
         round_trip(
             &OperatorResponse::Error {
-                code:   "FAIL_APPROVE_PLAN".into(),
+                code: "FAIL_APPROVE_PLAN".into(),
                 detail: "bad signature".into(),
             },
             json!({
@@ -973,20 +982,24 @@ mod tests {
         // explicit null. By pinning the typed serialization we lock the
         // contract.
         let val = OperatorRequest::CreateSession {
-            role:              "planner".into(),
-            worktree_root:     None,
-            base_sha:          None,
+            role: "planner".into(),
+            worktree_root: None,
+            base_sha: None,
             base_tracking_ref: None,
-            lineage_id:        "lin-1".into(),
-            task_id:           None,
+            lineage_id: "lin-1".into(),
+            task_id: None,
         };
         let serialised: Value = serde_json::to_value(&val).unwrap();
         let payload = serialised.get("payload").unwrap();
         for key in ["worktree_root", "base_sha", "base_tracking_ref", "task_id"] {
-            assert!(payload.get(key).is_some(),
-                "optional key `{key}` MUST be present (as null), not omitted");
-            assert!(payload[key].is_null(),
-                "optional key `{key}` must serialise to null when None");
+            assert!(
+                payload.get(key).is_some(),
+                "optional key `{key}` MUST be present (as null), not omitted"
+            );
+            assert!(
+                payload[key].is_null(),
+                "optional key `{key}` must serialise to null when None"
+            );
         }
     }
 
@@ -1006,7 +1019,11 @@ mod tests {
         let parsed: OperatorRequest = serde_json::from_value(frame).unwrap();
         match parsed {
             OperatorRequest::CreateSession {
-                worktree_root, base_sha, base_tracking_ref, task_id, ..
+                worktree_root,
+                base_sha,
+                base_tracking_ref,
+                task_id,
+                ..
             } => {
                 assert!(worktree_root.is_none());
                 assert!(base_sha.is_none());
@@ -1027,7 +1044,7 @@ mod tests {
         round_trip(
             &OperatorRequest::QuarantineInitiative {
                 initiative_id: "init-abc".into(),
-                reason:        Some("leaked key".into()),
+                reason: Some("leaked key".into()),
             },
             json!({
                 "op": "QuarantineInitiative",
@@ -1045,12 +1062,14 @@ mod tests {
         // wire when None, matching the rest of `OperatorRequest`.
         let val = OperatorRequest::QuarantineInitiative {
             initiative_id: "init-abc".into(),
-            reason:        None,
+            reason: None,
         };
         let serialised = serde_json::to_value(&val).unwrap();
-        let payload    = serialised.get("payload").unwrap();
-        assert!(payload.get("reason").is_some(),
-            "optional `reason` MUST be present (as null), not omitted");
+        let payload = serialised.get("payload").unwrap();
+        assert!(
+            payload.get("reason").is_some(),
+            "optional `reason` MUST be present (as null), not omitted"
+        );
         assert!(payload["reason"].is_null());
     }
 
@@ -1059,7 +1078,7 @@ mod tests {
         round_trip(
             &OperatorRequest::QuarantinePlansBy {
                 target_fingerprint: "abcdef0123456789".into(),
-                reason:             Some("operator suspended".into()),
+                reason: Some("operator suspended".into()),
             },
             json!({
                 "op": "QuarantinePlansBy",
@@ -1075,8 +1094,8 @@ mod tests {
     fn initiative_quarantined_response_wire_shape() {
         round_trip(
             &OperatorResponse::InitiativeQuarantined {
-                initiative_id:           "init-abc".into(),
-                quarantined_at:          1_700_000_000,
+                initiative_id: "init-abc".into(),
+                quarantined_at: 1_700_000_000,
                 was_already_quarantined: false,
             },
             json!({
@@ -1253,7 +1272,9 @@ mod tests {
     #[test]
     fn list_task_outputs_request_wire_shape() {
         round_trip(
-            &OperatorRequest::ListTaskOutputs { task_id: "task-1".into() },
+            &OperatorRequest::ListTaskOutputs {
+                task_id: "task-1".into(),
+            },
             json!({
                 "op": "ListTaskOutputs",
                 "payload": { "task_id": "task-1" }
@@ -1285,24 +1306,25 @@ mod tests {
                 task_id: "task-1".into(),
                 outputs: vec![
                     TaskOutputWire {
-                        output_id:     "out-1".into(),
+                        output_id: "out-1".into(),
                         initiative_id: "init-1".into(),
-                        task_id:       Some("task-1".into()),
-                        session_id:    "sess-1".into(),
-                        kind:          "diagnostic_flag".into(),
-                        severity:      Some("warning".into()),
-                        payload_json:  r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#.into(),
-                        emitted_at:    1_700_000_000,
+                        task_id: Some("task-1".into()),
+                        session_id: "sess-1".into(),
+                        kind: "diagnostic_flag".into(),
+                        severity: Some("warning".into()),
+                        payload_json: r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#
+                            .into(),
+                        emitted_at: 1_700_000_000,
                     },
                     TaskOutputWire {
-                        output_id:     "out-2".into(),
+                        output_id: "out-2".into(),
                         initiative_id: "init-1".into(),
-                        task_id:       Some("task-1".into()),
-                        session_id:    "sess-1".into(),
-                        kind:          "progress_report".into(),
-                        severity:      None,
-                        payload_json:  r#"{"ProgressReport":{}}"#.into(),
-                        emitted_at:    1_700_000_010,
+                        task_id: Some("task-1".into()),
+                        session_id: "sess-1".into(),
+                        kind: "progress_report".into(),
+                        severity: None,
+                        payload_json: r#"{"ProgressReport":{}}"#.into(),
+                        emitted_at: 1_700_000_010,
                     },
                 ],
             },
@@ -1341,9 +1363,9 @@ mod tests {
     fn quarantine_swept_response_wire_shape() {
         round_trip(
             &OperatorResponse::QuarantineSwept {
-                target_fingerprint:    "abcdef0123456789".into(),
+                target_fingerprint: "abcdef0123456789".into(),
                 newly_quarantined_ids: vec!["init-1".into(), "init-2".into()],
-                quarantined_at:        1_700_000_000,
+                quarantined_at: 1_700_000_000,
             },
             json!({
                 "status": "QuarantineSwept",

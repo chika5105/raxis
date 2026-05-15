@@ -24,7 +24,7 @@
 
 use sha2::{Digest, Sha256};
 
-use crate::{CryptoError, verify_ed25519};
+use crate::{verify_ed25519, CryptoError};
 
 /// Construct the canonical `canonical_bytes` for a GrantDelegation message,
 /// hash them with SHA-256, and return the 32-byte `signing_input`.
@@ -32,11 +32,11 @@ use crate::{CryptoError, verify_ed25519};
 /// Both the CLI (to sign) and the kernel (to verify) call this function.
 /// The exact byte layout is normative; any deviation is a spec violation.
 pub fn delegation_signing_input(
-    session_id: &str,          // UUID hyphenated form, 36 ASCII bytes
-    capability_class: &str,    // enum variant name, e.g. "WriteSecrets"
-    delegating_role_id: &str,  // operator role id
-    expires_at: u64,           // absolute Unix seconds
-    scope_json: Option<&str>,  // None or Some(raw JSON bytes)
+    session_id: &str,         // UUID hyphenated form, 36 ASCII bytes
+    capability_class: &str,   // enum variant name, e.g. "WriteSecrets"
+    delegating_role_id: &str, // operator role id
+    expires_at: u64,          // absolute Unix seconds
+    scope_json: Option<&str>, // None or Some(raw JSON bytes)
 ) -> [u8; 32] {
     let mut buf: Vec<u8> = Vec::with_capacity(256);
 
@@ -113,7 +113,7 @@ pub fn verify_delegation_grant(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{SigningKey, Signer};
+    use ed25519_dalek::{Signer, SigningKey};
 
     fn make_test_keypair() -> (SigningKey, [u8; 32]) {
         // Deterministic test key — NOT for production use.
@@ -191,6 +191,9 @@ mod tests {
     fn scope_none_vs_some_produces_different_inputs() {
         let a = delegation_signing_input("session-id-a", "NetworkEgress", "op1", 0, None);
         let b = delegation_signing_input("session-id-a", "NetworkEgress", "op1", 0, Some("{}"));
-        assert_ne!(a, b, "None and Some scope must produce distinct signing inputs");
+        assert_ne!(
+            a, b,
+            "None and Some scope must produce distinct signing inputs"
+        );
     }
 }

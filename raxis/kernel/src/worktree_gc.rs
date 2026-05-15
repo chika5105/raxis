@@ -69,7 +69,7 @@ pub enum WorktreeGcDecision {
     /// worktree on disk so a crash-recovery Case A re-fetch has
     /// the objects it needs.
     RetainedPendingMerge {
-        path:                   PathBuf,
+        path: PathBuf,
         blocking_initiative_id: String,
     },
 }
@@ -101,12 +101,10 @@ pub enum WorktreeGcError {
 /// AFTER the mutex is dropped so a slow `remove_dir_all` does not
 /// block other store consumers (admission, audit emit).
 pub fn gc_session_worktree(
-    store:      &Store,
+    store: &Store,
     session_id: &str,
 ) -> Result<WorktreeGcDecision, WorktreeGcError> {
-    use raxis_store::views::sessions::{
-        pending_initiative_for_session, worktree_root_for_session,
-    };
+    use raxis_store::views::sessions::{pending_initiative_for_session, worktree_root_for_session};
 
     let (worktree_root_opt, pending_initiative): (Option<String>, Option<String>) = {
         let conn = store.lock_sync();
@@ -117,7 +115,7 @@ pub fn gc_session_worktree(
 
     let path = match worktree_root_opt {
         Some(p) => PathBuf::from(p),
-        None    => return Ok(WorktreeGcDecision::NoWorktree),
+        None => return Ok(WorktreeGcDecision::NoWorktree),
     };
 
     if let Some(blocking_initiative_id) = pending_initiative {
@@ -166,8 +164,8 @@ mod tests {
     use raxis_test_support::DiskStore;
 
     const INITIATIVES: &str = Table::Initiatives.as_str();
-    const TASKS:       &str = Table::Tasks.as_str();
-    const SESSIONS:    &str = Table::Sessions.as_str();
+    const TASKS: &str = Table::Tasks.as_str();
+    const SESSIONS: &str = Table::Sessions.as_str();
 
     /// Materialise a worktree-shaped directory at
     /// `<data_dir>/worktrees/<session_uuid>/` so `destroy` has
@@ -191,14 +189,11 @@ mod tests {
                  VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, ?2)"
             ),
             rusqlite::params![initiative_id, pending],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn seed_session(
-        store:         &raxis_store::Store,
-        session_id:    &str,
-        worktree_root: Option<&Path>,
-    ) {
+    fn seed_session(store: &raxis_store::Store, session_id: &str, worktree_root: Option<&Path>) {
         let g = store.lock_sync();
         g.execute(
             &format!(
@@ -212,15 +207,11 @@ mod tests {
                 format!("tok-{session_id}"),
                 worktree_root.map(|p| p.display().to_string()),
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn seed_task(
-        store:         &raxis_store::Store,
-        task_id:       &str,
-        initiative_id: &str,
-        session_id:    &str,
-    ) {
+    fn seed_task(store: &raxis_store::Store, task_id: &str, initiative_id: &str, session_id: &str) {
         let g = store.lock_sync();
         g.execute(
             &format!(
@@ -230,7 +221,8 @@ mod tests {
                  VALUES (?1, ?2, 'lane-1', 'Running', 'orch', 1, 100, 100, ?3)"
             ),
             rusqlite::params![task_id, initiative_id, session_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -249,8 +241,10 @@ mod tests {
             WorktreeGcDecision::Removed { path } => assert_eq!(path, wt),
             other => panic!("expected Removed, got {other:?}"),
         }
-        assert!(!wt.exists(),
-            "INV-MERGE-WORKTREE-RETAIN cleared ⇒ GC must evict the worktree");
+        assert!(
+            !wt.exists(),
+            "INV-MERGE-WORKTREE-RETAIN cleared ⇒ GC must evict the worktree"
+        );
     }
 
     #[test]
@@ -266,16 +260,19 @@ mod tests {
         let decision = gc_session_worktree(disk.store(), session_id).unwrap();
         match decision {
             WorktreeGcDecision::RetainedPendingMerge {
-                path, blocking_initiative_id,
+                path,
+                blocking_initiative_id,
             } => {
-                assert_eq!(path,                   wt);
+                assert_eq!(path, wt);
                 assert_eq!(blocking_initiative_id, "init-pending");
             }
             other => panic!("expected RetainedPendingMerge, got {other:?}"),
         }
-        assert!(wt.exists(),
+        assert!(
+            wt.exists(),
             "INV-MERGE-WORKTREE-RETAIN: GC MUST NOT delete worktree while \
-             pending merge would need it for Case-A recovery");
+             pending merge would need it for Case-A recovery"
+        );
     }
 
     #[test]
@@ -309,8 +306,10 @@ mod tests {
         // should still see Removed (or NoWorktree if we cleared
         // the column on Phase 3, which we don't).
         let d2 = gc_session_worktree(disk.store(), session_id).unwrap();
-        assert!(matches!(d2, WorktreeGcDecision::Removed { .. }),
-            "idempotency: a second sweep after Removed must succeed");
+        assert!(
+            matches!(d2, WorktreeGcDecision::Removed { .. }),
+            "idempotency: a second sweep after Removed must succeed"
+        );
         assert!(!wt.exists());
     }
 
@@ -325,14 +324,16 @@ mod tests {
 
         // First sweep: blocked.
         let d1 = gc_session_worktree(disk.store(), session_id).unwrap();
-        assert!(matches!(d1, WorktreeGcDecision::RetainedPendingMerge { .. }));
+        assert!(matches!(
+            d1,
+            WorktreeGcDecision::RetainedPendingMerge { .. }
+        ));
         assert!(wt.exists());
 
         // Phase 3 (or recovery Case B/A) clears the flag.
         {
             let g = disk.store().lock_sync();
-            raxis_store::views::initiatives::clear_git_apply_pending(&g, "init-unblock")
-                .unwrap();
+            raxis_store::views::initiatives::clear_git_apply_pending(&g, "init-unblock").unwrap();
         }
 
         // Second sweep: unblocked.

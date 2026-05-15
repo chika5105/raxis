@@ -78,8 +78,7 @@ use raxis_planner_core::{
 /// manifest (negative redaction test). Includes both ASCII and a
 /// non-ASCII `█` so a naïve `to_string` substring search catches a
 /// regression that double-encodes Unicode.
-const KERNEL_PRIVATE_SENTINEL: &str =
-    "live-e2e-loopback-plan-payload-MUST-NOT-LEAK-█";
+const KERNEL_PRIVATE_SENTINEL: &str = "live-e2e-loopback-plan-payload-MUST-NOT-LEAK-█";
 
 /// Env vars the slice mutates on the live process. Recorded so the
 /// epilogue can restore the host environment when the slice runs
@@ -146,14 +145,8 @@ pub async fn run() -> Result<()> {
             "POSTGRES_PASSWORD",
             format!("pg-pwd-{KERNEL_PRIVATE_SENTINEL}"),
         );
-        std::env::set_var(
-            "DATABASE_URL",
-            "postgres://raxis@127.0.0.1:54121/livee2e",
-        );
-        std::env::set_var(
-            "MONGO_URL",
-            "mongodb://127.0.0.1:54122/livee2e",
-        );
+        std::env::set_var("DATABASE_URL", "postgres://raxis@127.0.0.1:54121/livee2e");
+        std::env::set_var("MONGO_URL", "mongodb://127.0.0.1:54122/livee2e");
         std::env::set_var("REDIS_URL", "redis://127.0.0.1:54123/0");
         std::env::set_var("SMTP_URL", "smtp://127.0.0.1:54124");
         std::env::set_var("RAXIS_PLANNER_ROLE", "executor");
@@ -166,10 +159,8 @@ pub async fn run() -> Result<()> {
     // ── Stage cwd. Real probe reads this for `filesystem.workdir`,
     //    `git_initialized`, `head_commit`. Use a tempdir without git
     //    init so the assertion is host-stable.
-    let staged_cwd = std::env::temp_dir().join(format!(
-        "raxis-live-e2e-vm-caps-{}",
-        std::process::id()
-    ));
+    let staged_cwd =
+        std::env::temp_dir().join(format!("raxis-live-e2e-vm-caps-{}", std::process::id()));
     if !staged_cwd.exists() {
         std::fs::create_dir_all(&staged_cwd)
             .with_context(|| format!("create staged cwd {}", staged_cwd.display()))?;
@@ -190,7 +181,7 @@ pub async fn run() -> Result<()> {
         for (k, prior) in saved {
             match prior {
                 Some(v) => std::env::set_var(&k, v),
-                None    => std::env::remove_var(&k),
+                None => std::env::remove_var(&k),
             }
         }
     }
@@ -201,10 +192,9 @@ pub async fn run() -> Result<()> {
 }
 
 fn run_assertions(
-    manifest:   &raxis_planner_core::CapabilityManifest,
+    manifest: &raxis_planner_core::CapabilityManifest,
     staged_cwd: &Path,
 ) -> Result<()> {
-
     // ── Assertion 1: image_role + image_digest reflect the kernel
     //    spawn metadata.
     if manifest.image_role != ImageRole::Executor {
@@ -228,11 +218,7 @@ fn run_assertions(
     //    binary present (any reasonable Linux host has bash; the
     //    slice deliberately picks the smallest possible canonical
     //    binary so the assertion holds in minimal containers too).
-    let binary_names: Vec<&str> = manifest
-        .binaries
-        .iter()
-        .map(|b| b.name.as_str())
-        .collect();
+    let binary_names: Vec<&str> = manifest.binaries.iter().map(|b| b.name.as_str()).collect();
     if binary_names.is_empty() {
         bail!(
             "INV-EXEC-DISCOVERY-01: binaries MUST be non-empty on a real \
@@ -245,8 +231,10 @@ fn run_assertions(
              got binaries: {binary_names:?}"
         );
     }
-    tracing::info!(n_binaries = manifest.binaries.len(),
-        "vm-capabilities: PATH walk found binaries");
+    tracing::info!(
+        n_binaries = manifest.binaries.len(),
+        "vm-capabilities: PATH walk found binaries"
+    );
 
     // ── Assertion 3: workdir reflects the staged cwd verbatim.
     if manifest.filesystem.workdir != staged_cwd.to_string_lossy().into_owned() {
@@ -272,9 +260,9 @@ fn run_assertions(
     // ── Assertion 4: credential-proxy URLs surface verbatim.
     for (key, expected) in [
         ("DATABASE_URL", "postgres://raxis@127.0.0.1:54121/livee2e"),
-        ("MONGO_URL",    "mongodb://127.0.0.1:54122/livee2e"),
-        ("REDIS_URL",    "redis://127.0.0.1:54123/0"),
-        ("SMTP_URL",     "smtp://127.0.0.1:54124"),
+        ("MONGO_URL", "mongodb://127.0.0.1:54122/livee2e"),
+        ("REDIS_URL", "redis://127.0.0.1:54123/0"),
+        ("SMTP_URL", "smtp://127.0.0.1:54124"),
     ] {
         let got = manifest.env.get(key).ok_or_else(|| {
             anyhow!(
@@ -285,9 +273,7 @@ fn run_assertions(
             )
         })?;
         if got != expected {
-            bail!(
-                "{key} MUST surface verbatim; expected {expected:?}, got {got:?}"
-            );
+            bail!("{key} MUST surface verbatim; expected {expected:?}, got {got:?}");
         }
     }
     tracing::info!("vm-capabilities: credential-proxy URLs surface verbatim");
@@ -324,8 +310,8 @@ fn run_assertions(
             );
         }
     }
-    let manifest_json = serde_json::to_string(&manifest)
-        .context("serialise manifest for sentinel scan")?;
+    let manifest_json =
+        serde_json::to_string(&manifest).context("serialise manifest for sentinel scan")?;
     if manifest_json.contains(KERNEL_PRIVATE_SENTINEL) {
         bail!(
             "INV-EXEC-DISCOVERY-01: kernel-private sentinel \
@@ -394,7 +380,10 @@ fn run_assertions(
         })?;
         let installed: Vec<&str> = py.packages.iter().map(|p| p.name.as_str()).collect();
         for required in CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS {
-            if !installed.iter().any(|name| name.eq_ignore_ascii_case(required)) {
+            if !installed
+                .iter()
+                .any(|name| name.eq_ignore_ascii_case(required))
+            {
                 bail!(
                     "canonical-executor opt-in: required Python DB client \
                      {required:?} MUST be present (planner-harness.md §10.6); \
@@ -420,10 +409,5 @@ fn run_assertions(
 /// per `planner-harness.md §10.6`. Names match what `pip` would
 /// install (case-insensitive comparison handles `psycopg2-binary`
 /// vs `Psycopg2-binary`, and dist-info case quirks).
-const CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS: &[&str] = &[
-    "psycopg2-binary",
-    "pymongo",
-    "redis",
-    "PyMySQL",
-    "pymssql",
-];
+const CANONICAL_EXECUTOR_PYTHON_DB_CLIENTS: &[&str] =
+    &["psycopg2-binary", "pymongo", "redis", "PyMySQL", "pymssql"];

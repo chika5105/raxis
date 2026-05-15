@@ -122,8 +122,7 @@ const DEFAULT_NPM_BUILD_TIMEOUT_SECS: u64 = 300;
 /// auto-bundle pipeline so a CI log scraper / operator can pin
 /// the failure mode by substring without parsing the whole
 /// remediation block.
-pub const FE_BUNDLE_VIOLATION_TOKEN: &str =
-    "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED";
+pub const FE_BUNDLE_VIOLATION_TOKEN: &str = "INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01 VIOLATED";
 
 /// Pure-data classification of the `dashboard-fe` workspace state
 /// at the moment the harness needs to mount the dashboard. Drives
@@ -290,10 +289,7 @@ fn run_npm_bounded(
             Err(e) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!(
-                    "`npm {}` try_wait error: {e}",
-                    args.join(" "),
-                ));
+                return Err(format!("`npm {}` try_wait error: {e}", args.join(" "),));
             }
         }
     }
@@ -306,8 +302,16 @@ fn run_npm_bounded(
 /// half-pruned `node_modules/` will fail the build with the
 /// exact iter52 symptom (`tsc: command not found`).
 fn node_modules_vite_present(fe_root: &Path) -> bool {
-    fe_root.join("node_modules").join(".bin").join("vite").is_file()
-        || fe_root.join("node_modules").join(".bin").join("tsc").is_file()
+    fe_root
+        .join("node_modules")
+        .join(".bin")
+        .join("vite")
+        .is_file()
+        || fe_root
+            .join("node_modules")
+            .join(".bin")
+            .join("tsc")
+            .is_file()
 }
 
 /// Absolute path to the React production bundle, installing
@@ -381,12 +385,7 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
                 npm_install_timeout().as_secs(),
             );
             let install_started = Instant::now();
-            if let Err(reason) = run_npm_bounded(
-                &fe_root,
-                &["ci"],
-                npm_install_timeout(),
-                true,
-            ) {
+            if let Err(reason) = run_npm_bounded(&fe_root, &["ci"], npm_install_timeout(), true) {
                 panic!(
                     "{FE_BUNDLE_VIOLATION_TOKEN}: `npm ci` failed in {}: \
                      {reason}. Either install a working Node + npm \
@@ -403,9 +402,7 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
             );
             run_build_or_panic(&fe_root, &dist, &dist_index)
         }
-        BundleState::NeedsBuildOnly => {
-            run_build_or_panic(&fe_root, &dist, &dist_index)
-        }
+        BundleState::NeedsBuildOnly => run_build_or_panic(&fe_root, &dist, &dist_index),
     }
 }
 
@@ -414,11 +411,7 @@ pub fn locate_dashboard_dist() -> Option<PathBuf> {
 /// any failure. Factored out so the
 /// [`BundleState::NeedsInstallThenBuild`] and
 /// [`BundleState::NeedsBuildOnly`] arms share one panic shape.
-fn run_build_or_panic(
-    fe_root: &Path,
-    dist: &Path,
-    dist_index: &Path,
-) -> Option<PathBuf> {
+fn run_build_or_panic(fe_root: &Path, dist: &Path, dist_index: &Path) -> Option<PathBuf> {
     eprintln!(
         "[dashboard-bundle] running `npm run build` in {} (bounded by {}={}s; \
          opt out via {ENV_SKIP_DASHBOARD_BUILD}=1)",
@@ -427,12 +420,7 @@ fn run_build_or_panic(
         npm_build_timeout().as_secs(),
     );
     let build_started = Instant::now();
-    if let Err(reason) = run_npm_bounded(
-        fe_root,
-        &["run", "build"],
-        npm_build_timeout(),
-        true,
-    ) {
+    if let Err(reason) = run_npm_bounded(fe_root, &["run", "build"], npm_build_timeout(), true) {
         panic!(
             "{FE_BUNDLE_VIOLATION_TOKEN}: `npm run build` failed in {}: \
              {reason}. Diagnose with `cd raxis/dashboard-fe && npm ci && \
@@ -466,11 +454,11 @@ fn run_build_or_panic(
 /// 1:1 so [`build_autologin_url`] can re-emit them in the URL
 /// fragment the React `LoginPage::parseAutologinHash` consumes.
 pub struct DashboardSession {
-    pub token:        String,
-    pub operator_id:  String,
+    pub token: String,
+    pub operator_id: String,
     pub display_name: String,
-    pub roles:        Vec<String>,
-    pub expires_at:   u64,
+    pub roles: Vec<String>,
+    pub expires_at: u64,
 }
 
 /// In-place mutation of the genesis-emitted `[dashboard]` block:
@@ -506,7 +494,10 @@ pub fn mutate_dashboard_block_in_policy(data_dir: &Path) {
             let mut s = String::new();
             s.push_str(&format!("bind_port    = {port}\n"));
             s.push_str("# static_dir injected by tests/common/dashboard.rs.\n");
-            s.push_str(&format!("static_dir   = {:?}\n", dist.display().to_string()));
+            s.push_str(&format!(
+                "static_dir   = {:?}\n",
+                dist.display().to_string()
+            ));
             s
         }
         None => {
@@ -545,9 +536,7 @@ pub fn wait_for_dashboard_port(port: u16, deadline: Duration) -> bool {
     };
     let start = Instant::now();
     while start.elapsed() < deadline {
-        if std::net::TcpStream::connect_timeout(
-            &parsed, Duration::from_millis(250),
-        ).is_ok() {
+        if std::net::TcpStream::connect_timeout(&parsed, Duration::from_millis(250)).is_ok() {
             // Accept-loop is up; give the router state one tick to
             // finish wiring before the first POST hits.
             std::thread::sleep(Duration::from_millis(150));
@@ -589,7 +578,9 @@ pub fn mint_dashboard_jwt(
     let challenge_body: serde_json::Value = challenge_resp.json().ok()?;
     let challenge_hex = challenge_body.get("challenge")?.as_str()?.to_owned();
     let challenge_bytes = hex::decode(&challenge_hex).ok()?;
-    if challenge_bytes.len() != 32 { return None; }
+    if challenge_bytes.len() != 32 {
+        return None;
+    }
 
     // Step 2 — sign with the test's operator key (the same one
     // `bootstrap_with_custom_cert` minted the operator cert
@@ -608,9 +599,7 @@ pub fn mint_dashboard_jwt(
     // the dashboard's manual challenge-response form. The
     // challenge is a one-time nonce (single-use, ~5 min TTL), so
     // the signature has no value beyond this single mint attempt.
-    eprintln!(
-        "[{label}] dashboard manual-fallback (paste into /login if autologin fails):"
-    );
+    eprintln!("[{label}] dashboard manual-fallback (paste into /login if autologin fails):");
     eprintln!("[{label}]   1. CLI command   : raxis auth sign {challenge_hex}");
     eprintln!("[{label}]   2. Signature hex : {signature_hex}");
     eprintln!("[{label}]   3. Public key hex: {pubkey_hex}");
@@ -636,15 +625,16 @@ pub fn mint_dashboard_jwt(
     }
     let verify_payload: serde_json::Value = verify_resp.json().ok()?;
     Some(DashboardSession {
-        token:        verify_payload.get("token")?.as_str()?.to_owned(),
-        operator_id:  verify_payload.get("operator_id")?.as_str()?.to_owned(),
+        token: verify_payload.get("token")?.as_str()?.to_owned(),
+        operator_id: verify_payload.get("operator_id")?.as_str()?.to_owned(),
         display_name: verify_payload.get("display_name")?.as_str()?.to_owned(),
-        roles:        verify_payload.get("roles")?
-                         .as_array()?
-                         .iter()
-                         .filter_map(|v| v.as_str().map(str::to_owned))
-                         .collect(),
-        expires_at:   verify_payload.get("expires_at")?.as_u64()?,
+        roles: verify_payload
+            .get("roles")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        expires_at: verify_payload.get("expires_at")?.as_u64()?,
     })
 }
 
@@ -661,14 +651,15 @@ pub fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
         // bespoke pass is sufficient.
         s.bytes()
             .flat_map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                | b'-' | b'_' | b'.' | b'~' => vec![b],
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => vec![b],
                 _ => format!("%{b:02X}").into_bytes(),
             })
             .map(|b| b as char)
             .collect()
     }
-    let roles_csv = session.roles.iter()
+    let roles_csv = session
+        .roles
+        .iter()
         .map(|r| encode(r))
         .collect::<Vec<_>>()
         .join(",");
@@ -680,13 +671,13 @@ pub fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
          &roles={roles}\
          &expires_at={exp}\
          &next=%2F",
-        addr  = DASHBOARD_BIND_ADDRESS,
-        port  = port,
+        addr = DASHBOARD_BIND_ADDRESS,
+        port = port,
         token = encode(&session.token),
-        op    = encode(&session.operator_id),
-        name  = encode(&session.display_name),
+        op = encode(&session.operator_id),
+        name = encode(&session.display_name),
         roles = roles_csv,
-        exp   = session.expires_at,
+        exp = session.expires_at,
     )
 }
 
@@ -706,9 +697,9 @@ pub fn spawn_url_opener(url: &str) -> Result<(), String> {
     use super::browser::{open_in_best_browser, OpenOutcome};
     match open_in_best_browser(url) {
         OpenOutcome::Cursor | OpenOutcome::System { .. } | OpenOutcome::Suppressed => Ok(()),
-        OpenOutcome::Printed => Err(
-            "no URL opener could be invoked on this host (URL was printed)".to_owned(),
-        ),
+        OpenOutcome::Printed => {
+            Err("no URL opener could be invoked on this host (URL was printed)".to_owned())
+        }
     }
 }
 
@@ -836,7 +827,8 @@ mod tests {
     }
 
     #[test]
-    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_node_modules_present_needs_build_only() {
+    fn inv_live_e2e_dashboard_fe_bundle_present_01_classifier_node_modules_present_needs_build_only(
+    ) {
         // No dist + no opt-out + package.json + node_modules.bin
         // populated ⇒ skip install, just build.
         assert_eq!(
@@ -854,8 +846,14 @@ mod tests {
     #[test]
     fn inv_live_e2e_dashboard_fe_bundle_present_01_opt_out_env_var_name_pinned() {
         assert_eq!(ENV_SKIP_DASHBOARD_BUILD, "RAXIS_E2E_SKIP_DASHBOARD_BUILD");
-        assert_eq!(ENV_NPM_INSTALL_TIMEOUT_SECS, "RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS");
-        assert_eq!(ENV_NPM_BUILD_TIMEOUT_SECS, "RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS");
+        assert_eq!(
+            ENV_NPM_INSTALL_TIMEOUT_SECS,
+            "RAXIS_E2E_NPM_INSTALL_TIMEOUT_SECS"
+        );
+        assert_eq!(
+            ENV_NPM_BUILD_TIMEOUT_SECS,
+            "RAXIS_E2E_NPM_BUILD_TIMEOUT_SECS"
+        );
     }
 
     /// Every panic produced by the auto-bundle pipeline carries
@@ -879,10 +877,22 @@ mod tests {
     /// trips here.
     #[test]
     fn inv_live_e2e_dashboard_fe_bundle_present_01_default_timeouts_are_generous_but_bounded() {
-        assert!(DEFAULT_NPM_INSTALL_TIMEOUT_SECS >= 60, "install timeout must allow a cold registry pull");
-        assert!(DEFAULT_NPM_INSTALL_TIMEOUT_SECS <= 1800, "install timeout must be bounded (30 min ceiling)");
-        assert!(DEFAULT_NPM_BUILD_TIMEOUT_SECS >= 30, "build timeout must allow a real `tsc -b && vite build`");
-        assert!(DEFAULT_NPM_BUILD_TIMEOUT_SECS <= 900, "build timeout must be bounded (15 min ceiling)");
+        assert!(
+            DEFAULT_NPM_INSTALL_TIMEOUT_SECS >= 60,
+            "install timeout must allow a cold registry pull"
+        );
+        assert!(
+            DEFAULT_NPM_INSTALL_TIMEOUT_SECS <= 1800,
+            "install timeout must be bounded (30 min ceiling)"
+        );
+        assert!(
+            DEFAULT_NPM_BUILD_TIMEOUT_SECS >= 30,
+            "build timeout must allow a real `tsc -b && vite build`"
+        );
+        assert!(
+            DEFAULT_NPM_BUILD_TIMEOUT_SECS <= 900,
+            "build timeout must be bounded (15 min ceiling)"
+        );
     }
 
     /// `node_modules_vite_present` returns `false` for an
@@ -901,8 +911,7 @@ mod tests {
         );
         // node_modules/ present but empty (.bin missing) — the
         // half-pruned shape that bites in practice.
-        std::fs::create_dir_all(tmp.path().join("node_modules"))
-            .expect("mkdir node_modules");
+        std::fs::create_dir_all(tmp.path().join("node_modules")).expect("mkdir node_modules");
         assert!(
             !node_modules_vite_present(tmp.path()),
             "node_modules/ without .bin/vite|.bin/tsc MUST classify as absent",
@@ -935,13 +944,17 @@ mod tests {
             fn set(key: &'static str, value: &str) -> Self {
                 let prior = std::env::var(key).ok();
                 // SAFETY: Test-only mutation guarded by Drop.
-                unsafe { std::env::set_var(key, value); }
+                unsafe {
+                    std::env::set_var(key, value);
+                }
                 EnvGuard(key, prior)
             }
             fn unset(key: &'static str) -> Self {
                 let prior = std::env::var(key).ok();
                 // SAFETY: Test-only mutation guarded by Drop.
-                unsafe { std::env::remove_var(key); }
+                unsafe {
+                    std::env::remove_var(key);
+                }
                 EnvGuard(key, prior)
             }
         }
@@ -949,14 +962,21 @@ mod tests {
             fn drop(&mut self) {
                 match &self.1 {
                     // SAFETY: Test-only restore.
-                    Some(v) => unsafe { std::env::set_var(self.0, v); },
-                    None    => unsafe { std::env::remove_var(self.0); },
+                    Some(v) => unsafe {
+                        std::env::set_var(self.0, v);
+                    },
+                    None => unsafe {
+                        std::env::remove_var(self.0);
+                    },
                 }
             }
         }
 
         let _g = EnvGuard::unset(ENV_NPM_INSTALL_TIMEOUT_SECS);
-        assert_eq!(npm_install_timeout(), Duration::from_secs(DEFAULT_NPM_INSTALL_TIMEOUT_SECS));
+        assert_eq!(
+            npm_install_timeout(),
+            Duration::from_secs(DEFAULT_NPM_INSTALL_TIMEOUT_SECS)
+        );
         let _g = EnvGuard::set(ENV_NPM_INSTALL_TIMEOUT_SECS, "1200");
         assert_eq!(npm_install_timeout(), Duration::from_secs(1200));
         let _g = EnvGuard::set(ENV_NPM_INSTALL_TIMEOUT_SECS, "0");

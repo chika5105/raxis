@@ -53,7 +53,9 @@ where
         return Ok(Json(full));
     }
     if !op.has_role(DashboardRole::Read) {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     // Sanitize for non-admins: keep the coarse status + active
     // counts, drop the per-check details.
@@ -83,7 +85,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let snapshot = state.data.subsystem_health()?;
     Ok(Json(snapshot))
@@ -160,9 +164,9 @@ pub struct KernelLifecycleResponse {
 #[derive(Debug, Clone, Serialize, serde::Deserialize)]
 pub struct KernelAutoResumeSummary {
     /// Tasks the sweep transitioned BRP → Admitted.
-    pub resumed:                   u32,
+    pub resumed: u32,
     /// Tasks skipped because the initiative is operator-quarantined.
-    pub skipped_quarantined:       u32,
+    pub skipped_quarantined: u32,
     /// Tasks skipped because they were already at `BlockedRecoveryPending`
     /// before this boot's recovery sweep (preserve operator pre-existing
     /// block).
@@ -170,16 +174,16 @@ pub struct KernelAutoResumeSummary {
     /// Tasks the sweep tried to resume but the FSM transition or
     /// audit-emit failed; they remain at `BlockedRecoveryPending`
     /// and will need an operator `task resume`.
-    pub transition_failed:         u32,
+    pub transition_failed: u32,
     /// Stable identifier shared by every
     /// `TaskAutoResumedAfterSupervisorRestart` event from this
     /// episode. Lets the dashboard link the banner pill to the
     /// matching audit rows.
-    pub supervisor_restart_id:     String,
+    pub supervisor_restart_id: String,
     /// Wallclock unix-seconds the kernel wrote the file. The
     /// dashboard handler suppresses the field if this is more
     /// than 5 minutes ago.
-    pub recorded_at_unix_secs:     i64,
+    pub recorded_at_unix_secs: i64,
 }
 
 /// Sentinel view used by the handler. Deliberately a private
@@ -212,7 +216,9 @@ struct SentinelView {
     updated_at_unix_secs: i64,
 }
 
-fn default_status_healthy() -> String { "Healthy".to_owned() }
+fn default_status_healthy() -> String {
+    "Healthy".to_owned()
+}
 
 /// `GET /api/health/kernel-lifecycle` — supervisor sentinel view.
 ///
@@ -230,7 +236,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let response = read_kernel_lifecycle_response(state.config.data_dir.as_deref());
     Ok(Json(response))
@@ -337,8 +345,7 @@ pub fn read_kernel_lifecycle_response(data_dir: Option<&str>) -> KernelLifecycle
         2 * i64::from(view.window_secs)
     };
     let age_secs = now.saturating_sub(view.updated_at_unix_secs);
-    let pid_alive = view.supervisor_pid == 0
-        || supervisor_pid_alive(view.supervisor_pid);
+    let pid_alive = view.supervisor_pid == 0 || supervisor_pid_alive(view.supervisor_pid);
     let fresh = age_secs <= staleness_window && pid_alive;
     let (status, sub_state) = if !fresh && view.supervisor_pid != 0 {
         // Supervisor PID we know about is gone OR the file
@@ -377,10 +384,7 @@ pub const AUTO_RESUME_STATUS_FILENAME: &str = "last_auto_resume.json";
 /// be on steady-state operation, not a stale post-restart event.
 pub const AUTO_RESUME_VISIBILITY_WINDOW_SECS: i64 = 300;
 
-fn read_recent_auto_resume_summary(
-    data_dir: &str,
-    now:      i64,
-) -> Option<KernelAutoResumeSummary> {
+fn read_recent_auto_resume_summary(data_dir: &str, now: i64) -> Option<KernelAutoResumeSummary> {
     let path = PathBuf::from(data_dir).join(AUTO_RESUME_STATUS_FILENAME);
     let bytes = std::fs::read(&path).ok()?;
     let parsed: KernelAutoResumeSummary = serde_json::from_slice(&bytes).ok()?;
@@ -433,9 +437,7 @@ mod tests {
     #[test]
     fn missing_sentinel_returns_healthy_fresh() {
         let dir = tempdir().unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Healthy");
         assert!(resp.sub_state.is_none());
         assert!(resp.fresh);
@@ -465,9 +467,7 @@ mod tests {
             serde_json::to_vec(&raw).unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Healthy");
         assert!(resp.fresh);
         assert_eq!(resp.supervisor_pid, std::process::id());
@@ -496,13 +496,14 @@ mod tests {
             serde_json::to_vec(&raw).unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Restarting");
         assert_eq!(resp.attempt_n, 2);
         assert_eq!(resp.max_attempts, 3);
-        assert_eq!(resp.last_restart_reason.as_deref(), Some("DeadlockDetected"));
+        assert_eq!(
+            resp.last_restart_reason.as_deref(),
+            Some("DeadlockDetected")
+        );
         assert!(resp.fresh);
     }
 
@@ -529,9 +530,7 @@ mod tests {
             serde_json::to_vec(&raw).unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Halted");
         assert_eq!(resp.sub_state.as_deref(), Some("CircuitOpen"));
         assert!(resp.fresh);
@@ -558,9 +557,7 @@ mod tests {
             serde_json::to_vec(&raw).unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Halted");
         assert_eq!(resp.sub_state.as_deref(), Some("SupervisorGone"));
         assert!(!resp.fresh);
@@ -574,9 +571,7 @@ mod tests {
             b"{ this is not json ",
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Halted");
         assert_eq!(resp.sub_state.as_deref(), Some("SupervisorGone"));
         assert!(!resp.fresh);
@@ -598,9 +593,7 @@ mod tests {
             serde_json::to_vec(&raw).unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert_eq!(resp.status, "Healthy");
         assert!(resp.fresh);
     }
@@ -626,15 +619,16 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         let summary = resp.auto_resume.expect("auto_resume must be populated");
         assert_eq!(summary.resumed, 4);
         assert_eq!(summary.skipped_quarantined, 1);
         assert_eq!(summary.skipped_pre_existing_block, 1);
         assert_eq!(summary.transition_failed, 0);
-        assert_eq!(summary.supervisor_restart_id, "supervisor-restart-1700000000-1");
+        assert_eq!(
+            summary.supervisor_restart_id,
+            "supervisor-restart-1700000000-1"
+        );
     }
 
     /// An auto-resume episode older than the 5-minute visibility
@@ -658,11 +652,11 @@ mod tests {
             .unwrap(),
         )
         .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
-        assert!(resp.auto_resume.is_none(),
-            "an episode > AUTO_RESUME_VISIBILITY_WINDOW_SECS old must be suppressed");
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
+        assert!(
+            resp.auto_resume.is_none(),
+            "an episode > AUTO_RESUME_VISIBILITY_WINDOW_SECS old must be suppressed"
+        );
     }
 
     /// Garbage in `last_auto_resume.json` MUST NOT panic the
@@ -671,14 +665,8 @@ mod tests {
     #[test]
     fn garbage_auto_resume_file_collapses_to_none() {
         let dir = tempdir().unwrap();
-        std::fs::write(
-            dir.path().join(AUTO_RESUME_STATUS_FILENAME),
-            b"{not-json",
-        )
-        .unwrap();
-        let resp = read_kernel_lifecycle_response(Some(
-            dir.path().to_str().unwrap(),
-        ));
+        std::fs::write(dir.path().join(AUTO_RESUME_STATUS_FILENAME), b"{not-json").unwrap();
+        let resp = read_kernel_lifecycle_response(Some(dir.path().to_str().unwrap()));
         assert!(resp.auto_resume.is_none());
         // The rest of the response must still be coherent — no
         // panic, no Halted{SupervisorGone} fallout, just the

@@ -30,15 +30,13 @@ use std::io::Write;
 
 use raxis_policy::{load_policy, LaneEntry};
 use raxis_store::open_ro;
-use raxis_store::views::budget::{
-    per_lane, reservations_for_lane, LaneBudgetRow, ReservationRow,
-};
+use raxis_store::views::budget::{per_lane, reservations_for_lane, LaneBudgetRow, ReservationRow};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
 const POLICY_FILE_NAME: &str = "policy.toml";
-const DEFAULT_LIMIT:    usize = 50;
+const DEFAULT_LIMIT: usize = 50;
 
 // ────────────────────────────────────────────────────────────────────
 // Entry point
@@ -62,9 +60,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         // Lane-detail drill-down. Validate the lane exists in policy
         // FIRST so an operator typo fails before we hit SQLite.
         if !bundle.lanes().iter().any(|l| &l.lane_id == lane_id) {
-            eprintln!(
-                "budget: lane {lane_id:?} is not declared in the active policy bundle"
-            );
+            eprintln!("budget: lane {lane_id:?} is not declared in the active policy bundle");
             std::process::exit(4);
         }
         let rows = reservations_for_lane(&conn, lane_id, opts.limit)
@@ -81,8 +77,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     }
 
     // Top-level "all lanes" mode.
-    let agg = per_lane(&conn)
-        .map_err(|e| CliError::Policy(format!("budget::per_lane: {e}")))?;
+    let agg = per_lane(&conn).map_err(|e| CliError::Policy(format!("budget::per_lane: {e}")))?;
 
     let lanes_index: HashMap<&str, &LaneEntry> = bundle
         .lanes()
@@ -121,15 +116,15 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Default, Clone)]
 struct BudgetOpts {
     lane_id: Option<String>,
-    limit:   usize,
-    json:    bool,
+    limit: usize,
+    json: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<BudgetOpts, CliError> {
     let mut opts = BudgetOpts {
         lane_id: None,
-        limit:   DEFAULT_LIMIT,
-        json:    false,
+        limit: DEFAULT_LIMIT,
+        json: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -144,9 +139,7 @@ fn parse_args(args: &[String]) -> Result<BudgetOpts, CliError> {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if n == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
                 opts.limit = n;
             }
@@ -188,7 +181,9 @@ fn print_help() {
 // ────────────────────────────────────────────────────────────────────
 
 fn pressure_pct(reserved: u64, max_cost: u64) -> Option<u64> {
-    if max_cost == 0 { return None; }
+    if max_cost == 0 {
+        return None;
+    }
     // u128 to avoid overflow on theoretical max budgets.
     let pct = (reserved as u128 * 100) / max_cost as u128;
     Some(pct.min(u64::MAX as u128) as u64)
@@ -199,15 +194,15 @@ fn pressure_pct(reserved: u64, max_cost: u64) -> Option<u64> {
 // ────────────────────────────────────────────────────────────────────
 
 fn render_human_all<W: Write>(
-    out:        &mut W,
-    lane_ids:   &[String],
-    lanes_idx:  &HashMap<&str, &LaneEntry>,
-    agg_idx:    &HashMap<&str, &LaneBudgetRow>,
+    out: &mut W,
+    lane_ids: &[String],
+    lanes_idx: &HashMap<&str, &LaneEntry>,
+    agg_idx: &HashMap<&str, &LaneBudgetRow>,
 ) {
     let _ = writeln!(
         out,
         "Lane budgets ({n} lane{plural}):",
-        n      = lane_ids.len(),
+        n = lane_ids.len(),
         plural = if lane_ids.len() == 1 { "" } else { "s" },
     );
     if lane_ids.is_empty() {
@@ -217,32 +212,36 @@ fn render_human_all<W: Write>(
     let _ = writeln!(
         out,
         "  {lane:<24} {tasks:>6} {reserved:>12} {cap:>12} {pct:>8}",
-        lane     = "lane_id",
-        tasks    = "tasks",
+        lane = "lane_id",
+        tasks = "tasks",
         reserved = "reserved",
-        cap      = "cap",
-        pct      = "pressure",
+        cap = "cap",
+        pct = "pressure",
     );
     for id in lane_ids {
         let agg = agg_idx.get(id.as_str());
         let lane = lanes_idx.get(id.as_str());
         let reserved = agg.map(|a| a.reserved_cost).unwrap_or(0);
-        let count    = agg.map(|a| a.task_count).unwrap_or(0);
-        let cap      = lane.map(|l| l.max_cost_per_epoch).unwrap_or(0);
-        let pct      = match pressure_pct(reserved, cap) {
+        let count = agg.map(|a| a.task_count).unwrap_or(0);
+        let cap = lane.map(|l| l.max_cost_per_epoch).unwrap_or(0);
+        let pct = match pressure_pct(reserved, cap) {
             Some(p) => format!("{p}%"),
-            None    => "n/a".to_owned(),
+            None => "n/a".to_owned(),
         };
-        let suffix = if lane.is_none() { "  (orphan: not in policy)" } else { "" };
+        let suffix = if lane.is_none() {
+            "  (orphan: not in policy)"
+        } else {
+            ""
+        };
         let _ = writeln!(
             out,
             "  {lane:<24} {tasks:>6} {reserved:>12} {cap:>12} {pct:>8}{suffix}",
-            lane     = truncate(id, 24),
-            tasks    = count,
+            lane = truncate(id, 24),
+            tasks = count,
             reserved = reserved,
-            cap      = cap,
-            pct      = pct,
-            suffix   = suffix,
+            cap = cap,
+            pct = pct,
+            suffix = suffix,
         );
     }
 }
@@ -256,8 +255,8 @@ fn render_human_lane<W: Write>(out: &mut W, lane_id: &str, rows: &[ReservationRo
         out,
         "Reservations for lane {lane_id} ({n} row{plural}):",
         lane_id = lane_id,
-        n       = rows.len(),
-        plural  = if rows.len() == 1 { "" } else { "s" },
+        n = rows.len(),
+        plural = if rows.len() == 1 { "" } else { "s" },
     );
     if rows.is_empty() {
         let _ = writeln!(out, "  (no active reservations)");
@@ -275,7 +274,7 @@ fn render_human_lane<W: Write>(out: &mut W, lane_id: &str, rows: &[ReservationRo
             "  {task:<24} {cost:>10}  {at}",
             task = truncate(&r.task_id, 24),
             cost = r.reserved_cost,
-            at   = r.reserved_at,
+            at = r.reserved_at,
         );
     }
 }
@@ -285,19 +284,19 @@ fn render_human_lane<W: Write>(out: &mut W, lane_id: &str, rows: &[ReservationRo
 // ────────────────────────────────────────────────────────────────────
 
 fn render_json_all<W: Write>(
-    out:       &mut W,
-    lane_ids:  &[String],
+    out: &mut W,
+    lane_ids: &[String],
     lanes_idx: &HashMap<&str, &LaneEntry>,
-    agg_idx:   &HashMap<&str, &LaneBudgetRow>,
+    agg_idx: &HashMap<&str, &LaneBudgetRow>,
 ) {
     let lanes: Vec<serde_json::Value> = lane_ids
         .iter()
         .map(|id| {
             let lane = lanes_idx.get(id.as_str());
-            let agg  = agg_idx.get(id.as_str());
+            let agg = agg_idx.get(id.as_str());
             let reserved = agg.map(|a| a.reserved_cost).unwrap_or(0);
-            let count    = agg.map(|a| a.task_count).unwrap_or(0);
-            let cap      = lane.map(|l| l.max_cost_per_epoch).unwrap_or(0);
+            let count = agg.map(|a| a.task_count).unwrap_or(0);
+            let cap = lane.map(|l| l.max_cost_per_epoch).unwrap_or(0);
             serde_json::json!({
                 "lane_id":            id,
                 "task_count":         count,
@@ -367,10 +366,7 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_zero_limit() {
-        let err = parse_args(&[
-            "--limit".to_owned(),
-            "0".to_owned(),
-        ]).unwrap_err();
+        let err = parse_args(&["--limit".to_owned(), "0".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -387,26 +383,26 @@ mod tests {
 
     fn sample_lane(id: &str, max_cost: u64) -> LaneEntry {
         LaneEntry {
-            lane_id:              id.to_owned(),
+            lane_id: id.to_owned(),
             max_concurrent_tasks: 10,
-            max_cost_per_epoch:   max_cost,
-            priority:             100,
+            max_cost_per_epoch: max_cost,
+            priority: 100,
         }
     }
 
     #[test]
     fn render_human_all_includes_every_policy_lane_even_without_reservations() {
         let lane_a = sample_lane("alpha", 100);
-        let lane_b = sample_lane("beta",  200);
-        let lanes_idx: HashMap<&str, &LaneEntry> =
-            [("alpha", &lane_a), ("beta", &lane_b)].into_iter().collect();
+        let lane_b = sample_lane("beta", 200);
+        let lanes_idx: HashMap<&str, &LaneEntry> = [("alpha", &lane_a), ("beta", &lane_b)]
+            .into_iter()
+            .collect();
         let agg = LaneBudgetRow {
-            lane_id:       "alpha".to_owned(),
+            lane_id: "alpha".to_owned(),
             reserved_cost: 50,
-            task_count:    3,
+            task_count: 3,
         };
-        let agg_idx: HashMap<&str, &LaneBudgetRow> =
-            std::iter::once(("alpha", &agg)).collect();
+        let agg_idx: HashMap<&str, &LaneBudgetRow> = std::iter::once(("alpha", &agg)).collect();
         let lane_ids = vec!["alpha".to_owned(), "beta".to_owned()];
 
         let mut buf: Vec<u8> = Vec::new();
@@ -425,12 +421,11 @@ mod tests {
         // No lanes in policy index, but reservations reference "ghost".
         let lanes_idx: HashMap<&str, &LaneEntry> = HashMap::new();
         let agg = LaneBudgetRow {
-            lane_id:       "ghost".to_owned(),
+            lane_id: "ghost".to_owned(),
             reserved_cost: 10,
-            task_count:    1,
+            task_count: 1,
         };
-        let agg_idx: HashMap<&str, &LaneBudgetRow> =
-            std::iter::once(("ghost", &agg)).collect();
+        let agg_idx: HashMap<&str, &LaneBudgetRow> = std::iter::once(("ghost", &agg)).collect();
         let lane_ids = vec!["ghost".to_owned()];
         let mut buf: Vec<u8> = Vec::new();
         render_human_all(&mut buf, &lane_ids, &lanes_idx, &agg_idx);
@@ -449,15 +444,13 @@ mod tests {
     #[test]
     fn render_json_all_emits_per_lane_struct() {
         let lane_a = sample_lane("alpha", 200);
-        let lanes_idx: HashMap<&str, &LaneEntry> =
-            std::iter::once(("alpha", &lane_a)).collect();
+        let lanes_idx: HashMap<&str, &LaneEntry> = std::iter::once(("alpha", &lane_a)).collect();
         let agg = LaneBudgetRow {
             lane_id: "alpha".to_owned(),
             reserved_cost: 50,
             task_count: 2,
         };
-        let agg_idx: HashMap<&str, &LaneBudgetRow> =
-            std::iter::once(("alpha", &agg)).collect();
+        let agg_idx: HashMap<&str, &LaneBudgetRow> = std::iter::once(("alpha", &agg)).collect();
         let lane_ids = vec!["alpha".to_owned()];
         let mut buf: Vec<u8> = Vec::new();
         render_json_all(&mut buf, &lane_ids, &lanes_idx, &agg_idx);

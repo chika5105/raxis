@@ -70,13 +70,21 @@ use crate::data::DashboardData;
 use crate::error::ApiError;
 
 #[cfg(test)]
-pub(crate) const fn body_limit_auth_for_tests() -> usize { BODY_LIMIT_AUTH }
+pub(crate) const fn body_limit_auth_for_tests() -> usize {
+    BODY_LIMIT_AUTH
+}
 #[cfg(test)]
-pub(crate) const fn body_limit_policy_for_tests() -> usize { BODY_LIMIT_POLICY }
+pub(crate) const fn body_limit_policy_for_tests() -> usize {
+    BODY_LIMIT_POLICY
+}
 #[cfg(test)]
-pub(crate) const fn handler_timeout_for_tests() -> Duration { HANDLER_TIMEOUT }
+pub(crate) const fn handler_timeout_for_tests() -> Duration {
+    HANDLER_TIMEOUT
+}
 #[cfg(test)]
-pub(crate) const fn max_inflight_for_tests() -> usize { MAX_INFLIGHT_REQUESTS }
+pub(crate) const fn max_inflight_for_tests() -> usize {
+    MAX_INFLIGHT_REQUESTS
+}
 
 /// Shared application state. Cheap `Arc` clone per request.
 pub type AppState<D> = Arc<AppStateInner<D>>;
@@ -194,10 +202,7 @@ pub struct DashboardServer<D: DashboardData> {
 impl<D: DashboardData> DashboardServer<D> {
     /// Bind a fresh dashboard server. `config.bind_address` and
     /// `config.bind_port` MUST be writable on the host.
-    pub async fn bind(
-        config: DashboardConfig,
-        data: Arc<D>,
-    ) -> Result<Self, BindError> {
+    pub async fn bind(config: DashboardConfig, data: Arc<D>) -> Result<Self, BindError> {
         Self::bind_with_observability(config, data, None).await
     }
 
@@ -211,8 +216,7 @@ impl<D: DashboardData> DashboardServer<D> {
         data: Arc<D>,
         observability: Option<Arc<raxis_observability::ObservabilityHub>>,
     ) -> Result<Self, BindError> {
-        let auth = build_auth_state(&config)
-            .map_err(|e| BindError::Auth(e.to_string()))?;
+        let auth = build_auth_state(&config).map_err(|e| BindError::Auth(e.to_string()))?;
         let shutdown = ShutdownSignal::new();
         let state: AppState<D> = Arc::new(AppStateInner {
             data: Arc::clone(&data),
@@ -224,21 +228,29 @@ impl<D: DashboardData> DashboardServer<D> {
         });
         let router = build_router(Arc::clone(&state));
         let addr_str = format!("{}:{}", config.bind_address, config.bind_port);
-        let listener = TcpListener::bind(&addr_str).await
+        let listener = TcpListener::bind(&addr_str)
+            .await
             .map_err(|e| BindError::Bind {
                 addr: addr_str.clone(),
                 source: e,
             })?;
-        let addr = listener.local_addr()
-            .map_err(|e| BindError::Bind {
-                addr: addr_str,
-                source: e,
-            })?;
-        Ok(Self { router, listener, addr, _state: state, shutdown })
+        let addr = listener.local_addr().map_err(|e| BindError::Bind {
+            addr: addr_str,
+            source: e,
+        })?;
+        Ok(Self {
+            router,
+            listener,
+            addr,
+            _state: state,
+            shutdown,
+        })
     }
 
     /// Address the listener is bound to (useful for tests).
-    pub fn local_addr(&self) -> SocketAddr { self.addr }
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
 
     /// Shutdown signal handle (cloneable). Triggering this
     /// directly is equivalent to triggering the future passed to
@@ -305,8 +317,8 @@ impl<D: DashboardData> DashboardServer<D> {
 /// SPA fallback (when `static_dir` is set) is added last so
 /// `/api/*` routes never fall through to `ServeDir`.
 fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
-    use axum::routing::{get, patch, post};
     use crate::routes::*;
+    use axum::routing::{get, patch, post};
 
     let static_dir = state.config.static_dir.clone();
 
@@ -346,21 +358,24 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
         // Health (admin sees full, read sees sanitized).
-        .route("/api/health",                  get(health::health::<D>))
-        .route("/api/health/subsystems",       get(health::subsystems::<D>))
+        .route("/api/health", get(health::health::<D>))
+        .route("/api/health/subsystems", get(health::subsystems::<D>))
         // V2.5 self-healing-supervisor.md §5.2 — supervisor
         // sentinel view, polled every 5 s by `KernelLifecycleBanner`.
-        .route("/api/health/kernel-lifecycle", get(health::kernel_lifecycle::<D>))
+        .route(
+            "/api/health/kernel-lifecycle",
+            get(health::kernel_lifecycle::<D>),
+        )
         // Initiatives.
-        .route("/api/initiatives",                 get(initiatives::list::<D>))
-        .route("/api/initiatives/:id",             get(initiatives::detail::<D>))
-        .route("/api/initiatives/:id/dag",         get(initiatives::dag::<D>))
-        .route("/api/initiatives/:id/tasks",       get(initiatives::tasks::<D>))
+        .route("/api/initiatives", get(initiatives::list::<D>))
+        .route("/api/initiatives/:id", get(initiatives::detail::<D>))
+        .route("/api/initiatives/:id/dag", get(initiatives::dag::<D>))
+        .route("/api/initiatives/:id/tasks", get(initiatives::tasks::<D>))
         // Original submitted plan TOML — INV-DASHBOARD-
         // INITIATIVE-PLAN-VISIBLE-01. Read-role suffices; the
         // handler emits a 60s `Cache-Control: private` header
         // for approved plans and `no-store` for pending ones.
-        .route("/api/initiatives/:id/plan",        get(initiatives::plan::<D>))
+        .route("/api/initiatives/:id/plan", get(initiatives::plan::<D>))
         // Per-initiative credential viewer (INV-DASHBOARD-CREDENTIAL-*).
         // Listing is read-role; reveal is admin-only with a per-
         // operator rate limit + paired audit emission. Body limits
@@ -391,17 +406,17 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
                 .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_AUTH)),
         )
         // Tasks.
-        .route("/api/tasks/:id",                   get(tasks::detail::<D>))
-        .route("/api/tasks/:id/outputs",           get(tasks::outputs::<D>))
-        .route("/api/tasks/:id/llm-turns",         get(tasks::llm_turns::<D>))
+        .route("/api/tasks/:id", get(tasks::detail::<D>))
+        .route("/api/tasks/:id/outputs", get(tasks::outputs::<D>))
+        .route("/api/tasks/:id/llm-turns", get(tasks::llm_turns::<D>))
         // Sessions.
-        .route("/api/sessions",                    get(sessions::list::<D>))
-        .route("/api/sessions/:id",                get(sessions::detail::<D>))
+        .route("/api/sessions", get(sessions::list::<D>))
+        .route("/api/sessions/:id", get(sessions::detail::<D>))
         // Escalations.
-        .route("/api/escalations",                 get(escalations::list::<D>))
-        .route("/api/escalations/:id",             get(escalations::detail::<D>))
+        .route("/api/escalations", get(escalations::list::<D>))
+        .route("/api/escalations/:id", get(escalations::detail::<D>))
         // Audit + Inbox.
-        .route("/api/audit",                       get(audit::list::<D>))
+        .route("/api/audit", get(audit::list::<D>))
         // Curated recent-activity feed for the dashboard
         // Overview widget. Filters server-side to state-
         // affecting events only (allow-list lives in
@@ -409,36 +424,47 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // makes a policy call about what's "noise". See
         // `specs/v2/dashboard-operator-action-audit-coverage.md
         // §signal-vs-noise`.
-        .route("/api/audit/recent",                get(audit::recent::<D>))
-        .route("/api/audit/chain-status",          get(audit::chain_status::<D>))
-        .route("/api/inbox",                       get(inbox::list::<D>))
+        .route("/api/audit/recent", get(audit::recent::<D>))
+        .route("/api/audit/chain-status", get(audit::chain_status::<D>))
+        .route("/api/inbox", get(inbox::list::<D>))
         // Notifications.
-        .route("/api/notifications",               get(notifications::list::<D>))
-        .route("/api/notifications/unread-count",  get(notifications::unread_count::<D>))
-        .route("/api/notifications/mark-all-read", post(notifications::mark_all_read::<D>))
-        .route("/api/notifications/:id/read",      patch(notifications::mark_read::<D>))
+        .route("/api/notifications", get(notifications::list::<D>))
+        .route(
+            "/api/notifications/unread-count",
+            get(notifications::unread_count::<D>),
+        )
+        .route(
+            "/api/notifications/mark-all-read",
+            post(notifications::mark_all_read::<D>),
+        )
+        .route(
+            "/api/notifications/:id/read",
+            patch(notifications::mark_read::<D>),
+        )
         // Policy.
-        .route("/api/policy",                      get(policy::snapshot::<D>))
+        .route("/api/policy", get(policy::snapshot::<D>))
         .route(
             "/api/policy/toml",
-            get(policy::raw_toml::<D>).put(
-                policy::update_toml::<D>
-            )
-            .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
-            .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
+            get(policy::raw_toml::<D>)
+                .put(policy::update_toml::<D>)
+                .layer::<_, Infallible>(DefaultBodyLimit::max(BODY_LIMIT_POLICY))
+                .layer::<_, Infallible>(RequestBodyLimitLayer::new(BODY_LIMIT_POLICY)),
         )
         // Git worktrees.
-        .route("/api/git/worktrees",                       get(git::list::<D>))
-        .route("/api/git/worktrees/:name",                 get(git::detail::<D>))
-        .route("/api/git/worktrees/:name/log",             get(git::log::<D>))
-        .route("/api/git/worktrees/:name/diff",            get(git::diff_default::<D>))
-        .route("/api/git/worktrees/:name/diff/:range",     get(git::diff_range::<D>))
+        .route("/api/git/worktrees", get(git::list::<D>))
+        .route("/api/git/worktrees/:name", get(git::detail::<D>))
+        .route("/api/git/worktrees/:name/log", get(git::log::<D>))
+        .route("/api/git/worktrees/:name/diff", get(git::diff_default::<D>))
+        .route(
+            "/api/git/worktrees/:name/diff/:range",
+            get(git::diff_range::<D>),
+        )
         // Repo browsing — directory tree + file content under
         // the worktree root, both subject to the
         // path-allowlist + symlink-escape sandbox in
         // `KernelDashboardData::worktree_{tree,file}`.
-        .route("/api/git/worktrees/:name/tree",            get(git::tree::<D>))
-        .route("/api/git/worktrees/:name/file",            get(git::file::<D>))
+        .route("/api/git/worktrees/:name/tree", get(git::tree::<D>))
+        .route("/api/git/worktrees/:name/file", get(git::file::<D>))
         // Per-handler wall-clock timeout. Applies to the
         // sub-router only so the SSE long-poll handler is
         // exempt (see the sibling sub-router below).
@@ -452,8 +478,8 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
     // connection after `HANDLER_TIMEOUT` seconds, which is
     // exactly the wrong behaviour for a stream the browser is
     // meant to hold open across the lifetime of a session.
-    let sse_router: Router<AppState<D>> = Router::new()
-        .route("/api/sessions/:id/stream",         get(sessions::stream::<D>));
+    let sse_router: Router<AppState<D>> =
+        Router::new().route("/api/sessions/:id/stream", get(sessions::stream::<D>));
 
     let mut router = api_router.merge(sse_router);
 
@@ -465,9 +491,7 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
     if let Some(dir) = static_dir {
         use tower_http::services::ServeDir;
         let index = std::path::PathBuf::from(&dir).join("index.html");
-        let serve = ServeDir::new(&dir).fallback(
-            tower_http::services::ServeFile::new(index),
-        );
+        let serve = ServeDir::new(&dir).fallback(tower_http::services::ServeFile::new(index));
         router = router.fallback_service(serve);
     }
 
@@ -485,12 +509,9 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .layer(ConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS))
         .layer(TraceLayer::new_for_http())
         .layer(CorsLayer::permissive())
-        .layer(
-            CompressionLayer::new().compress_when(
-                SizeAbove::new(512)
-                    .and(NotForContentType::const_new("text/event-stream")),
-            ),
-        )
+        .layer(CompressionLayer::new().compress_when(
+            SizeAbove::new(512).and(NotForContentType::const_new("text/event-stream")),
+        ))
         // V3 perf-telemetry — per-request duration histogram. The
         // middleware is appended last so the `route` label reflects
         // the routed path (after axum's matcher), the wall-clock
@@ -518,8 +539,8 @@ async fn observability_middleware<D: DashboardData>(
     next: axum::middleware::Next,
 ) -> axum::response::Response {
     let started = std::time::Instant::now();
-    let method  = request.method().as_str().to_owned();
-    let route   = matched
+    let method = request.method().as_str().to_owned();
+    let route = matched
         .as_ref()
         .map(|m| m.as_str().to_owned())
         .unwrap_or_else(|| "unknown".to_owned());
@@ -564,7 +585,9 @@ pub struct ServerHandle {
 
 impl ServerHandle {
     /// Address the listener is bound to.
-    pub fn local_addr(&self) -> SocketAddr { self.addr }
+    pub fn local_addr(&self) -> SocketAddr {
+        self.addr
+    }
 
     /// Spawn the supplied server in the background. Returns a
     /// handle whose [`shutdown`](Self::shutdown) method drains
@@ -573,11 +596,17 @@ impl ServerHandle {
         let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
         let addr = server.local_addr();
         let join = tokio::spawn(async move {
-            server.serve_with_shutdown(async move {
-                let _ = shutdown_rx.await;
-            }).await
+            server
+                .serve_with_shutdown(async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await
         });
-        Self { shutdown_tx, join, addr }
+        Self {
+            shutdown_tx,
+            join,
+            addr,
+        }
     }
 
     /// Signal shutdown and await the serve task.
@@ -585,7 +614,9 @@ impl ServerHandle {
         let _ = self.shutdown_tx.send(());
         match self.join.await {
             Ok(res) => res,
-            Err(e) => Err(std::io::Error::other(format!("dashboard task panicked: {e}"))),
+            Err(e) => Err(std::io::Error::other(format!(
+                "dashboard task panicked: {e}"
+            ))),
         }
     }
 }
@@ -635,10 +666,7 @@ impl<D: DashboardData> FromRequestParts<AppState<D>> for AuthorizedOperator {
         // practice; other endpoints continue to require the
         // header (the dashboard frontend always sets it).
         let token_owned: String = if let Some(h) = parts.headers.get(header::AUTHORIZATION) {
-            let s = h
-                .to_str()
-                .map_err(|_| ApiError::MissingAuth)?
-                .trim();
+            let s = h.to_str().map_err(|_| ApiError::MissingAuth)?.trim();
             match s.strip_prefix("Bearer ") {
                 Some(rest) => rest.trim().to_owned(),
                 None => return Err(ApiError::MissingAuth),
@@ -658,7 +686,9 @@ impl<D: DashboardData> FromRequestParts<AppState<D>> for AuthorizedOperator {
         // Re-resolve through the data layer so an operator who
         // was removed since the JWT was minted gets bounced
         // immediately.
-        let resolution = state.data.lookup_operator_roles(&claims.fingerprint)
+        let resolution = state
+            .data
+            .lookup_operator_roles(&claims.fingerprint)
             .ok_or(ApiError::UnknownOperator)?;
         Ok(AuthorizedOperator {
             fingerprint: claims.fingerprint.clone(),
@@ -673,9 +703,11 @@ impl<D: DashboardData> FromRequestParts<AppState<D>> for AuthorizedOperator {
 /// uniform error body.
 #[allow(dead_code)]
 async fn not_found() -> impl IntoResponse {
-    ApiError::NotFound { kind: "endpoint".into() }
-        .into_response()
-        .into_response()
+    ApiError::NotFound {
+        kind: "endpoint".into(),
+    }
+    .into_response()
+    .into_response()
 }
 
 /// Extract `token=<value>` from a URL query string. Used by the

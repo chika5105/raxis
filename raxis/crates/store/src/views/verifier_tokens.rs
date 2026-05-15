@@ -26,13 +26,13 @@ use crate::Table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifierTokenRow {
     pub verifier_run_id: String,
-    pub task_id:         String,
-    pub gate_type:       String,
-    pub evaluation_sha:  String,
-    pub issued_at:       u64,
-    pub expires_at:      u64,
-    pub consumed:        bool,
-    pub consumed_at:     Option<u64>,
+    pub task_id: String,
+    pub gate_type: String,
+    pub evaluation_sha: String,
+    pub issued_at: u64,
+    pub expires_at: u64,
+    pub consumed: bool,
+    pub consumed_at: Option<u64>,
 }
 
 #[derive(Debug, Error)]
@@ -45,9 +45,9 @@ pub enum VerifierTokenViewError {
 /// `now_secs`). Ordered by `issued_at DESC` so the operator sees
 /// freshly-spawned verifiers at the top.
 pub fn outstanding_at(
-    conn:     &RoConn,
+    conn: &RoConn,
     now_secs: u64,
-    limit:    usize,
+    limit: usize,
 ) -> Result<Vec<VerifierTokenRow>, VerifierTokenViewError> {
     let now_i = now_secs.min(i64::MAX as u64) as i64;
     let mut stmt = conn.prepare(&format!(
@@ -59,10 +59,7 @@ pub fn outstanding_at(
         Table::VerifierRunTokens.as_str(),
     ))?;
     let rows = stmt
-        .query_map(
-            rusqlite::params![now_i, limit as i64],
-            map_row,
-        )?
+        .query_map(rusqlite::params![now_i, limit as i64], map_row)?
         .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
@@ -70,7 +67,7 @@ pub fn outstanding_at(
 /// Convenience wrapper that uses host wall clock. Tests use
 /// [`outstanding_at`] for determinism.
 pub fn outstanding(
-    conn:  &RoConn,
+    conn: &RoConn,
     limit: usize,
 ) -> Result<Vec<VerifierTokenRow>, VerifierTokenViewError> {
     outstanding_at(conn, unix_now_secs(), limit)
@@ -79,7 +76,7 @@ pub fn outstanding(
 /// Last N issued tokens regardless of consumed / expired state.
 /// Ordered by `issued_at DESC`.
 pub fn recent_runs(
-    conn:  &RoConn,
+    conn: &RoConn,
     limit: usize,
 ) -> Result<Vec<VerifierTokenRow>, VerifierTokenViewError> {
     let mut stmt = conn.prepare(&format!(
@@ -98,13 +95,13 @@ pub fn recent_runs(
 fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<VerifierTokenRow> {
     Ok(VerifierTokenRow {
         verifier_run_id: r.get(0)?,
-        task_id:         r.get(1)?,
-        gate_type:       r.get(2)?,
-        evaluation_sha:  r.get(3)?,
-        issued_at:       r.get::<_, i64>(4)?.max(0) as u64,
-        expires_at:      r.get::<_, i64>(5)?.max(0) as u64,
-        consumed:        r.get::<_, i64>(6)? != 0,
-        consumed_at:     r.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
+        task_id: r.get(1)?,
+        gate_type: r.get(2)?,
+        evaluation_sha: r.get(3)?,
+        issued_at: r.get::<_, i64>(4)?.max(0) as u64,
+        expires_at: r.get::<_, i64>(5)?.max(0) as u64,
+        consumed: r.get::<_, i64>(6)? != 0,
+        consumed_at: r.get::<_, Option<i64>>(7)?.map(|v| v.max(0) as u64),
     })
 }
 
@@ -122,49 +119,55 @@ mod tests {
     use tempfile::TempDir;
 
     fn fresh_store_with_seed_tokens() -> TempDir {
-        const INITIATIVES:         &str = Table::Initiatives.as_str();
-        const TASKS:               &str = Table::Tasks.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         // Seed an initiative + a task so FKs pass.
-        guard.execute(
-            &format!(
-                "INSERT INTO {INITIATIVES} \
+        guard
+            .execute(
+                &format!(
+                    "INSERT INTO {INITIATIVES} \
                  (initiative_id, state, terminal_criteria_json, plan_artifact_sha256, created_at) \
                  VALUES ('init-1', 'Executing', '{{}}', 'sha-1', 1)"
-            ),
-            [],
-        ).unwrap();
-        guard.execute(
-            &format!(
-                "INSERT INTO {TASKS} \
+                ),
+                [],
+            )
+            .unwrap();
+        guard
+            .execute(
+                &format!(
+                    "INSERT INTO {TASKS} \
                  (task_id, initiative_id, lane_id, state, actor, \
                   policy_epoch, admitted_at, transitioned_at) \
                  VALUES ('t-1', 'init-1', 'd', 'Running', 'op', 1, 1, 1)"
-            ),
-            [],
-        ).unwrap();
+                ),
+                [],
+            )
+            .unwrap();
         // Three tokens:
         //   active   — consumed=0, expires_at > NOW
         //   expired  — consumed=0, expires_at < NOW
         //   consumed — consumed=1, expires_at > NOW
         for (id, gate, issued, expires, consumed) in [
-            ("v-active",   "tests", 100_i64, 9999999999_i64, 0_i64),
-            ("v-expired",  "tests", 100,     200,            0),
-            ("v-consumed", "tests", 100,     9999999999,     1),
+            ("v-active", "tests", 100_i64, 9999999999_i64, 0_i64),
+            ("v-expired", "tests", 100, 200, 0),
+            ("v-consumed", "tests", 100, 9999999999, 1),
         ] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {VERIFIER_RUN_TOKENS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {VERIFIER_RUN_TOKENS} \
                      (verifier_run_id, task_id, gate_type, evaluation_sha, \
                       token_hash, issued_at, expires_at, consumed) \
                      VALUES (?1, 't-1', ?2, 'eval-sha', 'th', ?3, ?4, ?5)"
-                ),
-                rusqlite::params![id, gate, issued, expires, consumed],
-            ).unwrap();
+                    ),
+                    rusqlite::params![id, gate, issued, expires, consumed],
+                )
+                .unwrap();
         }
         tmp
     }

@@ -54,7 +54,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let rows = state.data.list_notifications(
         q.limit.min(200),
@@ -84,7 +86,9 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let count = state.data.notification_count_unread()?;
     Ok(Json(UnreadCountResponse { count }))
@@ -131,17 +135,18 @@ where
             false,
             operator_outcome::REJECTED_PERMISSION,
         );
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let data = std::sync::Arc::clone(&state.data);
     let notif_for_mutate = notification_id.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        data.mark_notification_read(&notif_for_mutate)
-    })
-    .await
-    .map_err(|e| ApiError::Internal {
-        log_only: format!("mark_notification_read join error: {e}"),
-    });
+    let result =
+        tokio::task::spawn_blocking(move || data.mark_notification_read(&notif_for_mutate))
+            .await
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("mark_notification_read join error: {e}"),
+            });
     let updated = match result.and_then(|r| r) {
         Ok(u) => u,
         Err(err) => {
@@ -168,9 +173,9 @@ where
         .data
         .emit_operator_audit(AuditEventKind::OperatorNotificationMarkedRead {
             operator_fingerprint: op.fingerprint.clone(),
-            notification_id:      notification_id.clone(),
+            notification_id: notification_id.clone(),
             updated,
-            outcome:              operator_outcome::ACCEPTED.into(),
+            outcome: operator_outcome::ACCEPTED.into(),
         })?;
     Ok(Json(MarkReadResponse { updated }))
 }
@@ -190,9 +195,9 @@ fn emit_mark_read_audit<D>(
 {
     let _ = data.emit_operator_audit(AuditEventKind::OperatorNotificationMarkedRead {
         operator_fingerprint: op.fingerprint.clone(),
-        notification_id:      notification_id.to_owned(),
+        notification_id: notification_id.to_owned(),
         updated,
-        outcome:              outcome.into(),
+        outcome: outcome.into(),
     });
 }
 
@@ -222,22 +227,17 @@ where
     D: crate::data::DashboardData,
 {
     if !op.has_role(DashboardRole::Read) {
-        emit_mark_all_read_audit(
-            &*state.data,
-            &op,
-            0,
-            operator_outcome::REJECTED_PERMISSION,
-        );
-        return Err(ApiError::Forbidden { required: "read".into() });
+        emit_mark_all_read_audit(&*state.data, &op, 0, operator_outcome::REJECTED_PERMISSION);
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let data = std::sync::Arc::clone(&state.data);
-    let result = tokio::task::spawn_blocking(move || {
-        data.mark_all_notifications_read()
-    })
-    .await
-    .map_err(|e| ApiError::Internal {
-        log_only: format!("mark_all_notifications_read join error: {e}"),
-    });
+    let result = tokio::task::spawn_blocking(move || data.mark_all_notifications_read())
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("mark_all_notifications_read join error: {e}"),
+        });
     let count = match result.and_then(|r| r) {
         Ok(c) => c,
         Err(err) => {
@@ -260,12 +260,8 @@ where
     Ok(Json(MarkAllReadResponse { count }))
 }
 
-fn emit_mark_all_read_audit<D>(
-    data: &D,
-    op: &AuthorizedOperator,
-    count: u64,
-    outcome: &'static str,
-) where
+fn emit_mark_all_read_audit<D>(data: &D, op: &AuthorizedOperator, count: u64, outcome: &'static str)
+where
     D: crate::data::DashboardData + ?Sized,
 {
     let _ = data.emit_operator_audit(AuditEventKind::OperatorNotificationsMarkedAllRead {
@@ -291,10 +287,9 @@ mod tests {
 
     #[test]
     fn list_query_parses_all_fields() {
-        let q: ListQuery = serde_json::from_str(
-            r#"{"limit":10,"unread_only":true,"initiative_id":"init-x"}"#,
-        )
-        .unwrap();
+        let q: ListQuery =
+            serde_json::from_str(r#"{"limit":10,"unread_only":true,"initiative_id":"init-x"}"#)
+                .unwrap();
         assert_eq!(q.limit, 10);
         assert!(q.unread_only);
         assert_eq!(q.initiative_id.as_deref(), Some("init-x"));

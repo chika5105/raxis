@@ -80,11 +80,15 @@ impl CredentialName {
     /// Wrap an existing string. The kernel-side admission pipeline
     /// validates the name against `[[permitted_credentials]]` BEFORE
     /// reaching the backend, so there's no shape validation here.
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
 
     /// The underlying name string. Logged in `CredentialAccessed`
     /// and shown to the operator CLI; never the value.
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for CredentialName {
@@ -94,11 +98,15 @@ impl std::fmt::Display for CredentialName {
 }
 
 impl From<&str> for CredentialName {
-    fn from(s: &str) -> Self { Self(s.to_owned()) }
+    fn from(s: &str) -> Self {
+        Self(s.to_owned())
+    }
 }
 
 impl From<String> for CredentialName {
-    fn from(s: String) -> Self { Self(s) }
+    fn from(s: String) -> Self {
+        Self(s)
+    }
 }
 
 /// The bytes of a credential. Wrapped in [`secrecy::SecretBox`] so
@@ -225,7 +233,9 @@ impl<'a> ConsumerIdentity<'a> {
     /// strings; nothing here validates them — the audit event
     /// records them verbatim and the operator CLI is responsible
     /// for matching what it sees against its own taxonomy.
-    pub fn new(kind: &'a str, id: &'a str) -> Self { Self { kind, id } }
+    pub fn new(kind: &'a str, id: &'a str) -> Self {
+        Self { kind, id }
+    }
 }
 
 /// Lifetime hint for a resolved credential. The kernel uses this
@@ -309,12 +319,12 @@ impl CredentialError {
     /// Stable short-string for the operator CLI's error envelope.
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::NotFound(_)                       => "FAIL_CRED_NOT_FOUND",
-            Self::PermissionDenied { .. }           => "FAIL_CRED_PERMISSION_DENIED",
-            Self::Malformed { .. }                  => "FAIL_CRED_MALFORMED",
-            Self::BackendUnavailable { .. }         => "FAIL_CRED_BACKEND_UNAVAILABLE",
-            Self::RotationRequiresOutOfBand         => "FAIL_CRED_ROTATION_OOB",
-            Self::AuditEmissionFailed { .. }        => "FAIL_CRED_AUDIT_EMIT",
+            Self::NotFound(_) => "FAIL_CRED_NOT_FOUND",
+            Self::PermissionDenied { .. } => "FAIL_CRED_PERMISSION_DENIED",
+            Self::Malformed { .. } => "FAIL_CRED_MALFORMED",
+            Self::BackendUnavailable { .. } => "FAIL_CRED_BACKEND_UNAVAILABLE",
+            Self::RotationRequiresOutOfBand => "FAIL_CRED_ROTATION_OOB",
+            Self::AuditEmissionFailed { .. } => "FAIL_CRED_AUDIT_EMIT",
         }
     }
 }
@@ -417,7 +427,9 @@ pub enum CredentialBackendKind {
 }
 
 impl Default for CredentialBackendKind {
-    fn default() -> Self { Self::File }
+    fn default() -> Self {
+        Self::File
+    }
 }
 
 impl CredentialBackendKind {
@@ -426,11 +438,11 @@ impl CredentialBackendKind {
     /// drift the wire shape.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::File              => "file",
-            Self::Vault             => "vault",
+            Self::File => "file",
+            Self::Vault => "vault",
             Self::AwsSecretsManager => "aws_secrets_manager",
-            Self::AzureKeyVault     => "azure_key_vault",
-            Self::Pkcs11Hsm         => "pkcs11",
+            Self::AzureKeyVault => "azure_key_vault",
+            Self::Pkcs11Hsm => "pkcs11",
         }
     }
 }
@@ -457,10 +469,10 @@ pub fn emit_credential_accessed(
     audit
         .emit(
             AuditEventKind::CredentialAccessed {
-                name:          name.as_str().to_owned(),
+                name: name.as_str().to_owned(),
                 consumer_kind: consumer.kind.to_owned(),
-                consumer_id:   consumer.id.to_owned(),
-                backend_kind:  backend_kind.to_owned(),
+                consumer_id: consumer.id.to_owned(),
+                backend_kind: backend_kind.to_owned(),
                 success,
             },
             None,
@@ -468,7 +480,9 @@ pub fn emit_credential_accessed(
             None,
         )
         .map(|_| ())
-        .map_err(|e| CredentialError::AuditEmissionFailed { reason: e.to_string() })
+        .map_err(|e| CredentialError::AuditEmissionFailed {
+            reason: e.to_string(),
+        })
 }
 
 /// Emit a `CredentialRotated` event through the supplied audit sink.
@@ -483,16 +497,18 @@ pub fn emit_credential_rotated(
     audit
         .emit(
             AuditEventKind::CredentialRotated {
-                name:              name.as_str().to_owned(),
+                name: name.as_str().to_owned(),
                 actor_fingerprint: actor.0.clone(),
-                backend_kind:      backend_kind.to_owned(),
+                backend_kind: backend_kind.to_owned(),
             },
             None,
             None,
             None,
         )
         .map(|_| ())
-        .map_err(|e| CredentialError::AuditEmissionFailed { reason: e.to_string() })
+        .map_err(|e| CredentialError::AuditEmissionFailed {
+            reason: e.to_string(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -518,7 +534,10 @@ mod tests {
             !s.contains("actual-secret"),
             "Debug format must redact: got {s}"
         );
-        assert!(s.contains("redacted"), "Debug format should say redacted: got {s}");
+        assert!(
+            s.contains("redacted"),
+            "Debug format should say redacted: got {s}"
+        );
     }
 
     #[test]
@@ -552,14 +571,23 @@ mod tests {
     fn credential_backend_kind_str_pin() {
         assert_eq!(CredentialBackendKind::File.as_str(), "file");
         assert_eq!(CredentialBackendKind::Vault.as_str(), "vault");
-        assert_eq!(CredentialBackendKind::AwsSecretsManager.as_str(), "aws_secrets_manager");
-        assert_eq!(CredentialBackendKind::AzureKeyVault.as_str(), "azure_key_vault");
+        assert_eq!(
+            CredentialBackendKind::AwsSecretsManager.as_str(),
+            "aws_secrets_manager"
+        );
+        assert_eq!(
+            CredentialBackendKind::AzureKeyVault.as_str(),
+            "azure_key_vault"
+        );
         assert_eq!(CredentialBackendKind::Pkcs11Hsm.as_str(), "pkcs11");
     }
 
     #[test]
     fn credential_backend_kind_default_is_file() {
-        assert_eq!(CredentialBackendKind::default(), CredentialBackendKind::File);
+        assert_eq!(
+            CredentialBackendKind::default(),
+            CredentialBackendKind::File
+        );
     }
 
     #[test]
@@ -577,7 +605,11 @@ mod tests {
             "FAIL_CRED_PERMISSION_DENIED",
         );
         assert_eq!(
-            CredentialError::Malformed { name: "x".into(), reason: "y".into() }.error_code(),
+            CredentialError::Malformed {
+                name: "x".into(),
+                reason: "y".into()
+            }
+            .error_code(),
             "FAIL_CRED_MALFORMED",
         );
         assert_eq!(

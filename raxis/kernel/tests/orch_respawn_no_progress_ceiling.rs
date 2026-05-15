@@ -66,9 +66,7 @@
 #![cfg(test)]
 
 use raxis_audit_tools::AuditEventKind;
-use raxis_dashboard_kernel::notification_filter::{
-    notification_priority, NotificationPriority,
-};
+use raxis_dashboard_kernel::notification_filter::{notification_priority, NotificationPriority};
 use raxis_store::{migration::apply_pending, Table};
 use rusqlite::{params, Connection};
 
@@ -86,7 +84,7 @@ const MAX_ORCH_NO_PROGRESS_RESPAWNS: u32 = 3;
 /// schema matches production reads down to the WAL pragma path
 /// — the same pragma application order the kernel boots with.
 fn fresh_disk_conn() -> (tempfile::TempDir, Connection) {
-    let tmp  = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("kernel.db");
     let conn = Connection::open(&path).expect("open sqlite");
     apply_pending(&conn).expect("apply migrations");
@@ -110,7 +108,8 @@ fn seed_executing_initiative(conn: &Connection, initiative_id: &str) {
              VALUES (?1, 'Executing', '{{}}', '', strftime('%s','now'))"
         ),
         params![initiative_id],
-    ).expect("seed initiative");
+    )
+    .expect("seed initiative");
 }
 
 fn read_count(conn: &Connection, initiative_id: &str) -> u32 {
@@ -122,8 +121,12 @@ fn read_count(conn: &Connection, initiative_id: &str) -> u32 {
               WHERE initiative_id = ?1"
         ),
         params![initiative_id],
-        |r| r.get::<_, i64>(0).map(|v| u32::try_from(v).unwrap_or(u32::MAX)),
-    ).expect("read counter")
+        |r| {
+            r.get::<_, i64>(0)
+                .map(|v| u32::try_from(v).unwrap_or(u32::MAX))
+        },
+    )
+    .expect("read counter")
 }
 
 fn read_state(conn: &Connection, initiative_id: &str) -> String {
@@ -132,7 +135,8 @@ fn read_state(conn: &Connection, initiative_id: &str) -> String {
         &format!("SELECT state FROM {initiatives} WHERE initiative_id = ?1"),
         params![initiative_id],
         |r| r.get::<_, String>(0),
-    ).expect("read state")
+    )
+    .expect("read state")
 }
 
 /// One round of the iter42-second-run pathology: SQLite-side, the
@@ -144,10 +148,7 @@ fn read_state(conn: &Connection, initiative_id: &str) -> String {
 /// sequence the kernel actually emits.
 ///
 /// Returns the post-increment value.
-fn simulate_respawn_increment(
-    conn:          &mut Connection,
-    initiative_id: &str,
-) -> u32 {
+fn simulate_respawn_increment(conn: &mut Connection, initiative_id: &str) -> u32 {
     let initiatives = Table::Initiatives.as_str();
     let tx = conn.transaction().expect("begin");
     tx.execute(
@@ -158,16 +159,19 @@ fn simulate_respawn_increment(
               WHERE initiative_id = ?1"
         ),
         params![initiative_id],
-    ).expect("increment");
-    let new_count: i64 = tx.query_row(
-        &format!(
-            "SELECT orchestrator_no_progress_respawn_count
+    )
+    .expect("increment");
+    let new_count: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT orchestrator_no_progress_respawn_count
                FROM {initiatives}
               WHERE initiative_id = ?1"
-        ),
-        params![initiative_id],
-        |r| r.get(0),
-    ).expect("re-read");
+            ),
+            params![initiative_id],
+            |r| r.get(0),
+        )
+        .expect("re-read");
     tx.commit().expect("commit");
     u32::try_from(new_count).unwrap_or(u32::MAX)
 }
@@ -190,7 +194,8 @@ fn simulate_initiative_failed(conn: &mut Connection, initiative_id: &str) {
               WHERE initiative_id = ?1"
         ),
         params![initiative_id],
-    ).expect("flip to Failed");
+    )
+    .expect("flip to Failed");
     tx.commit().expect("commit failed-tx");
 }
 
@@ -209,7 +214,8 @@ fn simulate_fsm_progress_reset(conn: &mut Connection, initiative_id: &str) {
                 AND orchestrator_no_progress_respawn_count > 0"
         ),
         params![initiative_id],
-    ).expect("reset");
+    )
+    .expect("reset");
     tx.commit().expect("commit reset-tx");
 }
 
@@ -233,10 +239,16 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     let (_tmp, mut conn) = fresh_disk_conn();
     seed_executing_initiative(&conn, "init-iter42");
 
-    assert_eq!(read_count(&conn, "init-iter42"), 0,
-        "fresh initiative MUST start with respawn counter at 0");
-    assert_eq!(read_state(&conn, "init-iter42"), "Executing",
-        "fresh initiative MUST start in Executing state");
+    assert_eq!(
+        read_count(&conn, "init-iter42"),
+        0,
+        "fresh initiative MUST start with respawn counter at 0"
+    );
+    assert_eq!(
+        read_state(&conn, "init-iter42"),
+        "Executing",
+        "fresh initiative MUST start in Executing state"
+    );
 
     // Increments 1..=MAX land Permitted. We assert each one rather
     // than just the terminal value so a future regression that
@@ -248,8 +260,11 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
             observed, expected,
             "increment #{expected} MUST report counter = {expected}, observed {observed}",
         );
-        assert_eq!(read_state(&conn, "init-iter42"), "Executing",
-            "non-ceiling increment #{expected} MUST leave initiative Executing");
+        assert_eq!(
+            read_state(&conn, "init-iter42"),
+            "Executing",
+            "non-ceiling increment #{expected} MUST leave initiative Executing"
+        );
     }
 
     // Increment MAX + 1 trips the ceiling. The kernel's branch in
@@ -259,7 +274,8 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     // step here.
     let post_ceiling = simulate_respawn_increment(&mut conn, "init-iter42");
     assert_eq!(
-        post_ceiling, MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
+        post_ceiling,
+        MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
         "post-ceiling increment MUST report counter strictly above MAX",
     );
     simulate_initiative_failed(&mut conn, "init-iter42");
@@ -274,20 +290,20 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     // field so a wire-shape change is caught here.
     let event = AuditEventKind::OrchestratorRespawnCeilingExceeded {
         initiative_id: "init-iter42".to_owned(),
-        attempts:      post_ceiling,
-        max_attempts:  MAX_ORCH_NO_PROGRESS_RESPAWNS,
+        attempts: post_ceiling,
+        max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
     };
     match &event {
         AuditEventKind::OrchestratorRespawnCeilingExceeded {
-            initiative_id, attempts, max_attempts,
+            initiative_id,
+            attempts,
+            max_attempts,
         } => {
             assert_eq!(initiative_id, "init-iter42");
             assert_eq!(*attempts, MAX_ORCH_NO_PROGRESS_RESPAWNS + 1);
             assert_eq!(*max_attempts, MAX_ORCH_NO_PROGRESS_RESPAWNS);
         }
-        other => panic!(
-            "expected OrchestratorRespawnCeilingExceeded, got {other:?}"
-        ),
+        other => panic!("expected OrchestratorRespawnCeilingExceeded, got {other:?}"),
     }
 
     // Subsequent post-exit-hook triggers MUST be short-circuited by
@@ -296,7 +312,8 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     // `respawn_orchestrator_for_initiative` opens with this exact
     // check before calling the increment helper.
     assert_ne!(
-        read_state(&conn, "init-iter42"), "Executing",
+        read_state(&conn, "init-iter42"),
+        "Executing",
         "after Failed-flip the is_executing preflight MUST return false",
     );
 
@@ -306,7 +323,8 @@ fn iter42_pathology_bounded_at_max_plus_one_then_initiative_failed() {
     // increment helper after Failed". Re-reading the counter
     // confirms it is unchanged.
     assert_eq!(
-        read_count(&conn, "init-iter42"), MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
+        read_count(&conn, "init-iter42"),
+        MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
         "post-Failed counter MUST be the post-ceiling value, never re-incremented",
     );
 }
@@ -329,7 +347,8 @@ fn fsm_progress_reset_clears_loop_counter_then_ceiling_re_arms() {
     assert_eq!(simulate_respawn_increment(&mut conn, "init-progress"), 2);
     simulate_fsm_progress_reset(&mut conn, "init-progress");
     assert_eq!(
-        read_count(&conn, "init-progress"), 0,
+        read_count(&conn, "init-progress"),
+        0,
         "FSM-progress reset MUST drop counter to 0",
     );
 
@@ -347,7 +366,8 @@ fn fsm_progress_reset_clears_loop_counter_then_ceiling_re_arms() {
     // Ceiling re-arms: MAX + 1-th post-reset increment trips it.
     let post_ceiling = simulate_respawn_increment(&mut conn, "init-progress");
     assert_eq!(
-        post_ceiling, MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
+        post_ceiling,
+        MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
         "ceiling MUST re-arm after reset; (MAX+1)-th respawn trips it",
     );
 }
@@ -372,7 +392,8 @@ fn per_initiative_scope_isolates_counters_across_concurrent_initiatives() {
         MAX_ORCH_NO_PROGRESS_RESPAWNS,
     );
     assert_eq!(
-        read_count(&conn, "init-healthy"), 0,
+        read_count(&conn, "init-healthy"),
+        0,
         "healthy initiative's counter MUST stay at 0 while sibling stalls",
     );
 
@@ -397,8 +418,8 @@ fn per_initiative_scope_isolates_counters_across_concurrent_initiatives() {
 fn dashboard_promotes_ceiling_event_to_critical() {
     let event = AuditEventKind::OrchestratorRespawnCeilingExceeded {
         initiative_id: "init-arbitrary".to_owned(),
-        attempts:      MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
-        max_attempts:  MAX_ORCH_NO_PROGRESS_RESPAWNS,
+        attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS + 1,
+        max_attempts: MAX_ORCH_NO_PROGRESS_RESPAWNS,
     };
     assert_eq!(
         notification_priority(&event),

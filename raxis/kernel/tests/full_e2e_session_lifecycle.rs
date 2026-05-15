@@ -162,7 +162,7 @@ const LIVE_E2E_GATE: &str = "RAXIS_LIVE_E2E";
 
 /// Loopback host:port the docker-compose Postgres binds to. Pinned
 /// to match `live-e2e/docker-compose.e2e.yml`.
-const PG_HOST_PORT:    &str = "127.0.0.1:54399";
+const PG_HOST_PORT: &str = "127.0.0.1:54399";
 /// Loopback host:port the docker-compose MongoDB binds to.
 const MONGO_HOST_PORT: &str = "127.0.0.1:27399";
 
@@ -177,7 +177,7 @@ const DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
 /// How long the test waits for the kernel to bind sockets after
 /// spawn. `bootstrap_and_spawn` is generous; CI machines under
 /// load occasionally take >5s.
-const READY_DEADLINE:    Duration = Duration::from_secs(15);
+const READY_DEADLINE: Duration = Duration::from_secs(15);
 
 /// How long the test waits for graceful kernel exit on SIGTERM.
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(30);
@@ -282,7 +282,7 @@ fn full_session_lifecycle() {
     //    (mutated) policy.toml at boot, so `[gateway]` and
     //    `[[providers]]` go live on this spawn.
     let install_dir = PathBuf::from(
-        std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR")
+        std::env::var("RAXIS_INSTALL_DIR").expect("preflight verified RAXIS_INSTALL_DIR"),
     );
     let mut kernel = spawn_kernel_normal(&kernel_bin, data_dir.clone(), &install_dir);
     kernel.wait_until_ready_or_panic(READY_DEADLINE);
@@ -293,10 +293,8 @@ fn full_session_lifecycle() {
     // dashboard URL is captured below when the autologin helper
     // succeeds; we register it on the reporter so the post-run
     // block surfaces the same URL.
-    let mut tier3 = Tier3Reporter::new(
-        "e2e", &install_dir, kernel.data_dir(),
-    )
-    .with_observability_urls();
+    let mut tier3 =
+        Tier3Reporter::new("e2e", &install_dir, kernel.data_dir()).with_observability_urls();
 
     // Print the same Grafana/Prometheus URL block at startup that
     // the Tier-3 reporter will emit again at end-of-run, so an
@@ -353,7 +351,10 @@ fn full_session_lifecycle() {
     //    `ActivateSubTask` calls).
     let final_chain = walk_chain_or_panic(kernel.data_dir());
     assert_audit_invariants(&final_chain, &initiative_id);
-    eprintln!("[e2e] audit chain integrity verified ({} events)", final_chain.len());
+    eprintln!(
+        "[e2e] audit chain integrity verified ({} events)",
+        final_chain.len()
+    );
 
     // Tier-3 artifact-block parity with the realistic-scenario
     // driver. The merged worktree for `full_e2e_session_lifecycle`
@@ -389,7 +390,9 @@ fn require_tcp_reachable(host_port: &str, what: &str) {
     if std::net::TcpStream::connect_timeout(
         &host_port.parse().expect("static literal parses"),
         Duration::from_millis(500),
-    ).is_err() {
+    )
+    .is_err()
+    {
         panic!(
             "{what} not reachable at {host_port}. Run:\n  \
              docker compose -f live-e2e/docker-compose.e2e.yml up -d --wait",
@@ -408,9 +411,9 @@ fn require_anthropic_dev_key() {
             env_path.display(),
         ),
     };
-    let has_key = body
-        .lines()
-        .any(|l| l.starts_with("ANTHROPIC-API-DEV-KEY=") && l.len() > "ANTHROPIC-API-DEV-KEY=".len());
+    let has_key = body.lines().any(|l| {
+        l.starts_with("ANTHROPIC-API-DEV-KEY=") && l.len() > "ANTHROPIC-API-DEV-KEY=".len()
+    });
     assert!(
         has_key,
         "{} must contain a non-empty ANTHROPIC-API-DEV-KEY=... line",
@@ -517,20 +520,18 @@ fn require_canonical_images() {
         // ENOENT` instead of failing fast at preflight.
         // See `tests/common/cpio_inspect.rs`.
         let required: &[&str] = match *role {
-            "executor-starter"  => &[
+            "executor-starter" => &[
                 "bin/bash",
                 "usr/bin/python3",
                 "usr/bin/git",
                 "usr/local/bin/raxis-executor",
             ],
             "orchestrator-core" => &["usr/local/bin/raxis-orchestrator"],
-            "reviewer-core"     => &["usr/local/bin/raxis-reviewer"],
-            _                   => unreachable!("role list is closed-set"),
+            "reviewer-core" => &["usr/local/bin/raxis-reviewer"],
+            _ => unreachable!("role list is closed-set"),
         };
         let entries = common::cpio_inspect::list_initramfs_paths(&img)
-            .unwrap_or_else(|e| panic!(
-                "failed to walk canonical image {}: {e}", img.display(),
-            ));
+            .unwrap_or_else(|e| panic!("failed to walk canonical image {}: {e}", img.display(),));
         let missing: Vec<&&'static str> = required
             .iter()
             .filter(|b| !entries.contains_key(**b))
@@ -544,13 +545,13 @@ fn require_canonical_images() {
              cargo xtask images dev-stage    --role {role}\n  \
              cargo xtask images build-all    --role {role}",
             img.display(),
-            n      = missing.len(),
+            n = missing.len(),
             plural = if missing.len() == 1 { "y" } else { "ies" },
-            lines  = missing
-                         .iter()
-                         .map(|b| format!("  - {b}"))
-                         .collect::<Vec<_>>()
-                         .join("\n"),
+            lines = missing
+                .iter()
+                .map(|b| format!("  - {b}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
     }
 }
@@ -601,29 +602,32 @@ fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock is post-epoch")
         .as_secs() as i64;
-    let cert = ephemeral_cert_with_key(signing_key, CertOpts {
-        now_unix_secs,
-        permitted_ops: vec![
-            // V2.5 IPC: the test wraps the plan in a signed
-            // PlanBundle and goes through the sole
-            // `CreateInitiative` discriminant on the wire (the V1
-            // path-based variant was deleted in V2.5; there is no
-            // longer a separate V2-named alias either).
-            "CreateInitiative".to_owned(),
-            "ApprovePlan".to_owned(),
-            "AbortInitiative".to_owned(),
-            // Together with `OperatorCertInstall` below, these grant
-            // the dashboard `Admin` role per
-            // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
-            // Live-e2e operators run as Admin so the test exercises
-            // the full operator surface (reveal-plaintext, policy
-            // install via dashboard, every grant/deny audit path).
-            "RotateEpoch".to_owned(),
-            "OperatorCertInstall".to_owned(),
-        ],
-        display_name: "e2e-operator".to_owned(),
-        ..CertOpts::default()
-    });
+    let cert = ephemeral_cert_with_key(
+        signing_key,
+        CertOpts {
+            now_unix_secs,
+            permitted_ops: vec![
+                // V2.5 IPC: the test wraps the plan in a signed
+                // PlanBundle and goes through the sole
+                // `CreateInitiative` discriminant on the wire (the V1
+                // path-based variant was deleted in V2.5; there is no
+                // longer a separate V2-named alias either).
+                "CreateInitiative".to_owned(),
+                "ApprovePlan".to_owned(),
+                "AbortInitiative".to_owned(),
+                // Together with `OperatorCertInstall` below, these grant
+                // the dashboard `Admin` role per
+                // `crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`.
+                // Live-e2e operators run as Admin so the test exercises
+                // the full operator surface (reveal-plaintext, policy
+                // install via dashboard, every grant/deny audit path).
+                "RotateEpoch".to_owned(),
+                "OperatorCertInstall".to_owned(),
+            ],
+            display_name: "e2e-operator".to_owned(),
+            ..CertOpts::default()
+        },
+    );
 
     // Allocate a tempdir, then immediately leak its path with
     // `keep()` so the data dir survives until the kernel exits.
@@ -684,12 +688,12 @@ fn spawn_kernel_normal(kernel_bin: &Path, data_dir: PathBuf, install_dir: &Path)
     // poll loop. The on-disk file is also useful for post-mortem
     // triage when the test panics in CI.
     let log_path = data_dir.join("kernel.stderr.log");
-    let log_handle = std::fs::File::create(&log_path).ok().map(|f| {
-        Arc::new(Mutex::new(f))
-    });
+    let log_handle = std::fs::File::create(&log_path)
+        .ok()
+        .map(|f| Arc::new(Mutex::new(f)));
     {
-        let lines       = Arc::clone(&stderr_lines);
-        let log_handle  = log_handle.clone();
+        let lines = Arc::clone(&stderr_lines);
+        let log_handle = log_handle.clone();
         std::thread::spawn(move || {
             let reader = BufReader::new(stderr);
             for line in reader.lines().map_while(Result::ok) {
@@ -749,7 +753,10 @@ fn mutate_dashboard_block_in_policy(body: &mut String) {
             let mut s = String::new();
             s.push_str(&format!("bind_port    = {port}\n"));
             s.push_str("# static_dir injected by full_e2e_session_lifecycle.\n");
-            s.push_str(&format!("static_dir   = {:?}\n", dist.display().to_string()));
+            s.push_str(&format!(
+                "static_dir   = {:?}\n",
+                dist.display().to_string()
+            ));
             s
         }
         None => {
@@ -876,9 +883,8 @@ fn write_credentials(data_dir: &Path) {
     let adc = dirs_home()
         .expect("HOME is set (preflight passed)")
         .join(".config/gcloud/application_default_credentials.json");
-    let adc_bytes = std::fs::read(&adc).unwrap_or_else(|e| {
-        panic!("read GCP ADC at {}: {e}", adc.display())
-    });
+    let adc_bytes =
+        std::fs::read(&adc).unwrap_or_else(|e| panic!("read GCP ADC at {}: {e}", adc.display()));
     write_with_mode_0600(&cred_dir.join("test-gcp-dev.json"), &adc_bytes);
 }
 
@@ -944,23 +950,33 @@ fn seed_main_repository(data_dir: &Path) {
     // this `git commit` reads $HOME/.gitconfig and may fail or
     // produce nondeterministic SHAs.
     let env: &[(&str, &str)] = &[
-        ("GIT_AUTHOR_NAME",     "raxis-e2e"),
-        ("GIT_AUTHOR_EMAIL",    "e2e@raxis.invalid"),
-        ("GIT_COMMITTER_NAME",  "raxis-e2e"),
+        ("GIT_AUTHOR_NAME", "raxis-e2e"),
+        ("GIT_AUTHOR_EMAIL", "e2e@raxis.invalid"),
+        ("GIT_COMMITTER_NAME", "raxis-e2e"),
         ("GIT_COMMITTER_EMAIL", "e2e@raxis.invalid"),
         // Pin the commit timestamp so the SHA is deterministic
         // across runs (test diagnostics; not security-relevant).
-        ("GIT_AUTHOR_DATE",     "2026-01-01T00:00:00Z"),
-        ("GIT_COMMITTER_DATE",  "2026-01-01T00:00:00Z"),
+        ("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"),
+        ("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"),
     ];
 
     let commit = Command::new("git")
         .current_dir(&main_repo)
         .envs(env.iter().copied())
-        .args(["commit", "-q", "--allow-empty", "-m", "raxis-e2e: seed repository"])
+        .args([
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "raxis-e2e: seed repository",
+        ])
         .status()
         .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
-    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+    assert!(
+        commit.success(),
+        "git commit failed in {}",
+        main_repo.display()
+    );
 
     // Sanity-check: refs/heads/main exists.
     let rev = Command::new("git")
@@ -986,8 +1002,7 @@ fn seed_main_repository(data_dir: &Path) {
 /// `std::fs::write` because `write` honours umask and a permissive
 /// umask would leave the file world-readable.
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body)
-        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
@@ -1046,7 +1061,11 @@ struct OperatorIpc {
 }
 
 impl OperatorIpc {
-    fn connect(socket_path: &Path, signing_key: &SigningKey, _fingerprint: &OperatorFingerprint) -> Self {
+    fn connect(
+        socket_path: &Path,
+        signing_key: &SigningKey,
+        _fingerprint: &OperatorFingerprint,
+    ) -> Self {
         let mut stream = UnixStream::connect(socket_path)
             .unwrap_or_else(|e| panic!("connect {}: {e}", socket_path.display()));
 
@@ -1083,7 +1102,8 @@ impl OperatorIpc {
         // Step 4: read auth ack.
         let ack = read_json_blocking(&mut stream);
         assert_eq!(
-            ack["status"].as_str(), Some("Ok"),
+            ack["status"].as_str(),
+            Some("Ok"),
             "kernel rejected auth: {ack:#}",
         );
 
@@ -1123,7 +1143,8 @@ impl OperatorIpc {
         //   { "status": "InitiativeCreated",
         //     "payload": { "initiative_id": "<uuid>", "status": "Draft" } }
         assert_eq!(
-            resp["status"].as_str(), Some("InitiativeCreated"),
+            resp["status"].as_str(),
+            Some("InitiativeCreated"),
             "CreateInitiative must succeed; got: {resp:#}",
         );
         let returned_id = resp["payload"]["initiative_id"]
@@ -1163,7 +1184,8 @@ impl OperatorIpc {
         // serialises with the variant tag in the top-level `status`
         // field and the variant body under `payload`.
         assert_eq!(
-            resp["status"].as_str(), Some("PlanApproved"),
+            resp["status"].as_str(),
+            Some("PlanApproved"),
             "ApprovePlan must succeed; got: {resp:#}",
         );
     }
@@ -1254,7 +1276,8 @@ fn canonical_plan_toml() -> String {
         "Confirm that hello.txt was created with the expected content (the line",
         "\\\"Hello from RAXIS E2E test!\\\"). Approve via the reviewer's approve tool.",
         "\"\"\"",
-    ].join("\n")
+    ]
+    .join("\n")
 }
 
 /// Build a V2.1 `PlanBundle` carrying `plan.toml` as its sole
@@ -1265,8 +1288,8 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
     let plan_bytes = plan_toml.as_bytes().to_vec();
     let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
     let artifacts = vec![BundleArtifact {
-        name:   "plan.toml".to_owned(),
-        bytes:  plan_bytes,
+        name: "plan.toml".to_owned(),
+        bytes: plan_bytes,
         sha256: plan_sha,
     }];
     let signed_at = std::time::SystemTime::now()
@@ -1338,9 +1361,12 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
     }
 
     let status = Command::new("codesign")
-        .arg("--sign").arg("-")
-        .arg("--entitlements").arg(&entitlements)
-        .arg("--options").arg("runtime")
+        .arg("--sign")
+        .arg("-")
+        .arg("--entitlements")
+        .arg(&entitlements)
+        .arg("--options")
+        .arg("runtime")
         .arg("--force")
         .arg(kernel_bin)
         .status()
@@ -1349,7 +1375,8 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
         panic!(
             "codesign failed (exit {:?}) for {}; the orchestrator spawn \
              will be denied by AVF without the entitlements signature",
-            status.code(), kernel_bin.display(),
+            status.code(),
+            kernel_bin.display(),
         );
     }
     eprintln!(
@@ -1407,7 +1434,7 @@ fn policy_fingerprint_32(pubkey: &[u8; 32]) -> String {
 /// that must be present.
 fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
-    let deadline  = lifecycle_deadline();
+    let deadline = lifecycle_deadline();
     let start = Instant::now();
     let mut last_len = 0usize;
     loop {
@@ -1417,8 +1444,7 @@ fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<Au
             // panic surfaces enough context to triage the spawn /
             // planner / merge pipeline. The capture is best-effort:
             // we print the audit chain summary either way.
-            let stderr_path = audit_dir.parent()
-                .map(|p| p.join("kernel.stderr.log"));
+            let stderr_path = audit_dir.parent().map(|p| p.join("kernel.stderr.log"));
             let stderr_tail = stderr_path
                 .as_ref()
                 .and_then(|p| std::fs::read_to_string(p).ok())
@@ -1456,9 +1482,7 @@ fn poll_for_lifecycle_completion(data_dir: &Path, initiative_id: &str) -> Vec<Au
         // the test's expectations; if a gate fires the test run is
         // unrecoverable.
         for e in &events {
-            if e.event_kind == "SecurityViolation"
-                || e.event_kind == "SecurityViolationDetected"
-            {
+            if e.event_kind == "SecurityViolation" || e.event_kind == "SecurityViolationDetected" {
                 panic!(
                     "SecurityViolation fired during lifecycle: \
                      event_kind={}, payload={:#}",
@@ -1496,14 +1520,16 @@ fn read_audit_chain(audit_dir: &Path) -> Result<Vec<AuditEvent>, ()> {
         if entry.file_name().to_string_lossy().ends_with(".jsonl") {
             let bytes = std::fs::read(entry.path()).map_err(|_| ())?;
             for line in bytes.split(|&b| b == b'\n') {
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 if let Ok(ev) = serde_json::from_slice::<AuditEvent>(line) {
                     events.push(ev);
                 }
             }
         }
     }
-        events.sort_by_key(|e| e.seq);
+    events.sort_by_key(|e| e.seq);
     Ok(events)
 }
 
@@ -1511,7 +1537,8 @@ fn summarize_chain_for_panic(audit_dir: &Path) -> String {
     match read_audit_chain(audit_dir) {
         Ok(events) => {
             let kinds: Vec<&str> = events.iter().map(|e| e.event_kind.as_str()).collect();
-            format!("seqs={}…{}, kinds={kinds:#?}",
+            format!(
+                "seqs={}…{}, kinds={kinds:#?}",
                 events.first().map(|e| e.seq).unwrap_or(0),
                 events.last().map(|e| e.seq).unwrap_or(0),
             )
@@ -1545,17 +1572,18 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
     verify_chain_full(&audit_dir)
         .unwrap_or_else(|e| panic!("verify_chain_full({audit_dir:?}) failed: {e:?}"));
-    let reader = ChainReader::open(&audit_dir).unwrap_or_else(|e| {
-        panic!("ChainReader::open({audit_dir:?}) failed: {e:?}")
-    });
+    let reader = ChainReader::open(&audit_dir)
+        .unwrap_or_else(|e| panic!("ChainReader::open({audit_dir:?}) failed: {e:?}"));
     reader
         .records()
         .map(|r| {
             let row = r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}"));
-            let value = row.parsed_value.clone().unwrap_or_else(|| panic!(
-                "chain row seq={} has no parsed_value (raw_line failed JSON parse)",
-                row.seq,
-            ));
+            let value = row.parsed_value.clone().unwrap_or_else(|| {
+                panic!(
+                    "chain row seq={} has no parsed_value (raw_line failed JSON parse)",
+                    row.seq,
+                )
+            });
             // Genesis row has a distinct schema; project it onto the
             // AuditEvent shape so the invariant assertions stay uniform.
             if row.event_kind == "GenesisRecord" {
@@ -1571,9 +1599,8 @@ fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
                     prev_sha256: row.prev_sha256.clone(),
                 };
             }
-            serde_json::from_value::<AuditEvent>(value).unwrap_or_else(|e| {
-                panic!("decode AuditEvent from chain row {}: {e}", row.seq)
-            })
+            serde_json::from_value::<AuditEvent>(value)
+                .unwrap_or_else(|e| panic!("decode AuditEvent from chain row {}: {e}", row.seq))
         })
         .collect()
 }
@@ -1594,7 +1621,7 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
     assert!(!chain.is_empty(), "audit chain must be non-empty");
 
     let first_kind = chain.first().expect("non-empty").event_kind.as_str();
-    let last_kind  = chain.last().expect("non-empty").event_kind.as_str();
+    let last_kind = chain.last().expect("non-empty").event_kind.as_str();
     // The first row may be either:
     //   - `GenesisRecord` (modern, `raxis-genesis-tools`-emitted seed
     //     row, written before `KernelStarted`), or
@@ -1665,8 +1692,9 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
             return true;
         }
         match serde_json::from_value::<AuditEventKind>(e.payload.clone()) {
-            Ok(AuditEventKind::IntegrationMergeCompleted { initiative_id: id, .. })
-                if id == initiative_id => true,
+            Ok(AuditEventKind::IntegrationMergeCompleted {
+                initiative_id: id, ..
+            }) if id == initiative_id => true,
             _ => false,
         }
     });
@@ -1676,8 +1704,7 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
     );
 
     assert!(
-        !kinds.contains("SecurityViolation")
-            && !kinds.contains("SecurityViolationDetected"),
+        !kinds.contains("SecurityViolation") && !kinds.contains("SecurityViolationDetected"),
         "SecurityViolation must NOT appear in a clean lifecycle; \
          kinds: {kinds:?}",
     );
@@ -1731,7 +1758,9 @@ fn configured_dashboard_port() -> u16 {
 /// this; absent ⇒ JSON-API-only dashboard (still useful for
 /// programmatic poking, just no UI).
 fn locate_dashboard_dist() -> Option<PathBuf> {
-    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).parent()?.to_path_buf();
+    let raxis_root = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()?
+        .to_path_buf();
     let dist = raxis_root.join("dashboard-fe").join("dist");
     if dist.join("index.html").is_file() {
         Some(dist)
@@ -1743,11 +1772,11 @@ fn locate_dashboard_dist() -> Option<PathBuf> {
 /// Return-type of `mint_dashboard_jwt`. `None` ⇒ best-effort
 /// failure that callers must tolerate (browser-open is skipped).
 struct DashboardSession {
-    token:        String,
-    operator_id:  String,
+    token: String,
+    operator_id: String,
     display_name: String,
-    roles:        Vec<String>,
-    expires_at:   u64,
+    roles: Vec<String>,
+    expires_at: u64,
 }
 
 /// Block until `127.0.0.1:<port>` accepts a TCP connection or
@@ -1788,7 +1817,10 @@ fn mint_dashboard_jwt(signing_key: &SigningKey, port: u16) -> Option<DashboardSe
         .ok()?;
 
     // Step 1 — request a challenge.
-    let challenge_resp = client.get(format!("{base}/api/auth/challenge")).send().ok()?;
+    let challenge_resp = client
+        .get(format!("{base}/api/auth/challenge"))
+        .send()
+        .ok()?;
     if !challenge_resp.status().is_success() {
         eprintln!(
             "[e2e] dashboard /api/auth/challenge: HTTP {}",
@@ -1799,7 +1831,9 @@ fn mint_dashboard_jwt(signing_key: &SigningKey, port: u16) -> Option<DashboardSe
     let challenge_body: serde_json::Value = challenge_resp.json().ok()?;
     let challenge_hex = challenge_body.get("challenge")?.as_str()?.to_owned();
     let challenge_bytes = hex::decode(&challenge_hex).ok()?;
-    if challenge_bytes.len() != 32 { return None; }
+    if challenge_bytes.len() != 32 {
+        return None;
+    }
 
     // Step 2 — sign with the test's operator key (the same one
     // `bootstrap_with_custom_cert` minted the operator cert with,
@@ -1851,15 +1885,16 @@ fn mint_dashboard_jwt(signing_key: &SigningKey, port: u16) -> Option<DashboardSe
     }
     let verify_payload: serde_json::Value = verify_resp.json().ok()?;
     Some(DashboardSession {
-        token:        verify_payload.get("token")?.as_str()?.to_owned(),
-        operator_id:  verify_payload.get("operator_id")?.as_str()?.to_owned(),
+        token: verify_payload.get("token")?.as_str()?.to_owned(),
+        operator_id: verify_payload.get("operator_id")?.as_str()?.to_owned(),
         display_name: verify_payload.get("display_name")?.as_str()?.to_owned(),
-        roles:        verify_payload.get("roles")?
-                         .as_array()?
-                         .iter()
-                         .filter_map(|v| v.as_str().map(str::to_owned))
-                         .collect(),
-        expires_at:   verify_payload.get("expires_at")?.as_u64()?,
+        roles: verify_payload
+            .get("roles")?
+            .as_array()?
+            .iter()
+            .filter_map(|v| v.as_str().map(str::to_owned))
+            .collect(),
+        expires_at: verify_payload.get("expires_at")?.as_u64()?,
     })
 }
 
@@ -1876,14 +1911,15 @@ fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
         // pass is sufficient.
         s.bytes()
             .flat_map(|b| match b {
-                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9'
-                | b'-' | b'_' | b'.' | b'~' => vec![b],
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => vec![b],
                 _ => format!("%{b:02X}").into_bytes(),
             })
             .map(|b| b as char)
             .collect()
     }
-    let roles_csv = session.roles.iter()
+    let roles_csv = session
+        .roles
+        .iter()
         .map(|r| encode(r))
         .collect::<Vec<_>>()
         .join(",");
@@ -1895,13 +1931,13 @@ fn build_autologin_url(port: u16, session: &DashboardSession) -> String {
          &roles={roles}\
          &expires_at={exp}\
          &next=%2F",
-        addr  = DASHBOARD_BIND_ADDRESS,
-        port  = port,
+        addr = DASHBOARD_BIND_ADDRESS,
+        port = port,
         token = encode(&session.token),
-        op    = encode(&session.operator_id),
-        name  = encode(&session.display_name),
+        op = encode(&session.operator_id),
+        name = encode(&session.display_name),
         roles = roles_csv,
-        exp   = session.expires_at,
+        exp = session.expires_at,
     )
 }
 
@@ -1970,7 +2006,8 @@ fn open_dashboard_with_autologin(signing_key: &SigningKey, port: u16) -> Option<
             "[e2e] could not open browser ({e}); paste the URL above into a browser to autologin",
         );
     } else {
-        eprintln!("[e2e] dashboard opened in default browser as operator '{}' (roles={:?})",
+        eprintln!(
+            "[e2e] dashboard opened in default browser as operator '{}' (roles={:?})",
             session.display_name, session.roles,
         );
     }
@@ -1998,4 +2035,3 @@ fn workspace_dotenv_path() -> PathBuf {
 fn dirs_home() -> Option<PathBuf> {
     std::env::var_os("HOME").map(PathBuf::from)
 }
-

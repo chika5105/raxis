@@ -48,54 +48,49 @@ use std::time::Duration;
 use serde_json::json;
 
 use crate::circuit_breaker::{CircuitBreaker, RecordOutcome};
-use crate::classify::{Outcome, classify_exit_status};
+use crate::classify::{classify_exit_status, Outcome};
 use crate::log::SupervisorLog;
 use crate::sentinel::{write_sentinel, Sentinel};
 use crate::signal::IntentionalShutdownFlag;
-use crate::{
-    DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS,
-};
+use crate::{DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS};
 
 /// Where to find the kernel binary + the supervisor's data dir +
 /// per-restart back-off knobs. Built from environment + CLI in
 /// `main.rs`; tests construct it directly.
 #[derive(Debug, Clone)]
 pub struct SupervisorConfig {
-    pub data_dir:               PathBuf,
-    pub kernel_binary:          PathBuf,
-    pub kernel_args:            Vec<String>,
+    pub data_dir: PathBuf,
+    pub kernel_binary: PathBuf,
+    pub kernel_args: Vec<String>,
     /// Inherits process env into the child kernel by default.
     /// Tests override per-spawn.
-    pub kernel_env:             Vec<(String, String)>,
-    pub max_attempts:           u32,
-    pub window_secs:            u32,
-    pub shutdown_grace_secs:    u64,
+    pub kernel_env: Vec<(String, String)>,
+    pub max_attempts: u32,
+    pub window_secs: u32,
+    pub shutdown_grace_secs: u64,
     /// Inter-restart back-off (default 250ms — short enough that
     /// a transient deadlock recovers within ~3s of detection,
     /// long enough that we don't burn-loop on a fast crash and
     /// rip through the breaker in milliseconds).
-    pub restart_backoff_ms:     u64,
+    pub restart_backoff_ms: u64,
     /// Stop the supervisor after this many child runs. `None` =
     /// unbounded (production). Tests use a small value to bound
     /// the loop.
-    pub max_child_runs:         Option<u32>,
+    pub max_child_runs: Option<u32>,
 }
 
 impl SupervisorConfig {
-    pub fn with_defaults(
-        data_dir:      PathBuf,
-        kernel_binary: PathBuf,
-    ) -> Self {
+    pub fn with_defaults(data_dir: PathBuf, kernel_binary: PathBuf) -> Self {
         Self {
             data_dir,
             kernel_binary,
-            kernel_args:         Vec::new(),
-            kernel_env:          Vec::new(),
-            max_attempts:        DEFAULT_MAX_ATTEMPTS,
-            window_secs:         DEFAULT_RESTART_WINDOW_SECS,
+            kernel_args: Vec::new(),
+            kernel_env: Vec::new(),
+            max_attempts: DEFAULT_MAX_ATTEMPTS,
+            window_secs: DEFAULT_RESTART_WINDOW_SECS,
             shutdown_grace_secs: DEFAULT_SHUTDOWN_GRACE_SECS,
-            restart_backoff_ms:  250,
-            max_child_runs:      None,
+            restart_backoff_ms: 250,
+            max_child_runs: None,
         }
     }
 }
@@ -105,8 +100,8 @@ impl SupervisorConfig {
 #[derive(Debug, Clone, Eq, PartialEq)]
 pub struct SupervisorRunReport {
     pub child_runs_observed: u32,
-    pub final_outcome:       FinalOutcome,
-    pub last_exit_code:      i32,
+    pub final_outcome: FinalOutcome,
+    pub last_exit_code: i32,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -119,7 +114,10 @@ pub enum FinalOutcome {
     OperatorStopForced,
     /// Circuit breaker refused further restarts. Manual reset
     /// required.
-    CircuitOpen { attempts_in_window: u32, window_secs: u32 },
+    CircuitOpen {
+        attempts_in_window: u32,
+        window_secs: u32,
+    },
     /// Test-only: `max_child_runs` reached. Production never
     /// hits this branch.
     MaxRunsReached,
@@ -142,28 +140,25 @@ fn unix_now_secs() -> i64 {
 /// of the loop is portable.
 #[cfg(unix)]
 pub async fn run_supervisor_loop(
-    cfg:           SupervisorConfig,
-    intent_flag:   IntentionalShutdownFlag,
-    shutdown_rx:   Arc<tokio::sync::Notify>,
-    log:           Arc<SupervisorLog>,
+    cfg: SupervisorConfig,
+    intent_flag: IntentionalShutdownFlag,
+    shutdown_rx: Arc<tokio::sync::Notify>,
+    log: Arc<SupervisorLog>,
 ) -> std::io::Result<SupervisorRunReport> {
     use tokio::process::Command;
     let supervisor_pid = std::process::id();
-    let mut breaker = CircuitBreaker::load_or_default(
-        &cfg.data_dir,
-        cfg.max_attempts,
-        cfg.window_secs,
-    );
+    let mut breaker =
+        CircuitBreaker::load_or_default(&cfg.data_dir, cfg.max_attempts, cfg.window_secs);
     if breaker.is_tripped() {
         // Cold-start with an open breaker: refuse to spawn and
         // re-write the sentinel so the dashboard reflects the
         // halted state immediately.
         let s = Sentinel {
-            schema_version:      1,
-            status:              "Halted".to_owned(),
-            sub_state:           Some("CircuitOpen".to_owned()),
-            attempt_n:           breaker.state().recent_restart_unix_ts.len() as u32,
-            max_attempts:        cfg.max_attempts,
+            schema_version: 1,
+            status: "Halted".to_owned(),
+            sub_state: Some("CircuitOpen".to_owned()),
+            attempt_n: breaker.state().recent_restart_unix_ts.len() as u32,
+            max_attempts: cfg.max_attempts,
             last_restart_unix_ts: breaker
                 .state()
                 .recent_restart_unix_ts
@@ -171,13 +166,13 @@ pub async fn run_supervisor_loop(
                 .copied()
                 .unwrap_or(0),
             last_restart_reason: breaker.state().last_failure_reason.clone(),
-            prev_run_exit_code:  None,
-            attempts_in_window:  breaker
+            prev_run_exit_code: None,
+            attempts_in_window: breaker
                 .state()
                 .attempts_in_window(unix_now_secs(), cfg.window_secs),
-            window_secs:         cfg.window_secs,
+            window_secs: cfg.window_secs,
             supervisor_pid,
-            kernel_pid:          0,
+            kernel_pid: 0,
             updated_at_unix_secs: unix_now_secs(),
         };
         let _ = write_sentinel(&cfg.data_dir, &s);
@@ -188,11 +183,11 @@ pub async fn run_supervisor_loop(
         );
         return Ok(SupervisorRunReport {
             child_runs_observed: 0,
-            final_outcome:       FinalOutcome::CircuitOpen {
+            final_outcome: FinalOutcome::CircuitOpen {
                 attempts_in_window: s.attempts_in_window,
-                window_secs:        cfg.window_secs,
+                window_secs: cfg.window_secs,
             },
-            last_exit_code:      0,
+            last_exit_code: 0,
         });
     }
 
@@ -234,13 +229,11 @@ pub async fn run_supervisor_loop(
 
         let now = unix_now_secs();
         let healthy = Sentinel {
-            schema_version:      1,
-            status:              "Healthy".to_owned(),
-            sub_state:           None,
-            attempt_n:           breaker
-                .state()
-                .attempts_in_window(now, cfg.window_secs),
-            max_attempts:        cfg.max_attempts,
+            schema_version: 1,
+            status: "Healthy".to_owned(),
+            sub_state: None,
+            attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+            max_attempts: cfg.max_attempts,
             last_restart_unix_ts: breaker
                 .state()
                 .recent_restart_unix_ts
@@ -248,11 +241,9 @@ pub async fn run_supervisor_loop(
                 .copied()
                 .unwrap_or(0),
             last_restart_reason: breaker.state().last_failure_reason.clone(),
-            prev_run_exit_code:  Some(last_exit_code),
-            attempts_in_window:  breaker
-                .state()
-                .attempts_in_window(now, cfg.window_secs),
-            window_secs:         cfg.window_secs,
+            prev_run_exit_code: Some(last_exit_code),
+            attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+            window_secs: cfg.window_secs,
             supervisor_pid,
             kernel_pid,
             updated_at_unix_secs: now,
@@ -288,8 +279,9 @@ pub async fn run_supervisor_loop(
 
         let (status_for_classify, force_used) = match waited_outcome {
             WaitedOutcome::Exited(s) => (Some(s), false),
-            WaitedOutcome::ForwardedSignalThenExited { status, force_used } =>
-                (Some(status), force_used),
+            WaitedOutcome::ForwardedSignalThenExited { status, force_used } => {
+                (Some(status), force_used)
+            }
             WaitedOutcome::WaitErr(e) => {
                 log.emit(
                     "error",
@@ -302,7 +294,9 @@ pub async fn run_supervisor_loop(
         let supervisor_sent = intent_flag.take();
         let outcome = match status_for_classify {
             Some(s) => classify_exit_status(s, supervisor_sent),
-            None => Outcome::CleanExit { prev_run_exit_code: 0 },
+            None => Outcome::CleanExit {
+                prev_run_exit_code: 0,
+            },
         };
         last_exit_code = outcome.prev_run_exit_code();
         log.emit(
@@ -325,13 +319,11 @@ pub async fn run_supervisor_loop(
                 Some("OperatorStop".to_owned())
             };
             let s = Sentinel {
-                schema_version:      1,
-                status:              "Halted".to_owned(),
-                sub_state:           sub_state.clone(),
-                attempt_n:           breaker
-                    .state()
-                    .attempts_in_window(now, cfg.window_secs),
-                max_attempts:        cfg.max_attempts,
+                schema_version: 1,
+                status: "Halted".to_owned(),
+                sub_state: sub_state.clone(),
+                attempt_n: breaker.state().attempts_in_window(now, cfg.window_secs),
+                max_attempts: cfg.max_attempts,
                 last_restart_unix_ts: breaker
                     .state()
                     .recent_restart_unix_ts
@@ -339,13 +331,11 @@ pub async fn run_supervisor_loop(
                     .copied()
                     .unwrap_or(0),
                 last_restart_reason: Some(outcome.reason_str().to_owned()),
-                prev_run_exit_code:  Some(last_exit_code),
-                attempts_in_window:  breaker
-                    .state()
-                    .attempts_in_window(now, cfg.window_secs),
-                window_secs:         cfg.window_secs,
+                prev_run_exit_code: Some(last_exit_code),
+                attempts_in_window: breaker.state().attempts_in_window(now, cfg.window_secs),
+                window_secs: cfg.window_secs,
                 supervisor_pid,
-                kernel_pid:          0,
+                kernel_pid: 0,
                 updated_at_unix_secs: now,
             };
             let _ = write_sentinel(&cfg.data_dir, &s);
@@ -382,18 +372,18 @@ pub async fn run_supervisor_loop(
             } => {
                 let now = unix_now_secs();
                 let s = Sentinel {
-                    schema_version:      1,
-                    status:              "Halted".to_owned(),
-                    sub_state:           Some("CircuitOpen".to_owned()),
-                    attempt_n:           attempts_in_window,
-                    max_attempts:        cfg.max_attempts,
+                    schema_version: 1,
+                    status: "Halted".to_owned(),
+                    sub_state: Some("CircuitOpen".to_owned()),
+                    attempt_n: attempts_in_window,
+                    max_attempts: cfg.max_attempts,
                     last_restart_unix_ts: now,
                     last_restart_reason: Some(outcome.reason_str().to_owned()),
-                    prev_run_exit_code:  Some(last_exit_code),
+                    prev_run_exit_code: Some(last_exit_code),
                     attempts_in_window,
                     window_secs,
                     supervisor_pid,
-                    kernel_pid:          0,
+                    kernel_pid: 0,
                     updated_at_unix_secs: now,
                 };
                 let _ = write_sentinel(&cfg.data_dir, &s);
@@ -421,18 +411,18 @@ pub async fn run_supervisor_loop(
             } => {
                 let now = unix_now_secs();
                 let s = Sentinel {
-                    schema_version:      1,
-                    status:              "Restarting".to_owned(),
-                    sub_state:           None,
-                    attempt_n:           attempts_in_window,
+                    schema_version: 1,
+                    status: "Restarting".to_owned(),
+                    sub_state: None,
+                    attempt_n: attempts_in_window,
                     max_attempts,
                     last_restart_unix_ts: now,
                     last_restart_reason: Some(outcome.reason_str().to_owned()),
-                    prev_run_exit_code:  Some(last_exit_code),
+                    prev_run_exit_code: Some(last_exit_code),
                     attempts_in_window,
-                    window_secs:         cfg.window_secs,
+                    window_secs: cfg.window_secs,
                     supervisor_pid,
-                    kernel_pid:          0,
+                    kernel_pid: 0,
                     updated_at_unix_secs: now,
                 };
                 let _ = write_sentinel(&cfg.data_dir, &s);
@@ -445,8 +435,7 @@ pub async fn run_supervisor_loop(
                         "reason": outcome.reason_str(),
                     }),
                 );
-                tokio::time::sleep(Duration::from_millis(cfg.restart_backoff_ms))
-                    .await;
+                tokio::time::sleep(Duration::from_millis(cfg.restart_backoff_ms)).await;
             }
         }
     }
@@ -456,7 +445,7 @@ pub async fn run_supervisor_loop(
 enum WaitedOutcome {
     Exited(std::process::ExitStatus),
     ForwardedSignalThenExited {
-        status:     std::process::ExitStatus,
+        status: std::process::ExitStatus,
         force_used: bool,
     },
     WaitErr(std::io::Error),
@@ -464,10 +453,10 @@ enum WaitedOutcome {
 
 #[cfg(unix)]
 async fn forward_signal_and_wait(
-    child:               &mut tokio::process::Child,
-    intent_flag:         &IntentionalShutdownFlag,
+    child: &mut tokio::process::Child,
+    intent_flag: &IntentionalShutdownFlag,
     shutdown_grace_secs: u64,
-    log:                 &SupervisorLog,
+    log: &SupervisorLog,
 ) -> WaitedOutcome {
     use nix::sys::signal::Signal;
     intent_flag.set();

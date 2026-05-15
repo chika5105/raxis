@@ -92,7 +92,7 @@ pub enum CustomToolValidationError {
         /// Profile the offending entry sits on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
     },
     /// `name` collides with a reserved tool name.
     #[error("FAIL_CUSTOM_TOOL_NAME_RESERVED: profile={profile}, name={name:?} is reserved")]
@@ -100,7 +100,7 @@ pub enum CustomToolValidationError {
         /// Profile the offending entry sits on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
     },
     /// Two tools in the same profile share a name.
     #[error("FAIL_CUSTOM_TOOL_NAME_COLLISION: profile={profile}, name={name:?} declared twice")]
@@ -108,7 +108,7 @@ pub enum CustomToolValidationError {
         /// Profile the collision was observed on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
     },
     /// `description` length is outside [8, 800].
     #[error("FAIL_CUSTOM_TOOL_DESCRIPTION_LENGTH: profile={profile}, name={name:?} length={len} (must be 8..=800)")]
@@ -116,9 +116,9 @@ pub enum CustomToolValidationError {
         /// Profile the offending entry sits on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
         /// Observed length.
-        len:     usize,
+        len: usize,
     },
     /// `command` array is empty or contains an empty / non-absolute
     /// first element.
@@ -127,9 +127,9 @@ pub enum CustomToolValidationError {
         /// Profile the offending entry sits on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
         /// Free-form reason.
-        reason:  String,
+        reason: String,
     },
     /// `timeout_seconds` exceeds the policy hard cap.
     #[error("FAIL_CUSTOM_TOOL_TIMEOUT_EXCEEDED: profile={profile}, name={name:?}, got={got}s, cap={cap}s")]
@@ -137,11 +137,11 @@ pub enum CustomToolValidationError {
         /// Profile the offending entry sits on.
         profile: String,
         /// Offending tool name.
-        name:    String,
+        name: String,
         /// Operator-supplied timeout.
-        got:     u32,
+        got: u32,
         /// Policy hard cap.
-        cap:     u32,
+        cap: u32,
     },
     /// `[plan.tasks.<id>.custom_tool]` is declared (custom tools
     /// must live at the profile level only).
@@ -173,14 +173,13 @@ pub enum CustomToolValidationError {
 /// caller can include the count in the `PlanApproved` audit
 /// record).
 pub fn validate_plan_custom_tools(
-    plan_toml:                  &str,
+    plan_toml: &str,
     policy_max_timeout_seconds: u32,
 ) -> Result<u32, CustomToolValidationError> {
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        CustomToolValidationError::SchemaInvalid {
+    let doc: toml::Value =
+        toml::from_str(plan_toml).map_err(|e| CustomToolValidationError::SchemaInvalid {
             reason: format!("plan TOML parse error: {e}"),
-        }
-    })?;
+        })?;
 
     let mut total: u32 = 0;
 
@@ -209,26 +208,31 @@ pub fn validate_plan_custom_tools(
     };
 
     for (profile_name, profile_body) in profiles {
-        let Some(table) = profile_body.as_table() else { continue; };
-        let Some(tools_raw) = table.get("custom_tool") else { continue; };
+        let Some(table) = profile_body.as_table() else {
+            continue;
+        };
+        let Some(tools_raw) = table.get("custom_tool") else {
+            continue;
+        };
         let Some(tools_arr) = tools_raw.as_array() else {
             return Err(CustomToolValidationError::SchemaInvalid {
                 reason: format!(
                     "profile {profile_name:?} custom_tool field must be \
-                     an array of tables; got {:?}", tools_raw.type_str(),
+                     an array of tables; got {:?}",
+                    tools_raw.type_str(),
                 ),
             });
         };
 
-        let mut seen_names: std::collections::HashSet<String>
-            = std::collections::HashSet::new();
+        let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
         for entry in tools_arr {
             let Some(t) = entry.as_table() else {
                 return Err(CustomToolValidationError::SchemaInvalid {
                     reason: format!(
                         "profile {profile_name:?} custom_tool entries \
-                         must be tables, got {:?}", entry.type_str(),
+                         must be tables, got {:?}",
+                        entry.type_str(),
                     ),
                 });
             };
@@ -242,25 +246,28 @@ pub fn validate_plan_custom_tools(
                     ),
                 }
             })?;
-            let description = t.get("description").and_then(|v| v.as_str()).ok_or_else(|| {
-                CustomToolValidationError::SchemaInvalid {
+            let description = t
+                .get("description")
+                .and_then(|v| v.as_str())
+                .ok_or_else(|| CustomToolValidationError::SchemaInvalid {
                     reason: format!(
                         "profile {profile_name:?} custom_tool {name:?} \
                          missing required string field `description`",
                     ),
-                }
-            })?;
-            let command_raw = t.get("command").ok_or_else(|| {
-                CustomToolValidationError::SchemaInvalid {
-                    reason: format!(
-                        "profile {profile_name:?} custom_tool {name:?} \
+                })?;
+            let command_raw =
+                t.get("command")
+                    .ok_or_else(|| CustomToolValidationError::SchemaInvalid {
+                        reason: format!(
+                            "profile {profile_name:?} custom_tool {name:?} \
                          missing required field `command`",
-                    ),
-                }
-            })?;
+                        ),
+                    })?;
             let timeout_secs: u32 = match t.get("timeout_seconds") {
-                None    => 60, // spec default
-                Some(v) => v.as_integer().and_then(|n| u32::try_from(n).ok())
+                None => 60, // spec default
+                Some(v) => v
+                    .as_integer()
+                    .and_then(|n| u32::try_from(n).ok())
                     .ok_or_else(|| CustomToolValidationError::SchemaInvalid {
                         reason: format!(
                             "profile {profile_name:?} custom_tool {name:?} \
@@ -273,21 +280,21 @@ pub fn validate_plan_custom_tools(
             if !is_valid_custom_tool_name(name) {
                 return Err(CustomToolValidationError::NameInvalid {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
+                    name: name.to_owned(),
                 });
             }
             // §5.1 reserved.
             if RESERVED_TOOL_NAMES.iter().any(|r| *r == name) {
                 return Err(CustomToolValidationError::NameReserved {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
+                    name: name.to_owned(),
                 });
             }
             // §5.2 profile-internal uniqueness.
             if !seen_names.insert(name.to_owned()) {
                 return Err(CustomToolValidationError::NameCollision {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
+                    name: name.to_owned(),
                 });
             }
             // §3.2 description length.
@@ -295,7 +302,7 @@ pub fn validate_plan_custom_tools(
             if !(8..=800).contains(&len) {
                 return Err(CustomToolValidationError::DescriptionLength {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
+                    name: name.to_owned(),
                     len,
                 });
             }
@@ -303,8 +310,8 @@ pub fn validate_plan_custom_tools(
             let cmd_arr = command_raw.as_array().ok_or_else(|| {
                 CustomToolValidationError::CommandInvalid {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
-                    reason:  format!(
+                    name: name.to_owned(),
+                    reason: format!(
                         "command must be an array of strings; got {:?}",
                         command_raw.type_str(),
                     ),
@@ -313,33 +320,30 @@ pub fn validate_plan_custom_tools(
             if cmd_arr.is_empty() {
                 return Err(CustomToolValidationError::CommandInvalid {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
-                    reason:  "command must have at least one element".to_owned(),
+                    name: name.to_owned(),
+                    reason: "command must have at least one element".to_owned(),
                 });
             }
             for (i, c) in cmd_arr.iter().enumerate() {
-                let s = c.as_str().ok_or_else(|| {
-                    CustomToolValidationError::CommandInvalid {
+                let s = c
+                    .as_str()
+                    .ok_or_else(|| CustomToolValidationError::CommandInvalid {
                         profile: profile_name.clone(),
-                        name:    name.to_owned(),
-                        reason:  format!(
-                            "command[{i}] must be a string; got {:?}",
-                            c.type_str(),
-                        ),
-                    }
-                })?;
+                        name: name.to_owned(),
+                        reason: format!("command[{i}] must be a string; got {:?}", c.type_str(),),
+                    })?;
                 if s.is_empty() {
                     return Err(CustomToolValidationError::CommandInvalid {
                         profile: profile_name.clone(),
-                        name:    name.to_owned(),
-                        reason:  format!("command[{i}] must be non-empty"),
+                        name: name.to_owned(),
+                        reason: format!("command[{i}] must be non-empty"),
                     });
                 }
                 if i == 0 && !s.starts_with('/') {
                     return Err(CustomToolValidationError::CommandInvalid {
                         profile: profile_name.clone(),
-                        name:    name.to_owned(),
-                        reason:  format!(
+                        name: name.to_owned(),
+                        reason: format!(
                             "command[0]={s:?} must be an absolute path inside the VM filesystem",
                         ),
                     });
@@ -349,9 +353,9 @@ pub fn validate_plan_custom_tools(
             if timeout_secs > policy_max_timeout_seconds {
                 return Err(CustomToolValidationError::TimeoutExceeded {
                     profile: profile_name.clone(),
-                    name:    name.to_owned(),
-                    got:     timeout_secs,
-                    cap:     policy_max_timeout_seconds,
+                    name: name.to_owned(),
+                    got: timeout_secs,
+                    cap: policy_max_timeout_seconds,
                 });
             }
             total = total.saturating_add(1);
@@ -605,9 +609,17 @@ session_agent_type = "Executor"
     #[test]
     fn reserved_names_constants_are_in_sync_with_spec() {
         // Spot-check a few canonical entries from custom-tools.md §5.1
-        for n in ["read_file", "bash", "SubmitReview", "IntegrationMerge", "WebFetch"] {
-            assert!(RESERVED_TOOL_NAMES.iter().any(|r| *r == n),
-                "RESERVED_TOOL_NAMES must contain {n:?} per custom-tools.md §5.1");
+        for n in [
+            "read_file",
+            "bash",
+            "SubmitReview",
+            "IntegrationMerge",
+            "WebFetch",
+        ] {
+            assert!(
+                RESERVED_TOOL_NAMES.iter().any(|r| *r == n),
+                "RESERVED_TOOL_NAMES must contain {n:?} per custom-tools.md §5.1"
+            );
         }
     }
 }

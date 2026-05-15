@@ -37,7 +37,7 @@ use raxis_types::{operator_wire::ApprovalScopeWire, unix_now_secs, EscalationSta
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table names + state strings come
 // from the typed sources; no raw SQL identifiers anywhere in this file.
-const ESCALATIONS:     &str = Table::Escalations.as_str();
+const ESCALATIONS: &str = Table::Escalations.as_str();
 const APPROVAL_TOKENS: &str = Table::ApprovalTokens.as_str();
 
 // ---------------------------------------------------------------------------
@@ -57,7 +57,7 @@ pub enum EscalationError {
          only Pending escalations may be approved or denied"
     )]
     NotPending {
-        escalation_id:  String,
+        escalation_id: String,
         current_status: String,
     },
 
@@ -101,15 +101,15 @@ impl EscalationError {
     /// distinct error semantics.
     pub fn error_code(&self) -> &'static str {
         match self {
-            Self::NotFound                    { .. } => "FAIL_ESCALATION_NOT_FOUND",
-            Self::NotPending                  { .. } => "FAIL_ESCALATION_NOT_PENDING",
-            Self::InvalidScope                { .. } => "FAIL_APPROVAL_SCOPE_INVALID",
-            Self::OperatorUnknown             { .. } => "FAIL_OPERATOR_UNKNOWN",
-            Self::OperatorPubkeyMalformed     { .. } => "FAIL_POLICY_OPERATOR_PUBKEY_INVALID",
-            Self::SignatureInvalid                   => "FAIL_OPERATOR_SIGNATURE_INVALID",
-            Self::Authority(_)                       => "FAIL_APPROVE_ESCALATION",
-            Self::Store(_) | Self::Sql(_)            => "FAIL_STORE",
-            Self::Crypto(_)                          => "FAIL_CRYPTO",
+            Self::NotFound { .. } => "FAIL_ESCALATION_NOT_FOUND",
+            Self::NotPending { .. } => "FAIL_ESCALATION_NOT_PENDING",
+            Self::InvalidScope { .. } => "FAIL_APPROVAL_SCOPE_INVALID",
+            Self::OperatorUnknown { .. } => "FAIL_OPERATOR_UNKNOWN",
+            Self::OperatorPubkeyMalformed { .. } => "FAIL_POLICY_OPERATOR_PUBKEY_INVALID",
+            Self::SignatureInvalid => "FAIL_OPERATOR_SIGNATURE_INVALID",
+            Self::Authority(_) => "FAIL_APPROVE_ESCALATION",
+            Self::Store(_) | Self::Sql(_) => "FAIL_STORE",
+            Self::Crypto(_) => "FAIL_CRYPTO",
         }
     }
 }
@@ -122,13 +122,13 @@ impl EscalationError {
 /// these fields (plus `escalation_id`) into `OperatorResponse::EscalationApproved`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApproveResult {
-    pub approval_token_id:  String,
+    pub approval_token_id: String,
     /// Hex-encoded high-entropy token (32 bytes → 64 hex chars). The
     /// kernel does not store this value; only `sha256(raw)` ends up in
     /// `approval_tokens.token_hash`. Operators must treat it as a
     /// secret.
     pub approval_token_raw: String,
-    pub expires_at:         i64,
+    pub expires_at: i64,
 }
 
 /// Successful return of `deny_escalation`.
@@ -149,10 +149,7 @@ pub struct DenyResult {
 /// callers can pass the typed `ApprovalScopeWire` straight through
 /// without manually expanding the four scope fields at every call
 /// site.
-pub fn approval_scope_signing_input(
-    escalation_id: &str,
-    scope:         &ApprovalScopeWire,
-) -> Vec<u8> {
+pub fn approval_scope_signing_input(escalation_id: &str, scope: &ApprovalScopeWire) -> Vec<u8> {
     raxis_crypto::escalation::approval_scope_signing_input(
         escalation_id,
         &scope.capability_class,
@@ -171,13 +168,13 @@ pub fn approval_scope_signing_input(
 /// writes are impossible: either both the `approval_tokens` row and
 /// the `escalations` UPDATE land, or neither does.
 pub fn approve_escalation(
-    escalation_id:    &str,
-    approval_scope:   &ApprovalScopeWire,
-    operator_sig:     &[u8],
-    operator_fp:      &str,
-    policy_epoch:     u64,
-    policy:           &PolicyBundle,
-    store:            &Store,
+    escalation_id: &str,
+    approval_scope: &ApprovalScopeWire,
+    operator_sig: &[u8],
+    operator_fp: &str,
+    policy_epoch: u64,
+    policy: &PolicyBundle,
+    store: &Store,
 ) -> Result<ApproveResult, EscalationError> {
     validate_scope(approval_scope)?;
 
@@ -186,36 +183,38 @@ pub fn approve_escalation(
     verify::verify_ed25519(&pubkey_bytes, &signing_input, operator_sig)
         .map_err(|_| EscalationError::SignatureInvalid)?;
 
-    let approval_token_id  = uuid::Uuid::new_v4().to_string();
-    let nonce              = token::generate_approval_nonce()?;
+    let approval_token_id = uuid::Uuid::new_v4().to_string();
+    let nonce = token::generate_approval_nonce()?;
     let raw_bytes: [u8; 32] = token::try_random_array()?;
     let approval_token_raw = hex::encode(raw_bytes);
-    let token_hash         = token::sha256_hex(&raw_bytes);
-    let scope_json         = serde_json::to_string(approval_scope)
+    let token_hash = token::sha256_hex(&raw_bytes);
+    let scope_json = serde_json::to_string(approval_scope)
         .expect("ApprovalScopeWire is always JSON-serialisable");
-    let now_secs           = unix_now_secs();
-    let expires_at         = now_secs.saturating_add(approval_scope.valid_for_seconds as i64);
+    let now_secs = unix_now_secs();
+    let expires_at = now_secs.saturating_add(approval_scope.valid_for_seconds as i64);
 
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
 
-    let pending_state  = EscalationStatus::Pending.as_sql_str();
+    let pending_state = EscalationStatus::Pending.as_sql_str();
     let approved_state = EscalationStatus::Approved.as_sql_str();
 
-    let current_status: String = tx.query_row(
-        &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
-        params![escalation_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => EscalationError::NotFound {
-            escalation_id: escalation_id.to_owned(),
-        },
-        other => EscalationError::Sql(other),
-    })?;
+    let current_status: String = tx
+        .query_row(
+            &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
+            params![escalation_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => EscalationError::NotFound {
+                escalation_id: escalation_id.to_owned(),
+            },
+            other => EscalationError::Sql(other),
+        })?;
 
     if current_status.as_str() != pending_state {
         return Err(EscalationError::NotPending {
-            escalation_id:  escalation_id.to_owned(),
+            escalation_id: escalation_id.to_owned(),
             current_status,
         });
     }
@@ -254,7 +253,11 @@ pub fn approve_escalation(
     }
 
     tx.commit()?;
-    Ok(ApproveResult { approval_token_id, approval_token_raw, expires_at })
+    Ok(ApproveResult {
+        approval_token_id,
+        approval_token_raw,
+        expires_at,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -264,30 +267,32 @@ pub fn approve_escalation(
 /// Deny a `Pending` escalation. No approval artifact is created.
 pub fn deny_escalation(
     escalation_id: &str,
-    reason:        Option<&str>,
+    reason: Option<&str>,
     _denied_by_fp: &str,
-    store:         &Store,
+    store: &Store,
 ) -> Result<DenyResult, EscalationError> {
     let now = unix_now_secs();
     let conn = store.lock_sync();
 
     let pending_state = EscalationStatus::Pending.as_sql_str();
-    let denied_state  = EscalationStatus::Denied.as_sql_str();
+    let denied_state = EscalationStatus::Denied.as_sql_str();
 
-    let current_status: String = conn.query_row(
-        &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
-        params![escalation_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => EscalationError::NotFound {
-            escalation_id: escalation_id.to_owned(),
-        },
-        other => EscalationError::Sql(other),
-    })?;
+    let current_status: String = conn
+        .query_row(
+            &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
+            params![escalation_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => EscalationError::NotFound {
+                escalation_id: escalation_id.to_owned(),
+            },
+            other => EscalationError::Sql(other),
+        })?;
 
     if current_status.as_str() != pending_state {
         return Err(EscalationError::NotPending {
-            escalation_id:  escalation_id.to_owned(),
+            escalation_id: escalation_id.to_owned(),
             current_status,
         });
     }
@@ -305,7 +310,7 @@ pub fn deny_escalation(
         // UPDATE. The constraint above protects integrity; we surface
         // it as NotPending so the operator gets a clear error message.
         return Err(EscalationError::NotPending {
-            escalation_id:  escalation_id.to_owned(),
+            escalation_id: escalation_id.to_owned(),
             current_status: format!("{pending_state} (race)"),
         });
     }
@@ -336,18 +341,18 @@ fn validate_scope(scope: &ApprovalScopeWire) -> Result<(), EscalationError> {
 }
 
 fn lookup_operator_pubkey(
-    policy:      &PolicyBundle,
+    policy: &PolicyBundle,
     fingerprint: &str,
 ) -> Result<Vec<u8>, EscalationError> {
-    let entry = policy.operator_entry(fingerprint)
-        .ok_or_else(|| EscalationError::OperatorUnknown {
-            fingerprint: fingerprint.to_owned(),
-        })?;
-    hex::decode(&entry.pubkey_hex).map_err(|e| {
-        EscalationError::OperatorPubkeyMalformed {
-            fingerprint: fingerprint.to_owned(),
-            reason:      e.to_string(),
-        }
+    let entry =
+        policy
+            .operator_entry(fingerprint)
+            .ok_or_else(|| EscalationError::OperatorUnknown {
+                fingerprint: fingerprint.to_owned(),
+            })?;
+    hex::decode(&entry.pubkey_hex).map_err(|e| EscalationError::OperatorPubkeyMalformed {
+        fingerprint: fingerprint.to_owned(),
+        reason: e.to_string(),
     })
 }
 
@@ -381,8 +386,8 @@ mod tests {
 
     fn fixture_scope() -> ApprovalScopeWire {
         ApprovalScopeWire {
-            capability_class:  "WriteSecrets".into(),
-            max_uses:          3,
+            capability_class: "WriteSecrets".into(),
+            max_uses: 3,
             valid_for_seconds: 1800,
         }
     }
@@ -395,9 +400,9 @@ mod tests {
         let cert = raxis_test_support::stub_cert_for_pubkey(pubkey_hex.clone());
         PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: fp.to_owned(),
-            display_name:       fp.to_owned(),
+            display_name: fp.to_owned(),
             pubkey_hex,
-            permitted_ops:      vec![],
+            permitted_ops: vec![],
             cert,
             force_misconfig_bypass: false,
         }])
@@ -435,7 +440,8 @@ mod tests {
                 unix_now_secs(),
                 unix_now_secs() + 3600,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
     }
 
@@ -444,7 +450,8 @@ mod tests {
         conn.execute(
             &format!("UPDATE {ESCALATIONS} SET status = ?1 WHERE escalation_id = ?2"),
             params![status.as_sql_str(), escalation_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn read_status(store: &Store, escalation_id: &str) -> String {
@@ -453,7 +460,8 @@ mod tests {
             &format!("SELECT status FROM {ESCALATIONS} WHERE escalation_id = ?1"),
             params![escalation_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // ── signing_input_tests ───────────────────────────────────────────
@@ -464,8 +472,8 @@ mod tests {
         // A drift on either side (kernel changes the format / CLI
         // changes the format) is caught here at build time.
         let scope = ApprovalScopeWire {
-            capability_class:  "WriteSecrets".into(),
-            max_uses:          3,
+            capability_class: "WriteSecrets".into(),
+            max_uses: 3,
             valid_for_seconds: 1800,
         };
         let bytes = approval_scope_signing_input("esc-abc", &scope);
@@ -480,13 +488,14 @@ mod tests {
         // Verifies the kernel does NOT lowercase / trim — operators
         // must sign the exact bytes they put on the wire.
         let scope = ApprovalScopeWire {
-            capability_class:  "WriteCode".into(),
-            max_uses:          1,
+            capability_class: "WriteCode".into(),
+            max_uses: 1,
             valid_for_seconds: 60,
         };
         let bytes = approval_scope_signing_input("Esc With Spaces", &scope);
-        assert!(std::str::from_utf8(&bytes).unwrap()
-                .starts_with("approval|Esc With Spaces|"));
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .starts_with("approval|Esc With Spaces|"));
     }
 
     // ── approve_escalation ────────────────────────────────────────────
@@ -501,38 +510,55 @@ mod tests {
 
         insert_pending_escalation(&store, "esc-1");
 
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &scope))
             .to_bytes()
             .to_vec();
 
-        let result = approve_escalation(
-            "esc-1", &scope, &sig, "op-prime", 7, &policy, &store,
-        ).expect("happy-path approval must succeed");
+        let result = approve_escalation("esc-1", &scope, &sig, "op-prime", 7, &policy, &store)
+            .expect("happy-path approval must succeed");
 
-        assert_eq!(result.approval_token_raw.len(), 64,
-            "raw token must be 32 bytes hex-encoded (64 chars)");
-        assert!(uuid::Uuid::parse_str(&result.approval_token_id).is_ok(),
-            "approval_token_id must be a UUID");
-        assert!(result.expires_at > unix_now_secs(),
-            "expires_at must be in the future");
+        assert_eq!(
+            result.approval_token_raw.len(),
+            64,
+            "raw token must be 32 bytes hex-encoded (64 chars)"
+        );
+        assert!(
+            uuid::Uuid::parse_str(&result.approval_token_id).is_ok(),
+            "approval_token_id must be a UUID"
+        );
+        assert!(
+            result.expires_at > unix_now_secs(),
+            "expires_at must be in the future"
+        );
 
-        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Approved.as_sql_str());
+        assert_eq!(
+            read_status(&store, "esc-1"),
+            EscalationStatus::Approved.as_sql_str()
+        );
 
         // approval_tokens row was inserted with token_hash = sha256(raw).
         let conn = store.lock_sync();
-        let (stored_hash, stored_epoch): (String, i64) = conn.query_row(
-            &format!(
-                "SELECT token_hash, policy_epoch FROM {APPROVAL_TOKENS}
+        let (stored_hash, stored_epoch): (String, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT token_hash, policy_epoch FROM {APPROVAL_TOKENS}
                   WHERE escalation_id = ?1"
-            ),
-            params!["esc-1"],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+                ),
+                params!["esc-1"],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         let raw_bytes = hex::decode(&result.approval_token_raw).unwrap();
-        assert_eq!(stored_hash, token::sha256_hex(&raw_bytes),
-            "token_hash MUST equal sha256(raw)");
-        assert_eq!(stored_epoch, 7,
-            "policy_epoch MUST equal the value passed by the dispatcher");
+        assert_eq!(
+            stored_hash,
+            token::sha256_hex(&raw_bytes),
+            "token_hash MUST equal sha256(raw)"
+        );
+        assert_eq!(
+            stored_epoch, 7,
+            "policy_epoch MUST equal the value passed by the dispatcher"
+        );
     }
 
     #[test]
@@ -541,11 +567,13 @@ mod tests {
         let (sk, pk) = fixture_keypair();
         let policy = policy_with_operator("op-prime", hex::encode(pk));
         let scope = fixture_scope();
-        let sig = sk.sign(&approval_scope_signing_input("ghost", &scope)).to_bytes().to_vec();
+        let sig = sk
+            .sign(&approval_scope_signing_input("ghost", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let err = approve_escalation(
-            "ghost", &scope, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let err =
+            approve_escalation("ghost", &scope, &sig, "op-prime", 1, &policy, &store).unwrap_err();
 
         assert!(matches!(err, EscalationError::NotFound { .. }));
         assert_eq!(err.error_code(), "FAIL_ESCALATION_NOT_FOUND");
@@ -569,17 +597,21 @@ mod tests {
             let scope = fixture_scope();
             insert_pending_escalation(&store, "esc-x");
             force_status(&store, "esc-x", terminal_status);
-            let sig = sk.sign(&approval_scope_signing_input("esc-x", &scope))
-                .to_bytes().to_vec();
+            let sig = sk
+                .sign(&approval_scope_signing_input("esc-x", &scope))
+                .to_bytes()
+                .to_vec();
 
-            let err = approve_escalation(
-                "esc-x", &scope, &sig, "op-prime", 1, &policy, &store,
-            ).unwrap_err();
+            let err = approve_escalation("esc-x", &scope, &sig, "op-prime", 1, &policy, &store)
+                .unwrap_err();
 
             match err {
                 EscalationError::NotPending { current_status, .. } => {
-                    assert_eq!(current_status, terminal_status.as_sql_str(),
-                        "error must surface the actual current_status");
+                    assert_eq!(
+                        current_status,
+                        terminal_status.as_sql_str(),
+                        "error must surface the actual current_status"
+                    );
                 }
                 other => panic!("expected NotPending, got {other:?}"),
             }
@@ -595,38 +627,44 @@ mod tests {
 
         // case 1: empty capability_class
         let bad = ApprovalScopeWire {
-            capability_class:  "".into(),
-            max_uses:          1,
+            capability_class: "".into(),
+            max_uses: 1,
             valid_for_seconds: 60,
         };
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &bad)).to_bytes().to_vec();
-        let err = approve_escalation(
-            "esc-1", &bad, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &bad))
+            .to_bytes()
+            .to_vec();
+        let err =
+            approve_escalation("esc-1", &bad, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::InvalidScope { .. }));
 
         // case 2: max_uses = 0
         let bad = ApprovalScopeWire {
-            capability_class:  "WriteCode".into(),
-            max_uses:          0,
+            capability_class: "WriteCode".into(),
+            max_uses: 0,
             valid_for_seconds: 60,
         };
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &bad)).to_bytes().to_vec();
-        let err = approve_escalation(
-            "esc-1", &bad, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &bad))
+            .to_bytes()
+            .to_vec();
+        let err =
+            approve_escalation("esc-1", &bad, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::InvalidScope { .. }));
 
         // case 3: valid_for_seconds = 0
         let bad = ApprovalScopeWire {
-            capability_class:  "WriteCode".into(),
-            max_uses:          1,
+            capability_class: "WriteCode".into(),
+            max_uses: 1,
             valid_for_seconds: 0,
         };
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &bad)).to_bytes().to_vec();
-        let err = approve_escalation(
-            "esc-1", &bad, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &bad))
+            .to_bytes()
+            .to_vec();
+        let err =
+            approve_escalation("esc-1", &bad, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::InvalidScope { .. }));
     }
 
@@ -638,12 +676,13 @@ mod tests {
         let policy = policy_with_operator("op-other", hex::encode([0u8; 32]));
         let scope = fixture_scope();
         insert_pending_escalation(&store, "esc-1");
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
-            .to_bytes().to_vec();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let err = approve_escalation(
-            "esc-1", &scope, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let err =
+            approve_escalation("esc-1", &scope, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::OperatorUnknown { .. }));
         assert_eq!(err.error_code(), "FAIL_OPERATOR_UNKNOWN");
     }
@@ -658,16 +697,20 @@ mod tests {
 
         // Sign over a DIFFERENT escalation id — kernel must reject
         // because the signing input includes the escalation_id.
-        let bogus_sig = sk.sign(&approval_scope_signing_input("other-id", &scope))
-            .to_bytes().to_vec();
+        let bogus_sig = sk
+            .sign(&approval_scope_signing_input("other-id", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let err = approve_escalation(
-            "esc-1", &scope, &bogus_sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let err = approve_escalation("esc-1", &scope, &bogus_sig, "op-prime", 1, &policy, &store)
+            .unwrap_err();
         assert!(matches!(err, EscalationError::SignatureInvalid));
         assert_eq!(err.error_code(), "FAIL_OPERATOR_SIGNATURE_INVALID");
-        assert_eq!(read_status(&store, "esc-1"), "Pending",
-            "row MUST stay Pending when signature verification fails");
+        assert_eq!(
+            read_status(&store, "esc-1"),
+            "Pending",
+            "row MUST stay Pending when signature verification fails"
+        );
     }
 
     #[test]
@@ -680,14 +723,18 @@ mod tests {
 
         // Attacker has a different private key.
         let sk_attacker = SigningKey::from_bytes(&[42u8; 32]);
-        let sig = sk_attacker.sign(&approval_scope_signing_input("esc-1", &scope))
-            .to_bytes().to_vec();
+        let sig = sk_attacker
+            .sign(&approval_scope_signing_input("esc-1", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let err = approve_escalation(
-            "esc-1", &scope, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let err =
+            approve_escalation("esc-1", &scope, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::SignatureInvalid));
-        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Pending.as_sql_str());
+        assert_eq!(
+            read_status(&store, "esc-1"),
+            EscalationStatus::Pending.as_sql_str()
+        );
     }
 
     #[test]
@@ -702,22 +749,28 @@ mod tests {
         let scope = fixture_scope();
         insert_pending_escalation(&store, "esc-1");
         force_status(&store, "esc-1", EscalationStatus::Approved);
-        let sig = sk.sign(&approval_scope_signing_input("esc-1", &scope))
-            .to_bytes().to_vec();
+        let sig = sk
+            .sign(&approval_scope_signing_input("esc-1", &scope))
+            .to_bytes()
+            .to_vec();
 
-        let err = approve_escalation(
-            "esc-1", &scope, &sig, "op-prime", 1, &policy, &store,
-        ).unwrap_err();
+        let err =
+            approve_escalation("esc-1", &scope, &sig, "op-prime", 1, &policy, &store).unwrap_err();
         assert!(matches!(err, EscalationError::NotPending { .. }));
 
         // Crucial invariant: NO approval_tokens row was written.
         let conn = store.lock_sync();
-        let n: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
-            [], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(n, 0,
-            "rejected approve_escalation MUST NOT leave an orphaned approval_tokens row");
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            n, 0,
+            "rejected approve_escalation MUST NOT leave an orphaned approval_tokens row"
+        );
     }
 
     // ── deny_escalation ───────────────────────────────────────────────
@@ -727,18 +780,25 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         insert_pending_escalation(&store, "esc-1");
 
-        let result = deny_escalation(
-            "esc-1", Some("scope too broad"), "op-prime", &store,
-        ).expect("happy-path denial must succeed");
+        let result = deny_escalation("esc-1", Some("scope too broad"), "op-prime", &store)
+            .expect("happy-path denial must succeed");
 
         assert!(result.denied_at > 0);
-        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Denied.as_sql_str());
+        assert_eq!(
+            read_status(&store, "esc-1"),
+            EscalationStatus::Denied.as_sql_str()
+        );
 
         let conn = store.lock_sync();
-        let notes: Option<String> = conn.query_row(
-            &format!("SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"),
-            [], |r| r.get(0),
-        ).unwrap();
+        let notes: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(notes.as_deref(), Some("scope too broad"));
     }
 
@@ -749,12 +809,20 @@ mod tests {
 
         deny_escalation("esc-1", None, "op-prime", &store).unwrap();
 
-        assert_eq!(read_status(&store, "esc-1"), EscalationStatus::Denied.as_sql_str());
+        assert_eq!(
+            read_status(&store, "esc-1"),
+            EscalationStatus::Denied.as_sql_str()
+        );
         let conn = store.lock_sync();
-        let notes: Option<String> = conn.query_row(
-            &format!("SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"),
-            [], |r| r.get(0),
-        ).unwrap();
+        let notes: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT resolution_notes FROM {ESCALATIONS} WHERE escalation_id = 'esc-1'"
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(notes, None);
     }
 
@@ -794,10 +862,13 @@ mod tests {
         insert_pending_escalation(&store, "esc-1");
         deny_escalation("esc-1", Some("nope"), "op-prime", &store).unwrap();
         let conn = store.lock_sync();
-        let n: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
-            [], |r| r.get(0),
-        ).unwrap();
+        let n: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {APPROVAL_TOKENS} WHERE escalation_id = 'esc-1'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(n, 0, "denial MUST NOT issue an approval token");
     }
 }

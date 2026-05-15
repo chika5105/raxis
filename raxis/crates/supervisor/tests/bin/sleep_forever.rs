@@ -15,12 +15,10 @@ fn main() {
         .build()
         .expect("build runtime");
     rt.block_on(async {
-        let mut term =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("install SIGTERM handler");
-        let mut int_ =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
-                .expect("install SIGINT handler");
+        let mut term = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+            .expect("install SIGTERM handler");
+        let mut int_ = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+            .expect("install SIGINT handler");
         tokio::select! {
             _ = term.recv() => {}
             _ = int_.recv() => {}

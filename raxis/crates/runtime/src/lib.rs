@@ -32,7 +32,7 @@
 pub mod heartbeat;
 
 pub use heartbeat::{
-    HEARTBEAT_FILE, HEARTBEAT_INTERVAL, HEARTBEAT_SCHEMA_VERSION, HEARTBEAT_STALE_AFTER,
-    KernelLifecycleState, ReadError, RUNTIME_DIR, STORE_SCHEMA_VERSION, Snapshot,
-    read, unix_now_secs, write_atomic,
+    read, unix_now_secs, write_atomic, KernelLifecycleState, ReadError, Snapshot, HEARTBEAT_FILE,
+    HEARTBEAT_INTERVAL, HEARTBEAT_SCHEMA_VERSION, HEARTBEAT_STALE_AFTER, RUNTIME_DIR,
+    STORE_SCHEMA_VERSION,
 };

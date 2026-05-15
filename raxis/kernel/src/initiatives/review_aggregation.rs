@@ -121,8 +121,8 @@ const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 /// points at the SubmitReview that observed the missing peer.
 #[derive(Debug, Clone, Copy)]
 pub struct AgentTypeFilter<'a> {
-    pub plan_registry:    &'a PlanRegistry,
-    pub initiative_id:    &'a str,
+    pub plan_registry: &'a PlanRegistry,
+    pub initiative_id: &'a str,
     pub reviewer_task_id: &'a str,
 }
 
@@ -168,7 +168,7 @@ impl AgentTypeFilter<'_> {
                      \"task_id\":\"{successor_task_id}\",\
                      \"initiative_id\":\"{initiative_id}\",\
                      \"reviewer_task_id\":\"{reviewer_task_id}\"}}",
-                    initiative_id    = self.initiative_id,
+                    initiative_id = self.initiative_id,
                     reviewer_task_id = self.reviewer_task_id,
                 );
                 false
@@ -229,10 +229,10 @@ impl AggregateReviewVerdict {
     /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
     pub fn wire_str(self) -> &'static str {
         match self {
-            Self::Pending             => "Pending",
-            Self::AllPassed           => "AllPassed",
-            Self::AtLeastOneRejected  => "AtLeastOneRejected",
-            Self::NoSuccessors        => "NoSuccessors",
+            Self::Pending => "Pending",
+            Self::AllPassed => "AllPassed",
+            Self::AtLeastOneRejected => "AtLeastOneRejected",
+            Self::NoSuccessors => "NoSuccessors",
         }
     }
 }
@@ -326,11 +326,7 @@ pub fn compute_aggregate_review_outcome(
     agent_type_filter: Option<AgentTypeFilter<'_>>,
 ) -> Result<AggregateOutcome, rusqlite::Error> {
     let conn = store.lock_sync();
-    compute_aggregate_review_outcome_with_conn(
-        executor_task_id,
-        &*conn,
-        agent_type_filter,
-    )
+    compute_aggregate_review_outcome_with_conn(executor_task_id, &*conn, agent_type_filter)
 }
 
 /// `&Connection`-borrowing variant of
@@ -344,8 +340,8 @@ pub fn compute_aggregate_review_outcome(
 /// tests so any divergence between the two surfaces is caught at
 /// build time, not at iter-N debugging time.
 pub fn compute_aggregate_review_outcome_with_conn(
-    executor_task_id:  &str,
-    conn:              &Connection,
+    executor_task_id: &str,
+    conn: &Connection,
     agent_type_filter: Option<AgentTypeFilter<'_>>,
 ) -> Result<AggregateOutcome, rusqlite::Error> {
     // Pull every successor's task_id + verdict in a single query.
@@ -766,8 +762,8 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry:    &reg,
-                initiative_id:    "init-agg",
+                plan_registry: &reg,
+                initiative_id: "init-agg",
                 reviewer_task_id: "rev-2",
             }),
         )
@@ -802,8 +798,8 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry:    &reg,
-                initiative_id:    "init-agg",
+                plan_registry: &reg,
+                initiative_id: "init-agg",
                 reviewer_task_id: "rev-1",
             }),
         )
@@ -850,8 +846,8 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry:    &reg,
-                initiative_id:    "init-agg",
+                plan_registry: &reg,
+                initiative_id: "init-agg",
                 reviewer_task_id: "rev-0",
             }),
         )
@@ -885,8 +881,8 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry:    &reg,
-                initiative_id:    "init-agg",
+                plan_registry: &reg,
+                initiative_id: "init-agg",
                 reviewer_task_id: "rev-0",
             }),
         )
@@ -922,8 +918,8 @@ mod tests {
             &exe,
             &store,
             Some(AgentTypeFilter {
-                plan_registry:    &reg,
-                initiative_id:    "init-agg",
+                plan_registry: &reg,
+                initiative_id: "init-agg",
                 reviewer_task_id: "rev-0",
             }),
         )
@@ -945,13 +941,13 @@ mod tests {
     #[test]
     fn with_conn_variant_matches_store_variant_pending() {
         let store = Store::open_in_memory().unwrap();
-        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        let exe = seed_executor_with_n_reviewers(&store, 2);
         set_verdict(&store, "rev-0", ReviewVerdict::Rejected);
         // rev-1 still NULL → aggregator says Pending even though
         // rev-0 voted Reject. This is the iter42 regression case.
 
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
-        let via_conn  = {
+        let via_conn = {
             let conn = store.lock_sync();
             compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
         };
@@ -962,28 +958,31 @@ mod tests {
     #[test]
     fn with_conn_variant_matches_store_variant_at_least_one_rejected() {
         let store = Store::open_in_memory().unwrap();
-        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        let exe = seed_executor_with_n_reviewers(&store, 2);
         set_verdict(&store, "rev-0", ReviewVerdict::Rejected);
         set_verdict(&store, "rev-1", ReviewVerdict::Approved);
 
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
-        let via_conn  = {
+        let via_conn = {
             let conn = store.lock_sync();
             compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
         };
-        assert_eq!(via_store.verdict, AggregateReviewVerdict::AtLeastOneRejected);
+        assert_eq!(
+            via_store.verdict,
+            AggregateReviewVerdict::AtLeastOneRejected
+        );
         assert_eq!(via_conn, via_store);
     }
 
     #[test]
     fn with_conn_variant_matches_store_variant_all_passed() {
         let store = Store::open_in_memory().unwrap();
-        let exe   = seed_executor_with_n_reviewers(&store, 2);
+        let exe = seed_executor_with_n_reviewers(&store, 2);
         set_verdict(&store, "rev-0", ReviewVerdict::Approved);
         set_verdict(&store, "rev-1", ReviewVerdict::Approved);
 
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
-        let via_conn  = {
+        let via_conn = {
             let conn = store.lock_sync();
             compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
         };
@@ -998,9 +997,15 @@ mod tests {
     /// side. Closes `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`.
     #[test]
     fn wire_str_returns_stable_variant_names() {
-        assert_eq!(AggregateReviewVerdict::Pending.wire_str(),            "Pending");
-        assert_eq!(AggregateReviewVerdict::AllPassed.wire_str(),          "AllPassed");
-        assert_eq!(AggregateReviewVerdict::AtLeastOneRejected.wire_str(), "AtLeastOneRejected");
-        assert_eq!(AggregateReviewVerdict::NoSuccessors.wire_str(),       "NoSuccessors");
+        assert_eq!(AggregateReviewVerdict::Pending.wire_str(), "Pending");
+        assert_eq!(AggregateReviewVerdict::AllPassed.wire_str(), "AllPassed");
+        assert_eq!(
+            AggregateReviewVerdict::AtLeastOneRejected.wire_str(),
+            "AtLeastOneRejected"
+        );
+        assert_eq!(
+            AggregateReviewVerdict::NoSuccessors.wire_str(),
+            "NoSuccessors"
+        );
     }
 }

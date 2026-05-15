@@ -15,8 +15,8 @@ use raxis_policy::PolicyBundle;
 use raxis_store::{Store, Table};
 use raxis_types::{unix_now_secs, IntentKind};
 
-use crate::scheduler::{BudgetError, SchedulerError};
 use crate::scheduler::lane::{get_lane_status, get_lane_status_in_tx};
+use crate::scheduler::{BudgetError, SchedulerError};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): all SQL identifiers in this
 // module flow through the typed `Table` enum.
@@ -72,10 +72,10 @@ pub fn check_budget(
 /// per `kernel-store.md` §2.5.1.1). PK `(lane_id, task_id)` means
 /// re-insertion on continuation is prevented by `INSERT OR IGNORE`.
 pub fn consume_budget_in_tx(
-    conn:    &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     lane_id: &str,
     task_id: &str,
-    cost:    u64,
+    cost: u64,
 ) -> Result<(), SchedulerError> {
     let now = unix_now_secs();
     conn.execute(
@@ -110,14 +110,14 @@ pub fn consume_budget_in_tx(
 /// if `lane_id` is not declared in the policy. Idempotent on `(lane_id,
 /// task_id)` PK conflict (continuation intents do not double-charge).
 pub fn reserve_budget_in_tx(
-    conn:           &rusqlite::Connection,
-    lane_id:        &str,
-    task_id:        &str,
+    conn: &rusqlite::Connection,
+    lane_id: &str,
+    task_id: &str,
     estimated_cost: u64,
-    policy:         &PolicyBundle,
+    policy: &PolicyBundle,
 ) -> Result<(), SchedulerError> {
     let lane_cfg = crate::scheduler::lane::lane_config_for_row(lane_id, policy)?;
-    let status   = get_lane_status_in_tx(conn, lane_id)?;
+    let status = get_lane_status_in_tx(conn, lane_id)?;
 
     if status.active_tasks >= lane_cfg.max_concurrent_tasks {
         return Err(SchedulerError::BudgetExceeded {
@@ -197,14 +197,12 @@ pub fn release_budget(lane_id: &str, task_id: &str, store: &Store) -> Result<(),
 /// (schema invariant violation — the `(lane_id, task_id)` PK should
 /// make this unreachable, but we surface it for forensic value).
 pub fn release_budget_in_tx(
-    conn:    &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     lane_id: &str,
     task_id: &str,
 ) -> Result<(), SchedulerError> {
     let rows = conn.execute(
-        &format!(
-            "DELETE FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id=?1 AND task_id=?2"
-        ),
+        &format!("DELETE FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id=?1 AND task_id=?2"),
         rusqlite::params![lane_id, task_id],
     )?;
     match rows {
@@ -233,14 +231,13 @@ pub fn compute_admission_cost(
     // Convert IntentKind to the string key used in the policy table.
     let kind_str = intent_kind_to_str(&intent_kind);
 
-    let base_cost = policy
-        .base_cost_for_intent_kind(kind_str)
-        .ok_or_else(|| BudgetError::UnknownIntentKindCost {
+    let base_cost = policy.base_cost_for_intent_kind(kind_str).ok_or_else(|| {
+        BudgetError::UnknownIntentKindCost {
             intent_kind: kind_str.to_owned(),
-        })?;
+        }
+    })?;
 
-    let path_cost = (touched_paths.len() as u64)
-        .saturating_mul(policy.cost_per_touched_path());
+    let path_cost = (touched_paths.len() as u64).saturating_mul(policy.cost_per_touched_path());
 
     let raw = base_cost.saturating_add(path_cost);
     Ok(raw.min(policy.max_cost_per_task()))
@@ -283,10 +280,7 @@ pub const MICROS_PER_CENT: u64 = 10_000;
 ///
 /// Returns `0` when the policy declares no LLM providers with
 /// pricing — degraded read-only deployments charge no LLM cost.
-pub fn cost_micros_for_tokens(
-    report: &raxis_types::TokensReport,
-    policy: &PolicyBundle,
-) -> u64 {
+pub fn cost_micros_for_tokens(report: &raxis_types::TokensReport, policy: &PolicyBundle) -> u64 {
     let provider = if report.provider_id.is_empty() {
         worst_llm_pricing(policy)
     } else {
@@ -350,7 +344,7 @@ pub enum TokenBudgetVerdict {
         /// the intent (for audit + operator-facing reporting).
         cumulative_token_cost_micros: u64,
         /// Configured ceiling (micros).
-        ceiling_micros:               u64,
+        ceiling_micros: u64,
     },
 }
 
@@ -368,21 +362,23 @@ pub enum TokenBudgetVerdict {
 /// check still runs on the current total so the admission decision
 /// is monotonic with the most recent report.
 pub fn evaluate_token_budget(
-    report:               Option<&raxis_types::TokensReport>,
+    report: Option<&raxis_types::TokensReport>,
     previous_cost_micros: u64,
-    policy:               &PolicyBundle,
+    policy: &PolicyBundle,
 ) -> TokenBudgetVerdict {
     let report = match report {
         Some(r) => r,
         // Synthetic / kernel-injected intents skip the token gate.
         // The dispatch loop's per-session HARD cap remains in
         // effect via the spawn-time env vars (§2.5 phase B).
-        None    => return TokenBudgetVerdict::Allow {
-            cumulative_token_cost_micros: previous_cost_micros,
-        },
+        None => {
+            return TokenBudgetVerdict::Allow {
+                cumulative_token_cost_micros: previous_cost_micros,
+            }
+        }
     };
     let new_micros = cost_micros_for_tokens(report, policy);
-    let ceiling    = token_cost_ceiling_micros(policy);
+    let ceiling = token_cost_ceiling_micros(policy);
     if ceiling == 0 {
         // Policy did not configure a per-task cost ceiling — admit.
         return TokenBudgetVerdict::Allow {
@@ -392,7 +388,7 @@ pub fn evaluate_token_budget(
     if new_micros > ceiling {
         TokenBudgetVerdict::Reject {
             cumulative_token_cost_micros: new_micros,
-            ceiling_micros:               ceiling,
+            ceiling_micros: ceiling,
         }
     } else {
         TokenBudgetVerdict::Allow {
@@ -408,7 +404,7 @@ pub fn evaluate_token_budget(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_policy::{LaneEntry, PolicyBundle, OperatorEntry};
+    use raxis_policy::{LaneEntry, OperatorEntry, PolicyBundle};
     use raxis_store::Store;
 
     #[test]
@@ -434,9 +430,9 @@ mod tests {
     /// `tasks.task_id`) and `tasks` SELECTs (used by lane status) have
     /// rows to point at.
     fn seed_initiative_and_tasks(
-        store:         &Store,
+        store: &Store,
         initiative_id: &str,
-        tasks:         &[(&str, &str, &str)], // (task_id, lane_id, state)
+        tasks: &[(&str, &str, &str)], // (task_id, lane_id, state)
     ) {
         use raxis_store::Table;
         let conn = store.lock_sync();
@@ -474,10 +470,14 @@ mod tests {
     fn reserve_in_tx_serialises_concurrent_lane_writes() {
         let store = Store::open_in_memory().unwrap();
         let policy = policy_with_lane("lane-A", /*max_concurrent=*/ 8, /*max_cost=*/ 100);
-        seed_initiative_and_tasks(&store, "init-A", &[
-            ("task-1", "lane-A", "Admitted"),
-            ("task-2", "lane-A", "Admitted"),
-        ]);
+        seed_initiative_and_tasks(
+            &store,
+            "init-A",
+            &[
+                ("task-1", "lane-A", "Admitted"),
+                ("task-2", "lane-A", "Admitted"),
+            ],
+        );
 
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
@@ -487,8 +487,10 @@ mod tests {
             .expect_err("second reservation must be rejected as over-cap");
         match err {
             SchedulerError::BudgetExceeded { kind } => {
-                assert!(kind.starts_with("CostLimit"),
-                    "expected CostLimit rejection, got {kind}");
+                assert!(
+                    kind.starts_with("CostLimit"),
+                    "expected CostLimit rejection, got {kind}"
+                );
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
@@ -503,9 +505,7 @@ mod tests {
     fn reserve_in_tx_is_idempotent_on_same_task_pk() {
         let store = Store::open_in_memory().unwrap();
         let policy = policy_with_lane("lane-B", 8, 100);
-        seed_initiative_and_tasks(&store, "init-B", &[
-            ("task-1", "lane-B", "Admitted"),
-        ]);
+        seed_initiative_and_tasks(&store, "init-B", &[("task-1", "lane-B", "Admitted")]);
 
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
@@ -513,8 +513,10 @@ mod tests {
         reserve_budget_in_tx(&tx, "lane-B", "task-1", 50, &policy)
             .expect("continuation intent must not double-charge");
         let status = get_lane_status_in_tx(&tx, "lane-B").unwrap();
-        assert_eq!(status.reserved_cost, 50,
-            "PK collision must collapse to single reservation");
+        assert_eq!(
+            status.reserved_cost, 50,
+            "PK collision must collapse to single reservation"
+        );
         tx.commit().unwrap();
     }
 
@@ -535,24 +537,28 @@ mod tests {
     /// budget. The lane's ceiling bounds the sum across all of them.
     #[test]
     fn step28_shared_lane_bounds_orchestrator_plus_executors_plus_reviewer() {
-        let store  = Store::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         // Workspace-shaped lane: a "feature-work" lane with ceiling
         // 100 admission units. The cap is intentionally tight so the
         // sum of three reservations crosses it.
         let policy = policy_with_lane(
             "feature-work",
             /*max_concurrent=*/ 8,
-            /*max_cost=*/        100,
+            /*max_cost=*/ 100,
         );
         // Mirror the V2 multi-session shape: one Orchestrator + two
         // Executors + one Reviewer, every task carrying the same
         // workspace lane (per Step 28 propagation).
-        seed_initiative_and_tasks(&store, "init-step28-A", &[
-            ("orch-task-1",  "feature-work", "Admitted"),
-            ("exec-task-1",  "feature-work", "Admitted"),
-            ("exec-task-2",  "feature-work", "Admitted"),
-            ("rev-task-1",   "feature-work", "Admitted"),
-        ]);
+        seed_initiative_and_tasks(
+            &store,
+            "init-step28-A",
+            &[
+                ("orch-task-1", "feature-work", "Admitted"),
+                ("exec-task-1", "feature-work", "Admitted"),
+                ("exec-task-2", "feature-work", "Admitted"),
+                ("rev-task-1", "feature-work", "Admitted"),
+            ],
+        );
 
         // Budget consumption walk: Orchestrator(40) + Executor1(30) +
         // Executor2(20) = 90 (all admit). Reviewer's 15 trips the
@@ -567,16 +573,20 @@ mod tests {
             .expect("second executor's 20 brings the total to 90 — still under 100");
 
         let snapshot = get_lane_status_in_tx(&tx, "feature-work").unwrap();
-        assert_eq!(snapshot.reserved_cost, 90,
-            "Step 28: lane ceiling must aggregate across all sessions in the initiative");
+        assert_eq!(
+            snapshot.reserved_cost, 90,
+            "Step 28: lane ceiling must aggregate across all sessions in the initiative"
+        );
 
         let err = reserve_budget_in_tx(&tx, "feature-work", "rev-task-1", 15, &policy)
             .expect_err("reviewer's 15 must be rejected — initiative-wide sum 105 > 100");
         match err {
             SchedulerError::BudgetExceeded { kind } => {
-                assert!(kind.starts_with("CostLimit"),
+                assert!(
+                    kind.starts_with("CostLimit"),
                     "Step 28 rejection must surface as CostLimit (initiative-wide ceiling), \
-                     got {kind}");
+                     got {kind}"
+                );
             }
             other => panic!("expected BudgetExceeded(CostLimit), got {other:?}"),
         }
@@ -592,12 +602,16 @@ mod tests {
         // Permutation A: Executor submits first and consumes the bulk.
         // The Orchestrator's smaller intent is the one that crosses.
         {
-            let store  = Store::open_in_memory().unwrap();
+            let store = Store::open_in_memory().unwrap();
             let policy = policy_with_lane("lane-permA", 8, 100);
-            seed_initiative_and_tasks(&store, "init-permA", &[
-                ("exec-task", "lane-permA", "Admitted"),
-                ("orch-task", "lane-permA", "Admitted"),
-            ]);
+            seed_initiative_and_tasks(
+                &store,
+                "init-permA",
+                &[
+                    ("exec-task", "lane-permA", "Admitted"),
+                    ("orch-task", "lane-permA", "Admitted"),
+                ],
+            );
             let mut conn = store.lock_sync();
             let tx = conn.transaction().unwrap();
             reserve_budget_in_tx(&tx, "lane-permA", "exec-task", 95, &policy)
@@ -613,12 +627,16 @@ mod tests {
         // Permutation B: Orchestrator submits first; an Executor's
         // larger intent crosses.
         {
-            let store  = Store::open_in_memory().unwrap();
+            let store = Store::open_in_memory().unwrap();
             let policy = policy_with_lane("lane-permB", 8, 100);
-            seed_initiative_and_tasks(&store, "init-permB", &[
-                ("orch-task", "lane-permB", "Admitted"),
-                ("exec-task", "lane-permB", "Admitted"),
-            ]);
+            seed_initiative_and_tasks(
+                &store,
+                "init-permB",
+                &[
+                    ("orch-task", "lane-permB", "Admitted"),
+                    ("exec-task", "lane-permB", "Admitted"),
+                ],
+            );
             let mut conn = store.lock_sync();
             let tx = conn.transaction().unwrap();
             reserve_budget_in_tx(&tx, "lane-permB", "orch-task", 10, &policy)
@@ -639,21 +657,37 @@ mod tests {
     /// V2 supports concurrent initiatives on disjoint lanes.
     #[test]
     fn step28_disjoint_lanes_do_not_share_ceiling() {
-        let store  = Store::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         let mut bundle = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
         bundle.set_lanes_for_tests(vec![
-            LaneEntry { lane_id: "lane-feature".into(), max_concurrent_tasks: 8, max_cost_per_epoch: 100, priority: 0 },
-            LaneEntry { lane_id: "lane-bugfix".into(),  max_concurrent_tasks: 8, max_cost_per_epoch: 100, priority: 0 },
+            LaneEntry {
+                lane_id: "lane-feature".into(),
+                max_concurrent_tasks: 8,
+                max_cost_per_epoch: 100,
+                priority: 0,
+            },
+            LaneEntry {
+                lane_id: "lane-bugfix".into(),
+                max_concurrent_tasks: 8,
+                max_cost_per_epoch: 100,
+                priority: 0,
+            },
         ]);
         let policy = bundle;
 
-        seed_initiative_and_tasks(&store, "init-feature", &[
-            ("feat-task-1", "lane-feature", "Admitted"),
-            ("feat-task-2", "lane-feature", "Admitted"),
-        ]);
-        seed_initiative_and_tasks(&store, "init-bugfix", &[
-            ("bug-task-1", "lane-bugfix", "Admitted"),
-        ]);
+        seed_initiative_and_tasks(
+            &store,
+            "init-feature",
+            &[
+                ("feat-task-1", "lane-feature", "Admitted"),
+                ("feat-task-2", "lane-feature", "Admitted"),
+            ],
+        );
+        seed_initiative_and_tasks(
+            &store,
+            "init-bugfix",
+            &[("bug-task-1", "lane-bugfix", "Admitted")],
+        );
 
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
@@ -675,11 +709,17 @@ mod tests {
     #[test]
     fn reserve_in_tx_enforces_concurrency_cap() {
         let store = Store::open_in_memory().unwrap();
-        let policy = policy_with_lane("lane-C", /*max_concurrent=*/ 1, /*max_cost=*/ 1_000);
-        seed_initiative_and_tasks(&store, "init-C", &[
-            ("t-existing", "lane-C", "Running"),
-            ("task-new",   "lane-C", "Admitted"),
-        ]);
+        let policy = policy_with_lane(
+            "lane-C", /*max_concurrent=*/ 1, /*max_cost=*/ 1_000,
+        );
+        seed_initiative_and_tasks(
+            &store,
+            "init-C",
+            &[
+                ("t-existing", "lane-C", "Running"),
+                ("task-new", "lane-C", "Admitted"),
+            ],
+        );
 
         let mut conn = store.lock_sync();
         let tx = conn.transaction().unwrap();
@@ -687,8 +727,10 @@ mod tests {
             .expect_err("concurrency cap must reject when active >= max");
         match err {
             SchedulerError::BudgetExceeded { kind } => {
-                assert!(kind.starts_with("ConcurrencyLimit"),
-                    "expected ConcurrencyLimit rejection, got {kind}");
+                assert!(
+                    kind.starts_with("ConcurrencyLimit"),
+                    "expected ConcurrencyLimit rejection, got {kind}"
+                );
             }
             other => panic!("unexpected error variant: {other:?}"),
         }
@@ -700,25 +742,25 @@ mod tests {
     /// configured for the V2.5 token-budget tests, plus a configurable
     /// `max_cost_per_task` ceiling (cents).
     fn make_provider(
-        id:                       &str,
-        input_tokens_per_dollar:  u64,
+        id: &str,
+        input_tokens_per_dollar: u64,
         output_tokens_per_dollar: u64,
     ) -> raxis_policy::ProviderEntry {
         raxis_policy::ProviderEntry {
-            provider_id:               id.to_owned(),
-            kind:                      "Anthropic".to_owned(),
-            credentials_file:          format!("{id}.toml"),
-            inference_timeout_ms:      30_000,
-            data_fetch_timeout_ms:     10_000,
-            max_response_bytes:        16 * 1024 * 1024,
-            stream_idle_timeout_ms:    None,
-            sidecar_endpoint:          None,
-            sidecar_hmac_secret:       None,
+            provider_id: id.to_owned(),
+            kind: "Anthropic".to_owned(),
+            credentials_file: format!("{id}.toml"),
+            inference_timeout_ms: 30_000,
+            data_fetch_timeout_ms: 10_000,
+            max_response_bytes: 16 * 1024 * 1024,
+            stream_idle_timeout_ms: None,
+            sidecar_endpoint: None,
+            sidecar_hmac_secret: None,
             sidecar_health_check_path: None,
             pricing: Some(raxis_policy::ProviderPricing {
                 input_tokens_per_dollar,
                 output_tokens_per_dollar,
-                cache_read_tokens_per_dollar:     None,
+                cache_read_tokens_per_dollar: None,
                 cache_creation_tokens_per_dollar: None,
             }),
         }
@@ -729,9 +771,7 @@ mod tests {
         input_tokens_per_dollar: u64,
         output_tokens_per_dollar: u64,
     ) -> PolicyBundle {
-        let mut bundle = PolicyBundle::for_tests_with_operators(
-            Vec::<OperatorEntry>::new(),
-        );
+        let mut bundle = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
         bundle.set_max_cost_per_task_for_tests(max_cost_per_task_cents);
         bundle.set_providers_for_tests(vec![make_provider(
             "anthropic-prod",
@@ -754,12 +794,11 @@ mod tests {
     #[test]
     fn token_cost_anthropic_million_million_is_25usd() {
         let policy = policy_with_pricing_and_ceiling(
-            /*cents*/ 0,
-            /*input/$*/ 200_000,   // $5 / 1M input
-            /*output/$*/ 50_000,   // $20 / 1M output
+            /*cents*/ 0, /*input/$*/ 200_000, // $5 / 1M input
+            /*output/$*/ 50_000, // $20 / 1M output
         );
         let report = raxis_types::TokensReport {
-            input_tokens:  1_000_000,
+            input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -776,8 +815,10 @@ mod tests {
         match evaluate_token_budget(None, /*prev*/ 1234, &policy) {
             TokenBudgetVerdict::Allow {
                 cumulative_token_cost_micros,
-            } => assert_eq!(cumulative_token_cost_micros, 1234,
-                "synthetic intent must NOT modify the previous total"),
+            } => assert_eq!(
+                cumulative_token_cost_micros, 1234,
+                "synthetic intent must NOT modify the previous total"
+            ),
             other => panic!("expected Allow, got {other:?}"),
         }
     }
@@ -788,7 +829,7 @@ mod tests {
     fn evaluate_token_budget_admits_when_no_ceiling() {
         let policy = policy_with_pricing_and_ceiling(0, 200_000, 50_000);
         let report = raxis_types::TokensReport {
-            input_tokens:  500_000,
+            input_tokens: 500_000,
             output_tokens: 500_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -810,7 +851,7 @@ mod tests {
         // 1_500_000 > 1_000_000 → reject.
         let policy = policy_with_pricing_and_ceiling(100, 200_000, 50_000);
         let report = raxis_types::TokensReport {
-            input_tokens:  100_000,
+            input_tokens: 100_000,
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -836,7 +877,7 @@ mod tests {
         // 200k input @ $5/M + 50k output @ $20/M = $1 + $1 = $2 = 2_000_000 µ$.
         let policy = policy_with_pricing_and_ceiling(200, 200_000, 50_000);
         let report = raxis_types::TokensReport {
-            input_tokens:  200_000,
+            input_tokens: 200_000,
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -858,7 +899,7 @@ mod tests {
     fn evaluate_token_budget_total_is_monotonic_non_decreasing() {
         let policy = policy_with_pricing_and_ceiling(0, 200_000, 50_000);
         let lower_report = raxis_types::TokensReport {
-            input_tokens:  100_000,
+            input_tokens: 100_000,
             output_tokens: 50_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -878,18 +919,16 @@ mod tests {
     /// `provider_id` is empty.
     #[test]
     fn token_cost_worst_of_n_on_empty_provider_id() {
-        let mut policy = PolicyBundle::for_tests_with_operators(
-            Vec::<OperatorEntry>::new(),
-        );
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
         policy.set_providers_for_tests(vec![
             // Cheap: $1/M input + $1/M output.
-            make_provider("cheap",   1_000_000, 1_000_000),
+            make_provider("cheap", 1_000_000, 1_000_000),
             // Expensive: $10/M input + $10/M output (worst-of-N
             // wins for upper-bound).
-            make_provider("premium",   100_000,   100_000),
+            make_provider("premium", 100_000, 100_000),
         ]);
         let report = raxis_types::TokensReport {
-            input_tokens:  1_000_000,
+            input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,
@@ -903,15 +942,13 @@ mod tests {
     /// declared provider with pricing.
     #[test]
     fn token_cost_uses_named_provider_when_present() {
-        let mut policy = PolicyBundle::for_tests_with_operators(
-            Vec::<OperatorEntry>::new(),
-        );
+        let mut policy = PolicyBundle::for_tests_with_operators(Vec::<OperatorEntry>::new());
         policy.set_providers_for_tests(vec![
-            make_provider("cheap",   1_000_000, 1_000_000),
-            make_provider("premium",   100_000,   100_000),
+            make_provider("cheap", 1_000_000, 1_000_000),
+            make_provider("premium", 100_000, 100_000),
         ]);
         let report = raxis_types::TokensReport {
-            input_tokens:  1_000_000,
+            input_tokens: 1_000_000,
             output_tokens: 1_000_000,
             cache_read_tokens: 0,
             cache_creation_tokens: 0,

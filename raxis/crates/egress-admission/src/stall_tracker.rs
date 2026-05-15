@@ -67,16 +67,16 @@ pub const DEFAULT_THRESHOLD: u32 = 3;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StallEmission {
     /// Session whose VM is stalling.
-    pub session_id:            String,
+    pub session_id: String,
     /// Host or SNI as reported by the chokepoint. `None` for
     /// raw-TCP destinations where the in-VM proxy could not
     /// extract an SNI.
-    pub host_or_sni:           Option<String>,
+    pub host_or_sni: Option<String>,
     /// Original destination port the chokepoint observed.
-    pub original_dst_port:     u16,
+    pub original_dst_port: u16,
     /// Stable short reason string carried from the underlying
     /// denial event (`host_not_in_allowlist`, etc.).
-    pub reason:                String,
+    pub reason: String,
     /// Number of denials inside the window that triggered this
     /// detection.
     pub block_count_in_window: u32,
@@ -84,7 +84,7 @@ pub struct StallEmission {
     /// `Duration` rounded down — operator dashboards compare
     /// against integer seconds so the audit field stays an
     /// integer.
-    pub window_seconds:        u32,
+    pub window_seconds: u32,
 }
 
 /// Outcome of [`EgressStallTracker::record_denial`].
@@ -119,10 +119,10 @@ impl Clock for SystemClock {
 
 #[derive(Debug, Hash, PartialEq, Eq, Clone)]
 struct StallKey {
-    session_id:        String,
-    host_or_sni:       Option<String>,
+    session_id: String,
+    host_or_sni: Option<String>,
     original_dst_port: u16,
-    reason:            String,
+    reason: String,
 }
 
 #[derive(Debug)]
@@ -140,10 +140,10 @@ struct Bucket {
 ///
 /// See module docs for the contract.
 pub struct EgressStallTracker {
-    window:    Duration,
+    window: Duration,
     threshold: u32,
-    clock:     Box<dyn Clock>,
-    state:     Mutex<HashMap<StallKey, Bucket>>,
+    clock: Box<dyn Clock>,
+    state: Mutex<HashMap<StallKey, Bucket>>,
 }
 
 impl std::fmt::Debug for EgressStallTracker {
@@ -184,21 +184,24 @@ impl EgressStallTracker {
     /// (bucket, sliding window) when the threshold is crossed.
     pub fn record_denial(
         &self,
-        session_id:        &str,
-        host_or_sni:       Option<&str>,
+        session_id: &str,
+        host_or_sni: Option<&str>,
         original_dst_port: u16,
-        reason:            &str,
+        reason: &str,
     ) -> StallSignal {
         let now = self.clock.now();
         let key = StallKey {
-            session_id:        session_id.to_owned(),
-            host_or_sni:       host_or_sni.map(str::to_owned),
+            session_id: session_id.to_owned(),
+            host_or_sni: host_or_sni.map(str::to_owned),
             original_dst_port,
-            reason:            reason.to_owned(),
+            reason: reason.to_owned(),
         };
-        let mut state = self.state.lock().expect("EgressStallTracker mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("EgressStallTracker mutex poisoned");
         let bucket = state.entry(key.clone()).or_insert_with(|| Bucket {
-            denials:      VecDeque::new(),
+            denials: VecDeque::new(),
             last_emit_at: None,
         });
         // Prune denials that fell out of the window.
@@ -228,10 +231,10 @@ impl EgressStallTracker {
         bucket.last_emit_at = Some(now);
         let window_seconds = self.window.as_secs() as u32;
         StallSignal::Detected(StallEmission {
-            session_id:            key.session_id,
-            host_or_sni:           key.host_or_sni,
-            original_dst_port:     key.original_dst_port,
-            reason:                key.reason,
+            session_id: key.session_id,
+            host_or_sni: key.host_or_sni,
+            original_dst_port: key.original_dst_port,
+            reason: key.reason,
             block_count_in_window: count,
             window_seconds,
         })
@@ -241,7 +244,10 @@ impl EgressStallTracker {
     /// when a session terminates so a long-lived tracker doesn't
     /// hold stale per-session state forever.
     pub fn forget_session(&self, session_id: &str) {
-        let mut state = self.state.lock().expect("EgressStallTracker mutex poisoned");
+        let mut state = self
+            .state
+            .lock()
+            .expect("EgressStallTracker mutex poisoned");
         state.retain(|k, _| k.session_id != session_id);
     }
 
@@ -249,7 +255,10 @@ impl EgressStallTracker {
     /// `forget_session` cleanup contract.
     #[doc(hidden)]
     pub fn bucket_count(&self) -> usize {
-        let state = self.state.lock().expect("EgressStallTracker mutex poisoned");
+        let state = self
+            .state
+            .lock()
+            .expect("EgressStallTracker mutex poisoned");
         state.len()
     }
 }
@@ -273,7 +282,9 @@ mod tests {
 
     impl FakeClock {
         fn new() -> Self {
-            Self { now: StdMutex::new(Instant::now()) }
+            Self {
+                now: StdMutex::new(Instant::now()),
+            }
         }
         fn advance(&self, delta: Duration) {
             let mut guard = self.now.lock().unwrap();
@@ -287,12 +298,17 @@ mod tests {
         }
     }
 
-    fn tracker(window: Duration, threshold: u32) -> (std::sync::Arc<FakeClock>, EgressStallTracker) {
+    fn tracker(
+        window: Duration,
+        threshold: u32,
+    ) -> (std::sync::Arc<FakeClock>, EgressStallTracker) {
         let clock = std::sync::Arc::new(FakeClock::new());
         let tracker = EgressStallTracker::new(
             window,
             threshold,
-            Box::new(FakeClockHandle { inner: std::sync::Arc::clone(&clock) }),
+            Box::new(FakeClockHandle {
+                inner: std::sync::Arc::clone(&clock),
+            }),
         );
         (clock, tracker)
     }
@@ -304,7 +320,9 @@ mod tests {
         inner: std::sync::Arc<FakeClock>,
     }
     impl Clock for FakeClockHandle {
-        fn now(&self) -> Instant { self.inner.now() }
+        fn now(&self) -> Instant {
+            self.inner.now()
+        }
     }
 
     #[test]
@@ -312,7 +330,12 @@ mod tests {
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
         for _ in 0..2 {
             assert_eq!(
-                t.record_denial("sess-1", Some("api.anthropic.com"), 443, "host_not_in_allowlist"),
+                t.record_denial(
+                    "sess-1",
+                    Some("api.anthropic.com"),
+                    443,
+                    "host_not_in_allowlist"
+                ),
                 StallSignal::Quiet,
             );
         }
@@ -326,12 +349,12 @@ mod tests {
         let signal = t.record_denial("s", Some("api.anthropic.com"), 443, "host_not_in_allowlist");
         match signal {
             StallSignal::Detected(emit) => {
-                assert_eq!(emit.session_id,            "s");
+                assert_eq!(emit.session_id, "s");
                 assert_eq!(emit.host_or_sni.as_deref(), Some("api.anthropic.com"));
-                assert_eq!(emit.original_dst_port,     443);
-                assert_eq!(emit.reason,                "host_not_in_allowlist");
+                assert_eq!(emit.original_dst_port, 443);
+                assert_eq!(emit.reason, "host_not_in_allowlist");
                 assert_eq!(emit.block_count_in_window, 3);
-                assert_eq!(emit.window_seconds,        30);
+                assert_eq!(emit.window_seconds, 30);
             }
             other => panic!("expected Detected, got {:?}", other),
         }
@@ -340,11 +363,16 @@ mod tests {
     #[test]
     fn fourth_and_fifth_denials_inside_window_are_debounced() {
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s", Some("api"), 443, "r"); }
+        for _ in 0..3 {
+            t.record_denial("s", Some("api"), 443, "r");
+        }
         // Threshold already crossed; subsequent denials are quiet
         // until the window slides.
         for _ in 0..2 {
-            assert_eq!(t.record_denial("s", Some("api"), 443, "r"), StallSignal::Quiet);
+            assert_eq!(
+                t.record_denial("s", Some("api"), 443, "r"),
+                StallSignal::Quiet
+            );
         }
     }
 
@@ -355,18 +383,26 @@ mod tests {
         t.record_denial("s", Some("api"), 443, "r");
         // Slide everything out of the window.
         clock.advance(Duration::from_secs(31));
-        assert_eq!(t.record_denial("s", Some("api"), 443, "r"), StallSignal::Quiet,
-            "single fresh denial below threshold");
+        assert_eq!(
+            t.record_denial("s", Some("api"), 443, "r"),
+            StallSignal::Quiet,
+            "single fresh denial below threshold"
+        );
     }
 
     #[test]
     fn re_arms_after_window_slides_past_emit() {
         let (clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s", Some("api"), 443, "r"); }
+        for _ in 0..3 {
+            t.record_denial("s", Some("api"), 443, "r");
+        }
         // Slide past the window.
         clock.advance(Duration::from_secs(31));
         for _ in 0..2 {
-            assert_eq!(t.record_denial("s", Some("api"), 443, "r"), StallSignal::Quiet);
+            assert_eq!(
+                t.record_denial("s", Some("api"), 443, "r"),
+                StallSignal::Quiet
+            );
         }
         // Third inside the new window re-emits.
         match t.record_denial("s", Some("api"), 443, "r") {
@@ -378,10 +414,18 @@ mod tests {
     #[test]
     fn distinct_destinations_track_independently() {
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s", Some("a.example"), 443, "r"); }
+        for _ in 0..3 {
+            t.record_denial("s", Some("a.example"), 443, "r");
+        }
         // Different host — independent bucket, below threshold.
-        assert_eq!(t.record_denial("s", Some("b.example"), 443, "r"), StallSignal::Quiet);
-        assert_eq!(t.record_denial("s", Some("b.example"), 443, "r"), StallSignal::Quiet);
+        assert_eq!(
+            t.record_denial("s", Some("b.example"), 443, "r"),
+            StallSignal::Quiet
+        );
+        assert_eq!(
+            t.record_denial("s", Some("b.example"), 443, "r"),
+            StallSignal::Quiet
+        );
         match t.record_denial("s", Some("b.example"), 443, "r") {
             StallSignal::Detected(emit) => {
                 assert_eq!(emit.host_or_sni.as_deref(), Some("b.example"));
@@ -393,10 +437,15 @@ mod tests {
     #[test]
     fn distinct_sessions_track_independently() {
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s1", Some("api"), 443, "r"); }
+        for _ in 0..3 {
+            t.record_denial("s1", Some("api"), 443, "r");
+        }
         // s2 — fresh bucket, below threshold.
         for _ in 0..2 {
-            assert_eq!(t.record_denial("s2", Some("api"), 443, "r"), StallSignal::Quiet);
+            assert_eq!(
+                t.record_denial("s2", Some("api"), 443, "r"),
+                StallSignal::Quiet
+            );
         }
     }
 
@@ -407,7 +456,9 @@ mod tests {
         // `proxy_target_bypass` for the same dest is two
         // distinct stalls.)
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s", Some("api"), 443, "host_not_in_allowlist"); }
+        for _ in 0..3 {
+            t.record_denial("s", Some("api"), 443, "host_not_in_allowlist");
+        }
         for _ in 0..2 {
             assert_eq!(
                 t.record_denial("s", Some("api"), 443, "proxy_target_bypass"),
@@ -419,9 +470,14 @@ mod tests {
     #[test]
     fn host_none_buckets_separately_from_named_host() {
         let (_clock, t) = tracker(Duration::from_secs(30), 3);
-        for _ in 0..3 { t.record_denial("s", None, 443, "r"); }
+        for _ in 0..3 {
+            t.record_denial("s", None, 443, "r");
+        }
         for _ in 0..2 {
-            assert_eq!(t.record_denial("s", Some("api"), 443, "r"), StallSignal::Quiet);
+            assert_eq!(
+                t.record_denial("s", Some("api"), 443, "r"),
+                StallSignal::Quiet
+            );
         }
     }
 

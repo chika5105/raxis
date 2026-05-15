@@ -91,8 +91,8 @@ impl GatewayCallError {
     /// and forensic tooling. Pinned by tests so the wire never drifts.
     pub fn category(&self) -> &'static str {
         match self {
-            GatewayCallError::Unavailable     => "unavailable",
-            GatewayCallError::Dropped         => "dropped",
+            GatewayCallError::Unavailable => "unavailable",
+            GatewayCallError::Dropped => "dropped",
             GatewayCallError::GatewayError(_) => "gateway_error",
             GatewayCallError::UnexpectedReply => "unexpected_reply",
         }
@@ -102,7 +102,7 @@ impl GatewayCallError {
 /// One outstanding fetch waiting on the pump task.
 struct Pending {
     fetch_id: Uuid,
-    payload:  GatewayMessage, // ALWAYS GatewayMessage::FetchRequest
+    payload: GatewayMessage, // ALWAYS GatewayMessage::FetchRequest
     reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
     /// Task identifier mirrored from the `FetchRequest`. Threaded
     /// here so the pump can route the response to a per-task
@@ -112,7 +112,7 @@ struct Pending {
     /// `task_id` (the gateway has no business with task-id
     /// semantics), so the inflight slot is the only place the
     /// kernel can correlate response → task.
-    task_id:  Option<String>,
+    task_id: Option<String>,
     /// Session id, mirrored for the same reason as `task_id`.
     /// The observer uses this to attribute one task's records
     /// to the specific VM that produced them.
@@ -150,13 +150,13 @@ pub trait LlmTurnObserver: Send + Sync {
     /// validation it wants to apply before storing.
     fn observe(
         &self,
-        task_id:     &str,
-        session_id:  Option<&str>,
-        fetch_id:    Uuid,
+        task_id: &str,
+        session_id: Option<&str>,
+        fetch_id: Uuid,
         status_code: Option<u16>,
-        latency_ms:  u32,
-        body_bytes:  Option<&[u8]>,
-        error:       Option<&str>,
+        latency_ms: u32,
+        body_bytes: Option<&[u8]>,
+        error: Option<&str>,
     );
 }
 
@@ -167,7 +167,7 @@ pub trait LlmTurnObserver: Send + Sync {
 /// signal semantics are best-effort fire-and-forget.
 struct OneShot {
     payload: GatewayMessage,
-    ack_tx:  oneshot::Sender<Result<(), GatewayCallError>>,
+    ack_tx: oneshot::Sender<Result<(), GatewayCallError>>,
 }
 
 /// What the pump task accepts. Either an in-flight `Pending` (correlated
@@ -182,11 +182,11 @@ enum PumpJob {
 /// need to pattern-match against `GatewayMessage`.
 #[derive(Debug, Clone)]
 pub struct FetchResult {
-    pub fetch_id:    Uuid,
+    pub fetch_id: Uuid,
     pub status_code: Option<u16>,
-    pub headers:     Vec<(String, String)>,
-    pub body_bytes:  Option<Vec<u8>>,
-    pub latency_ms:  u32,
+    pub headers: Vec<(String, String)>,
+    pub body_bytes: Option<Vec<u8>>,
+    pub latency_ms: u32,
 }
 
 /// Shared state visible to both the supervisor (which `set_expected_token`s
@@ -208,14 +208,14 @@ struct Inner {
     expected_token: Mutex<Option<String>>,
     /// Sender into the active pump task. `None` when no gateway is
     /// connected. Dropped to terminate the pump.
-    submit:         Mutex<Option<mpsc::UnboundedSender<PumpJob>>>,
+    submit: Mutex<Option<mpsc::UnboundedSender<PumpJob>>>,
     /// Optional observer fanned every successful + failed
     /// `FetchResponse` so per-task capture (the dashboard's
     /// `TaskLlmCapture` file ring) can record raw LLM turns
     /// for operator-side debugging. `None` ⇒ no observer
     /// installed (matches every pre-iter58 deployment); the
     /// pump's hot path stays branch-light when absent.
-    observer:       Mutex<Option<Arc<dyn LlmTurnObserver>>>,
+    observer: Mutex<Option<Arc<dyn LlmTurnObserver>>>,
 }
 
 impl GatewayClient {
@@ -252,10 +252,7 @@ impl GatewayClient {
     /// the `GatewayClient`'s shared inner so a fresh
     /// `install_connection` (gateway respawn) inherits the
     /// previously-installed observer transparently.
-    pub async fn install_observer(
-        &self,
-        observer: Arc<dyn LlmTurnObserver>,
-    ) {
+    pub async fn install_observer(&self, observer: Arc<dyn LlmTurnObserver>) {
         *self.inner.observer.lock().await = Some(observer);
     }
 
@@ -293,14 +290,14 @@ impl GatewayClient {
     pub async fn fetch(
         &self,
         gateway_token: String,
-        fetch_kind:    FetchKind,
-        url:           String,
-        method:        String,
-        headers:       Vec<(String, String)>,
-        body_bytes:    Vec<u8>,
-        timeout_ms:    u32,
-        session_id:    Option<Uuid>,
-        task_id:       Option<String>,
+        fetch_kind: FetchKind,
+        url: String,
+        method: String,
+        headers: Vec<(String, String)>,
+        body_bytes: Vec<u8>,
+        timeout_ms: u32,
+        session_id: Option<Uuid>,
+        task_id: Option<String>,
     ) -> Result<FetchResult, GatewayCallError> {
         let fetch_id = Uuid::new_v4();
         // Clone the correlation ids BEFORE moving them into the
@@ -309,9 +306,9 @@ impl GatewayClient {
         // `FetchResponse` does NOT echo task_id; the inflight
         // slot is the only place the kernel can correlate
         // response → task).
-        let task_id_for_inflight    = task_id.clone();
+        let task_id_for_inflight = task_id.clone();
         let session_id_for_inflight = session_id;
-        let payload  = GatewayMessage::FetchRequest {
+        let payload = GatewayMessage::FetchRequest {
             gateway_token,
             fetch_id,
             fetch_kind,
@@ -338,10 +335,10 @@ impl GatewayClient {
                 fetch_id,
                 payload,
                 reply_tx,
-                task_id:    task_id_for_inflight,
+                task_id: task_id_for_inflight,
                 session_id: session_id_for_inflight,
             }))
-                .map_err(|_| GatewayCallError::Unavailable)?;
+            .map_err(|_| GatewayCallError::Unavailable)?;
         }
 
         match reply_rx.await {
@@ -376,10 +373,7 @@ impl GatewayClient {
     /// gateway's own failure-closed contract (returns
     /// `PolicyReloadFailed` on its next request when its on-disk
     /// allowlist is stale) is the second line of defence.
-    pub async fn notify_epoch_advanced(
-        &self,
-        new_epoch_id: u64,
-    ) -> Result<(), GatewayCallError> {
+    pub async fn notify_epoch_advanced(&self, new_epoch_id: u64) -> Result<(), GatewayCallError> {
         let payload = GatewayMessage::EpochAdvanced { new_epoch_id };
         let (ack_tx, ack_rx) = oneshot::channel();
 
@@ -421,8 +415,8 @@ async fn pump(
     /// struct (instead of a tuple) keeps the pump's bookkeeping
     /// self-documenting.
     struct InflightSlot {
-        reply_tx:   oneshot::Sender<Result<FetchResult, GatewayCallError>>,
-        task_id:    Option<String>,
+        reply_tx: oneshot::Sender<Result<FetchResult, GatewayCallError>>,
+        task_id: Option<String>,
         session_id: Option<Uuid>,
     }
 
@@ -591,10 +585,10 @@ mod tests {
                     let resp = GatewayMessage::FetchResponse {
                         fetch_id,
                         status_code: Some(200),
-                        headers:     vec![],
-                        body_bytes:  Some(b"OK".to_vec()),
-                        latency_ms:  1,
-                        error:       None,
+                        headers: vec![],
+                        body_bytes: Some(b"OK".to_vec()),
+                        latency_ms: 1,
+                        error: None,
                     };
                     let _ = write_frame(&mut stream, &resp).await;
                 }
@@ -602,21 +596,25 @@ mod tests {
         })
     }
 
-    fn dummy_fetch(client: GatewayClient, token: String, idx: u32)
-        -> tokio::task::JoinHandle<Result<FetchResult, GatewayCallError>>
-    {
+    fn dummy_fetch(
+        client: GatewayClient,
+        token: String,
+        idx: u32,
+    ) -> tokio::task::JoinHandle<Result<FetchResult, GatewayCallError>> {
         tokio::spawn(async move {
-            client.fetch(
-                token,
-                FetchKind::DataFetch,
-                format!("https://example.com/{idx}"),
-                "GET".into(),
-                vec![],
-                vec![],
-                5_000,
-                None,
-                None,
-            ).await
+            client
+                .fetch(
+                    token,
+                    FetchKind::DataFetch,
+                    format!("https://example.com/{idx}"),
+                    "GET".into(),
+                    vec![],
+                    vec![],
+                    5_000,
+                    None,
+                    None,
+                )
+                .await
         })
     }
 
@@ -633,13 +631,13 @@ mod tests {
     impl LlmTurnObserver for RecordingObserver {
         fn observe(
             &self,
-            task_id:     &str,
+            task_id: &str,
             _session_id: Option<&str>,
-            fetch_id:    Uuid,
+            fetch_id: Uuid,
             status_code: Option<u16>,
             _latency_ms: u32,
-            body_bytes:  Option<&[u8]>,
-            error:       Option<&str>,
+            body_bytes: Option<&[u8]>,
+            error: Option<&str>,
         ) {
             let body = body_bytes
                 .map(|b| String::from_utf8_lossy(b).to_string())
@@ -667,17 +665,20 @@ mod tests {
         client.install_observer(obs.clone()).await;
         client.install_connection(kernel_side).await;
 
-        let result = client.fetch(
-            "tok".into(),
-            FetchKind::Inference,
-            "https://api.anthropic.com/v1/messages".into(),
-            "POST".into(),
-            vec![],
-            vec![],
-            5_000,
-            None,
-            Some("task-cap-1".into()),
-        ).await.expect("fetch must succeed");
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::Inference,
+                "https://api.anthropic.com/v1/messages".into(),
+                "POST".into(),
+                vec![],
+                vec![],
+                5_000,
+                None,
+                Some("task-cap-1".into()),
+            )
+            .await
+            .expect("fetch must succeed");
         assert_eq!(result.status_code, Some(200));
 
         let seen = obs.seen.lock().clone();
@@ -703,29 +704,43 @@ mod tests {
         client.install_observer(obs.clone()).await;
         client.install_connection(kernel_side).await;
 
-        let _ = client.fetch(
-            "tok".into(),
-            FetchKind::DataFetch,
-            "https://example.com".into(),
-            "GET".into(),
-            vec![],
-            vec![],
-            5_000,
-            None,
-            None, // task_id is None
-        ).await.expect("fetch must succeed");
+        let _ = client
+            .fetch(
+                "tok".into(),
+                FetchKind::DataFetch,
+                "https://example.com".into(),
+                "GET".into(),
+                vec![],
+                vec![],
+                5_000,
+                None,
+                None, // task_id is None
+            )
+            .await
+            .expect("fetch must succeed");
 
-        assert!(obs.seen.lock().is_empty(),
-            "no task_id ⇒ no observer record");
+        assert!(
+            obs.seen.lock().is_empty(),
+            "no task_id ⇒ no observer record"
+        );
     }
 
     #[tokio::test]
     async fn fetch_returns_unavailable_when_no_gateway_connected() {
         let client = GatewayClient::new();
-        let result = client.fetch(
-            "tok".into(), FetchKind::DataFetch, "https://x".into(), "GET".into(),
-            vec![], vec![], 1_000, None, None,
-        ).await;
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::DataFetch,
+                "https://x".into(),
+                "GET".into(),
+                vec![],
+                vec![],
+                1_000,
+                None,
+                None,
+            )
+            .await;
         assert!(matches!(result, Err(GatewayCallError::Unavailable)));
     }
 
@@ -737,17 +752,20 @@ mod tests {
         let client = GatewayClient::new();
         client.install_connection(kernel_side).await;
 
-        let result = client.fetch(
-            "tok".into(),
-            FetchKind::DataFetch,
-            "https://example.com".into(),
-            "GET".into(),
-            vec![],
-            vec![],
-            5_000,
-            None,
-            None,
-        ).await.expect("fetch must succeed");
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::DataFetch,
+                "https://example.com".into(),
+                "GET".into(),
+                vec![],
+                vec![],
+                5_000,
+                None,
+                None,
+            )
+            .await
+            .expect("fetch must succeed");
         assert_eq!(result.status_code, Some(200));
         assert_eq!(result.body_bytes.as_deref(), Some(b"OK".as_ref()));
     }
@@ -800,9 +818,18 @@ mod tests {
         assert!(r2.body_bytes.as_deref().unwrap().starts_with(b"for-"));
         assert!(r3.body_bytes.as_deref().unwrap().starts_with(b"for-"));
 
-        assert!(r1.body_bytes.unwrap().ends_with(r1.fetch_id.to_string().as_bytes()));
-        assert!(r2.body_bytes.unwrap().ends_with(r2.fetch_id.to_string().as_bytes()));
-        assert!(r3.body_bytes.unwrap().ends_with(r3.fetch_id.to_string().as_bytes()));
+        assert!(r1
+            .body_bytes
+            .unwrap()
+            .ends_with(r1.fetch_id.to_string().as_bytes()));
+        assert!(r2
+            .body_bytes
+            .unwrap()
+            .ends_with(r2.fetch_id.to_string().as_bytes()));
+        assert!(r3
+            .body_bytes
+            .unwrap()
+            .ends_with(r3.fetch_id.to_string().as_bytes()));
     }
 
     #[tokio::test]
@@ -826,10 +853,19 @@ mod tests {
         let client = GatewayClient::new();
         client.install_connection(kernel_side).await;
 
-        let result = client.fetch(
-            "tok".into(), FetchKind::DataFetch, "https://x".into(), "GET".into(),
-            vec![], vec![], 1_000, None, None,
-        ).await;
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::DataFetch,
+                "https://x".into(),
+                "GET".into(),
+                vec![],
+                vec![],
+                1_000,
+                None,
+                None,
+            )
+            .await;
         gw.await.unwrap();
 
         match result {
@@ -916,10 +952,19 @@ mod tests {
         assert!(client.is_connected().await);
         client.disconnect().await;
         assert!(!client.is_connected().await);
-        let result = client.fetch(
-            "tok".into(), FetchKind::DataFetch, "https://x".into(), "GET".into(),
-            vec![], vec![], 1_000, None, None,
-        ).await;
+        let result = client
+            .fetch(
+                "tok".into(),
+                FetchKind::DataFetch,
+                "https://x".into(),
+                "GET".into(),
+                vec![],
+                vec![],
+                1_000,
+                None,
+                None,
+            )
+            .await;
         assert!(matches!(result, Err(GatewayCallError::Unavailable)));
     }
 
@@ -930,9 +975,15 @@ mod tests {
         // GatewaySignalFailed.reason consumers (audit JSONL, raxis log
         // forensics) key off these short strings. Pin every variant.
         assert_eq!(GatewayCallError::Unavailable.category(), "unavailable");
-        assert_eq!(GatewayCallError::Dropped.category(),     "dropped");
-        assert_eq!(GatewayCallError::GatewayError("x".into()).category(), "gateway_error");
-        assert_eq!(GatewayCallError::UnexpectedReply.category(), "unexpected_reply");
+        assert_eq!(GatewayCallError::Dropped.category(), "dropped");
+        assert_eq!(
+            GatewayCallError::GatewayError("x".into()).category(),
+            "gateway_error"
+        );
+        assert_eq!(
+            GatewayCallError::UnexpectedReply.category(),
+            "unexpected_reply"
+        );
     }
 
     // ── notify_epoch_advanced (Phase 3 of policy_manager::advance_epoch) ─
@@ -941,8 +992,10 @@ mod tests {
     async fn notify_epoch_advanced_returns_unavailable_when_no_gateway() {
         let client = GatewayClient::new();
         let result = client.notify_epoch_advanced(7).await;
-        assert!(matches!(result, Err(GatewayCallError::Unavailable)),
-            "no gateway connected ⇒ Unavailable, got {result:?}");
+        assert!(
+            matches!(result, Err(GatewayCallError::Unavailable)),
+            "no gateway connected ⇒ Unavailable, got {result:?}"
+        );
     }
 
     #[tokio::test]
@@ -961,7 +1014,10 @@ mod tests {
         let client = GatewayClient::new();
         client.install_connection(kernel_side).await;
 
-        client.notify_epoch_advanced(42).await.expect("signal must succeed");
+        client
+            .notify_epoch_advanced(42)
+            .await
+            .expect("signal must succeed");
         let observed = server.await.unwrap();
         assert_eq!(observed, 42);
     }
@@ -981,8 +1037,11 @@ mod tests {
             // Neither response is sent. The fetch caller hangs (test
             // does not await it); the signal caller MUST complete.
             let _f1: GatewayMessage = read_frame(&mut gateway_side).await.unwrap();
-            let f2: GatewayMessage  = read_frame(&mut gateway_side).await.unwrap();
-            assert!(matches!(f2, GatewayMessage::EpochAdvanced { new_epoch_id: 9 }));
+            let f2: GatewayMessage = read_frame(&mut gateway_side).await.unwrap();
+            assert!(matches!(
+                f2,
+                GatewayMessage::EpochAdvanced { new_epoch_id: 9 }
+            ));
             observer.notify_one();
             std::future::pending::<()>().await;
         });
@@ -994,7 +1053,10 @@ mod tests {
         let _hanging = dummy_fetch(client.clone(), "tok".into(), 1);
         tokio::time::sleep(std::time::Duration::from_millis(20)).await;
 
-        client.notify_epoch_advanced(9).await.expect("signal must succeed");
+        client
+            .notify_epoch_advanced(9)
+            .await
+            .expect("signal must succeed");
         observed_signal.notified().await;
         server.abort();
     }
@@ -1016,7 +1078,7 @@ mod tests {
         let result = client.notify_epoch_advanced(5).await;
         assert!(
             matches!(result, Err(GatewayCallError::Dropped))
-            || matches!(result, Err(GatewayCallError::Unavailable)),
+                || matches!(result, Err(GatewayCallError::Unavailable)),
             "expected Dropped or Unavailable after gateway close, got {result:?}",
         );
     }

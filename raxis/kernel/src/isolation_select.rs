@@ -72,7 +72,7 @@ pub enum SelectError {
         /// Backend identifier from `Backend::backend_id`.
         backend_id: &'static str,
         /// Reported tier.
-        tier:       IsolationLevel,
+        tier: IsolationLevel,
     },
 
     /// The substrate self-reported `TestOnly`. Production never
@@ -90,7 +90,7 @@ pub enum SelectError {
         /// Backend identifier.
         backend_id: &'static str,
         /// Substrate-reported reason.
-        reason:     String,
+        reason: String,
     },
 }
 
@@ -122,8 +122,8 @@ impl SelectorInputs {
     /// production; this helper exists for tests + smoke fixtures.
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
         Self {
-            runtime_dir:        runtime_dir.into(),
-            allow_fallback:     false,
+            runtime_dir: runtime_dir.into(),
+            allow_fallback: false,
             allow_wasm_sandbox: false,
         }
     }
@@ -138,7 +138,7 @@ pub struct SelectedBackend {
     /// The chosen backend, ready to be cloned into `HandlerContext`.
     pub backend: Arc<dyn Backend>,
     /// Verified tier from `verify_isolation_guarantee`.
-    pub tier:    IsolationLevel,
+    pub tier: IsolationLevel,
     /// Whether the kernel must emit `IsolationFallbackBypass` before
     /// admitting any session (true iff the substrate reported
     /// `FallbackOnly` and the operator overrode).
@@ -162,9 +162,7 @@ pub struct SelectedBackend {
 ///   the bypass audit event.
 /// * `TestOnly` ⇒ never admit (production never includes test
 ///   substrates per the `raxis-test-support` mock-isolation rule).
-pub fn select_isolation_backend(
-    inputs: &SelectorInputs,
-) -> Result<SelectedBackend, SelectError> {
+pub fn select_isolation_backend(inputs: &SelectorInputs) -> Result<SelectedBackend, SelectError> {
     let backend = build_platform_backend(inputs)?;
     admit_backend(backend, inputs)
 }
@@ -173,27 +171,21 @@ pub fn select_isolation_backend(
 /// stub the build step without going through the full admission
 /// path.
 #[cfg(target_os = "linux")]
-fn build_platform_backend(
-    inputs: &SelectorInputs,
-) -> Result<Arc<dyn Backend>, SelectError> {
+fn build_platform_backend(inputs: &SelectorInputs) -> Result<Arc<dyn Backend>, SelectError> {
     use raxis_isolation_firecracker::FirecrackerBackend;
     let backend = FirecrackerBackend::new(&inputs.runtime_dir);
     Ok(Arc::new(backend))
 }
 
 #[cfg(target_os = "macos")]
-fn build_platform_backend(
-    inputs: &SelectorInputs,
-) -> Result<Arc<dyn Backend>, SelectError> {
+fn build_platform_backend(inputs: &SelectorInputs) -> Result<Arc<dyn Backend>, SelectError> {
     use raxis_isolation_apple_vz::AppleVzBackend;
     let backend = AppleVzBackend::new(&inputs.runtime_dir);
     Ok(Arc::new(backend))
 }
 
 #[cfg(not(any(target_os = "linux", target_os = "macos")))]
-fn build_platform_backend(
-    _inputs: &SelectorInputs,
-) -> Result<Arc<dyn Backend>, SelectError> {
+fn build_platform_backend(_inputs: &SelectorInputs) -> Result<Arc<dyn Backend>, SelectError> {
     Err(SelectError::NoSubstrateForPlatform {
         os: std::env::consts::OS.to_owned(),
     })
@@ -207,15 +199,15 @@ fn build_platform_backend(
 /// through the full admission gate).
 pub fn admit_backend(
     backend: Arc<dyn Backend>,
-    inputs:  &SelectorInputs,
+    inputs: &SelectorInputs,
 ) -> Result<SelectedBackend, SelectError> {
     let backend_id = backend.backend_id();
-    let tier = backend.verify_isolation_guarantee().map_err(|e| {
-        SelectError::VerifyFailed {
+    let tier = backend
+        .verify_isolation_guarantee()
+        .map_err(|e| SelectError::VerifyFailed {
             backend_id,
             reason: format!("{e}"),
-        }
-    })?;
+        })?;
     let decision = raxis_isolation::verify_admission_tier(tier);
     match decision {
         AdmissionDecision::Admit => Ok(SelectedBackend {
@@ -245,9 +237,7 @@ pub fn admit_backend(
                 Err(SelectError::TierBelowR1 { backend_id, tier })
             }
         }
-        AdmissionDecision::Refuse(_) => {
-            Err(SelectError::TestOnlyInProduction { backend_id })
-        }
+        AdmissionDecision::Refuse(_) => Err(SelectError::TestOnlyInProduction { backend_id }),
     }
 }
 
@@ -260,24 +250,24 @@ pub fn admit_backend(
 mod tests {
     use super::*;
     use raxis_isolation::{
-        Backend, CapabilityKind, CapabilityValue, IsolationError, Session, VerifiedImage,
-        VmSpec, WorkspaceMount,
+        Backend, CapabilityKind, CapabilityValue, IsolationError, Session, VerifiedImage, VmSpec,
+        WorkspaceMount,
     };
 
     /// Tiny in-test backend that lets us inject a tier and a
     /// backend_id. Used only to drive `admit_backend` — never wired
     /// into a production code path.
     struct TestBackend {
-        id:   &'static str,
+        id: &'static str,
         tier: IsolationLevel,
     }
 
     impl Backend for TestBackend {
         fn spawn(
             &self,
-            _image:    &VerifiedImage,
-            _mounts:   &[WorkspaceMount],
-            _spec:     &VmSpec,
+            _image: &VerifiedImage,
+            _mounts: &[WorkspaceMount],
+            _spec: &VmSpec,
         ) -> Result<Box<dyn Session>, IsolationError> {
             Err(IsolationError::BackendInternal(
                 "test backend never spawns".to_owned(),
@@ -294,17 +284,19 @@ mod tests {
         }
     }
 
-    fn run_admit(tier: IsolationLevel, allow_fallback: bool, allow_wasm: bool)
-        -> Result<SelectedBackend, SelectError>
-    {
+    fn run_admit(
+        tier: IsolationLevel,
+        allow_fallback: bool,
+        allow_wasm: bool,
+    ) -> Result<SelectedBackend, SelectError> {
         let backend = Arc::new(TestBackend {
-            id:   "test-backend-fixture",
+            id: "test-backend-fixture",
             tier,
         }) as Arc<dyn Backend>;
         admit_backend(
             backend,
             &SelectorInputs {
-                runtime_dir:        PathBuf::from("/tmp/raxis-runtime"),
+                runtime_dir: PathBuf::from("/tmp/raxis-runtime"),
                 allow_fallback,
                 allow_wasm_sandbox: allow_wasm,
             },
@@ -334,7 +326,7 @@ mod tests {
                 assert_eq!(tier, IsolationLevel::WasmSandbox);
             }
             Err(other) => panic!("expected TierBelowR1, got {other:?}"),
-            Ok(_)      => panic!("WasmSandbox must not admit without policy"),
+            Ok(_) => panic!("WasmSandbox must not admit without policy"),
         }
         let r = run_admit(IsolationLevel::WasmSandbox, false, true)
             .unwrap_or_else(|e| panic!("WasmSandbox with policy must admit: {e:?}"));
@@ -349,11 +341,14 @@ mod tests {
                 assert_eq!(tier, IsolationLevel::FallbackOnly);
             }
             Err(other) => panic!("expected TierBelowR1, got {other:?}"),
-            Ok(_)      => panic!("FallbackOnly must not admit without unsafe flag"),
+            Ok(_) => panic!("FallbackOnly must not admit without unsafe flag"),
         }
-        let r = run_admit(IsolationLevel::FallbackOnly, true, false)
-            .unwrap_or_else(|e| panic!("FallbackOnly with --unsafe-fallback-isolation must \
-                                          admit: {e:?}"));
+        let r = run_admit(IsolationLevel::FallbackOnly, true, false).unwrap_or_else(|e| {
+            panic!(
+                "FallbackOnly with --unsafe-fallback-isolation must \
+                                          admit: {e:?}"
+            )
+        });
         assert_eq!(r.tier, IsolationLevel::FallbackOnly);
         assert!(
             r.fallback_bypass_required,
@@ -369,7 +364,7 @@ mod tests {
                 assert_eq!(backend_id, "test-backend-fixture");
             }
             Err(other) => panic!("expected TestOnlyInProduction, got {other:?}"),
-            Ok(_)      => panic!("TestOnly must never be admitted in production"),
+            Ok(_) => panic!("TestOnly must never be admitted in production"),
         }
     }
 

@@ -30,9 +30,7 @@ use std::io::Write;
 
 use raxis_store::open_ro;
 use raxis_store::views::plan_fields::PlanPathFields;
-use raxis_store::views::tasks::{
-    by_id, dag_edges_for_task, DagEdgeRow, EdgeDirection, TaskRow,
-};
+use raxis_store::views::tasks::{by_id, dag_edges_for_task, DagEdgeRow, EdgeDirection, TaskRow};
 use raxis_store::views::witnesses::{for_task as witnesses_for_task, WitnessRow};
 
 use crate::errors::CliError;
@@ -42,17 +40,14 @@ use crate::GlobalFlags;
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
 
-    let conn = open_ro(flags.data_dir()).map_err(|e| {
-        CliError::Policy(format!("kernel.db open failed: {e}"))
-    })?;
+    let conn = open_ro(flags.data_dir())
+        .map_err(|e| CliError::Policy(format!("kernel.db open failed: {e}")))?;
 
     let row = by_id(&conn, &opts.task_id)
         .map_err(|e| CliError::Policy(format!("tasks::by_id failed: {e}")))?
-        .ok_or_else(|| {
-            CliError::KernelError {
-                code: "TASK_NOT_FOUND".to_owned(),
-                detail: format!("no task with id {:?}", opts.task_id),
-            }
+        .ok_or_else(|| CliError::KernelError {
+            code: "TASK_NOT_FOUND".to_owned(),
+            detail: format!("no task with id {:?}", opts.task_id),
         })?;
 
     let upstream = dag_edges_for_task(&conn, &opts.task_id, EdgeDirection::Upstream)
@@ -83,7 +78,14 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut out = stdout.lock();
 
     if opts.json {
-        render_json(&mut out, &row, &upstream, &downstream, &witnesses, revealed.as_ref());
+        render_json(
+            &mut out,
+            &row,
+            &upstream,
+            &downstream,
+            &witnesses,
+            revealed.as_ref(),
+        );
     } else if opts.gates_only {
         render_gates_only(&mut out, &row.task_id, &witnesses);
     } else {
@@ -265,7 +267,11 @@ fn render_deps<W: Write>(out: &mut W, upstream: &[DagEdgeRow], downstream: &[Dag
         let _ = writeln!(out, "    (none)");
     }
     for e in upstream {
-        let satisfied = if e.predecessor_satisfied { "satisfied" } else { "PENDING" };
+        let satisfied = if e.predecessor_satisfied {
+            "satisfied"
+        } else {
+            "PENDING"
+        };
         let _ = writeln!(
             out,
             "    {tid:<22} {state:<22} {satisfied}",
@@ -283,7 +289,11 @@ fn render_deps<W: Write>(out: &mut W, upstream: &[DagEdgeRow], downstream: &[Dag
         // downstream successor. `false` => the successor is still waiting on
         // us. We surface this as PENDING so operators can immediately spot
         // tasks that other work is blocked on.
-        let waiting = if e.predecessor_satisfied { "released" } else { "PENDING" };
+        let waiting = if e.predecessor_satisfied {
+            "released"
+        } else {
+            "PENDING"
+        };
         let _ = writeln!(
             out,
             "    {tid:<22} {state:<22} {waiting}",
@@ -294,12 +304,12 @@ fn render_deps<W: Write>(out: &mut W, upstream: &[DagEdgeRow], downstream: &[Dag
 }
 
 fn render_json<W: Write>(
-    out:        &mut W,
-    row:        &TaskRow,
-    upstream:   &[DagEdgeRow],
+    out: &mut W,
+    row: &TaskRow,
+    upstream: &[DagEdgeRow],
     downstream: &[DagEdgeRow],
-    witnesses:  &[WitnessRow],
-    revealed:   Option<&PlanPathFields>,
+    witnesses: &[WitnessRow],
+    revealed: Option<&PlanPathFields>,
 ) {
     let v = serde_json::json!({
         "task_id":           row.task_id,
@@ -426,9 +436,7 @@ fn parse_args(args: &[String]) -> Result<InspectOpts, CliError> {
                 opts.task_id = other.to_owned();
             }
             other => {
-                return Err(CliError::Usage(format!(
-                    "unknown inspect flag: {other:?}"
-                )));
+                return Err(CliError::Usage(format!("unknown inspect flag: {other:?}")));
             }
         }
         i += 1;
@@ -506,7 +514,8 @@ mod tests {
             "t-007".to_owned(),
             "--with-deps".to_owned(),
             "--gates-only".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(opts.task_id, "t-007");
         assert!(opts.with_deps);
         assert!(opts.gates_only);
@@ -526,10 +535,10 @@ mod tests {
 
     fn sample_revealed_fields() -> PlanPathFields {
         PlanPathFields {
-            path_allowlist:            vec!["src/**".to_owned(), "README.md".to_owned()],
+            path_allowlist: vec!["src/**".to_owned(), "README.md".to_owned()],
             path_export_to_successors: true,
-            path_export_globs:         vec!["src/ipc/**".to_owned()],
-            path_scope_override:       false,
+            path_export_globs: vec!["src/ipc/**".to_owned()],
+            path_scope_override: false,
         }
     }
 
@@ -541,8 +550,10 @@ mod tests {
         render_full(&mut buf, &row, &[], &[], &w, false, None);
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("Task t-1"), "got: {s}");
-        assert!(s.contains("initiative_id" /* unused but defensive */) || s.contains("initiative:"),
-            "got: {s}");
+        assert!(
+            s.contains("initiative_id" /* unused but defensive */) || s.contains("initiative:"),
+            "got: {s}"
+        );
         assert!(s.contains("state:             Running"), "got: {s}");
         assert!(s.contains("Witnesses (1)"), "got: {s}");
         assert!(s.contains("(use --with-deps to expand)"), "got: {s}");
@@ -554,7 +565,10 @@ mod tests {
             "redacted state must hint --reveal-paths; got: {s}"
         );
         // No path data must escape into the default render.
-        assert!(!s.contains("src/**"), "path data leaked without --reveal-paths: {s}");
+        assert!(
+            !s.contains("src/**"),
+            "path data leaked without --reveal-paths: {s}"
+        );
     }
 
     #[test]
@@ -571,10 +585,10 @@ mod tests {
         );
         let s = String::from_utf8(buf).unwrap();
         // Both array entries surface verbatim.
-        assert!(s.contains("src/**"),    "got: {s}");
+        assert!(s.contains("src/**"), "got: {s}");
         assert!(s.contains("README.md"), "got: {s}");
         // Booleans render as `true`/`false` literals.
-        assert!(s.contains("path_export_to_successors: true"),  "got: {s}");
+        assert!(s.contains("path_export_to_successors: true"), "got: {s}");
         assert!(s.contains("path_scope_override:       false"), "got: {s}");
         // The redaction hint must be GONE — once revealed, no hint.
         assert!(!s.contains("pass --reveal-paths"), "got: {s}");
@@ -584,12 +598,20 @@ mod tests {
     fn render_full_revealed_empty_allowlist_uses_compact_brackets() {
         let mut buf: Vec<u8> = Vec::new();
         let revealed = PlanPathFields::default(); // all-empty / lockdown
-        render_full(&mut buf, &sample_row(), &[], &[], &[], false, Some(&revealed));
+        render_full(
+            &mut buf,
+            &sample_row(),
+            &[],
+            &[],
+            &[],
+            false,
+            Some(&revealed),
+        );
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("path_allowlist             []"),     "got: {s}");
-        assert!(s.contains("path_export_globs          []"),     "got: {s}");
-        assert!(s.contains("path_export_to_successors: false"),  "got: {s}");
-        assert!(s.contains("path_scope_override:       false"),  "got: {s}");
+        assert!(s.contains("path_allowlist             []"), "got: {s}");
+        assert!(s.contains("path_export_globs          []"), "got: {s}");
+        assert!(s.contains("path_export_to_successors: false"), "got: {s}");
+        assert!(s.contains("path_scope_override:       false"), "got: {s}");
     }
 
     #[test]
@@ -605,7 +627,15 @@ mod tests {
             predecessor_satisfied: false,
         }];
         let mut buf: Vec<u8> = Vec::new();
-        render_full(&mut buf, &sample_row(), &upstream, &downstream, &[], true, None);
+        render_full(
+            &mut buf,
+            &sample_row(),
+            &upstream,
+            &downstream,
+            &[],
+            true,
+            None,
+        );
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("upstream (1)"), "got: {s}");
         assert!(s.contains("downstream (1)"), "got: {s}");
@@ -641,8 +671,15 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_slice(&buf).expect("json render must parse back");
         for k in [
-            "task_id", "initiative_id", "initiative_state", "state",
-            "lane_id", "policy_epoch", "plan_fields", "dependencies", "witnesses",
+            "task_id",
+            "initiative_id",
+            "initiative_state",
+            "state",
+            "lane_id",
+            "policy_epoch",
+            "plan_fields",
+            "dependencies",
+            "witnesses",
         ] {
             assert!(v.get(k).is_some(), "missing key {k}; got {v}");
         }
@@ -665,15 +702,23 @@ mod tests {
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         let pf = &v["plan_fields"];
         assert_eq!(pf["revealed"], serde_json::json!(true));
-        assert_eq!(pf["path_allowlist"], serde_json::json!(["src/**", "README.md"]));
+        assert_eq!(
+            pf["path_allowlist"],
+            serde_json::json!(["src/**", "README.md"])
+        );
         assert_eq!(pf["path_export_to_successors"], serde_json::json!(true));
         assert_eq!(pf["path_export_globs"], serde_json::json!(["src/ipc/**"]));
         assert_eq!(pf["path_scope_override"], serde_json::json!(false));
         // Once revealed, the hint key MUST be absent — readers
         // distinguish the two shapes by `revealed` boolean.
-        assert!(pf.get("hint").is_none(), "hint must not appear in revealed json");
-        assert!(pf.get("redacted_fields").is_none(),
-                "redacted_fields must not appear in revealed json");
+        assert!(
+            pf.get("hint").is_none(),
+            "hint must not appear in revealed json"
+        );
+        assert!(
+            pf.get("redacted_fields").is_none(),
+            "redacted_fields must not appear in revealed json"
+        );
     }
 
     #[test]

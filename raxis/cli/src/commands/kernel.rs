@@ -51,7 +51,7 @@ pub fn run_install(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     while i < args.len() {
         match args[i].as_str() {
             "--system" => system = true,
-            "--force"  => force = true,
+            "--force" => force = true,
             "--binary" => {
                 i += 1;
                 let p = args.get(i).ok_or_else(|| {
@@ -75,7 +75,7 @@ pub fn run_install(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     let target = TargetUnit::resolve(system)?;
     let binary = match binary_override {
         Some(p) => p,
-        None    => locate_kernel_binary()?,
+        None => locate_kernel_binary()?,
     };
     let data_dir = flags.data_dir().clone();
 
@@ -91,13 +91,13 @@ pub fn run_install(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError>
     if let Some(parent) = target.unit_path.parent() {
         if !parent.exists() {
             std::fs::create_dir_all(parent).map_err(|e| CliError::Io {
-                path:   parent.display().to_string(),
+                path: parent.display().to_string(),
                 source: e,
             })?;
         }
     }
     std::fs::write(&target.unit_path, body.as_bytes()).map_err(|e| CliError::Io {
-        path:   target.unit_path.display().to_string(),
+        path: target.unit_path.display().to_string(),
         source: e,
     })?;
 
@@ -133,11 +133,14 @@ pub fn run_uninstall(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
 
     let target = TargetUnit::resolve(system)?;
     if !target.unit_path.exists() {
-        println!("Not installed: {} does not exist", target.unit_path.display());
+        println!(
+            "Not installed: {} does not exist",
+            target.unit_path.display()
+        );
         return Ok(());
     }
     std::fs::remove_file(&target.unit_path).map_err(|e| CliError::Io {
-        path:   target.unit_path.display().to_string(),
+        path: target.unit_path.display().to_string(),
         source: e,
     })?;
     println!("Removed: {}", target.unit_path.display());
@@ -163,17 +166,17 @@ enum Platform {
 
 #[derive(Debug, Clone)]
 struct TargetUnit {
-    platform:  Platform,
+    platform: Platform,
     unit_path: PathBuf,
 }
 
 impl TargetUnit {
     fn resolve(system: bool) -> Result<Self, CliError> {
         let platform = match (cfg!(target_os = "linux"), cfg!(target_os = "macos"), system) {
-            (true,  _,    false) => Platform::LinuxUser,
-            (true,  _,    true)  => Platform::LinuxSystem,
-            (_,     true, false) => Platform::MacosUser,
-            (_,     true, true)  => Platform::MacosSystem,
+            (true, _, false) => Platform::LinuxUser,
+            (true, _, true) => Platform::LinuxSystem,
+            (_, true, false) => Platform::MacosUser,
+            (_, true, true) => Platform::MacosSystem,
             _ => {
                 return Err(CliError::Usage(
                     "kernel install: this platform is not supported \
@@ -191,8 +194,7 @@ impl TargetUnit {
                             .into(),
                     )
                 })?;
-                PathBuf::from(home)
-                    .join(".config/systemd/user/raxis-kernel.service")
+                PathBuf::from(home).join(".config/systemd/user/raxis-kernel.service")
             }
             Platform::LinuxSystem => {
                 require_root("--system")?;
@@ -205,8 +207,7 @@ impl TargetUnit {
                             .into(),
                     )
                 })?;
-                PathBuf::from(home)
-                    .join("Library/LaunchAgents/com.raxis.kernel.plist")
+                PathBuf::from(home).join("Library/LaunchAgents/com.raxis.kernel.plist")
             }
             Platform::MacosSystem => {
                 require_root("--system")?;
@@ -214,14 +215,17 @@ impl TargetUnit {
             }
         };
 
-        Ok(Self { platform, unit_path })
+        Ok(Self {
+            platform,
+            unit_path,
+        })
     }
 
     fn platform_label(&self) -> &'static str {
         match self.platform {
-            Platform::LinuxUser   => "Linux + systemd, user level",
+            Platform::LinuxUser => "Linux + systemd, user level",
             Platform::LinuxSystem => "Linux + systemd, system level",
-            Platform::MacosUser   => "macOS + launchd, user agent",
+            Platform::MacosUser => "macOS + launchd, user agent",
             Platform::MacosSystem => "macOS + launchd, system daemon",
         }
     }
@@ -240,13 +244,15 @@ impl TargetUnit {
                 "journalctl -u raxis-kernel -f   # follow logs".into(),
             ],
             Platform::MacosUser => vec![
-                "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.raxis.kernel.plist".into(),
+                "launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.raxis.kernel.plist"
+                    .into(),
                 "launchctl enable gui/$(id -u)/com.raxis.kernel".into(),
                 "launchctl kickstart -kp gui/$(id -u)/com.raxis.kernel".into(),
                 "tail -F ~/Library/Logs/raxis/kernel.out   # follow logs".into(),
             ],
             Platform::MacosSystem => vec![
-                "sudo launchctl bootstrap system /Library/LaunchDaemons/com.raxis.kernel.plist".into(),
+                "sudo launchctl bootstrap system /Library/LaunchDaemons/com.raxis.kernel.plist"
+                    .into(),
                 "sudo launchctl enable system/com.raxis.kernel".into(),
                 "sudo launchctl kickstart -kp system/com.raxis.kernel".into(),
                 "sudo tail -F /var/log/raxis/kernel.out   # follow logs".into(),
@@ -266,12 +272,8 @@ impl TargetUnit {
                 "sudo systemctl disable raxis-kernel".into(),
                 "sudo systemctl daemon-reload".into(),
             ],
-            Platform::MacosUser => vec![
-                "launchctl bootout gui/$(id -u)/com.raxis.kernel".into(),
-            ],
-            Platform::MacosSystem => vec![
-                "sudo launchctl bootout system/com.raxis.kernel".into(),
-            ],
+            Platform::MacosUser => vec!["launchctl bootout gui/$(id -u)/com.raxis.kernel".into()],
+            Platform::MacosSystem => vec!["sudo launchctl bootout system/com.raxis.kernel".into()],
         }
     }
 }
@@ -307,19 +309,25 @@ fn locate_kernel_binary() -> Result<PathBuf, CliError> {
     // The operator can always override with `--binary <path>`.
     if let Some(p) = std::env::var_os("RAXIS_KERNEL_BINARY") {
         let p = PathBuf::from(p);
-        if p.exists() { return Ok(p); }
+        if p.exists() {
+            return Ok(p);
+        }
     }
     if let Ok(self_exe) = std::env::current_exe() {
         if let Some(parent) = self_exe.parent() {
             let candidate = parent.join("raxis-kernel");
-            if candidate.exists() { return Ok(candidate); }
+            if candidate.exists() {
+                return Ok(candidate);
+            }
         }
     }
     if let Some(p) = which_in_path("raxis-kernel") {
         return Ok(p);
     }
     let fallback = PathBuf::from("/usr/local/bin/raxis-kernel");
-    if fallback.exists() { return Ok(fallback); }
+    if fallback.exists() {
+        return Ok(fallback);
+    }
     Err(CliError::Usage(
         "kernel install: could not locate the `raxis-kernel` binary. \
          Pass --binary <path>, set RAXIS_KERNEL_BINARY=<path>, or \
@@ -332,7 +340,9 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for entry in std::env::split_paths(&path) {
         let candidate = entry.join(name);
-        if candidate.is_file() { return Some(candidate); }
+        if candidate.is_file() {
+            return Some(candidate);
+        }
     }
     None
 }
@@ -343,9 +353,9 @@ fn which_in_path(name: &str) -> Option<PathBuf> {
 
 fn render_unit(target: &TargetUnit, binary: &Path, data_dir: &Path) -> String {
     match target.platform {
-        Platform::LinuxUser   => render_systemd_user(binary, data_dir),
+        Platform::LinuxUser => render_systemd_user(binary, data_dir),
         Platform::LinuxSystem => render_systemd_system(binary, data_dir),
-        Platform::MacosUser   => render_launchd_user(binary, data_dir),
+        Platform::MacosUser => render_launchd_user(binary, data_dir),
         Platform::MacosSystem => render_launchd_system(binary, data_dir),
     }
 }
@@ -483,8 +493,8 @@ fn render_launchd_user(binary: &Path, data_dir: &Path) -> String {
 </plist>
 "#,
         binary = binary.display(),
-        data   = data_dir.display(),
-        logs   = log_dir.display(),
+        data = data_dir.display(),
+        logs = log_dir.display(),
     )
 }
 
@@ -536,7 +546,7 @@ fn render_launchd_system(binary: &Path, data_dir: &Path) -> String {
 </plist>
 "#,
         binary = binary.display(),
-        data   = data_dir.display(),
+        data = data_dir.display(),
     )
 }
 
@@ -602,7 +612,10 @@ mod tests {
 
     #[test]
     fn render_systemd_user_includes_binary_and_data_dir() {
-        let s = render_systemd_user(Path::new("/opt/raxis/raxis-kernel"), Path::new("/srv/raxis"));
+        let s = render_systemd_user(
+            Path::new("/opt/raxis/raxis-kernel"),
+            Path::new("/srv/raxis"),
+        );
         assert!(s.contains("/opt/raxis/raxis-kernel"));
         assert!(s.contains("--data-dir /srv/raxis"));
         assert!(s.contains("[Install]"));
@@ -620,7 +633,10 @@ mod tests {
 
     #[test]
     fn render_launchd_user_is_well_formed_xml_with_binary_and_data_dir() {
-        let s = render_launchd_user(Path::new("/opt/raxis/raxis-kernel"), Path::new("/Users/me/.raxis"));
+        let s = render_launchd_user(
+            Path::new("/opt/raxis/raxis-kernel"),
+            Path::new("/Users/me/.raxis"),
+        );
         assert!(s.contains("<key>Label</key>"));
         assert!(s.contains("<string>com.raxis.kernel</string>"));
         assert!(s.contains("<string>/opt/raxis/raxis-kernel</string>"));

@@ -84,10 +84,10 @@ impl CircuitBreakerState {
 /// interactively via [`CircuitBreaker::save`].
 #[derive(Debug, Clone)]
 pub struct CircuitBreaker {
-    state:        CircuitBreakerState,
+    state: CircuitBreakerState,
     max_attempts: u32,
-    window_secs:  u32,
-    state_path:   PathBuf,
+    window_secs: u32,
+    state_path: PathBuf,
 }
 
 impl CircuitBreaker {
@@ -97,11 +97,7 @@ impl CircuitBreaker {
     /// to stderr and reset to default — better to over-restart
     /// than refuse to boot a kernel because of a stale meta
     /// file.
-    pub fn load_or_default(
-        data_dir:     &Path,
-        max_attempts: u32,
-        window_secs:  u32,
-    ) -> Self {
+    pub fn load_or_default(data_dir: &Path, max_attempts: u32, window_secs: u32) -> Self {
         let state_path = data_dir.join(STATE_FILENAME);
         let state = match std::fs::read(&state_path) {
             Ok(bytes) => match serde_json::from_slice::<CircuitBreakerState>(&bytes) {
@@ -114,9 +110,7 @@ impl CircuitBreaker {
                     CircuitBreakerState::default()
                 }
             },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                CircuitBreakerState::default()
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => CircuitBreakerState::default(),
             Err(e) => {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"supervisor_state_read_failed\",\
@@ -136,11 +130,7 @@ impl CircuitBreaker {
     /// Construct a breaker pinned to the workspace defaults
     /// (`DEFAULT_MAX_ATTEMPTS` / `DEFAULT_RESTART_WINDOW_SECS`).
     pub fn load_with_defaults(data_dir: &Path) -> Self {
-        Self::load_or_default(
-            data_dir,
-            DEFAULT_MAX_ATTEMPTS,
-            DEFAULT_RESTART_WINDOW_SECS,
-        )
+        Self::load_or_default(data_dir, DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS)
     }
 
     pub fn state(&self) -> &CircuitBreakerState {
@@ -166,11 +156,7 @@ impl CircuitBreaker {
     }
 
     /// Outcome returned by [`CircuitBreaker::record_attempt`].
-    pub fn record_attempt(
-        &mut self,
-        now_unix_secs:    i64,
-        failure_reason:   &str,
-    ) -> RecordOutcome {
+    pub fn record_attempt(&mut self, now_unix_secs: i64, failure_reason: &str) -> RecordOutcome {
         // Prune stale entries first so the count we check
         // against `max_attempts` reflects the trailing window.
         let lo = now_unix_secs.saturating_sub(i64::from(self.window_secs));
@@ -225,14 +211,14 @@ pub enum RecordOutcome {
     /// Supervisor may proceed with the restart.
     Allowed {
         attempts_in_window: u32,
-        max_attempts:       u32,
+        max_attempts: u32,
     },
     /// Supervisor MUST NOT restart further. Sentinel + stderr
     /// log + `KernelRestartHaltedCircuitOpen` audit emit on the
     /// next successful boot all carry these counters.
     Tripped {
         attempts_in_window: u32,
-        window_secs:        u32,
+        window_secs: u32,
     },
 }
 
@@ -295,7 +281,7 @@ mod tests {
             out,
             RecordOutcome::Allowed {
                 attempts_in_window: 1,
-                max_attempts:       3,
+                max_attempts: 3,
             },
         );
     }
@@ -335,8 +321,7 @@ mod tests {
     #[test]
     fn corrupted_state_file_falls_back_to_default_without_panic() {
         let dir = tempdir().unwrap();
-        std::fs::write(dir.path().join(STATE_FILENAME), b"{ this is not json ")
-            .unwrap();
+        std::fs::write(dir.path().join(STATE_FILENAME), b"{ this is not json ").unwrap();
         let cb = CircuitBreaker::load_or_default(dir.path(), 3, 60);
         assert!(!cb.is_tripped());
         assert!(cb.state().recent_restart_unix_ts.is_empty());

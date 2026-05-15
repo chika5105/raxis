@@ -48,11 +48,11 @@ impl Batch {
     pub fn new(stream: Stream, cap: usize) -> Self {
         Self {
             stream,
-            spans:           Vec::with_capacity(cap),
-            metrics:         Vec::with_capacity(cap),
-            bytes:           0,
-            tail:            CursorEntry::default(),
-            kernel_version:  String::new(),
+            spans: Vec::with_capacity(cap),
+            metrics: Vec::with_capacity(cap),
+            bytes: 0,
+            tail: CursorEntry::default(),
+            kernel_version: String::new(),
             cap,
         }
     }
@@ -60,16 +60,20 @@ impl Batch {
     /// Number of frames in the batch.
     pub fn len(&self) -> usize {
         match self.stream {
-            Stream::Spans   => self.spans.len(),
+            Stream::Spans => self.spans.len(),
             Stream::Metrics => self.metrics.len(),
         }
     }
 
     /// True iff the batch has no frames.
-    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
 
     /// True iff the batch has reached `cap`.
-    pub fn is_full(&self) -> bool { self.len() >= self.cap }
+    pub fn is_full(&self) -> bool {
+        self.len() >= self.cap
+    }
 
     /// Push a frame into the batch. The frame's wire-bytes (length
     /// of its JSONL line + `\n`) feed `self.bytes` so the caller
@@ -78,9 +82,9 @@ impl Batch {
     /// read will start.
     pub fn push(&mut self, frame: Frame, frame_bytes: u64, tail: CursorEntry) -> PushOutcome {
         let kv = match &frame {
-            Frame::Span        { kernel_version, .. } => kernel_version.clone(),
-            Frame::Metric      { kernel_version, .. } => kernel_version.clone(),
-            Frame::PusherEvent { .. }                 => String::new(),
+            Frame::Span { kernel_version, .. } => kernel_version.clone(),
+            Frame::Metric { kernel_version, .. } => kernel_version.clone(),
+            Frame::PusherEvent { .. } => String::new(),
         };
         if self.kernel_version.is_empty() && !kv.is_empty() {
             self.kernel_version = kv;
@@ -96,10 +100,12 @@ impl Batch {
                 self.bytes += frame_bytes;
                 self.tail = tail;
             }
-            (s, other) => return PushOutcome::WrongKind {
-                expected: s,
-                got:      kind_of(&other),
-            },
+            (s, other) => {
+                return PushOutcome::WrongKind {
+                    expected: s,
+                    got: kind_of(&other),
+                }
+            }
         }
         if self.is_full() {
             PushOutcome::AcceptedFull
@@ -138,8 +144,8 @@ pub enum PushOutcome {
 
 fn kind_of(f: &Frame) -> &'static str {
     match f {
-        Frame::Span        { .. } => "span",
-        Frame::Metric      { .. } => "metric",
+        Frame::Span { .. } => "span",
+        Frame::Metric { .. } => "metric",
         Frame::PusherEvent { .. } => "pusher_event",
     }
 }
@@ -154,37 +160,37 @@ mod tests {
 
     fn span_frame() -> Frame {
         Frame::Span {
-            schema:         SCHEMA_VERSION,
+            schema: SCHEMA_VERSION,
             kernel_version: "0.1.0".into(),
-            trace_id:       hex_trace_id([1; 16]),
-            span_id:        hex_span_id([2; 8]),
+            trace_id: hex_trace_id([1; 16]),
+            span_id: hex_span_id([2; 8]),
             span: SpanData {
                 trace_id: [1; 16],
-                span_id:  [2; 8],
+                span_id: [2; 8],
                 parent_span_id: None,
-                name:     SpanName::IntentAdmission,
-                kind:     SpanKind::Internal,
+                name: SpanName::IntentAdmission,
+                kind: SpanKind::Internal,
                 start_unix_nanos: 0,
-                end_unix_nanos:   1,
-                status:   SpanStatus::Ok,
+                end_unix_nanos: 1,
+                status: SpanStatus::Ok,
                 status_message: None,
-                attrs:    AttrMap::new(),
-                events:   vec![],
+                attrs: AttrMap::new(),
+                events: vec![],
             },
         }
     }
 
     fn metric_frame() -> Frame {
         Frame::Metric {
-            schema:         SCHEMA_VERSION,
+            schema: SCHEMA_VERSION,
             kernel_version: "0.1.0".into(),
             metric: MetricData {
-                name:        MetricName::IntentAdmissionTotal,
+                name: MetricName::IntentAdmissionTotal,
                 metric_type: MetricType::Counter,
-                unit:        Unit::None,
-                labels:      AttrMap::new(),
-                datapoint:   DataPoint::Sum { value: 1.0 },
-                unix_nanos:  0,
+                unit: Unit::None,
+                labels: AttrMap::new(),
+                datapoint: DataPoint::Sum { value: 1.0 },
+                unix_nanos: 0,
             },
         }
     }
@@ -195,13 +201,19 @@ mod tests {
         let f1 = b.push(
             span_frame(),
             120,
-            CursorEntry { segment: "000001.jsonl".into(), offset: 120 },
+            CursorEntry {
+                segment: "000001.jsonl".into(),
+                offset: 120,
+            },
         );
         assert_eq!(f1, PushOutcome::Accepted);
         let f2 = b.push(
             span_frame(),
             120,
-            CursorEntry { segment: "000001.jsonl".into(), offset: 240 },
+            CursorEntry {
+                segment: "000001.jsonl".into(),
+                offset: 240,
+            },
         );
         assert_eq!(f2, PushOutcome::AcceptedFull);
         assert!(b.is_full());
@@ -228,8 +240,22 @@ mod tests {
     #[test]
     fn reset_clears_state_but_keeps_capacity() {
         let mut b = Batch::new(Stream::Metrics, 4);
-        b.push(metric_frame(), 50, CursorEntry { segment: "x".into(), offset: 50 });
-        b.push(metric_frame(), 50, CursorEntry { segment: "x".into(), offset: 100 });
+        b.push(
+            metric_frame(),
+            50,
+            CursorEntry {
+                segment: "x".into(),
+                offset: 50,
+            },
+        );
+        b.push(
+            metric_frame(),
+            50,
+            CursorEntry {
+                segment: "x".into(),
+                offset: 100,
+            },
+        );
         assert_eq!(b.len(), 2);
         b.reset();
         assert_eq!(b.len(), 0);

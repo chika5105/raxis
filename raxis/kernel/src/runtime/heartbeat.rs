@@ -21,12 +21,12 @@ use std::sync::Arc;
 
 use tokio::sync::oneshot;
 
+use raxis_observability::ObservabilityHub;
 use raxis_runtime::{
-    HEARTBEAT_FILE, HEARTBEAT_INTERVAL, KernelLifecycleState, RUNTIME_DIR, Snapshot,
-    unix_now_secs, write_atomic,
+    unix_now_secs, write_atomic, KernelLifecycleState, Snapshot, HEARTBEAT_FILE,
+    HEARTBEAT_INTERVAL, RUNTIME_DIR,
 };
 use raxis_store::Store;
-use raxis_observability::ObservabilityHub;
 
 /// Closed set of session agent types the heartbeat emits a
 /// `raxis.session.active` gauge for, mirroring
@@ -163,11 +163,7 @@ pub async fn run_loop(
 /// site short-circuits). Failure paths log to stderr and do NOT
 /// propagate; the heartbeat loop must never die because of an
 /// observability blip (`INV-OTEL-08`).
-async fn emit_observability_gauges(
-    hub: &ObservabilityHub,
-    store: &Arc<Store>,
-    started_at: u64,
-) {
+async fn emit_observability_gauges(hub: &ObservabilityHub, store: &Arc<Store>, started_at: u64) {
     if !hub.enabled() {
         return;
     }
@@ -183,7 +179,7 @@ async fn emit_observability_gauges(
     let counts = {
         let conn = store.lock().await;
         match raxis_store::views::sessions::active_counts_by_agent_type(&conn) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(e) => {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"heartbeat_session_gauge_failed\",\
@@ -236,7 +232,7 @@ fn write_one(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_runtime::{HEARTBEAT_SCHEMA_VERSION, STORE_SCHEMA_VERSION, read};
+    use raxis_runtime::{read, HEARTBEAT_SCHEMA_VERSION, STORE_SCHEMA_VERSION};
     use std::time::Duration;
     use tempfile::TempDir;
 
@@ -284,14 +280,20 @@ mod tests {
         let started_at = unix_now_secs();
 
         let policy_for_loop = Arc::clone(&policy);
-        let store_for_loop  = fresh_in_memory_store();
-        let hub_for_loop    = fresh_disabled_hub();
+        let store_for_loop = fresh_in_memory_store();
+        let hub_for_loop = fresh_disabled_hub();
         let data_dir = tmp.path().to_path_buf();
         let handle = tokio::spawn(async move {
             run_loop(
-                data_dir, pid, started_at, policy_for_loop,
-                store_for_loop, hub_for_loop, rx,
-            ).await
+                data_dir,
+                pid,
+                started_at,
+                policy_for_loop,
+                store_for_loop,
+                hub_for_loop,
+                rx,
+            )
+            .await
         });
 
         // Allow the eager initial write to land; 50ms is far less
@@ -324,14 +326,20 @@ mod tests {
         let started_at = unix_now_secs();
 
         let policy_for_loop = Arc::clone(&policy);
-        let store_for_loop  = fresh_in_memory_store();
-        let hub_for_loop    = fresh_disabled_hub();
+        let store_for_loop = fresh_in_memory_store();
+        let hub_for_loop = fresh_disabled_hub();
         let data_dir = tmp.path().to_path_buf();
         let handle = tokio::spawn(async move {
             run_loop(
-                data_dir, pid, started_at, policy_for_loop,
-                store_for_loop, hub_for_loop, rx,
-            ).await
+                data_dir,
+                pid,
+                started_at,
+                policy_for_loop,
+                store_for_loop,
+                hub_for_loop,
+                rx,
+            )
+            .await
         });
 
         tokio::time::sleep(Duration::from_millis(50)).await;

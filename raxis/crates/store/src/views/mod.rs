@@ -86,20 +86,22 @@ pub mod witnesses;
 pub use budget::{LaneBudgetRow, ReservationRow};
 pub use escalations::{EscalationRow, EscalationStatusFilter};
 pub use initiative_quarantines::{InitiativeQuarantineRow, QuarantineViewError};
-pub use notifications::{NotificationRow, NotificationViewError};
 pub use initiatives::{
     InitiativeListFilter, InitiativeListRow, InitiativeRow, InitiativeStateCounts,
 };
 pub use kernel_meta::{KernelMeta, KernelMetaError};
+pub use notifications::{NotificationRow, NotificationViewError};
 pub use operator_certificates::{OperatorCertRow, OperatorCertViewError};
 pub use plan_bundles::{
     header_by_sha256 as plan_bundle_header_by_sha256,
     list_artifact_names as plan_bundle_list_artifact_names,
     nonce_row_by_nonce as plan_bundle_nonce_row_by_nonce,
-    read_artifact as plan_bundle_read_artifact,
-    NonceRow, PlanBundleArtifactName, PlanBundleHeader, PlanBundleViewError,
+    read_artifact as plan_bundle_read_artifact, NonceRow, PlanBundleArtifactName, PlanBundleHeader,
+    PlanBundleViewError,
 };
-pub use plan_fields::{reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields};
+pub use plan_fields::{
+    reveal_for_task as reveal_plan_fields_for_task, PlanFieldsError, PlanPathFields,
+};
 pub use policy_history::PolicyEpochRow;
 pub use sessions::{SessionRow, SessionStateCounts};
 pub use signed_plan_artifacts::{SignedPlanArtifactHeader, SignedPlanArtifactViewError};

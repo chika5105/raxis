@@ -37,7 +37,7 @@ use crate::types::{AttrMap, AttrValue, MetricData, SpanData};
 #[derive(Debug, Clone, Copy)]
 pub struct AttrSchema {
     /// Expected attribute type tag.
-    pub ty:        AttrTy,
+    pub ty: AttrTy,
     /// Maximum byte length after sanitisation (0 for non-string types).
     pub max_bytes: usize,
 }
@@ -45,7 +45,12 @@ pub struct AttrSchema {
 /// Type tags the redactor checks; mirror of [`AttrValue`] discriminants.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[allow(missing_docs)]
-pub enum AttrTy { Str, I64, F64, Bool }
+pub enum AttrTy {
+    Str,
+    I64,
+    F64,
+    Bool,
+}
 
 /// Closed allow-list for span and metric attribute keys.
 ///
@@ -59,96 +64,534 @@ pub enum AttrTy { Str, I64, F64, Bool }
 /// lookup. The list stays small (~50 keys); a perfect-hash crate is
 /// overkill at this size and would add a build dep.
 const ALLOW_LIST: &[(&str, AttrSchema)] = &[
-    ("intent_kind",       AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("task_id",           AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("session_id",        AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("initiative_id",     AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("verdict",           AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("verdict_reason",    AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("policy_epoch",      AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("latency_ms",        AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("provider",          AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("model",             AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("status_code",       AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("bytes_in",          AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("bytes_out",         AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("cached",            AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("circuit_state",     AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("verifier_name",     AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("gate_type",         AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("final_status",      AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("exit_code",         AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("proxy_type",        AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("proxy_name",        AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("method",            AttrSchema { ty: AttrTy::Str,  max_bytes: 8   }),
+    (
+        "intent_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "task_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "session_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "initiative_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "verdict",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "verdict_reason",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "policy_epoch",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "latency_ms",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "provider",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "model",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "status_code",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "bytes_in",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "bytes_out",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "cached",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "circuit_state",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "verifier_name",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "gate_type",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "final_status",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "exit_code",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "proxy_type",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "proxy_name",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "method",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 8,
+        },
+    ),
     // url_prefix is `scheme://host[:port]` only — never path/query.
     // The redactor verifies the absence of `?`, `#`, and trailing
     // path segments before passing the value through.
-    ("url_prefix",        AttrSchema { ty: AttrTy::Str,  max_bytes: 128 }),
-    ("channel_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("channel_id",        AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("event_kind",        AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("delivery_ms",       AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("success",           AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("command_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("accepted",          AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("escalation_id",     AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("from_state",        AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("to_state",          AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("class",             AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("role",              AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("image_alias",       AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("duration_ms",       AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("outcome",           AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("from_epoch",        AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("to_epoch",          AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("reason",            AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("seq",               AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("latency_ns",        AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("lane_id",           AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("activation_id",     AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("expires_at_unix",   AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("activated_by_count", AttrSchema { ty: AttrTy::I64, max_bytes: 0   }),
-    ("circuit_open",      AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("direction",         AttrSchema { ty: AttrTy::Str,  max_bytes: 8   }),
-    ("state",             AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("drop_reason",       AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    (
+        "url_prefix",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 128,
+        },
+    ),
+    (
+        "channel_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "channel_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "event_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "delivery_ms",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "success",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "command_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "accepted",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "escalation_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "from_state",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "to_state",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "class",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "role",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "image_alias",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "duration_ms",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "outcome",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "from_epoch",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "to_epoch",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "reason",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "seq",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "latency_ns",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "lane_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "activation_id",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "expires_at_unix",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "activated_by_count",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "circuit_open",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "direction",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 8,
+        },
+    ),
+    (
+        "state",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "drop_reason",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
     // ---- V3 perf-telemetry expansion (specs/v3/observability-prometheus.md) ----
-    ("backend",           AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("image_kind",        AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("failure_class",     AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("agent_type",        AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("tool_name",         AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("service",           AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("operation",         AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("blocked",           AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("route",             AttrSchema { ty: AttrTy::Str,  max_bytes: 64  }),
-    ("http_method",       AttrSchema { ty: AttrTy::Str,  max_bytes: 8   }),
-    ("http_status",       AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("revision_round",    AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("author_role",       AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("attempt",           AttrSchema { ty: AttrTy::I64,  max_bytes: 0   }),
-    ("final_outcome",     AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
-    ("streaming",         AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
-    ("initiative_class",  AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("phase",             AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    (
+        "backend",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "image_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "failure_class",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "agent_type",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "tool_name",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "service",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "operation",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "blocked",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "route",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 64,
+        },
+    ),
+    (
+        "http_method",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 8,
+        },
+    ),
+    (
+        "http_status",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "revision_round",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "author_role",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "attempt",
+        AttrSchema {
+            ty: AttrTy::I64,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "final_outcome",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    (
+        "streaming",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
+    (
+        "initiative_class",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "phase",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
     // ---- V3 §3 expansion: egress admit/deny/default-grant/stall + cred-proxy substitution
     // (see worker/reviewer-orch-egress-defaults @ 4d8f5dc and
     //  worker/secrets-model-realignment @ 6114f49). The values are
     //  closed lexicons of operational chokepoint / provider-kind labels;
     //  no PII flows through these keys (they describe code-paths, not data).
-    ("chokepoint",        AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
-    ("provider_kind",     AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    (
+        "chokepoint",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    (
+        "provider_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
     // iter44 / `INV-OBS-RESPAWN-KIND-LABEL-01`: disambiguates
     // `IsolationRespawnAttemptedTotal` between vm_crash transient
     // retries, orchestrator no-progress respawns, and reviewer
     // rejection respawns. Closed lexicon — no PII.
-    ("respawn_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    (
+        "respawn_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
     // iter44: `IntentAdmitPredicateEvaluatedTotal` carries a boolean
     // `admissible` (true → predicate accepted, false → kernel
     // rejected the intent). The matching `reason` label is already
     // covered by the generic `reason` schema above.
-    ("admissible",        AttrSchema { ty: AttrTy::Bool, max_bytes: 0   }),
+    (
+        "admissible",
+        AttrSchema {
+            ty: AttrTy::Bool,
+            max_bytes: 0,
+        },
+    ),
     // iter44 / `INV-OBS-KERNEL-RESPAWN-COVERAGE-01`: the
     // `KernelRespawn{Total,Duration}` family carries a closed
     // `trigger` lexicon
@@ -159,7 +602,13 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     // `outcome` schema above. `message_kind` (4b) and `role` (4b)
     // are also closed lexicons whose schemas already exist
     // (`reason`/`role`).
-    ("trigger",           AttrSchema { ty: AttrTy::Str,  max_bytes: 16  }),
+    (
+        "trigger",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
     // iter44 slice 4b — `KernelSubstrateIpc*` family carries a
     // closed `message_kind` lexicon
     // { `intent_request`, `witness_submission`, `escalation_request`,
@@ -174,7 +623,13 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
     // new wire variants are added. Paired with `role` (`planner` /
     // `verifier` / `gateway` / `unknown`) on counter + histogram
     // emit sites; gauge sites carry `role` only.
-    ("message_kind",      AttrSchema { ty: AttrTy::Str,  max_bytes: 32  }),
+    (
+        "message_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
 ];
 
 /// Explicit denylist. Defense-in-depth: even if a key accidentally
@@ -196,7 +651,7 @@ const DENY_LIST: &[&str] = &[
     "diff_bytes",
     "file_content",
     "blob_bytes",
-    "url",          // forbidden — only `url_prefix` is allowed
+    "url", // forbidden — only `url_prefix` is allowed
     "secret",
     "token",
     "bearer",
@@ -230,11 +685,11 @@ pub enum RedactError {
     #[error("attribute {key} expected type {expected:?} but got {got}")]
     TypeMismatch {
         /// The offending key.
-        key:      String,
+        key: String,
         /// Expected type tag.
         expected: AttrTy,
         /// Actual variant name.
-        got:      String,
+        got: String,
     },
 
     /// A floating-point value was non-finite.
@@ -249,7 +704,7 @@ pub enum RedactError {
     #[error("attribute {key} exceeds {max_bytes}-byte limit")]
     Oversize {
         /// The offending key.
-        key:       String,
+        key: String,
         /// The applicable per-key limit.
         max_bytes: usize,
     },
@@ -329,7 +784,14 @@ fn sanitise_string_in_place(s: &mut String, max_bytes: usize) {
     // Byte-length truncate at a char boundary.
     let trunc_to = original
         .char_indices()
-        .take_while(|(i, _)| *i + original[*i..].chars().next().map(|c| c.len_utf8()).unwrap_or(0) <= max_bytes)
+        .take_while(|(i, _)| {
+            *i + original[*i..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0)
+                <= max_bytes
+        })
         .last()
         .map(|(i, c)| i + c.len_utf8())
         .unwrap_or(0);
@@ -354,7 +816,11 @@ fn sanitise_string_in_place(s: &mut String, max_bytes: usize) {
 fn sanitise_attr_map(map: &mut AttrMap) -> Result<(), RedactError> {
     let keys: Vec<String> = map.keys().cloned().collect();
     for key in keys {
-        if let Some(schema) = ALLOW_LIST.iter().find(|(k, _)| *k == key.as_str()).map(|(_, s)| *s) {
+        if let Some(schema) = ALLOW_LIST
+            .iter()
+            .find(|(k, _)| *k == key.as_str())
+            .map(|(_, s)| *s)
+        {
             // Defense-in-depth: never let a denylist key through even
             // if it (somehow) made it onto the allow-list.
             if DENY_LIST.iter().any(|k| *k == key.as_str()) {
@@ -374,11 +840,13 @@ fn sanitise_attr_map(map: &mut AttrMap) -> Result<(), RedactError> {
 /// Type-check + size-cap a single attribute value.
 fn sanitise_value(key: &str, val: &mut AttrValue, schema: AttrSchema) -> Result<(), RedactError> {
     match (&schema.ty, &*val) {
-        (AttrTy::Str, AttrValue::Str(_))   => {}
-        (AttrTy::I64, AttrValue::I64(_))   => return Ok(()),
+        (AttrTy::Str, AttrValue::Str(_)) => {}
+        (AttrTy::I64, AttrValue::I64(_)) => return Ok(()),
         (AttrTy::F64, AttrValue::F64(f)) => {
             if !f.is_finite() {
-                return Err(RedactError::NonFinite { key: key.to_owned() });
+                return Err(RedactError::NonFinite {
+                    key: key.to_owned(),
+                });
             }
             return Ok(());
         }
@@ -426,9 +894,9 @@ fn sanitise_value(key: &str, val: &mut AttrValue, schema: AttrSchema) -> Result<
 
 fn variant_name(v: &AttrValue) -> &'static str {
     match v {
-        AttrValue::Str(_)  => "Str",
-        AttrValue::I64(_)  => "I64",
-        AttrValue::F64(_)  => "F64",
+        AttrValue::Str(_) => "Str",
+        AttrValue::I64(_) => "I64",
+        AttrValue::F64(_) => "F64",
         AttrValue::Bool(_) => "Bool",
     }
 }
@@ -437,7 +905,17 @@ fn variant_name(v: &AttrValue) -> &'static str {
 fn check_datapoint(metric: &MetricData) -> Result<(), RedactError> {
     use crate::types::{DataPoint, MetricType};
     match (&metric.metric_type, &metric.datapoint) {
-        (MetricType::Histogram, DataPoint::Histo { buckets, counts, sum, count, min, max }) => {
+        (
+            MetricType::Histogram,
+            DataPoint::Histo {
+                buckets,
+                counts,
+                sum,
+                count,
+                min,
+                max,
+            },
+        ) => {
             if buckets.is_empty() {
                 return Err(RedactError::MalformedMetric {
                     name: metric.name.as_otel_name().to_owned(),
@@ -449,7 +927,8 @@ fn check_datapoint(metric: &MetricData) -> Result<(), RedactError> {
                     name: metric.name.as_otel_name().to_owned(),
                     reason: format!(
                         "histogram counts length {} != buckets length + 1 ({})",
-                        counts.len(), buckets.len() + 1,
+                        counts.len(),
+                        buckets.len() + 1,
                     ),
                 });
             }
@@ -458,7 +937,9 @@ fn check_datapoint(metric: &MetricData) -> Result<(), RedactError> {
                 if !b.is_finite() || b <= prev {
                     return Err(RedactError::MalformedMetric {
                         name: metric.name.as_otel_name().to_owned(),
-                        reason: "histogram boundaries must be finite, positive, strictly increasing".to_owned(),
+                        reason:
+                            "histogram boundaries must be finite, positive, strictly increasing"
+                                .to_owned(),
                     });
                 }
                 prev = b;
@@ -482,7 +963,7 @@ fn check_datapoint(metric: &MetricData) -> Result<(), RedactError> {
             Ok(())
         }
         (MetricType::Counter, DataPoint::Sum { value })
-        | (MetricType::Gauge,   DataPoint::Sum { value }) => {
+        | (MetricType::Gauge, DataPoint::Sum { value }) => {
             if !value.is_finite() {
                 return Err(RedactError::MalformedMetric {
                     name: metric.name.as_otel_name().to_owned(),
@@ -534,23 +1015,23 @@ pub fn attrs<const N: usize, V: Into<AttrValue>>(pairs: [(&str, V); N]) -> AttrM
 mod tests {
     use super::*;
     use crate::types::{
-        AttrValue, DataPoint, MetricData, MetricName, MetricType, SpanData, SpanKind,
-        SpanName, SpanStatus, Unit,
+        AttrValue, DataPoint, MetricData, MetricName, MetricType, SpanData, SpanKind, SpanName,
+        SpanStatus, Unit,
     };
 
     fn span_with_attrs(attrs: AttrMap) -> SpanData {
         SpanData {
-            trace_id:         [1; 16],
-            span_id:          [2; 8],
-            parent_span_id:   None,
-            name:             SpanName::IntentAdmission,
-            kind:             SpanKind::Internal,
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 0,
-            end_unix_nanos:   1_000_000,
-            status:           SpanStatus::Ok,
-            status_message:   None,
+            end_unix_nanos: 1_000_000,
+            status: SpanStatus::Ok,
+            status_message: None,
             attrs,
-            events:           vec![],
+            events: vec![],
         }
     }
 
@@ -559,11 +1040,12 @@ mod tests {
         let r = Redactor;
         let attrs = attrs([
             ("intent_kind", AttrValue::Str("CompleteTask".into())),
-            ("verdict",     AttrValue::Str("Accepted".into())),
-            ("latency_ms",  AttrValue::I64(42)),
-            ("cached",      AttrValue::Bool(true)),
+            ("verdict", AttrValue::Str("Accepted".into())),
+            ("latency_ms", AttrValue::I64(42)),
+            ("cached", AttrValue::Bool(true)),
         ]);
-        r.sanitize_span(span_with_attrs(attrs)).expect("known attributes pass");
+        r.sanitize_span(span_with_attrs(attrs))
+            .expect("known attributes pass");
     }
 
     #[test]
@@ -573,17 +1055,33 @@ mod tests {
         let err = r.sanitize_span(span_with_attrs(attrs)).unwrap_err();
         // Note: `prompt_text` is on the deny list AND not on the allow
         // list; the deny check fires first inside `sanitise_attr_map`.
-        assert!(matches!(err, RedactError::DenyListed { .. } | RedactError::UnknownAttribute { .. }));
+        assert!(matches!(
+            err,
+            RedactError::DenyListed { .. } | RedactError::UnknownAttribute { .. }
+        ));
     }
 
     #[test]
     fn redactor_rejects_denylisted_key() {
         let r = Redactor;
-        for bad in ["session_token", "api_key", "url", "password", "secret", "bearer", "authorization"] {
+        for bad in [
+            "session_token",
+            "api_key",
+            "url",
+            "password",
+            "secret",
+            "bearer",
+            "authorization",
+        ] {
             let attrs = attrs([(bad, AttrValue::Str("x".into()))]);
             let err = r.sanitize_span(span_with_attrs(attrs)).unwrap_err();
-            assert!(matches!(err, RedactError::DenyListed { .. } | RedactError::UnknownAttribute { .. }),
-                "key {bad}: {err:?}");
+            assert!(
+                matches!(
+                    err,
+                    RedactError::DenyListed { .. } | RedactError::UnknownAttribute { .. }
+                ),
+                "key {bad}: {err:?}"
+            );
         }
     }
 
@@ -600,9 +1098,13 @@ mod tests {
         let r = Redactor;
         let mut s = String::new();
         // verdict has max_bytes=16; build a 100-byte string.
-        for _ in 0..100 { s.push('a'); }
+        for _ in 0..100 {
+            s.push('a');
+        }
         let attrs = attrs([("verdict", AttrValue::Str(s))]);
-        let span = r.sanitize_span(span_with_attrs(attrs)).expect("truncates, not rejects");
+        let span = r
+            .sanitize_span(span_with_attrs(attrs))
+            .expect("truncates, not rejects");
         if let AttrValue::Str(out) = span.attrs.get("verdict").unwrap() {
             assert!(out.len() <= 16, "got len {}", out.len());
         } else {
@@ -623,7 +1125,10 @@ mod tests {
     #[test]
     fn redactor_rejects_url_prefix_with_path() {
         let r = Redactor;
-        let attrs = attrs([("url_prefix", AttrValue::Str("https://api.example.com/v1/foo".into()))]);
+        let attrs = attrs([(
+            "url_prefix",
+            AttrValue::Str("https://api.example.com/v1/foo".into()),
+        )]);
         let err = r.sanitize_span(span_with_attrs(attrs)).unwrap_err();
         assert!(matches!(err, RedactError::UrlPrefixNotPrefix { .. }));
     }
@@ -631,7 +1136,10 @@ mod tests {
     #[test]
     fn redactor_rejects_url_prefix_with_query() {
         let r = Redactor;
-        let attrs = attrs([("url_prefix", AttrValue::Str("https://api.example.com?key=v".into()))]);
+        let attrs = attrs([(
+            "url_prefix",
+            AttrValue::Str("https://api.example.com?key=v".into()),
+        )]);
         let err = r.sanitize_span(span_with_attrs(attrs)).unwrap_err();
         assert!(matches!(err, RedactError::UrlPrefixNotPrefix { .. }));
     }
@@ -639,8 +1147,12 @@ mod tests {
     #[test]
     fn redactor_accepts_url_prefix_host_port() {
         let r = Redactor;
-        let attrs = attrs([("url_prefix", AttrValue::Str("https://api.example.com:443".into()))]);
-        r.sanitize_span(span_with_attrs(attrs)).expect("scheme://host:port is allowed");
+        let attrs = attrs([(
+            "url_prefix",
+            AttrValue::Str("https://api.example.com:443".into()),
+        )]);
+        r.sanitize_span(span_with_attrs(attrs))
+            .expect("scheme://host:port is allowed");
     }
 
     #[test]
@@ -648,7 +1160,10 @@ mod tests {
         // We don't have an F64-typed allow-list key right now, but exercise the path
         // synthetically by routing through `sanitise_value`.
         let mut v = AttrValue::F64(f64::NAN);
-        let schema = AttrSchema { ty: AttrTy::F64, max_bytes: 0 };
+        let schema = AttrSchema {
+            ty: AttrTy::F64,
+            max_bytes: 0,
+        };
         let err = sanitise_value("synthetic", &mut v, schema).unwrap_err();
         assert!(matches!(err, RedactError::NonFinite { .. }));
     }
@@ -657,19 +1172,19 @@ mod tests {
     fn redactor_validates_histogram_shape() {
         let r = Redactor;
         let m = MetricData {
-            name:        MetricName::IntentAdmissionDuration,
+            name: MetricName::IntentAdmissionDuration,
             metric_type: MetricType::Histogram,
-            unit:        Unit::Milliseconds,
-            labels:      AttrMap::new(),
-            datapoint:   DataPoint::Histo {
+            unit: Unit::Milliseconds,
+            labels: AttrMap::new(),
+            datapoint: DataPoint::Histo {
                 buckets: vec![1.0, 5.0, 10.0],
-                counts:  vec![0, 1, 0, 0],
-                sum:     3.5,
-                count:   1,
-                min:     3.5,
-                max:     3.5,
+                counts: vec![0, 1, 0, 0],
+                sum: 3.5,
+                count: 1,
+                min: 3.5,
+                max: 3.5,
             },
-            unix_nanos:  0,
+            unix_nanos: 0,
         };
         r.sanitize_metric(m).expect("well-formed histogram");
     }
@@ -678,19 +1193,19 @@ mod tests {
     fn redactor_rejects_histogram_count_mismatch() {
         let r = Redactor;
         let m = MetricData {
-            name:        MetricName::IntentAdmissionDuration,
+            name: MetricName::IntentAdmissionDuration,
             metric_type: MetricType::Histogram,
-            unit:        Unit::Milliseconds,
-            labels:      AttrMap::new(),
-            datapoint:   DataPoint::Histo {
+            unit: Unit::Milliseconds,
+            labels: AttrMap::new(),
+            datapoint: DataPoint::Histo {
                 buckets: vec![1.0, 5.0, 10.0],
-                counts:  vec![0, 1, 0, 0],   // sums to 1
-                sum:     3.5,
-                count:   2,                  // declares 2 — mismatch
-                min:     3.5,
-                max:     3.5,
+                counts: vec![0, 1, 0, 0], // sums to 1
+                sum: 3.5,
+                count: 2, // declares 2 — mismatch
+                min: 3.5,
+                max: 3.5,
             },
-            unix_nanos:  0,
+            unix_nanos: 0,
         };
         let err = r.sanitize_metric(m).unwrap_err();
         assert!(matches!(err, RedactError::MalformedMetric { .. }));
@@ -700,19 +1215,19 @@ mod tests {
     fn redactor_rejects_histogram_non_monotone_buckets() {
         let r = Redactor;
         let m = MetricData {
-            name:        MetricName::IntentAdmissionDuration,
+            name: MetricName::IntentAdmissionDuration,
             metric_type: MetricType::Histogram,
-            unit:        Unit::Milliseconds,
-            labels:      AttrMap::new(),
-            datapoint:   DataPoint::Histo {
-                buckets: vec![5.0, 3.0, 10.0],   // not monotone
-                counts:  vec![0, 0, 0, 0],
-                sum:     0.0,
-                count:   0,
-                min:     0.0,
-                max:     0.0,
+            unit: Unit::Milliseconds,
+            labels: AttrMap::new(),
+            datapoint: DataPoint::Histo {
+                buckets: vec![5.0, 3.0, 10.0], // not monotone
+                counts: vec![0, 0, 0, 0],
+                sum: 0.0,
+                count: 0,
+                min: 0.0,
+                max: 0.0,
             },
-            unix_nanos:  0,
+            unix_nanos: 0,
         };
         let err = r.sanitize_metric(m).unwrap_err();
         assert!(matches!(err, RedactError::MalformedMetric { .. }));
@@ -722,7 +1237,10 @@ mod tests {
     fn allow_list_does_not_collide_with_denylist() {
         let allow_set: std::collections::HashSet<&str> = allow_list_keys().collect();
         for d in deny_list_keys() {
-            assert!(!allow_set.contains(d), "denylist key {d:?} also on allow list");
+            assert!(
+                !allow_set.contains(d),
+                "denylist key {d:?} also on allow list"
+            );
         }
     }
 }

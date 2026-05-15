@@ -53,8 +53,8 @@ use std::time::Duration;
 use raxis_ipc::{read_frame, write_frame, FrameError, IpcMessage};
 use raxis_types::{
     CapabilityClass, EscalationClass, EscalationRejectionReason, EscalationRequest,
-    EscalationResponse, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
-    PlannerErrorCode, RequestedEscalationScope, SessionId, TaskId, TaskState,
+    EscalationResponse, IntentKind, IntentOutcome, IntentRequest, IntentResponse, PlannerErrorCode,
+    RequestedEscalationScope, SessionId, TaskId, TaskState,
 };
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -68,8 +68,8 @@ use common::kernel_harness::KernelInstance;
 // bind sockets. Long enough to hide environmental noise, short enough that
 // a true regression (kernel never binds) fails the test in well under a
 // minute.
-const READY_DEADLINE:     Duration = Duration::from_secs(10);
-const SHUTDOWN_DEADLINE:  Duration = Duration::from_secs(10);
+const READY_DEADLINE: Duration = Duration::from_secs(10);
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 const ROUND_TRIP_DEADLINE: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
@@ -227,22 +227,22 @@ fn fresh_task_id() -> TaskId {
 /// change for the variants these tests exercise.
 fn describe_message(msg: &IpcMessage) -> &'static str {
     match msg {
-        IpcMessage::IntentRequest(_)              => "IntentRequest",
-        IpcMessage::EscalationRequest(_)          => "EscalationRequest",
-        IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
-        IpcMessage::PlannerExitNotice { .. }      => "PlannerExitNotice",
-        IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
-        IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+        IpcMessage::IntentRequest(_) => "IntentRequest",
+        IpcMessage::EscalationRequest(_) => "EscalationRequest",
+        IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+        IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
+        IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
+        IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
         IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
-        IpcMessage::KernelPlannerExitNoticeAck    => "KernelPlannerExitNoticeAck",
-        IpcMessage::TproxyAdmissionRequest(_)        => "TproxyAdmissionRequest",
+        IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
+        IpcMessage::TproxyAdmissionRequest(_) => "TproxyAdmissionRequest",
         IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
-        IpcMessage::DnsResolveRequest(_)             => "DnsResolveRequest",
-        IpcMessage::KernelDnsResolveResponse(_)      => "KernelDnsResolveResponse",
-        IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
-        IpcMessage::WitnessAck { .. }             => "WitnessAck",
-        IpcMessage::OperatorRequest(_)            => "OperatorRequest",
-        IpcMessage::OperatorResponse(_)           => "OperatorResponse",
+        IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
+        IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
+        IpcMessage::WitnessAck { .. } => "WitnessAck",
+        IpcMessage::OperatorRequest(_) => "OperatorRequest",
+        IpcMessage::OperatorResponse(_) => "OperatorResponse",
     }
 }
 
@@ -279,8 +279,7 @@ fn expect_escalation_response(msg: IpcMessage) -> EscalationResponse {
 /// emit. The kernel will fail the `sessions WHERE session_token=?` lookup
 /// and reject with `Unauthorized` (intents) / `RateLimitExceeded`
 /// (escalations).
-const FAKE_TOKEN: &str =
-    "deadbeefcafebabefeedfacefadedfeed1122334455667788abcd1234efef0011";
+const FAKE_TOKEN: &str = "deadbeefcafebabefeedfacefadedfeed1122334455667788abcd1234efef0011";
 
 // ---------------------------------------------------------------------------
 // Test 1 — golden round trip (the "user's example, fleshed out")
@@ -327,12 +326,16 @@ async fn intent_with_unknown_session_is_rejected_unauthorized() {
     // task_state on early-rejection paths defaults to Admitted (handler
     // uses the FSM-default state because no real task was loaded).
     assert_eq!(
-        resp.task_state, TaskState::Admitted,
+        resp.task_state,
+        TaskState::Admitted,
         "task_state must be Admitted on session-resolution rejection",
     );
 
     match resp.outcome {
-        IntentOutcome::Rejected { error_code, error_detail } => {
+        IntentOutcome::Rejected {
+            error_code,
+            error_detail,
+        } => {
             assert_eq!(
                 error_code,
                 PlannerErrorCode::Unauthorized,
@@ -513,7 +516,8 @@ async fn planner_socket_serves_concurrent_connections() {
     }
 
     for (i, h) in handles.into_iter().enumerate() {
-        h.await.unwrap_or_else(|e| panic!("planner task #{i} panicked: {e}"));
+        h.await
+            .unwrap_or_else(|e| panic!("planner task #{i} panicked: {e}"));
     }
 
     let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
@@ -622,8 +626,8 @@ async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
     {
         let conn = rusqlite::Connection::open(&kernel_db_path)
             .unwrap_or_else(|e| panic!("open kernel.db at {kernel_db_path:?}: {e}"));
-        let now      = raxis_types::unix_now_secs() as i64;
-        let far_exp  = now + 86_400;
+        let now = raxis_types::unix_now_secs() as i64;
+        let far_exp = now + 86_400;
         conn.execute(
             &format!(
                 "INSERT INTO {SESSIONS} ( \

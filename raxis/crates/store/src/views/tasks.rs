@@ -26,21 +26,21 @@ use crate::Table;
 /// the CLI nearly always wants both side-by-side.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskRow {
-    pub task_id:                  String,
-    pub initiative_id:            String,
-    pub initiative_state:         String,
-    pub lane_id:                  String,
-    pub state:                    String,
-    pub block_reason:             Option<String>,
-    pub actor:                    String,
-    pub policy_epoch:             u64,
-    pub admitted_at:              u64,
-    pub transitioned_at:          u64,
-    pub session_id:               Option<String>,
-    pub evaluation_sha:           Option<String>,
-    pub base_sha:                 Option<String>,
+    pub task_id: String,
+    pub initiative_id: String,
+    pub initiative_state: String,
+    pub lane_id: String,
+    pub state: String,
+    pub block_reason: Option<String>,
+    pub actor: String,
+    pub policy_epoch: u64,
+    pub admitted_at: u64,
+    pub transitioned_at: u64,
+    pub session_id: Option<String>,
+    pub evaluation_sha: Option<String>,
+    pub base_sha: Option<String>,
     pub admission_reserved_units: Option<i64>,
-    pub actual_cost:              i64,
+    pub actual_cost: i64,
 }
 
 /// One row's worth of "what's ready" — the smaller projection
@@ -50,10 +50,10 @@ pub struct TaskRow {
 /// the full row at every poll.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReadyTaskRow {
-    pub task_id:       String,
+    pub task_id: String,
     pub initiative_id: String,
-    pub lane_id:       String,
-    pub admitted_at:   u64,
+    pub lane_id: String,
+    pub admitted_at: u64,
 }
 
 /// Per-state row count used by `raxis status`.
@@ -64,15 +64,15 @@ pub struct ReadyTaskRow {
 /// sees the same key set.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct TaskStateCounts {
-    pub admitted:                 u64,
-    pub gates_pending:            u64,
-    pub running:                  u64,
-    pub completed:                u64,
-    pub failed:                   u64,
-    pub aborted:                  u64,
-    pub cancelled:                u64,
+    pub admitted: u64,
+    pub gates_pending: u64,
+    pub running: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub aborted: u64,
+    pub cancelled: u64,
     pub blocked_recovery_pending: u64,
-    pub total:                    u64,
+    pub total: u64,
 }
 
 /// Failure modes for the task views.
@@ -102,13 +102,13 @@ pub fn counts_by_state(conn: &RoConn) -> Result<TaskStateCounts, TaskViewError> 
         let (state, count) = row?;
         let n = count.max(0) as u64;
         match state.as_str() {
-            "Admitted"               => counts.admitted = n,
-            "GatesPending"           => counts.gates_pending = n,
-            "Running"                => counts.running = n,
-            "Completed"              => counts.completed = n,
-            "Failed"                 => counts.failed = n,
-            "Aborted"                => counts.aborted = n,
-            "Cancelled"              => counts.cancelled = n,
+            "Admitted" => counts.admitted = n,
+            "GatesPending" => counts.gates_pending = n,
+            "Running" => counts.running = n,
+            "Completed" => counts.completed = n,
+            "Failed" => counts.failed = n,
+            "Aborted" => counts.aborted = n,
+            "Cancelled" => counts.cancelled = n,
             "BlockedRecoveryPending" => counts.blocked_recovery_pending = n,
             // CHECK constraint on the `state` column already restricts
             // the universe, but a future schema migration could add a
@@ -136,25 +136,27 @@ pub fn by_id(conn: &RoConn, task_id: &str) -> Result<Option<TaskRow>, TaskViewEr
         tasks = Table::Tasks.as_str(),
         initiatives = Table::Initiatives.as_str(),
     );
-    let row = conn.query_row(&sql, rusqlite::params![task_id], |r| {
-        Ok(TaskRow {
-            task_id:                  r.get(0)?,
-            initiative_id:            r.get(1)?,
-            initiative_state:         r.get(2)?,
-            lane_id:                  r.get(3)?,
-            state:                    r.get(4)?,
-            block_reason:             r.get(5)?,
-            actor:                    r.get(6)?,
-            policy_epoch:             r.get::<_, i64>(7)?.max(0) as u64,
-            admitted_at:              r.get::<_, i64>(8)?.max(0) as u64,
-            transitioned_at:          r.get::<_, i64>(9)?.max(0) as u64,
-            session_id:               r.get(10)?,
-            evaluation_sha:           r.get(11)?,
-            base_sha:                 r.get(12)?,
-            admission_reserved_units: r.get(13)?,
-            actual_cost:              r.get(14)?,
+    let row = conn
+        .query_row(&sql, rusqlite::params![task_id], |r| {
+            Ok(TaskRow {
+                task_id: r.get(0)?,
+                initiative_id: r.get(1)?,
+                initiative_state: r.get(2)?,
+                lane_id: r.get(3)?,
+                state: r.get(4)?,
+                block_reason: r.get(5)?,
+                actor: r.get(6)?,
+                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
+                session_id: r.get(10)?,
+                evaluation_sha: r.get(11)?,
+                base_sha: r.get(12)?,
+                admission_reserved_units: r.get(13)?,
+                actual_cost: r.get(14)?,
+            })
         })
-    }).optional()?;
+        .optional()?;
     Ok(row)
 }
 
@@ -199,10 +201,7 @@ pub fn ready_set(
 /// Tasks the scheduler considers blocked: state =
 /// `BlockedRecoveryPending` (the only `Blocked*` state in v1's
 /// FSM). Same ordering + paging contract as [`ready_set`].
-pub fn blocked_set(
-    conn: &RoConn,
-    limit: usize,
-) -> Result<Vec<TaskRow>, TaskViewError> {
+pub fn blocked_set(conn: &RoConn, limit: usize) -> Result<Vec<TaskRow>, TaskViewError> {
     let sql = format!(
         "SELECT t.task_id, t.initiative_id, i.state, t.lane_id, t.state, \
                 t.block_reason, t.actor, t.policy_epoch, t.admitted_at, \
@@ -216,34 +215,36 @@ pub fn blocked_set(
         initiatives = Table::Initiatives.as_str(),
     );
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params![limit as i64], |r| {
-        Ok(TaskRow {
-            task_id:                  r.get(0)?,
-            initiative_id:            r.get(1)?,
-            initiative_state:         r.get(2)?,
-            lane_id:                  r.get(3)?,
-            state:                    r.get(4)?,
-            block_reason:             r.get(5)?,
-            actor:                    r.get(6)?,
-            policy_epoch:             r.get::<_, i64>(7)?.max(0) as u64,
-            admitted_at:              r.get::<_, i64>(8)?.max(0) as u64,
-            transitioned_at:          r.get::<_, i64>(9)?.max(0) as u64,
-            session_id:               r.get(10)?,
-            evaluation_sha:           r.get(11)?,
-            base_sha:                 r.get(12)?,
-            admission_reserved_units: r.get(13)?,
-            actual_cost:              r.get(14)?,
-        })
-    })?.collect::<Result<Vec<_>, _>>()?;
+    let rows = stmt
+        .query_map(rusqlite::params![limit as i64], |r| {
+            Ok(TaskRow {
+                task_id: r.get(0)?,
+                initiative_id: r.get(1)?,
+                initiative_state: r.get(2)?,
+                lane_id: r.get(3)?,
+                state: r.get(4)?,
+                block_reason: r.get(5)?,
+                actor: r.get(6)?,
+                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
+                session_id: r.get(10)?,
+                evaluation_sha: r.get(11)?,
+                base_sha: r.get(12)?,
+                admission_reserved_units: r.get(13)?,
+                actual_cost: r.get(14)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(rows)
 }
 
 fn map_ready_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<ReadyTaskRow> {
     Ok(ReadyTaskRow {
-        task_id:       r.get(0)?,
+        task_id: r.get(0)?,
         initiative_id: r.get(1)?,
-        lane_id:       r.get(2)?,
-        admitted_at:   r.get::<_, i64>(3)?.max(0) as u64,
+        lane_id: r.get(2)?,
+        admitted_at: r.get::<_, i64>(3)?.max(0) as u64,
     })
 }
 
@@ -278,21 +279,21 @@ pub fn list_by_initiative(
     let rows = stmt
         .query_map(rusqlite::params![initiative_id, limit as i64], |r| {
             Ok(TaskRow {
-                task_id:                  r.get(0)?,
-                initiative_id:            r.get(1)?,
-                initiative_state:         r.get(2)?,
-                lane_id:                  r.get(3)?,
-                state:                    r.get(4)?,
-                block_reason:             r.get(5)?,
-                actor:                    r.get(6)?,
-                policy_epoch:             r.get::<_, i64>(7)?.max(0) as u64,
-                admitted_at:              r.get::<_, i64>(8)?.max(0) as u64,
-                transitioned_at:          r.get::<_, i64>(9)?.max(0) as u64,
-                session_id:               r.get(10)?,
-                evaluation_sha:           r.get(11)?,
-                base_sha:                 r.get(12)?,
+                task_id: r.get(0)?,
+                initiative_id: r.get(1)?,
+                initiative_state: r.get(2)?,
+                lane_id: r.get(3)?,
+                state: r.get(4)?,
+                block_reason: r.get(5)?,
+                actor: r.get(6)?,
+                policy_epoch: r.get::<_, i64>(7)?.max(0) as u64,
+                admitted_at: r.get::<_, i64>(8)?.max(0) as u64,
+                transitioned_at: r.get::<_, i64>(9)?.max(0) as u64,
+                session_id: r.get(10)?,
+                evaluation_sha: r.get(11)?,
+                base_sha: r.get(12)?,
                 admission_reserved_units: r.get(13)?,
-                actual_cost:              r.get(14)?,
+                actual_cost: r.get(14)?,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -375,7 +376,7 @@ pub fn dag_edges_for_task(
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BlockingEdgeRow {
     pub blocked_task_id: String,
-    pub blocked_state:   String,
+    pub blocked_state: String,
     pub waiting_on_task: String,
     pub waiting_on_state: String,
 }
@@ -422,7 +423,7 @@ mod tests {
 
     fn fresh_store_with_seed_tasks() -> (TempDir, std::path::PathBuf) {
         const INITIATIVES: &str = Table::Initiatives.as_str();
-        const TASKS:       &str = Table::Tasks.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         {
@@ -444,17 +445,25 @@ mod tests {
                 ("t-1", "Running", "default", 100_i64, None::<&str>),
                 ("t-2", "Admitted", "default", 200, None),
                 ("t-3", "Admitted", "fast", 50, None),
-                ("t-4", "BlockedRecoveryPending", "default", 10, Some("waiting on t-1")),
+                (
+                    "t-4",
+                    "BlockedRecoveryPending",
+                    "default",
+                    10,
+                    Some("waiting on t-1"),
+                ),
             ] {
-                guard.execute(
-                    &format!(
-                        "INSERT INTO {TASKS} \
+                guard
+                    .execute(
+                        &format!(
+                            "INSERT INTO {TASKS} \
                          (task_id, initiative_id, lane_id, state, actor, \
                           policy_epoch, admitted_at, transitioned_at, block_reason) \
                          VALUES (?1, 'init-1', ?2, ?3, 'op', 1, ?4, ?4, ?5)"
-                    ),
-                    rusqlite::params![id, lane, state, admitted_at, block],
-                ).unwrap();
+                        ),
+                        rusqlite::params![id, lane, state, admitted_at, block],
+                    )
+                    .unwrap();
             }
         }
         (tmp, db)
@@ -593,8 +602,8 @@ mod tests {
     /// And we mark t-3 as `BlockedRecoveryPending` so the
     /// `blocking_edges` test has a real blocked task to find.
     fn fresh_store_with_seed_dag() -> (TempDir, std::path::PathBuf) {
-        const INITIATIVES:    &str = Table::Initiatives.as_str();
-        const TASKS:          &str = Table::Tasks.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
@@ -628,11 +637,8 @@ mod tests {
                 )
                 .unwrap();
         }
-        for (pred, succ, satisfied) in [
-            ("t-1", "t-2", 1_i64),
-            ("t-1", "t-3", 0),
-            ("t-2", "t-3", 0),
-        ] {
+        for (pred, succ, satisfied) in [("t-1", "t-2", 1_i64), ("t-1", "t-3", 0), ("t-2", "t-3", 0)]
+        {
             guard
                 .execute(
                     &format!(

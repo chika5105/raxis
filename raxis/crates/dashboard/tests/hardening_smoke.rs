@@ -306,8 +306,12 @@ async fn mint_jwt(base: &str, signing_key: &ed25519_dalek::SigningKey) -> (Strin
 /// Helper: registers an operator, binds the dashboard in
 /// memory, returns `(handle, base, token, data)`. Tests can
 /// push fixture rows onto `data` before issuing requests.
-async fn serve_authed_in_memory()
--> (ServerHandle, String, String, std::sync::Arc<InMemoryDashboardData>) {
+async fn serve_authed_in_memory() -> (
+    ServerHandle,
+    String,
+    String,
+    std::sync::Arc<InMemoryDashboardData>,
+) {
     let cfg = DashboardConfig {
         enabled: true,
         bind_address: "127.0.0.1".into(),
@@ -320,11 +324,7 @@ async fn serve_authed_in_memory()
     let pubkey_bytes: [u8; 32] = signing_key.verifying_key().to_bytes();
     let fingerprint = operator_fingerprint_hex(&pubkey_bytes);
     let data = InMemoryDashboardData::new();
-    data.with_operator(
-        fingerprint,
-        "filter-tester",
-        vec![DashboardRole::Read],
-    );
+    data.with_operator(fingerprint, "filter-tester", vec![DashboardRole::Read]);
     let server = DashboardServer::bind(cfg, std::sync::Arc::clone(&data))
         .await
         .expect("bind");
@@ -342,35 +342,34 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
     let (handle, base, token, data) = serve_authed_in_memory().await;
 
     let sess_alpha = SessionView {
-        session_id:    "sess-alpha".into(),
-        role:          "Executor".into(),
+        session_id: "sess-alpha".into(),
+        role: "Executor".into(),
         initiative_id: Some("init-alpha".into()),
-        task_id:       Some("task-1".into()),
-        state:         "Active".into(),
-        provider:      None,
-        model:         None,
-        input_tokens:  0,
+        task_id: Some("task-1".into()),
+        state: "Active".into(),
+        provider: None,
+        model: None,
+        input_tokens: 0,
         output_tokens: 0,
-        created_at:    1_700_000_000,
-        updated_at:    1_700_000_000,
-        failure:       None,
+        created_at: 1_700_000_000,
+        updated_at: 1_700_000_000,
+        failure: None,
     };
     let sess_beta = SessionView {
-        session_id:    "sess-beta".into(),
-        role:          "Executor".into(),
+        session_id: "sess-beta".into(),
+        role: "Executor".into(),
         initiative_id: Some("init-beta".into()),
-        task_id:       Some("task-2".into()),
-        state:         "Active".into(),
-        provider:      None,
-        model:         None,
-        input_tokens:  0,
+        task_id: Some("task-2".into()),
+        state: "Active".into(),
+        provider: None,
+        model: None,
+        input_tokens: 0,
         output_tokens: 0,
-        created_at:    1_700_000_001,
-        updated_at:    1_700_000_001,
-        failure:       None,
+        created_at: 1_700_000_001,
+        updated_at: 1_700_000_001,
+        failure: None,
     };
-    data.push_session(sess_alpha)
-        .push_session(sess_beta);
+    data.push_session(sess_alpha).push_session(sess_beta);
 
     let client = reqwest::Client::new();
 
@@ -389,8 +388,14 @@ async fn sessions_list_with_initiative_id_filter_narrows_results() {
         .iter()
         .map(|v| v["session_id"].as_str().unwrap())
         .collect();
-    assert!(all_ids.contains(&"sess-alpha"), "unfiltered must include alpha");
-    assert!(all_ids.contains(&"sess-beta"), "unfiltered must include beta");
+    assert!(
+        all_ids.contains(&"sess-alpha"),
+        "unfiltered must include alpha"
+    );
+    assert!(
+        all_ids.contains(&"sess-beta"),
+        "unfiltered must include beta"
+    );
 
     // `?initiative_id=init-alpha` — only alpha surfaces.
     let res = client
@@ -427,24 +432,24 @@ async fn audit_list_with_initiative_id_filter_narrows_results() {
 
     // Seed two audit rows on different initiatives.
     data.push_audit(AuditEntryView {
-        seq:           1,
-        event_id:      "ev-1".into(),
-        event_kind:    "InitiativeCreated".into(),
+        seq: 1,
+        event_id: "ev-1".into(),
+        event_kind: "InitiativeCreated".into(),
         initiative_id: Some("init-alpha".into()),
-        task_id:       None,
-        session_id:    None,
-        at:            1_700_000_000,
-        payload:       serde_json::json!({}),
+        task_id: None,
+        session_id: None,
+        at: 1_700_000_000,
+        payload: serde_json::json!({}),
     });
     data.push_audit(AuditEntryView {
-        seq:           2,
-        event_id:      "ev-2".into(),
-        event_kind:    "InitiativeCreated".into(),
+        seq: 2,
+        event_id: "ev-2".into(),
+        event_kind: "InitiativeCreated".into(),
         initiative_id: Some("init-beta".into()),
-        task_id:       None,
-        session_id:    None,
-        at:            1_700_000_001,
-        payload:       serde_json::json!({}),
+        task_id: None,
+        session_id: None,
+        at: 1_700_000_001,
+        payload: serde_json::json!({}),
     });
 
     let client = reqwest::Client::new();

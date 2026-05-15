@@ -24,8 +24,8 @@ use tokio::net::{UnixListener, UnixStream};
 
 use crate::errors::KernelError;
 use crate::handlers;
-use crate::ipc::context::HandlerContext;
 use crate::ipc::auth;
+use crate::ipc::context::HandlerContext;
 use crate::ipc::operator;
 
 // ---------------------------------------------------------------------------
@@ -101,22 +101,22 @@ pub async fn start(
     }
 
     // Bind operator socket.
-    let operator_listener = UnixListener::bind(&operator_path)
-        .map_err(|e| KernelError::SocketBind {
+    let operator_listener =
+        UnixListener::bind(&operator_path).map_err(|e| KernelError::SocketBind {
             reason: format!("operator.sock bind failed: {e}"),
         })?;
     set_socket_permissions(&operator_path, 0o600);
 
     // Bind planner socket.
-    let planner_listener = UnixListener::bind(&planner_path)
-        .map_err(|e| KernelError::SocketBind {
+    let planner_listener =
+        UnixListener::bind(&planner_path).map_err(|e| KernelError::SocketBind {
             reason: format!("planner.sock bind failed: {e}"),
         })?;
     set_socket_permissions(&planner_path, 0o660);
 
     // Bind gateway socket.
-    let gateway_listener = UnixListener::bind(&gateway_path)
-        .map_err(|e| KernelError::SocketBind {
+    let gateway_listener =
+        UnixListener::bind(&gateway_path).map_err(|e| KernelError::SocketBind {
             reason: format!("gateway.sock bind failed: {e}"),
         })?;
     set_socket_permissions(&gateway_path, 0o660);
@@ -161,7 +161,7 @@ pub async fn start(
     let operator_ctx = Arc::clone(&ctx);
     let planner_ctx = Arc::clone(&ctx);
     let gateway_client = Arc::clone(&ctx.gateway);
-    let gateway_audit  = Arc::clone(&ctx.audit);
+    let gateway_audit = Arc::clone(&ctx.audit);
 
     let op_task = tokio::spawn(accept_operator_loop(operator_listener, operator_ctx));
     let pl_task = tokio::spawn(accept_planner_loop(planner_listener, planner_ctx));
@@ -183,10 +183,7 @@ pub async fn start(
     for path in &[&operator_path, &planner_path, &gateway_path] {
         if let Err(e) = std::fs::remove_file(path) {
             if e.kind() != std::io::ErrorKind::NotFound {
-                server_log::socket_remove_failed(
-                    &path.display().to_string(),
-                    &e.to_string(),
-                );
+                server_log::socket_remove_failed(&path.display().to_string(), &e.to_string());
             }
         }
     }
@@ -258,10 +255,7 @@ async fn wait_for_shutdown(
 // Operator accept loop
 // ---------------------------------------------------------------------------
 
-async fn accept_operator_loop(
-    listener: UnixListener,
-    ctx: Arc<HandlerContext>,
-) {
+async fn accept_operator_loop(listener: UnixListener, ctx: Arc<HandlerContext>) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
@@ -491,14 +485,14 @@ where
                 planner_dispatch_log::intent_request(&req);
                 // Capture context BEFORE moving `req` into the handler.
                 let task_id_for_log = req.task_id.as_str().to_owned();
-                let seq_for_log     = req.sequence_number;
+                let seq_for_log = req.sequence_number;
                 // INV-FAILURE-REASON-MANDATORY-01 — also capture
                 // the intent kind here so we can record the
                 // last-activity entry post-handle for the
                 // Mode-B post-exit synthesis hook. Cheap copy
                 // (`IntentKind` is `Copy`).
                 let intent_kind_for_activity = req.intent_kind;
-                let started         = std::time::Instant::now();
+                let started = std::time::Instant::now();
                 let resp = handlers::intent::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::intent_response(
@@ -519,13 +513,13 @@ where
                     ctx.session_activity.record(
                         sid,
                         crate::session_activity::SessionActivity {
-                            last_intent_kind:    intent_kind_for_activity,
-                            last_intent_seq:     seq_for_log,
+                            last_intent_kind: intent_kind_for_activity,
+                            last_intent_seq: seq_for_log,
                             last_intent_outcome:
                                 crate::session_activity::LastIntentOutcome::from_response(
                                     &resp.outcome,
                                 ),
-                            recorded_at_unix:    raxis_types::clock::unix_now_secs(),
+                            recorded_at_unix: raxis_types::clock::unix_now_secs(),
                         },
                     );
                 }
@@ -544,7 +538,7 @@ where
                 );
                 planner_dispatch_log::witness_request(&sub);
                 let task_id_for_log = sub.task_id.as_str().to_owned();
-                let started         = std::time::Instant::now();
+                let started = std::time::Instant::now();
                 match handlers::witness::handle(sub, &ctx).await {
                     Ok(ack) => {
                         let latency_ms = started.elapsed().as_millis() as u64;
@@ -565,11 +559,15 @@ where
                         // surfaces the result_class for AcceptedNonPass so the
                         // verifier's own logs can echo it.
                         let (accepted, verifier_run_id, reason) = match ack {
-                            handlers::witness::WitnessAck::Accepted { run_id, .. } => {
-                                (true, uuid::Uuid::parse_str(&run_id).unwrap_or_default(), None)
-                            }
+                            handlers::witness::WitnessAck::Accepted { run_id, .. } => (
+                                true,
+                                uuid::Uuid::parse_str(&run_id).unwrap_or_default(),
+                                None,
+                            ),
                             handlers::witness::WitnessAck::AcceptedNonPass {
-                                run_id, gate_type, result_class,
+                                run_id,
+                                gate_type,
+                                result_class,
                             } => (
                                 true,
                                 uuid::Uuid::parse_str(&run_id).unwrap_or_default(),
@@ -583,11 +581,15 @@ where
                                 (false, uuid::Uuid::nil(), Some(format!("{reason:?}")))
                             }
                         };
-                        write_frame(&mut stream, &IpcMessage::WitnessAck {
-                            verifier_run_id,
-                            accepted,
-                            reason,
-                        }).await?;
+                        write_frame(
+                            &mut stream,
+                            &IpcMessage::WitnessAck {
+                                verifier_run_id,
+                                accepted,
+                                reason,
+                            },
+                        )
+                        .await?;
                     }
                     Err(e) => {
                         // HandlerError: transport/auth-level failure.
@@ -615,7 +617,7 @@ where
                 );
                 planner_dispatch_log::escalation_request(&req);
                 let task_id_for_log = req.task_id.as_str().to_owned();
-                let started         = std::time::Instant::now();
+                let started = std::time::Instant::now();
                 let resp = handlers::escalation::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
                 planner_dispatch_log::escalation_response(&task_id_for_log, &resp, latency_ms);
@@ -637,18 +639,11 @@ where
                     crate::observability::IPC_MSG_KIND_PLANNER_FETCH_REQUEST,
                 );
                 let request_id = req.request_id;
-                let started    = std::time::Instant::now();
+                let started = std::time::Instant::now();
                 let resp = handlers::planner_fetch::handle(req, &ctx).await;
                 let latency_ms = started.elapsed().as_millis() as u64;
-                planner_dispatch_log::planner_fetch_response(
-                    request_id,
-                    &resp,
-                    latency_ms,
-                );
-                write_frame(
-                    &mut stream,
-                    &IpcMessage::KernelPlannerFetchResponse(resp),
-                ).await?;
+                planner_dispatch_log::planner_fetch_response(request_id, &resp, latency_ms);
+                write_frame(&mut stream, &IpcMessage::KernelPlannerFetchResponse(resp)).await?;
             }
 
             // ── PlannerExitNotice ─────────────────────────────────
@@ -680,10 +675,7 @@ where
                 );
                 planner_dispatch_log::planner_exit_notice(&outcome);
                 last_exit_notice = Some(outcome);
-                write_frame(
-                    &mut stream,
-                    &IpcMessage::KernelPlannerExitNoticeAck,
-                ).await?;
+                write_frame(&mut stream, &IpcMessage::KernelPlannerExitNoticeAck).await?;
             }
 
             other => {
@@ -786,8 +778,8 @@ pub(crate) mod server_log {
     ) -> String {
         let mut body = Map::new();
         body.insert("operator".into(), json!(operator_path));
-        body.insert("planner".into(),  json!(planner_path));
-        body.insert("gateway".into(),  json!(gateway_path));
+        body.insert("planner".into(), json!(planner_path));
+        body.insert("gateway".into(), json!(gateway_path));
         finalize_line(level::INFO, MODULE, "sockets_bound", body, ts_unix)
     }
 
@@ -799,14 +791,14 @@ pub(crate) mod server_log {
 
     pub(crate) fn build_socket_remove_failed_line(path: &str, error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
-        body.insert("path".into(),  json!(path));
+        body.insert("path".into(), json!(path));
         body.insert("error".into(), json!(error));
         finalize_line(level::WARN, MODULE, "socket_remove_failed", body, ts_unix)
     }
 
     pub(crate) fn build_chmod_socket_failed_line(path: &str, error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
-        body.insert("path".into(),  json!(path));
+        body.insert("path".into(), json!(path));
         body.insert("error".into(), json!(error));
         finalize_line(level::WARN, MODULE, "chmod_socket_failed", body, ts_unix)
     }
@@ -818,8 +810,14 @@ pub(crate) mod server_log {
     ) -> String {
         let mut body = Map::new();
         body.insert("signal".into(), json!(signal));
-        body.insert("error".into(),  json!(error));
-        finalize_line(level::ERROR, MODULE, "signal_handler_install_failed", body, ts_unix)
+        body.insert("error".into(), json!(error));
+        finalize_line(
+            level::ERROR,
+            MODULE,
+            "signal_handler_install_failed",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_signal_received_line(signal: &'static str, ts_unix: i64) -> String {
@@ -835,14 +833,17 @@ pub(crate) mod server_log {
         ts_unix: i64,
     ) -> String {
         let mut body = Map::new();
-        body.insert("which".into(),  json!(which));
+        body.insert("which".into(), json!(which));
         // `join_result_debug` is always a `tokio::task::JoinError`-or-`Ok`
         // Debug rendering. The variants are bounded enums on a unit
         // payload — they cannot carry application credentials — but we
         // route through `serde_json` anyway so embedded quotes can't
         // break the JSON line.
         body.insert("join_result".into(), json!(join_result_debug));
-        body.insert("signal_handler_installed".into(), json!(signal_handler_installed));
+        body.insert(
+            "signal_handler_installed".into(),
+            json!(signal_handler_installed),
+        );
         finalize_line(level::ERROR, MODULE, "accept_loop_exited", body, ts_unix)
     }
 
@@ -855,7 +856,13 @@ pub(crate) mod server_log {
     pub(crate) fn build_operator_connection_error_line(error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("error".into(), json!(error));
-        finalize_line(level::WARN, MODULE, "operator_connection_error", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "operator_connection_error",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_operator_authenticated_line(operator_fp: &str, ts_unix: i64) -> String {
@@ -981,13 +988,25 @@ pub(crate) mod planner_dispatch_log {
     pub(crate) fn build_planner_connection_error_line(error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("error".into(), json!(error));
-        finalize_line(level::WARN, MODULE, "planner_connection_error", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "planner_connection_error",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_planner_frame_decode_failed_line(error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("error".into(), json!(error));
-        finalize_line(level::WARN, MODULE, "planner_frame_decode_failed", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "planner_frame_decode_failed",
+            body,
+            ts_unix,
+        )
     }
 
     /// Per-message-variant log emitted whenever the planner socket
@@ -1000,7 +1019,13 @@ pub(crate) mod planner_dispatch_log {
     ) -> String {
         let mut body = Map::new();
         body.insert("variant".into(), json!(variant));
-        finalize_line(level::WARN, MODULE, "planner_unexpected_message", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "planner_unexpected_message",
+            body,
+            ts_unix,
+        )
     }
 
     /// Build the `intent_request` line for a received `IntentRequest`.
@@ -1012,11 +1037,14 @@ pub(crate) mod planner_dispatch_log {
     /// `intent_request_line_does_not_contain_session_token` pins this.
     pub(crate) fn build_intent_request_line(req: &IntentRequest, ts_unix: i64) -> String {
         let mut body = body_from_fields(&[
-            ("task_id",         req.task_id.as_str().to_owned()),
-            ("intent_kind",     req.intent_kind.as_str().to_owned()),
+            ("task_id", req.task_id.as_str().to_owned()),
+            ("intent_kind", req.intent_kind.as_str().to_owned()),
         ]);
-        body.insert("sequence_number".into(),  json!(req.sequence_number));
-        body.insert("session_token_fp".into(), json!(credential_fingerprint(&req.session_token)));
+        body.insert("sequence_number".into(), json!(req.sequence_number));
+        body.insert(
+            "session_token_fp".into(),
+            json!(credential_fingerprint(&req.session_token)),
+        );
         if let Some(idem) = req.idempotency_key {
             body.insert("idempotency_key".into(), json!(idem.to_string()));
         }
@@ -1034,19 +1062,27 @@ pub(crate) mod planner_dispatch_log {
     ) -> String {
         let mut body = body_from_fields(&[("task_id", task_id.to_owned())]);
         body.insert("sequence_number".into(), json!(sequence_number));
-        body.insert("latency_ms".into(),      json!(latency_ms));
-        body.insert("task_state".into(),      json!(resp.task_state.as_sql_str()));
+        body.insert("latency_ms".into(), json!(latency_ms));
+        body.insert("task_state".into(), json!(resp.task_state.as_sql_str()));
 
         let log_level = match &resp.outcome {
-            IntentOutcome::Accepted { warn_delegation_stale, remaining_budget } => {
+            IntentOutcome::Accepted {
+                warn_delegation_stale,
+                remaining_budget,
+            } => {
                 body.insert("status".into(), json!("accepted"));
                 body.insert("warn_delegation_stale".into(), json!(warn_delegation_stale));
-                body.insert("admission_units_remaining".into(),
-                            json!(remaining_budget.admission_units));
+                body.insert(
+                    "admission_units_remaining".into(),
+                    json!(remaining_budget.admission_units),
+                );
                 level::INFO
             }
-            IntentOutcome::Rejected { error_code, error_detail } => {
-                body.insert("status".into(),     json!("rejected"));
+            IntentOutcome::Rejected {
+                error_code,
+                error_detail,
+            } => {
+                body.insert("status".into(), json!("rejected"));
                 body.insert("error_code".into(), json!(format!("{error_code:?}")));
                 if let Some(d) = error_detail {
                     body.insert("error_detail".into(), json!(format!("{d:?}")));
@@ -1065,13 +1101,15 @@ pub(crate) mod planner_dispatch_log {
     /// `witness_request_line_does_not_contain_verifier_token`.
     pub(crate) fn build_witness_request_line(sub: &WitnessSubmission, ts_unix: i64) -> String {
         let mut body = body_from_fields(&[
-            ("task_id",        sub.task_id.as_str().to_owned()),
-            ("gate_type",      sub.gate_type.as_str().to_owned()),
+            ("task_id", sub.task_id.as_str().to_owned()),
+            ("gate_type", sub.gate_type.as_str().to_owned()),
             ("evaluation_sha", sub.evaluation_sha.as_str().to_owned()),
-            ("result_class",   sub.result_class.as_sql_str().to_owned()),
+            ("result_class", sub.result_class.as_sql_str().to_owned()),
         ]);
-        body.insert("verifier_token_fp".into(),
-                    json!(credential_fingerprint(&sub.verifier_token)));
+        body.insert(
+            "verifier_token_fp".into(),
+            json!(credential_fingerprint(&sub.verifier_token)),
+        );
         finalize_line(level::INFO, MODULE, "witness_request", body, ts_unix)
     }
 
@@ -1092,10 +1130,14 @@ pub(crate) mod planner_dispatch_log {
                 body.insert("run_id".into(), json!(run_id));
                 level::INFO
             }
-            WitnessAck::AcceptedNonPass { run_id, gate_type, result_class } => {
-                body.insert("status".into(),       json!("accepted_non_pass"));
-                body.insert("run_id".into(),       json!(run_id));
-                body.insert("gate_type".into(),    json!(gate_type.as_str()));
+            WitnessAck::AcceptedNonPass {
+                run_id,
+                gate_type,
+                result_class,
+            } => {
+                body.insert("status".into(), json!("accepted_non_pass"));
+                body.insert("run_id".into(), json!(run_id));
+                body.insert("gate_type".into(), json!(gate_type.as_str()));
                 body.insert("result_class".into(), json!(result_class.as_str()));
                 level::INFO
             }
@@ -1108,7 +1150,11 @@ pub(crate) mod planner_dispatch_log {
         finalize_line(log_level, MODULE, "witness_response", body, ts_unix)
     }
 
-    pub(crate) fn build_witness_handler_error_line(task_id: Option<&str>, error: &str, ts_unix: i64) -> String {
+    pub(crate) fn build_witness_handler_error_line(
+        task_id: Option<&str>,
+        error: &str,
+        ts_unix: i64,
+    ) -> String {
         let mut body = Map::new();
         if let Some(t) = task_id {
             body.insert("task_id".into(), json!(t));
@@ -1126,10 +1172,16 @@ pub(crate) mod planner_dispatch_log {
     pub(crate) fn build_escalation_request_line(req: &EscalationRequest, ts_unix: i64) -> String {
         let mut body = body_from_fields(&[
             ("task_id", req.task_id.as_str().to_owned()),
-            ("class",   req.class.as_sql_str().to_owned()),
+            ("class", req.class.as_sql_str().to_owned()),
         ]);
-        body.insert("session_token_fp".into(), json!(credential_fingerprint(&req.session_token)));
-        body.insert("idempotency_key".into(),  json!(req.idempotency_key.to_string()));
+        body.insert(
+            "session_token_fp".into(),
+            json!(credential_fingerprint(&req.session_token)),
+        );
+        body.insert(
+            "idempotency_key".into(),
+            json!(req.idempotency_key.to_string()),
+        );
         finalize_line(level::INFO, MODULE, "escalation_request", body, ts_unix)
     }
 
@@ -1144,12 +1196,12 @@ pub(crate) mod planner_dispatch_log {
         body.insert("latency_ms".into(), json!(latency_ms));
         let log_level = match resp {
             EscalationResponse::Submitted { escalation_id, .. } => {
-                body.insert("status".into(),        json!("submitted"));
+                body.insert("status".into(), json!("submitted"));
                 body.insert("escalation_id".into(), json!(escalation_id.as_str()));
                 level::INFO
             }
             EscalationResponse::AlreadyPending { escalation_id } => {
-                body.insert("status".into(),        json!("already_pending"));
+                body.insert("status".into(), json!("already_pending"));
                 body.insert("escalation_id".into(), json!(escalation_id.as_str()));
                 level::INFO
             }
@@ -1196,7 +1248,10 @@ pub(crate) mod planner_dispatch_log {
     }
 
     pub(super) fn intent_request(req: &IntentRequest) {
-        eprintln!("{}", build_intent_request_line(req, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_intent_request_line(req, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn intent_response(
@@ -1218,7 +1273,10 @@ pub(crate) mod planner_dispatch_log {
     }
 
     pub(super) fn witness_request(sub: &WitnessSubmission) {
-        eprintln!("{}", build_witness_request_line(sub, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_witness_request_line(sub, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn witness_response(task_id: &str, ack: &WitnessAck, latency_ms: u64) {
@@ -1236,7 +1294,10 @@ pub(crate) mod planner_dispatch_log {
     }
 
     pub(super) fn escalation_request(req: &EscalationRequest) {
-        eprintln!("{}", build_escalation_request_line(req, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_escalation_request_line(req, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn escalation_response(task_id: &str, resp: &EscalationResponse, latency_ms: u64) {
@@ -1290,11 +1351,10 @@ pub(crate) mod planner_dispatch_log {
     /// verbatim. Operators can grep on the `kind` field to
     /// classify exits without writing a per-variant log
     /// scanner.
-    pub(super) fn planner_exit_notice(
-        outcome: &raxis_types::PlannerExitOutcome,
-    ) {
-        let outcome_json = serde_json::to_string(outcome)
-            .unwrap_or_else(|e| format!("{{\"kind\":\"_serde_error\",\"err\":{:?}}}", e.to_string()));
+    pub(super) fn planner_exit_notice(outcome: &raxis_types::PlannerExitOutcome) {
+        let outcome_json = serde_json::to_string(outcome).unwrap_or_else(|e| {
+            format!("{{\"kind\":\"_serde_error\",\"err\":{:?}}}", e.to_string())
+        });
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"planner_exit_notice_observed\",\
               \"outcome\":{outcome_json},\
@@ -1314,22 +1374,22 @@ pub(crate) mod planner_dispatch_log {
     /// tag rather than panicking.
     pub(crate) fn ipc_message_variant_name(msg: &IpcMessage) -> &'static str {
         match msg {
-            IpcMessage::IntentRequest(_)              => "IntentRequest",
-            IpcMessage::EscalationRequest(_)          => "EscalationRequest",
-            IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
-            IpcMessage::PlannerExitNotice { .. }      => "PlannerExitNotice",
-            IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
-            IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+            IpcMessage::IntentRequest(_) => "IntentRequest",
+            IpcMessage::EscalationRequest(_) => "EscalationRequest",
+            IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+            IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
+            IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
+            IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
             IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
-            IpcMessage::KernelPlannerExitNoticeAck    => "KernelPlannerExitNoticeAck",
-            IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
-            IpcMessage::WitnessAck { .. }             => "WitnessAck",
-            IpcMessage::OperatorRequest(_)            => "OperatorRequest",
-            IpcMessage::OperatorResponse(_)           => "OperatorResponse",
-            IpcMessage::TproxyAdmissionRequest(_)         => "TproxyAdmissionRequest",
-            IpcMessage::KernelTproxyAdmissionResponse(_)  => "KernelTproxyAdmissionResponse",
-            IpcMessage::DnsResolveRequest(_)              => "DnsResolveRequest",
-            IpcMessage::KernelDnsResolveResponse(_)       => "KernelDnsResolveResponse",
+            IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
+            IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
+            IpcMessage::WitnessAck { .. } => "WitnessAck",
+            IpcMessage::OperatorRequest(_) => "OperatorRequest",
+            IpcMessage::OperatorResponse(_) => "OperatorResponse",
+            IpcMessage::TproxyAdmissionRequest(_) => "TproxyAdmissionRequest",
+            IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
+            IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
+            IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
         }
     }
 }
@@ -1403,12 +1463,12 @@ mod server_log_tests {
             1_700_000_000,
         );
         let v = parse(&line);
-        assert_eq!(v["module"],   "ipc.server");
-        assert_eq!(v["event"],    "sockets_bound");
-        assert_eq!(v["level"],    "info");
+        assert_eq!(v["module"], "ipc.server");
+        assert_eq!(v["event"], "sockets_bound");
+        assert_eq!(v["level"], "info");
         assert_eq!(v["operator"], "/d/sockets/operator.sock");
-        assert_eq!(v["planner"],  "/d/sockets/planner.sock");
-        assert_eq!(v["gateway"],  "/d/sockets/gateway.sock");
+        assert_eq!(v["planner"], "/d/sockets/planner.sock");
+        assert_eq!(v["gateway"], "/d/sockets/gateway.sock");
     }
 
     #[test]
@@ -1418,46 +1478,40 @@ mod server_log_tests {
             1_700_000_001,
         );
         let v = parse(&line);
-        assert_eq!(v["event"],  "sockets_unbound");
+        assert_eq!(v["event"], "sockets_unbound");
         assert_eq!(v["reason"], "accept_loop_exited:planner");
     }
 
     #[test]
     fn signal_handler_install_failed_at_error_with_signal_name() {
-        let line = server_log::build_signal_handler_install_failed_line(
-            "SIGTERM", "ENOSYS", 0,
-        );
+        let line = server_log::build_signal_handler_install_failed_line("SIGTERM", "ENOSYS", 0);
         let v = parse(&line);
-        assert_eq!(v["level"],  "error");
-        assert_eq!(v["event"],  "signal_handler_install_failed");
+        assert_eq!(v["level"], "error");
+        assert_eq!(v["event"], "signal_handler_install_failed");
         assert_eq!(v["signal"], "SIGTERM");
-        assert_eq!(v["error"],  "ENOSYS");
+        assert_eq!(v["error"], "ENOSYS");
     }
 
     #[test]
     fn accept_loop_exited_marks_signal_handler_state() {
-        let with_handler = server_log::build_accept_loop_exited_line(
-            "operator", "Ok(())", true, 0,
-        );
+        let with_handler = server_log::build_accept_loop_exited_line("operator", "Ok(())", true, 0);
         let v = parse(&with_handler);
         assert_eq!(v["which"], "operator");
         assert_eq!(v["signal_handler_installed"], true);
 
-        let without_handler = server_log::build_accept_loop_exited_line(
-            "planner", "Err(JoinError)", false, 0,
-        );
+        let without_handler =
+            server_log::build_accept_loop_exited_line("planner", "Err(JoinError)", false, 0);
         let v = parse(&without_handler);
         assert_eq!(v["signal_handler_installed"], false);
     }
 
     #[test]
     fn operator_authenticated_carries_fingerprint_at_info() {
-        let line = server_log::build_operator_authenticated_line(
-            "abcd1234abcd1234abcd1234abcd1234", 0,
-        );
+        let line =
+            server_log::build_operator_authenticated_line("abcd1234abcd1234abcd1234abcd1234", 0);
         let v = parse(&line);
-        assert_eq!(v["level"],       "info");
-        assert_eq!(v["event"],       "operator_authenticated");
+        assert_eq!(v["level"], "info");
+        assert_eq!(v["event"], "operator_authenticated");
         assert_eq!(v["operator_fp"], "abcd1234abcd1234abcd1234abcd1234");
     }
 
@@ -1466,10 +1520,8 @@ mod server_log_tests {
     /// The shared `finalize_line` MUST escape them.
     #[test]
     fn error_strings_with_embedded_quotes_round_trip_through_json() {
-        let line = server_log::build_operator_accept_error_line(
-            r#"bind: "address already in use""#,
-            0,
-        );
+        let line =
+            server_log::build_operator_accept_error_line(r#"bind: "address already in use""#, 0);
         let v = parse(&line);
         assert_eq!(v["error"], r#"bind: "address already in use""#);
     }
@@ -1493,7 +1545,7 @@ mod planner_dispatch_log_tests {
     use super::planner_dispatch_log;
     use raxis_ipc::message::IpcMessage;
     use raxis_types::escalation::{
-        EscalationClass, EscalationRequest, EscalationRejectionReason, EscalationResponse,
+        EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
         RequestedEscalationScope,
     };
     use raxis_types::intent::{
@@ -1501,7 +1553,9 @@ mod planner_dispatch_log_tests {
         PlannerErrorTemplate,
     };
     use raxis_types::witness::WitnessResultClass;
-    use raxis_types::{EscalationId, GateType, PlannerErrorCode, TaskId, TaskState, WitnessSubmission};
+    use raxis_types::{
+        EscalationId, GateType, PlannerErrorCode, TaskId, TaskState, WitnessSubmission,
+    };
     use serde_json::Value;
     use uuid::Uuid;
 
@@ -1520,21 +1574,21 @@ mod planner_dispatch_log_tests {
 
     fn fixture_intent_request(token: &str) -> IntentRequest {
         IntentRequest {
-            session_token:    token.to_owned(),
-            sequence_number:  7,
-            envelope_nonce:   "00000000000000000000000000000001".to_owned(),
-            intent_kind:      IntentKind::SingleCommit,
-            task_id:          TaskId::parse("task-alpha").unwrap(),
-            base_sha:         None,
-            head_sha:         None,
+            session_token: token.to_owned(),
+            sequence_number: 7,
+            envelope_nonce: "00000000000000000000000000000001".to_owned(),
+            intent_kind: IntentKind::SingleCommit,
+            task_id: TaskId::parse("task-alpha").unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:    None,
-            idempotency_key:  None,
-            approval_token:   None,
-            approved:         None,
-            critique:         None,
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:      None,
+            tokens_used: None,
             structured_output: None,
         }
     }
@@ -1542,23 +1596,23 @@ mod planner_dispatch_log_tests {
     fn fixture_witness(token: &str) -> WitnessSubmission {
         WitnessSubmission {
             verifier_token: token.to_owned(),
-            task_id:        TaskId::parse("task-beta").unwrap(),
-            gate_type:      GateType::parse("TestCoverage").unwrap(),
+            task_id: TaskId::parse("task-beta").unwrap(),
+            gate_type: GateType::parse("TestCoverage").unwrap(),
             evaluation_sha: raxis_types::CommitSha::parse(&"a".repeat(40)).unwrap(),
-            result_class:   WitnessResultClass::Pass,
-            body:           serde_json::json!({}),
+            result_class: WitnessResultClass::Pass,
+            body: serde_json::json!({}),
         }
     }
 
     fn fixture_escalation_request(token: &str) -> EscalationRequest {
         EscalationRequest {
-            session_token:   token.to_owned(),
-            task_id:         TaskId::parse("task-gamma").unwrap(),
-            class:           EscalationClass::CapabilityUpgrade,
+            session_token: token.to_owned(),
+            task_id: TaskId::parse("task-gamma").unwrap(),
+            class: EscalationClass::CapabilityUpgrade,
             requested_scope: RequestedEscalationScope::CapabilityUpgrade {
                 capability: raxis_types::CapabilityClass::WriteSecrets,
             },
-            justification:   "needs to write to vault for prod migration".to_owned(),
+            justification: "needs to write to vault for prod migration".to_owned(),
             idempotency_key: Uuid::nil(),
         }
     }
@@ -1584,13 +1638,15 @@ mod planner_dispatch_log_tests {
         let req = fixture_intent_request(SECRET_SESSION_TOKEN);
         let line = planner_dispatch_log::build_intent_request_line(&req, 1_700_000_010);
         let v = parse(&line);
-        assert_eq!(v["module"],          "ipc.planner");
-        assert_eq!(v["event"],           "intent_request");
-        assert_eq!(v["level"],           "info");
-        assert_eq!(v["task_id"],         "task-alpha");
-        assert_eq!(v["intent_kind"],     "SingleCommit");
+        assert_eq!(v["module"], "ipc.planner");
+        assert_eq!(v["event"], "intent_request");
+        assert_eq!(v["level"], "info");
+        assert_eq!(v["task_id"], "task-alpha");
+        assert_eq!(v["intent_kind"], "SingleCommit");
         assert_eq!(v["sequence_number"], 7);
-        let fp = v["session_token_fp"].as_str().expect("session_token_fp must be string");
+        let fp = v["session_token_fp"]
+            .as_str()
+            .expect("session_token_fp must be string");
         assert_eq!(fp.len(), 8, "fingerprint must be 8 hex chars");
         assert!(
             !SECRET_SESSION_TOKEN.starts_with(fp),
@@ -1604,23 +1660,23 @@ mod planner_dispatch_log_tests {
     fn intent_response_accepted_at_info_with_budget_snapshot() {
         let resp = IntentResponse {
             sequence_number: 7,
-            task_state:      TaskState::Running,
-            outcome:         IntentOutcome::Accepted {
-                remaining_budget: BudgetSnapshot { admission_units: 42 },
+            task_state: TaskState::Running,
+            outcome: IntentOutcome::Accepted {
+                remaining_budget: BudgetSnapshot {
+                    admission_units: 42,
+                },
                 warn_delegation_stale: true,
             },
         };
-        let line = planner_dispatch_log::build_intent_response_line(
-            "task-alpha", 7, &resp, 12, 0,
-        );
+        let line = planner_dispatch_log::build_intent_response_line("task-alpha", 7, &resp, 12, 0);
         let v = parse(&line);
-        assert_eq!(v["level"],                     "info");
-        assert_eq!(v["status"],                    "accepted");
-        assert_eq!(v["task_id"],                   "task-alpha");
-        assert_eq!(v["sequence_number"],           7);
-        assert_eq!(v["latency_ms"],                12);
-        assert_eq!(v["task_state"],                "Running");
-        assert_eq!(v["warn_delegation_stale"],     true);
+        assert_eq!(v["level"], "info");
+        assert_eq!(v["status"], "accepted");
+        assert_eq!(v["task_id"], "task-alpha");
+        assert_eq!(v["sequence_number"], 7);
+        assert_eq!(v["latency_ms"], 12);
+        assert_eq!(v["task_state"], "Running");
+        assert_eq!(v["warn_delegation_stale"], true);
         assert_eq!(v["admission_units_remaining"], 42);
     }
 
@@ -1628,17 +1684,15 @@ mod planner_dispatch_log_tests {
     fn intent_response_rejected_at_warn_with_error_code() {
         let resp = IntentResponse {
             sequence_number: 7,
-            task_state:      TaskState::Admitted,
-            outcome:         IntentOutcome::Rejected {
-                error_code:   PlannerErrorCode::FailPolicyViolation,
+            task_state: TaskState::Admitted,
+            outcome: IntentOutcome::Rejected {
+                error_code: PlannerErrorCode::FailPolicyViolation,
                 error_detail: Some(PlannerErrorTemplate::IntentKindNotPermitted),
             },
         };
-        let line = planner_dispatch_log::build_intent_response_line(
-            "task-alpha", 7, &resp, 3, 0,
-        );
+        let line = planner_dispatch_log::build_intent_response_line("task-alpha", 7, &resp, 3, 0);
         let v = parse(&line);
-        assert_eq!(v["level"],  "warn");
+        assert_eq!(v["level"], "warn");
         assert_eq!(v["status"], "rejected");
         let code = v["error_code"].as_str().expect("error_code must be string");
         assert!(code.contains("FailPolicyViolation"), "got: {code}");
@@ -1654,7 +1708,10 @@ mod planner_dispatch_log_tests {
             !line.contains(SECRET_VERIFIER_TOKEN),
             "verifier_token MUST NOT appear in witness_request log line; got: {line}",
         );
-        assert!(!line.contains("SECRET_"), "no prefix of the secret token may appear");
+        assert!(
+            !line.contains("SECRET_"),
+            "no prefix of the secret token may appear"
+        );
     }
 
     #[test]
@@ -1662,11 +1719,11 @@ mod planner_dispatch_log_tests {
         let sub = fixture_witness(SECRET_VERIFIER_TOKEN);
         let line = planner_dispatch_log::build_witness_request_line(&sub, 0);
         let v = parse(&line);
-        assert_eq!(v["module"],         "ipc.planner");
-        assert_eq!(v["event"],          "witness_request");
-        assert_eq!(v["task_id"],        "task-beta");
-        assert_eq!(v["gate_type"],      "TestCoverage");
-        assert_eq!(v["result_class"],   "Pass");
+        assert_eq!(v["module"], "ipc.planner");
+        assert_eq!(v["event"], "witness_request");
+        assert_eq!(v["task_id"], "task-beta");
+        assert_eq!(v["gate_type"], "TestCoverage");
+        assert_eq!(v["result_class"], "Pass");
         assert_eq!(v["evaluation_sha"], "a".repeat(40));
         assert_eq!(
             v["verifier_token_fp"].as_str().unwrap().len(),
@@ -1684,11 +1741,9 @@ mod planner_dispatch_log_tests {
                 current_state: "Running".to_owned(),
             },
         };
-        let line = planner_dispatch_log::build_witness_response_line(
-            "task-beta", &ack, 5, 0,
-        );
+        let line = planner_dispatch_log::build_witness_response_line("task-beta", &ack, 5, 0);
         let v = parse(&line);
-        assert_eq!(v["level"],  "warn");
+        assert_eq!(v["level"], "warn");
         assert_eq!(v["status"], "rejected");
         assert_eq!(v["task_id"], "task-beta");
     }
@@ -1710,10 +1765,10 @@ mod planner_dispatch_log_tests {
         let req = fixture_escalation_request(SECRET_SESSION_TOKEN);
         let line = planner_dispatch_log::build_escalation_request_line(&req, 0);
         let v = parse(&line);
-        assert_eq!(v["module"],   "ipc.planner");
-        assert_eq!(v["event"],    "escalation_request");
-        assert_eq!(v["task_id"],  "task-gamma");
-        assert_eq!(v["class"],    "CapabilityUpgrade");
+        assert_eq!(v["module"], "ipc.planner");
+        assert_eq!(v["event"], "escalation_request");
+        assert_eq!(v["task_id"], "task-gamma");
+        assert_eq!(v["class"], "CapabilityUpgrade");
         assert_eq!(v["session_token_fp"].as_str().unwrap().len(), 8);
     }
 
@@ -1723,11 +1778,9 @@ mod planner_dispatch_log_tests {
     fn escalation_response_submitted_carries_escalation_id() {
         let resp = EscalationResponse::Submitted {
             escalation_id: EscalationId::new_v4(),
-            timeout_at:    raxis_types::id::UnixSeconds(1_700_001_000),
+            timeout_at: raxis_types::id::UnixSeconds(1_700_001_000),
         };
-        let line = planner_dispatch_log::build_escalation_response_line(
-            "task-gamma", &resp, 4, 0,
-        );
+        let line = planner_dispatch_log::build_escalation_response_line("task-gamma", &resp, 4, 0);
         let v = parse(&line);
         assert_eq!(v["status"], "submitted");
         assert!(v["escalation_id"].is_string());
@@ -1738,11 +1791,9 @@ mod planner_dispatch_log_tests {
         let resp = EscalationResponse::Rejected {
             reason: EscalationRejectionReason::LineageQuarantined,
         };
-        let line = planner_dispatch_log::build_escalation_response_line(
-            "task-gamma", &resp, 4, 0,
-        );
+        let line = planner_dispatch_log::build_escalation_response_line("task-gamma", &resp, 4, 0);
         let v = parse(&line);
-        assert_eq!(v["level"],  "warn");
+        assert_eq!(v["level"], "warn");
         assert_eq!(v["status"], "rejected");
     }
 
@@ -1755,20 +1806,32 @@ mod planner_dispatch_log_tests {
         // exhaustive match in `ipc_message_variant_name` at compile
         // time; this test pins the strings.
         let intent = IpcMessage::IntentRequest(fixture_intent_request("x"));
-        assert_eq!(planner_dispatch_log::ipc_message_variant_name(&intent), "IntentRequest");
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&intent),
+            "IntentRequest"
+        );
 
         let escalation = IpcMessage::EscalationRequest(fixture_escalation_request("x"));
-        assert_eq!(planner_dispatch_log::ipc_message_variant_name(&escalation), "EscalationRequest");
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&escalation),
+            "EscalationRequest"
+        );
 
         let witness = IpcMessage::WitnessSubmission(fixture_witness("x"));
-        assert_eq!(planner_dispatch_log::ipc_message_variant_name(&witness), "WitnessSubmission");
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&witness),
+            "WitnessSubmission"
+        );
 
         let ack = IpcMessage::WitnessAck {
             verifier_run_id: Uuid::nil(),
-            accepted:        true,
-            reason:          None,
+            accepted: true,
+            reason: None,
         };
-        assert_eq!(planner_dispatch_log::ipc_message_variant_name(&ack), "WitnessAck");
+        assert_eq!(
+            planner_dispatch_log::ipc_message_variant_name(&ack),
+            "WitnessAck"
+        );
     }
 
     /// **Regression**: the dispatcher's `planner_unexpected_message`
@@ -1779,12 +1842,10 @@ mod planner_dispatch_log_tests {
     /// echo the token.
     #[test]
     fn planner_unexpected_message_line_carries_variant_only_no_payload() {
-        let line = planner_dispatch_log::build_planner_unexpected_message_line(
-            "WitnessSubmission",
-            0,
-        );
+        let line =
+            planner_dispatch_log::build_planner_unexpected_message_line("WitnessSubmission", 0);
         let v = parse(&line);
-        assert_eq!(v["event"],   "planner_unexpected_message");
+        assert_eq!(v["event"], "planner_unexpected_message");
         assert_eq!(v["variant"], "WitnessSubmission");
         // No SECRET_ token should appear in this line — there is no
         // payload reference, only the variant tag.

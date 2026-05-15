@@ -48,11 +48,9 @@
 
 use std::path::PathBuf;
 
-use raxis_audit_tools::{
-    last_chain_state, AuditEventKind, AuditWriter, AUDIT_DIR_NAME,
-};
-use raxis_store::views::plan_fields::{reveal_for_task, PlanFieldsError, PlanPathFields};
+use raxis_audit_tools::{last_chain_state, AuditEventKind, AuditWriter, AUDIT_DIR_NAME};
 use raxis_store::open_ro;
+use raxis_store::views::plan_fields::{reveal_for_task, PlanFieldsError, PlanPathFields};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -77,7 +75,7 @@ pub const REVEAL_COLUMN_ALL: &str = "all";
 /// payload's `command` field so multiple reveal-capable commands can
 /// be told apart by log readers.
 pub fn reveal_path_fields(
-    flags:   &GlobalFlags,
+    flags: &GlobalFlags,
     task_id: &str,
     command: &str,
 ) -> Result<PlanPathFields, CliError> {
@@ -85,9 +83,8 @@ pub fn reveal_path_fields(
     // append: a `TaskNotFound` from the view layer means the
     // operator passed a nonexistent task_id and we should NOT
     // pollute the audit chain with a "reveal" of nothing.
-    let conn = open_ro(flags.data_dir()).map_err(|e| {
-        CliError::Policy(format!("kernel.db open failed: {e}"))
-    })?;
+    let conn = open_ro(flags.data_dir())
+        .map_err(|e| CliError::Policy(format!("kernel.db open failed: {e}")))?;
     let fields = reveal_for_task(&conn, task_id).map_err(map_reveal_error)?;
 
     // Step 2 + 3 — Append the audit event. Failure here is fatal:
@@ -108,8 +105,8 @@ pub fn reveal_path_fields(
 /// to audit other column reveals (e.g. `delegations.scope_json`) can
 /// call it directly without going through the plan-fields path.
 pub fn append_path_read_accessed(
-    flags:   &GlobalFlags,
-    actor:   &str,
+    flags: &GlobalFlags,
+    actor: &str,
     task_id: &str,
     command: &str,
 ) -> Result<(), CliError> {
@@ -123,7 +120,7 @@ pub fn append_path_read_accessed(
     })?;
     let (next_seq, prev_sha) = match resume {
         Some(info) => (info.next_seq, Some(info.prev_sha256)),
-        None       => (0, None),
+        None => (0, None),
     };
 
     let mut writer = AuditWriter::open(&segment_path, next_seq, prev_sha).map_err(|e| {
@@ -135,19 +132,17 @@ pub fn append_path_read_accessed(
     writer
         .append(
             AuditEventKind::PathReadAccessed {
-                actor:   actor.to_owned(),
-                table:   REVEAL_TABLE_NAME.to_owned(),
-                column:  REVEAL_COLUMN_ALL.to_owned(),
+                actor: actor.to_owned(),
+                table: REVEAL_TABLE_NAME.to_owned(),
+                column: REVEAL_COLUMN_ALL.to_owned(),
                 task_id: task_id.to_owned(),
                 command: command.to_owned(),
             },
-            None,           // session_id — CLI runs out-of-session
-            Some(task_id),  // foreign key for `raxis log --task`
-            None,           // initiative_id derivable from task_id via store query
+            None,          // session_id — CLI runs out-of-session
+            Some(task_id), // foreign key for `raxis log --task`
+            None,          // initiative_id derivable from task_id via store query
         )
-        .map_err(|e| {
-            CliError::Policy(format!("audit append for PathReadAccessed failed: {e}"))
-        })?;
+        .map_err(|e| CliError::Policy(format!("audit append for PathReadAccessed failed: {e}")))?;
     Ok(())
 }
 
@@ -157,26 +152,29 @@ pub fn append_path_read_accessed(
 fn map_reveal_error(e: PlanFieldsError) -> CliError {
     match e {
         PlanFieldsError::TaskNotFound { task_id } => CliError::KernelError {
-            code:   "TASK_NOT_FOUND".to_owned(),
+            code: "TASK_NOT_FOUND".to_owned(),
             detail: format!("no task with id {task_id:?}"),
         },
-        PlanFieldsError::PlanArtifactMissing { task_id, initiative_id } => {
-            CliError::Policy(format!(
-                "task {task_id:?} (initiative {initiative_id:?}) has no signed plan artifact \
+        PlanFieldsError::PlanArtifactMissing {
+            task_id,
+            initiative_id,
+        } => CliError::Policy(format!(
+            "task {task_id:?} (initiative {initiative_id:?}) has no signed plan artifact \
                  in kernel.db; cannot reveal paths"
-            ))
-        }
-        PlanFieldsError::PlanInvalid { initiative_id, reason } => {
-            CliError::Policy(format!(
-                "plan TOML for initiative {initiative_id:?} is unparseable: {reason}"
-            ))
-        }
-        PlanFieldsError::TaskNotInPlan { initiative_id, task_id } => {
-            CliError::Policy(format!(
-                "plan for initiative {initiative_id:?} has no [[tasks]] entry for \
+        )),
+        PlanFieldsError::PlanInvalid {
+            initiative_id,
+            reason,
+        } => CliError::Policy(format!(
+            "plan TOML for initiative {initiative_id:?} is unparseable: {reason}"
+        )),
+        PlanFieldsError::TaskNotInPlan {
+            initiative_id,
+            task_id,
+        } => CliError::Policy(format!(
+            "plan for initiative {initiative_id:?} has no [[tasks]] entry for \
                  task_id={task_id:?} — kernel may have admitted a task outside the signed plan"
-            ))
-        }
+        )),
         PlanFieldsError::Sqlite(e) => CliError::Policy(format!("plan_fields sqlite error: {e}")),
     }
 }
@@ -185,7 +183,10 @@ fn map_reveal_error(e: PlanFieldsError) -> CliError {
 /// constant `AUDIT_DIR_NAME` from `raxis-audit-tools` so a future
 /// rename in the kernel writer reaches both.
 fn audit_segment_path(flags: &GlobalFlags) -> PathBuf {
-    flags.data_dir().join(AUDIT_DIR_NAME).join("segment-000.jsonl")
+    flags
+        .data_dir()
+        .join(AUDIT_DIR_NAME)
+        .join("segment-000.jsonl")
 }
 
 /// Build the `actor` string for the `PathReadAccessed` payload. See
@@ -224,19 +225,16 @@ mod tests {
     /// kernel-style record so we exercise the chain-resume path.
     /// Returns the tempdir + the (init, task) ids.
     fn fresh_data_dir_with_plan(plan_toml: &str) -> (TempDir, String, String) {
-        const INITIATIVES:           &str =
-            raxis_store::Table::Initiatives.as_str();
-        const TASKS:                 &str =
-            raxis_store::Table::Tasks.as_str();
-        const SIGNED_PLAN_ARTIFACTS: &str =
-            raxis_store::Table::SignedPlanArtifacts.as_str();
+        const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        const SIGNED_PLAN_ARTIFACTS: &str = raxis_store::Table::SignedPlanArtifacts.as_str();
 
         let tmp = TempDir::new().unwrap();
         let data_dir = tmp.path();
         // kernel.db
         let db = data_dir.join("kernel.db");
         let initiative_id = "init-1".to_owned();
-        let task_id       = "t-1".to_owned();
+        let task_id = "t-1".to_owned();
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
@@ -248,23 +246,27 @@ mod tests {
                 ),
                 rusqlite::params![&initiative_id],
             ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {TASKS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {TASKS} \
                      (task_id, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
                      VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)"
-                ),
-                rusqlite::params![&task_id, &initiative_id],
-            ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                    ),
+                    rusqlite::params![&task_id, &initiative_id],
+                )
+                .unwrap();
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
                      (initiative_id, plan_bytes, plan_sig, stored_at) \
                      VALUES (?1, ?2, x'00', 1)"
-                ),
-                rusqlite::params![&initiative_id, plan_toml.as_bytes()],
-            ).unwrap();
+                    ),
+                    rusqlite::params![&initiative_id, plan_toml.as_bytes()],
+                )
+                .unwrap();
         }
         // audit/segment-000.jsonl with one seed record so the
         // resume path is exercised (not just the genesis-from-empty
@@ -275,20 +277,23 @@ mod tests {
         let mut seed = AuditWriter::open(&seg, 0, None).unwrap();
         seed.append(
             AuditEventKind::KernelStarted {
-                data_dir:       data_dir.display().to_string(),
-                policy_epoch:   1,
+                data_dir: data_dir.display().to_string(),
+                policy_epoch: 1,
                 schema_version: 1,
             },
-            None, None, None,
-        ).unwrap();
+            None,
+            None,
+            None,
+        )
+        .unwrap();
         drop(seed);
         (tmp, initiative_id, task_id)
     }
 
     fn flags_for(data_dir: &std::path::Path) -> GlobalFlags {
         GlobalFlags {
-            data_dir:          data_dir.to_path_buf(),
-            socket_path:       None,
+            data_dir: data_dir.to_path_buf(),
+            socket_path: None,
             operator_key_path: None,
         }
     }
@@ -324,9 +329,9 @@ mod tests {
         assert_eq!(last.event_kind, "PathReadAccessed");
         assert_eq!(last.task_id.as_deref(), Some("t-1"));
         let payload = last.parsed_value.as_ref().unwrap().get("payload").unwrap();
-        assert_eq!(payload["kind"],    serde_json::json!("PathReadAccessed"));
-        assert_eq!(payload["table"],   serde_json::json!("task_plan_fields"));
-        assert_eq!(payload["column"],  serde_json::json!("all"));
+        assert_eq!(payload["kind"], serde_json::json!("PathReadAccessed"));
+        assert_eq!(payload["table"], serde_json::json!("task_plan_fields"));
+        assert_eq!(payload["column"], serde_json::json!("all"));
         assert_eq!(payload["command"], serde_json::json!("inspect"));
         assert_eq!(payload["task_id"], serde_json::json!("t-1"));
         let actor = payload["actor"].as_str().unwrap();
@@ -384,7 +389,7 @@ mod tests {
 
     #[test]
     fn resolve_actor_identity_returns_cli_user_when_no_key_supplied() {
-        let tmp   = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let flags = flags_for(tmp.path());
         let actor = resolve_actor_identity(&flags).unwrap();
         assert!(

@@ -77,14 +77,18 @@ impl HttpBackend {
             // a gateway that cannot mint a TLS client cannot fulfil
             // its single side effect.
             .expect("reqwest::Client init failed (TLS stack misconfigured?)");
-        Self { client: Arc::new(client) }
+        Self {
+            client: Arc::new(client),
+        }
     }
 
     /// Construct a backend backed by an externally-built client.
     /// Used by tests and by operators that want to install custom
     /// root CAs or middleware.
     pub fn from_client(client: reqwest::Client) -> Self {
-        Self { client: Arc::new(client) }
+        Self {
+            client: Arc::new(client),
+        }
     }
 }
 
@@ -92,8 +96,9 @@ impl Backend for HttpBackend {
     fn call<'a>(
         &'a self,
         req: BackendRequest<'a>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>>
-    {
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>,
+    > {
         let client = self.client.clone();
         Box::pin(async move {
             let started = std::time::Instant::now();
@@ -120,8 +125,7 @@ impl Backend for HttpBackend {
             // `credential-proxy.md` §4.
             let auth_value = format!(
                 "{}{}",
-                req.provider.credentials.auth_prefix,
-                req.provider.credentials.api_key,
+                req.provider.credentials.auth_prefix, req.provider.credentials.api_key,
             );
             builder = builder.header(&req.provider.credentials.auth_header, auth_value);
 
@@ -163,7 +167,9 @@ impl Backend for HttpBackend {
                     // because a strict reject would surprise
                     // operators when a CDN inserts a `via:` header
                     // with a Latin-1 character.
-                    Err(_) => v.as_bytes().iter()
+                    Err(_) => v
+                        .as_bytes()
+                        .iter()
                         .map(|b| format!("\\x{:02x}", b))
                         .collect::<String>(),
                 };
@@ -194,29 +200,26 @@ impl Backend for HttpBackend {
             let mut resp = resp;
             loop {
                 let next = match stream_idle {
-                    Some(idle) => {
-                        match tokio::time::timeout(idle, resp.chunk()).await {
-                            Ok(r) => r,
-                            Err(_) => {
-                                return Err(BackendError::Timeout {
-                                    timeout_ms: idle
-                                        .as_millis()
-                                        .min(u32::MAX as u128)
-                                        as u32,
-                                });
-                            }
+                    Some(idle) => match tokio::time::timeout(idle, resp.chunk()).await {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return Err(BackendError::Timeout {
+                                timeout_ms: idle.as_millis().min(u32::MAX as u128) as u32,
+                            });
                         }
-                    }
+                    },
                     None => resp.chunk().await,
                 }
                 .map_err(|e| BackendError::Upstream {
                     reason: format!("body stream error: {e}"),
                 })?;
-                let Some(chunk) = next else { break; };
+                let Some(chunk) = next else {
+                    break;
+                };
                 let next_total = body.len() as u64 + chunk.len() as u64;
                 if next_total > limit {
                     return Err(BackendError::TooLarge {
-                        got:   next_total,
+                        got: next_total,
                         limit,
                     });
                 }
@@ -235,12 +238,12 @@ impl Backend for HttpBackend {
 
 fn parse_method(m: &str) -> Result<reqwest::Method, BackendError> {
     match m.to_ascii_uppercase().as_str() {
-        "GET"     => Ok(reqwest::Method::GET),
-        "POST"    => Ok(reqwest::Method::POST),
-        "PUT"     => Ok(reqwest::Method::PUT),
-        "PATCH"   => Ok(reqwest::Method::PATCH),
-        "DELETE"  => Ok(reqwest::Method::DELETE),
-        "HEAD"    => Ok(reqwest::Method::HEAD),
+        "GET" => Ok(reqwest::Method::GET),
+        "POST" => Ok(reqwest::Method::POST),
+        "PUT" => Ok(reqwest::Method::PUT),
+        "PATCH" => Ok(reqwest::Method::PATCH),
+        "DELETE" => Ok(reqwest::Method::DELETE),
+        "HEAD" => Ok(reqwest::Method::HEAD),
         "OPTIONS" => Ok(reqwest::Method::OPTIONS),
         other => Err(BackendError::Upstream {
             reason: format!("unsupported HTTP method {other:?}"),
@@ -291,9 +294,7 @@ mod tests {
         use raxis_gateway_substrate::ProviderEntryView;
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-            .await
-            .unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
 
         // Mock server: read request, send headers + first 4 bytes
@@ -327,14 +328,14 @@ mod tests {
         // Provider with a generous per-request timeout so the only
         // boundary that fires is the idle one.
         let provider = ProviderEntryView {
-            provider_id:           "anthropic".to_owned(),
-            kind:                  "Anthropic".to_owned(),
-            inference_timeout_ms:  60_000,
+            provider_id: "anthropic".to_owned(),
+            kind: "Anthropic".to_owned(),
+            inference_timeout_ms: 60_000,
             data_fetch_timeout_ms: 60_000,
-            max_response_bytes:    1_048_576,
+            max_response_bytes: 1_048_576,
             stream_idle_timeout_ms: None,
             credentials: raxis_gateway_substrate::ProviderCredentials {
-                api_key:     "k-test".to_owned(),
+                api_key: "k-test".to_owned(),
                 auth_header: "x-api-key".to_owned(),
                 auth_prefix: "".to_owned(),
             },
@@ -343,12 +344,12 @@ mod tests {
         let backend = HttpBackend::new();
         let url = format!("http://127.0.0.1:{port}/v1/messages");
         let req = BackendRequest {
-            provider:            &provider,
-            url:                 &url,
-            method:              "POST",
-            headers:             &[],
-            body:                b"{}",
-            timeout:             Duration::from_secs(60),
+            provider: &provider,
+            url: &url,
+            method: "POST",
+            headers: &[],
+            body: b"{}",
+            timeout: Duration::from_secs(60),
             stream_idle_timeout: Some(Duration::from_millis(250)),
         };
 

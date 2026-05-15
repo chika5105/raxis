@@ -104,17 +104,17 @@ use crate::GlobalFlags;
 const DEFAULT_INSTALL_DIR: &str = "/usr/local/lib/raxis";
 
 const POLICY_FILE_NAME: &str = "policy.toml";
-const AUDIT_DIR_NAME:   &str = "audit";
+const AUDIT_DIR_NAME: &str = "audit";
 
 // Spec'd mode bits per kernel-store.md §2.5.1 ("permissions") and
 // peripherals.md §3.2 (providers/). These match what bootstrap.rs sets.
 const EXPECTED_MODES: &[(&str, u32)] = &[
-    ("keys",          0o700),
-    ("policy",        0o755),
-    ("audit",         0o755),
-    ("providers",     0o700),
-    ("runtime",       0o755),
-    ("sockets",       0o755),
+    ("keys", 0o700),
+    ("policy", 0o755),
+    ("audit", 0o755),
+    ("providers", 0o700),
+    ("runtime", 0o755),
+    ("sockets", 0o755),
     ("notifications", 0o755),
 ];
 
@@ -127,18 +127,22 @@ const EXPECTED_MODES: &[(&str, u32)] = &[
 struct Check {
     /// Short stable identifier, e.g. "data_dir.exists". Stable across
     /// versions so JSON consumers can pin against it.
-    id:      &'static str,
+    id: &'static str,
     outcome: Outcome,
-    detail:  String,
+    detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Outcome { Ok, Warn, Fail }
+enum Outcome {
+    Ok,
+    Warn,
+    Fail,
+}
 
 impl Outcome {
     fn label(self) -> &'static str {
         match self {
-            Self::Ok   => "OK",
+            Self::Ok => "OK",
             Self::Warn => "WARN",
             Self::Fail => "FAIL",
         }
@@ -152,7 +156,11 @@ struct Report {
 
 impl Report {
     fn push(&mut self, id: &'static str, outcome: Outcome, detail: impl Into<String>) {
-        self.checks.push(Check { id, outcome, detail: detail.into() });
+        self.checks.push(Check {
+            id,
+            outcome,
+            detail: detail.into(),
+        });
     }
 
     /// Worst-of outcome. Drives the process exit code.
@@ -160,9 +168,9 @@ impl Report {
         let mut worst = Outcome::Ok;
         for c in &self.checks {
             worst = match (worst, c.outcome) {
-                (_, Outcome::Fail)              => Outcome::Fail,
-                (Outcome::Ok, Outcome::Warn)    => Outcome::Warn,
-                (other, _)                      => other,
+                (_, Outcome::Fail) => Outcome::Fail,
+                (Outcome::Ok, Outcome::Warn) => Outcome::Warn,
+                (other, _) => other,
             };
         }
         worst
@@ -170,7 +178,7 @@ impl Report {
 
     fn exit_code(&self) -> i32 {
         match self.worst() {
-            Outcome::Ok   => 0,
+            Outcome::Ok => 0,
             Outcome::Warn => 1,
             Outcome::Fail => 2,
         }
@@ -189,9 +197,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         Subcommand::CanonicalImages { install_dir } => {
             run_canonical_images(parsed.opts, install_dir)
         }
-        Subcommand::CachePrune { dry_run } => {
-            run_cache_prune(flags, parsed.opts, dry_run)
-        }
+        Subcommand::CachePrune { dry_run } => run_cache_prune(flags, parsed.opts, dry_run),
         Subcommand::Category(cat) => run_category(flags, parsed.opts, cat),
     }
 }
@@ -301,7 +307,7 @@ fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), Cl
     // presence/absence as an informational Warn-or-Ok at the end,
     // without invoking the kernel-trust path.
     let images = [
-        (CanonicalImageKind::Reviewer,     "raxis-reviewer-core"),
+        (CanonicalImageKind::Reviewer, "raxis-reviewer-core"),
         (CanonicalImageKind::Orchestrator, "raxis-orchestrator-core"),
     ];
 
@@ -318,7 +324,11 @@ fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), Cl
             ),
         );
     } else {
-        report.push("canonical_images.dir", Outcome::Ok, format!("{}", images_dir.display()));
+        report.push(
+            "canonical_images.dir",
+            Outcome::Ok,
+            format!("{}", images_dir.display()),
+        );
 
         for (kind, file_prefix) in images {
             let image_path = images_dir.join(format!("{file_prefix}-{kernel_version}.img"));
@@ -331,8 +341,10 @@ fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), Cl
             report.push(
                 "canonical_images.executor_starter.exists",
                 Outcome::Ok,
-                format!("{} present (operator-replaceable; not kernel-trust-verified here)",
-                    exec_path.display()),
+                format!(
+                    "{} present (operator-replaceable; not kernel-trust-verified here)",
+                    exec_path.display()
+                ),
             );
         } else {
             report.push(
@@ -356,9 +368,9 @@ fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), Cl
 }
 
 fn verify_one(
-    report:         &mut Report,
-    kind:           CanonicalImageKind,
-    image_path:     &Path,
+    report: &mut Report,
+    kind: CanonicalImageKind,
+    image_path: &Path,
     kernel_version: &str,
 ) {
     let id_exists = leak_subdir_id_owned(format!("canonical_images.{}.exists", kind_tag(kind)));
@@ -437,15 +449,11 @@ fn verify_one(
 ///         as 0 but no bytes were freed.
 ///   * 2 — the cache could not be enumerated (filesystem error
 ///         walking the cache root, etc.); details on stderr.
-fn run_cache_prune(
-    flags:   &GlobalFlags,
-    opts:    DoctorOpts,
-    dry_run: bool,
-) -> Result<(), CliError> {
-    use std::collections::HashSet;
+fn run_cache_prune(flags: &GlobalFlags, opts: DoctorOpts, dry_run: bool) -> Result<(), CliError> {
     use raxis_image_cache::{ImageResolver, OciDigest, ProductionResolver};
+    use std::collections::HashSet;
 
-    let data_dir   = flags.data_dir().clone();
+    let data_dir = flags.data_dir().clone();
     let cache_root = data_dir.join("oci-cache");
 
     let stdout = std::io::stdout();
@@ -455,10 +463,7 @@ fn run_cache_prune(
     let live_digests: HashSet<OciDigest> = match enumerate_live_digests(&data_dir) {
         Ok(s) => s,
         Err(e) => {
-            let _ = writeln!(
-                out,
-                "raxis doctor cache prune — FAIL: {e}",
-            );
+            let _ = writeln!(out, "raxis doctor cache prune — FAIL: {e}",);
             std::process::exit(2);
         }
     };
@@ -497,9 +502,12 @@ fn run_cache_prune(
     // `None` for both. The reqwest client is constructed but
     // unused (prune is local I/O only).
     let client = match reqwest::Client::builder().build() {
-        Ok(c)  => c,
+        Ok(c) => c,
         Err(e) => {
-            let _ = writeln!(out, "raxis doctor cache prune — FAIL: reqwest client build: {e}");
+            let _ = writeln!(
+                out,
+                "raxis doctor cache prune — FAIL: reqwest client build: {e}"
+            );
             std::process::exit(2);
         }
     };
@@ -563,12 +571,14 @@ fn enumerate_live_digests(
     }
     let body = std::fs::read_to_string(&policy_path)
         .map_err(|e| format!("read {}: {e}", policy_path.display()))?;
-    let value: toml::Value = toml::from_str(&body)
-        .map_err(|e| format!("parse {}: {e}", policy_path.display()))?;
+    let value: toml::Value =
+        toml::from_str(&body).map_err(|e| format!("parse {}: {e}", policy_path.display()))?;
     let mut out = HashSet::new();
     if let Some(arr) = value.get("vm_images").and_then(|v| v.as_array()) {
         for entry in arr {
-            let Some(d) = entry.get("oci_digest").and_then(|v| v.as_str()) else { continue };
+            let Some(d) = entry.get("oci_digest").and_then(|v| v.as_str()) else {
+                continue;
+            };
             if let Ok(parsed) = d.parse::<raxis_image_cache::OciDigest>() {
                 out.insert(parsed);
             }
@@ -583,14 +593,19 @@ fn enumerate_dead_digests(
 ) -> Result<Vec<raxis_image_cache::OciDigest>, String> {
     use std::fs;
     let images_root = cache_root.join("images/sha256");
-    if !images_root.exists() { return Ok(Vec::new()); }
+    if !images_root.exists() {
+        return Ok(Vec::new());
+    }
     let mut out = Vec::new();
     for shard in fs::read_dir(&images_root).map_err(|e| format!("read {images_root:?}: {e}"))? {
         let shard = shard.map_err(|e| e.to_string())?;
         for de in fs::read_dir(shard.path()).map_err(|e| e.to_string())? {
             let de = de.map_err(|e| e.to_string())?;
-            let Some(name) = de.file_name().to_str().map(str::to_owned) else { continue };
-            let Ok(digest) = format!("sha256:{name}").parse::<raxis_image_cache::OciDigest>() else {
+            let Some(name) = de.file_name().to_str().map(str::to_owned) else {
+                continue;
+            };
+            let Ok(digest) = format!("sha256:{name}").parse::<raxis_image_cache::OciDigest>()
+            else {
                 continue;
             };
             if !live.contains(&digest) {
@@ -603,8 +618,8 @@ fn enumerate_dead_digests(
 
 fn kind_tag(kind: CanonicalImageKind) -> &'static str {
     match kind {
-        CanonicalImageKind::Reviewer        => "reviewer",
-        CanonicalImageKind::Orchestrator    => "orchestrator",
+        CanonicalImageKind::Reviewer => "reviewer",
+        CanonicalImageKind::Orchestrator => "orchestrator",
         CanonicalImageKind::ExecutorStarter => "executor-starter",
     }
 }
@@ -614,10 +629,10 @@ fn leak_subdir_id_owned(s: String) -> &'static str {
 }
 
 fn render_canonical_images_human<W: Write>(
-    out:            &mut W,
-    install_dir:    &Path,
+    out: &mut W,
+    install_dir: &Path,
     kernel_version: &str,
-    report:         &Report,
+    report: &Report,
 ) {
     let _ = writeln!(out, "raxis doctor — canonical images");
     let _ = writeln!(out, "  install_dir:    {}", install_dir.display());
@@ -628,8 +643,8 @@ fn render_canonical_images_human<W: Write>(
         let _ = writeln!(
             out,
             "  [{lvl:<4}] {id:<48} {detail}",
-            lvl    = c.outcome.label(),
-            id     = c.id,
+            lvl = c.outcome.label(),
+            id = c.id,
             detail = c.detail,
         );
     }
@@ -654,16 +669,12 @@ enum Subcommand {
     SigningKeyFp,
     /// `raxis doctor canonical-images` — verify shipped canonical
     /// images under `<install_dir>/images/`.
-    CanonicalImages {
-        install_dir: PathBuf,
-    },
+    CanonicalImages { install_dir: PathBuf },
     /// `raxis doctor cache prune` — sweep the OCI image cache
     /// (`<data_dir>/oci-cache/`) for `images/` and `blobs/` entries
     /// whose digest is not referenced by any active policy
     /// generation. The `--dry-run` flag walks without unlinking.
-    CachePrune {
-        dry_run: bool,
-    },
+    CachePrune { dry_run: bool },
     /// `raxis doctor <category>` per `operator-ergonomics.md §17.3`.
     /// V2.3 MVP categories:
     /// `policy` | `providers` | `host` | `network` | `keys`
@@ -701,15 +712,15 @@ enum DoctorCategory {
 impl DoctorCategory {
     fn parse(s: &str) -> Option<Self> {
         match s {
-            "policy"    => Some(Self::Policy),
+            "policy" => Some(Self::Policy),
             "providers" => Some(Self::Providers),
-            "host"      => Some(Self::Host),
-            "network"   => Some(Self::Network),
-            "keys"      => Some(Self::Keys),
-            "bundles"   => Some(Self::Bundles),
+            "host" => Some(Self::Host),
+            "network" => Some(Self::Network),
+            "keys" => Some(Self::Keys),
+            "bundles" => Some(Self::Bundles),
             "vm-images" => Some(Self::VmImages),
-            "all"       => Some(Self::All),
-            _           => None,
+            "all" => Some(Self::All),
+            _ => None,
         }
     }
 }
@@ -717,7 +728,7 @@ impl DoctorCategory {
 #[derive(Debug, Clone)]
 struct ParsedArgs {
     subcommand: Subcommand,
-    opts:       DoctorOpts,
+    opts: DoctorOpts,
 }
 
 fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
@@ -733,13 +744,19 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
     match subcmd_name {
         None => {
             let opts = parse_default_flags(args)?;
-            Ok(ParsedArgs { subcommand: Subcommand::Default, opts })
+            Ok(ParsedArgs {
+                subcommand: Subcommand::Default,
+                opts,
+            })
         }
         Some("signing-key-fp") => {
             let mut tail = args.to_vec();
             tail.remove(subcmd_pos.unwrap());
             let opts = parse_default_flags(&tail)?;
-            Ok(ParsedArgs { subcommand: Subcommand::SigningKeyFp, opts })
+            Ok(ParsedArgs {
+                subcommand: Subcommand::SigningKeyFp,
+                opts,
+            })
         }
         Some("canonical-images") => {
             let mut tail = args.to_vec();
@@ -777,7 +794,8 @@ fn parse_args(args: &[String]) -> Result<ParsedArgs, CliError> {
                 ))),
                 None => Err(CliError::Usage(
                     "missing verb after `cache` \
-                     (available: prune)".to_owned(),
+                     (available: prune)"
+                        .to_owned(),
                 )),
             }
         }
@@ -812,15 +830,17 @@ fn parse_cache_prune_flags(args: &[String]) -> Result<(DoctorOpts, bool), CliErr
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json"    => opts.json = true,
+            "--json" => opts.json = true,
             "--dry-run" => dry_run = true,
             "-h" | "--help" => {
                 eprintln!("Usage: raxis doctor cache prune [--dry-run] [--json]");
                 std::process::exit(0);
             }
-            other => return Err(CliError::Usage(format!(
-                "unknown flag for `doctor cache prune`: {other:?}",
-            ))),
+            other => {
+                return Err(CliError::Usage(format!(
+                    "unknown flag for `doctor cache prune`: {other:?}",
+                )))
+            }
         }
         i += 1;
     }
@@ -849,7 +869,7 @@ fn parse_default_flags(args: &[String]) -> Result<DoctorOpts, CliError> {
 }
 
 fn parse_canonical_images_flags(args: &[String]) -> Result<(DoctorOpts, PathBuf), CliError> {
-    let mut opts        = DoctorOpts::default();
+    let mut opts = DoctorOpts::default();
     let mut install_dir: Option<PathBuf> = None;
     let mut i = 0;
     while i < args.len() {
@@ -860,9 +880,9 @@ fn parse_canonical_images_flags(args: &[String]) -> Result<(DoctorOpts, PathBuf)
                 std::process::exit(0);
             }
             "--install-dir" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::Usage(
-                    "missing value for --install-dir".to_owned(),
-                ))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("missing value for --install-dir".to_owned()))?;
                 if v.is_empty() {
                     return Err(CliError::Usage("--install-dir cannot be empty".to_owned()));
                 }
@@ -880,9 +900,9 @@ fn parse_canonical_images_flags(args: &[String]) -> Result<(DoctorOpts, PathBuf)
     }
 
     // Resolve install dir: --install-dir > $RAXIS_INSTALL_DIR > default.
-    let install_dir = install_dir.or_else(|| {
-        std::env::var("RAXIS_INSTALL_DIR").ok().map(PathBuf::from)
-    }).unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR));
+    let install_dir = install_dir
+        .or_else(|| std::env::var("RAXIS_INSTALL_DIR").ok().map(PathBuf::from))
+        .unwrap_or_else(|| PathBuf::from(DEFAULT_INSTALL_DIR));
 
     Ok((opts, install_dir))
 }
@@ -920,7 +940,11 @@ fn collect(data_dir: &Path) -> Report {
     // 1. data_dir exists.
     match std::fs::metadata(data_dir) {
         Ok(m) if m.is_dir() => {
-            r.push("data_dir.exists", Outcome::Ok, format!("{}", data_dir.display()));
+            r.push(
+                "data_dir.exists",
+                Outcome::Ok,
+                format!("{}", data_dir.display()),
+            );
         }
         Ok(_) => {
             r.push(
@@ -969,7 +993,9 @@ fn collect(data_dir: &Path) -> Report {
             r.push("store.open_ro", Outcome::Ok, "schema version pin satisfied");
             Some(c)
         }
-        Err(RoError::SchemaMismatch { actual, expected, .. }) => {
+        Err(RoError::SchemaMismatch {
+            actual, expected, ..
+        }) => {
             r.push(
                 "store.open_ro",
                 Outcome::Fail,
@@ -1010,7 +1036,10 @@ fn collect(data_dir: &Path) -> Report {
     // 6. Audit chain quick check.
     let audit_dir = data_dir.join(AUDIT_DIR_NAME);
     match quick_chain_check(&audit_dir) {
-        ChainQuickCheck::Ok { last_seq, segment_count } => {
+        ChainQuickCheck::Ok {
+            last_seq,
+            segment_count,
+        } => {
             r.push(
                 "audit.quick_check",
                 Outcome::Ok,
@@ -1085,11 +1114,7 @@ fn collect(data_dir: &Path) -> Report {
 /// cert (for instance due to migration drift), doctor will not see
 /// it either, which is the right behaviour — the kernel's view of
 /// the world is what matters at boot.
-fn check_operator_certs(
-    r:    &mut Report,
-    conn: &raxis_store::RoConn,
-    now:  i64,
-) {
+fn check_operator_certs(r: &mut Report, conn: &raxis_store::RoConn, now: i64) {
     let rows = match operator_certificates::list_all(conn) {
         Ok(rows) => rows,
         Err(e) => {
@@ -1134,24 +1159,23 @@ fn check_operator_certs(
         // check at policy-sign time and should be reminded.
         if row.force_misconfig_bypass {
             r.push(
-                Box::leak(format!("cert.{}.misconfig_bypass", &row.pubkey_fingerprint)
-                    .into_boxed_str()),
+                Box::leak(
+                    format!("cert.{}.misconfig_bypass", &row.pubkey_fingerprint).into_boxed_str(),
+                ),
                 Outcome::Warn,
                 format!(
                     "{display} ({fp}) was installed with --force-misconfig — \
                      a structural validation check was bypassed at policy-sign time. \
                      See `OperatorCertMisconfigBypassed` audit event for the reason.",
                     display = row.display_name,
-                    fp      = row.pubkey_fingerprint,
+                    fp = row.pubkey_fingerprint,
                 ),
             );
         }
 
-        let cert   = row.clone().into_operator_cert();
+        let cert = row.clone().into_operator_cert();
         let status = cert_status(&cert, now);
-        let id     = Box::leak(
-            format!("cert.{}.status", &row.pubkey_fingerprint).into_boxed_str(),
-        );
+        let id = Box::leak(format!("cert.{}.status", &row.pubkey_fingerprint).into_boxed_str());
 
         match status {
             CertStatus::Active | CertStatus::AlwaysActiveEmergency => {
@@ -1161,8 +1185,8 @@ fn check_operator_certs(
                     format!(
                         "{display} ({fp}) status={tag}",
                         display = row.display_name,
-                        fp      = row.pubkey_fingerprint,
-                        tag     = status.tag(),
+                        fp = row.pubkey_fingerprint,
+                        tag = status.tag(),
                     ),
                 );
             }
@@ -1176,14 +1200,16 @@ fn check_operator_certs(
                          (warn_window={warn_d}d, not_after={not_after}); \
                          rotate via `raxis cert mint` + `raxis cert install` \
                          + `raxis epoch advance`",
-                        display   = row.display_name,
-                        fp        = row.pubkey_fingerprint,
-                        warn_d    = row.warn_before_expiry_days,
+                        display = row.display_name,
+                        fp = row.pubkey_fingerprint,
+                        warn_d = row.warn_before_expiry_days,
                         not_after = row.not_after,
                     ),
                 );
             }
-            CertStatus::Grace { secs_until_grace_end } => {
+            CertStatus::Grace {
+                secs_until_grace_end,
+            } => {
                 let days = secs_until_grace_end / 86_400;
                 r.push(
                     id,
@@ -1193,7 +1219,7 @@ fn check_operator_certs(
                          allowed. {days}d remaining before all ops are denied. \
                          Rotate immediately.",
                         display = row.display_name,
-                        fp      = row.pubkey_fingerprint,
+                        fp = row.pubkey_fingerprint,
                     ),
                 );
             }
@@ -1206,7 +1232,7 @@ fn check_operator_certs(
                         "{display} ({fp}) EXPIRED ~{days}d ago — all ops denied. \
                          Operator key is unusable until rotated.",
                         display = row.display_name,
-                        fp      = row.pubkey_fingerprint,
+                        fp = row.pubkey_fingerprint,
                     ),
                 );
             }
@@ -1218,8 +1244,8 @@ fn check_operator_certs(
                     format!(
                         "{display} ({fp}) NOT YET VALID — activates in ~{days}d \
                          (not_before={not_before}). All ops denied until then.",
-                        display    = row.display_name,
-                        fp         = row.pubkey_fingerprint,
+                        display = row.display_name,
+                        fp = row.pubkey_fingerprint,
                         not_before = row.not_before,
                     ),
                 );
@@ -1233,7 +1259,7 @@ fn check_operator_certs(
                          — all ops denied. Mint a fresh cert with a new signing \
                          key, install it, and advance the policy epoch.",
                         display = row.display_name,
-                        fp      = row.pubkey_fingerprint,
+                        fp = row.pubkey_fingerprint,
                     ),
                 );
             }
@@ -1248,7 +1274,7 @@ fn check_operator_certs(
 fn check_subdir(r: &mut Report, data_dir: &Path, name: &'static str, expected_mode: u32) {
     let path = data_dir.join(name);
     let id_exists = leak_subdir_id(name, "exists");
-    let id_mode   = leak_subdir_id(name, "mode");
+    let id_mode = leak_subdir_id(name, "mode");
 
     let meta = match std::fs::metadata(&path) {
         Ok(m) => m,
@@ -1260,11 +1286,7 @@ fn check_subdir(r: &mut Report, data_dir: &Path, name: &'static str, expected_mo
             } else {
                 Outcome::Fail
             };
-            r.push(
-                id_exists,
-                outcome,
-                format!("missing: {}", path.display()),
-            );
+            r.push(id_exists, outcome, format!("missing: {}", path.display()));
             return;
         }
     };
@@ -1336,8 +1358,8 @@ fn render_human<W: Write>(out: &mut W, data_dir: &Path, report: &Report) {
         let _ = writeln!(
             out,
             "  [{lvl:<4}] {id:<28} {detail}",
-            lvl    = c.outcome.label(),
-            id     = c.id,
+            lvl = c.outcome.label(),
+            id = c.id,
             detail = c.detail,
         );
     }
@@ -1378,8 +1400,8 @@ fn render_json<W: Write>(out: &mut W, data_dir: &Path, report: &Report) {
 
 fn run_category(
     flags: &GlobalFlags,
-    opts:  DoctorOpts,
-    cat:   DoctorCategory,
+    opts: DoctorOpts,
+    cat: DoctorCategory,
 ) -> Result<(), CliError> {
     let data_dir = flags.data_dir().clone();
     let report = collect_category(&data_dir, cat);
@@ -1397,14 +1419,14 @@ fn run_category(
 fn collect_category(data_dir: &Path, cat: DoctorCategory) -> Report {
     let mut r = Report::default();
     match cat {
-        DoctorCategory::Policy    => collect_policy(data_dir, &mut r),
+        DoctorCategory::Policy => collect_policy(data_dir, &mut r),
         DoctorCategory::Providers => collect_providers(data_dir, &mut r),
-        DoctorCategory::Host      => collect_host(data_dir, &mut r),
-        DoctorCategory::Network   => collect_network(data_dir, &mut r),
-        DoctorCategory::Keys      => collect_keys(data_dir, &mut r),
-        DoctorCategory::Bundles   => collect_bundles(data_dir, &mut r),
-        DoctorCategory::VmImages  => collect_vm_images(data_dir, &mut r),
-        DoctorCategory::All       => {
+        DoctorCategory::Host => collect_host(data_dir, &mut r),
+        DoctorCategory::Network => collect_network(data_dir, &mut r),
+        DoctorCategory::Keys => collect_keys(data_dir, &mut r),
+        DoctorCategory::Bundles => collect_bundles(data_dir, &mut r),
+        DoctorCategory::VmImages => collect_vm_images(data_dir, &mut r),
+        DoctorCategory::All => {
             collect_policy(data_dir, &mut r);
             collect_providers(data_dir, &mut r);
             collect_host(data_dir, &mut r);
@@ -1425,13 +1447,22 @@ fn collect_policy(data_dir: &Path, r: &mut Report) {
     let policy_path = data_dir.join("policy/policy.toml");
     match std::fs::metadata(&policy_path) {
         Ok(_) => match raxis_policy::load_policy(&policy_path) {
-            Ok((b, _bytes, _sha)) => r.push("policy.load", Outcome::Ok,
-                format!("loaded; epoch={}", b.epoch())),
-            Err(e) => r.push("policy.load", Outcome::Fail,
-                format!("failed to load {}: {e}", policy_path.display())),
+            Ok((b, _bytes, _sha)) => r.push(
+                "policy.load",
+                Outcome::Ok,
+                format!("loaded; epoch={}", b.epoch()),
+            ),
+            Err(e) => r.push(
+                "policy.load",
+                Outcome::Fail,
+                format!("failed to load {}: {e}", policy_path.display()),
+            ),
         },
-        Err(_) => r.push("policy.load", Outcome::Fail,
-            format!("policy file missing at {}", policy_path.display())),
+        Err(_) => r.push(
+            "policy.load",
+            Outcome::Fail,
+            format!("policy file missing at {}", policy_path.display()),
+        ),
     }
 }
 
@@ -1460,26 +1491,38 @@ fn collect_providers(data_dir: &Path, r: &mut Report) {
     let bundle = match raxis_policy::load_policy(&policy_path) {
         Ok((b, _bytes, _sha)) => b,
         Err(e) => {
-            r.push("providers.load_policy", Outcome::Fail,
-                format!("policy load failed: {e}"));
+            r.push(
+                "providers.load_policy",
+                Outcome::Fail,
+                format!("policy load failed: {e}"),
+            );
             return;
         }
     };
     if bundle.providers().is_empty() {
-        r.push("providers.count", Outcome::Warn,
-            "no [[providers]] declared — gateway-mediated inference disabled");
+        r.push(
+            "providers.count",
+            Outcome::Warn,
+            "no [[providers]] declared — gateway-mediated inference disabled",
+        );
         return;
     }
     for p in bundle.providers() {
-        r.push("providers.entry", Outcome::Ok,
-            format!("{} ({:?})", p.provider_id, p.kind));
+        r.push(
+            "providers.entry",
+            Outcome::Ok,
+            format!("{} ({:?})", p.provider_id, p.kind),
+        );
 
         if p.kind == "http_sidecar" {
             collect_sidecar_health(p, r);
         }
     }
-    r.push("providers.live_check", Outcome::Warn,
-        "live one-token completion check is V3 (see V2_GAPS.md §12.5)");
+    r.push(
+        "providers.live_check",
+        Outcome::Warn,
+        "live one-token completion check is V3 (see V2_GAPS.md §12.5)",
+    );
 }
 
 /// V2_GAPS §C5 — TCP reachability probe for one `http_sidecar`
@@ -1496,10 +1539,16 @@ fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
     let endpoint = match p.sidecar_endpoint.as_deref() {
         Some(e) => e,
         None => {
-            r.push("sidecar.health", Outcome::Fail,
-                format!("provider {:?}: kind=\"http_sidecar\" but \
+            r.push(
+                "sidecar.health",
+                Outcome::Fail,
+                format!(
+                    "provider {:?}: kind=\"http_sidecar\" but \
                     sidecar_endpoint is missing (policy validate \
-                    should have rejected this)", p.provider_id));
+                    should have rejected this)",
+                    p.provider_id
+                ),
+            );
             return;
         }
     };
@@ -1507,10 +1556,15 @@ fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
     let (host, port) = match parse_sidecar_host_port(endpoint) {
         Ok(hp) => hp,
         Err(e) => {
-            r.push("sidecar.health", Outcome::Fail,
-                format!("provider {:?}: cannot parse \
+            r.push(
+                "sidecar.health",
+                Outcome::Fail,
+                format!(
+                    "provider {:?}: cannot parse \
                     sidecar_endpoint={endpoint:?}: {e}",
-                    p.provider_id));
+                    p.provider_id
+                ),
+            );
             return;
         }
     };
@@ -1520,31 +1574,43 @@ fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
         Ok(mut iter) => match iter.next() {
             Some(a) => a,
             None => {
-                r.push("sidecar.health", Outcome::Fail,
-                    format!("provider {:?}: DNS for {host} returned \
-                        no addresses", p.provider_id));
+                r.push(
+                    "sidecar.health",
+                    Outcome::Fail,
+                    format!(
+                        "provider {:?}: DNS for {host} returned \
+                        no addresses",
+                        p.provider_id
+                    ),
+                );
                 return;
             }
         },
         Err(e) => {
-            r.push("sidecar.health", Outcome::Fail,
-                format!("provider {:?}: DNS for {host} failed: {e}",
-                    p.provider_id));
+            r.push(
+                "sidecar.health",
+                Outcome::Fail,
+                format!("provider {:?}: DNS for {host} failed: {e}", p.provider_id),
+            );
             return;
         }
     };
 
-    match std::net::TcpStream::connect_timeout(
-        &addr,
-        std::time::Duration::from_secs(3),
-    ) {
-        Ok(_) => r.push("sidecar.health", Outcome::Ok,
-            format!("provider {:?}: TCP {target} reachable \
+    match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(3)) {
+        Ok(_) => r.push(
+            "sidecar.health",
+            Outcome::Ok,
+            format!(
+                "provider {:?}: TCP {target} reachable \
                 (full HMAC /health probe runs at planner boot)",
-                p.provider_id)),
-        Err(e) => r.push("sidecar.health", Outcome::Fail,
-            format!("provider {:?}: TCP {target}: {e}",
-                p.provider_id)),
+                p.provider_id
+            ),
+        ),
+        Err(e) => r.push(
+            "sidecar.health",
+            Outcome::Fail,
+            format!("provider {:?}: TCP {target}: {e}", p.provider_id),
+        ),
     }
 }
 
@@ -1554,16 +1620,15 @@ fn collect_sidecar_health(p: &raxis_policy::ProviderEntry, r: &mut Report) {
 /// here. We extract `(host, port)` and default `port` to 80 / 443
 /// when the URL omits it.
 fn parse_sidecar_host_port(endpoint: &str) -> Result<(String, u16), String> {
-    let (scheme, rest, default_port) =
-        if let Some(rest) = endpoint.strip_prefix("http://") {
-            ("http", rest, 80u16)
-        } else if let Some(rest) = endpoint.strip_prefix("https://") {
-            ("https", rest, 443u16)
-        } else {
-            return Err(format!(
-                "missing http:// or https:// prefix; got {endpoint:?}"
-            ));
-        };
+    let (scheme, rest, default_port) = if let Some(rest) = endpoint.strip_prefix("http://") {
+        ("http", rest, 80u16)
+    } else if let Some(rest) = endpoint.strip_prefix("https://") {
+        ("https", rest, 443u16)
+    } else {
+        return Err(format!(
+            "missing http:// or https:// prefix; got {endpoint:?}"
+        ));
+    };
     let _ = scheme;
 
     // Strip path / query / fragment.
@@ -1620,24 +1685,40 @@ fn collect_host(data_dir: &Path, r: &mut Report) {
             } else {
                 Outcome::Fail
             };
-            r.push("host.disk_free_mb", outcome,
-                format!("{free_mb} MiB free at {}", data_dir.display()));
+            r.push(
+                "host.disk_free_mb",
+                outcome,
+                format!("{free_mb} MiB free at {}", data_dir.display()),
+            );
         }
-        None => r.push("host.disk_free_mb", Outcome::Warn,
-            format!("could not statvfs {}", data_dir.display())),
+        None => r.push(
+            "host.disk_free_mb",
+            Outcome::Warn,
+            format!("could not statvfs {}", data_dir.display()),
+        ),
     }
     // cgroup v2 (Linux only; macOS is documented as N/A).
     if cfg!(target_os = "linux") {
         let cg2_root = std::path::Path::new("/sys/fs/cgroup/cgroup.controllers");
         if cg2_root.exists() {
-            r.push("host.cgroup_v2", Outcome::Ok, "cgroup v2 mounted at /sys/fs/cgroup");
+            r.push(
+                "host.cgroup_v2",
+                Outcome::Ok,
+                "cgroup v2 mounted at /sys/fs/cgroup",
+            );
         } else {
-            r.push("host.cgroup_v2", Outcome::Fail,
-                "cgroup v2 not mounted; required for VM resource caps");
+            r.push(
+                "host.cgroup_v2",
+                Outcome::Fail,
+                "cgroup v2 not mounted; required for VM resource caps",
+            );
         }
     } else {
-        r.push("host.cgroup_v2", Outcome::Ok,
-            "skipped (non-Linux host; AVF/KVM probe is V3)");
+        r.push(
+            "host.cgroup_v2",
+            Outcome::Ok,
+            "skipped (non-Linux host; AVF/KVM probe is V3)",
+        );
     }
 }
 
@@ -1649,8 +1730,11 @@ fn collect_network(data_dir: &Path, r: &mut Report) {
     let bundle = match raxis_policy::load_policy(&policy_path) {
         Ok((b, _bytes, _sha)) => b,
         Err(e) => {
-            r.push("network.load_policy", Outcome::Fail,
-                format!("policy load failed: {e}"));
+            r.push(
+                "network.load_policy",
+                Outcome::Fail,
+                format!("policy load failed: {e}"),
+            );
             return;
         }
     };
@@ -1659,8 +1743,11 @@ fn collect_network(data_dir: &Path, r: &mut Report) {
         seen.insert(d.to_lowercase());
     }
     if seen.is_empty() {
-        r.push("network.empty", Outcome::Warn,
-            "no [[egress]] domains declared — agent egress will fail closed");
+        r.push(
+            "network.empty",
+            Outcome::Warn,
+            "no [[egress]] domains declared — agent egress will fail closed",
+        );
         return;
     }
     for host in seen {
@@ -1670,14 +1757,20 @@ fn collect_network(data_dir: &Path, r: &mut Report) {
                 Ok(mut iter) => match iter.next() {
                     Some(addr) => addr,
                     None => {
-                        r.push("network.connect", Outcome::Fail,
-                            format!("{host}: DNS returned no addresses"));
+                        r.push(
+                            "network.connect",
+                            Outcome::Fail,
+                            format!("{host}: DNS returned no addresses"),
+                        );
                         continue;
                     }
                 },
                 Err(e) => {
-                    r.push("network.connect", Outcome::Fail,
-                        format!("{host}: DNS resolution failed: {e}"));
+                    r.push(
+                        "network.connect",
+                        Outcome::Fail,
+                        format!("{host}: DNS resolution failed: {e}"),
+                    );
                     continue;
                 }
             },
@@ -1685,13 +1778,19 @@ fn collect_network(data_dir: &Path, r: &mut Report) {
         ) {
             Ok(_) => Outcome::Ok,
             Err(e) => {
-                r.push("network.connect", Outcome::Warn,
-                    format!("{target}: connect failed: {e}"));
+                r.push(
+                    "network.connect",
+                    Outcome::Warn,
+                    format!("{target}: connect failed: {e}"),
+                );
                 continue;
             }
         };
-        r.push("network.connect", outcome,
-            format!("{target}: TCP connect OK"));
+        r.push(
+            "network.connect",
+            outcome,
+            format!("{target}: TCP connect OK"),
+        );
     }
 }
 
@@ -1708,8 +1807,11 @@ fn collect_keys(data_dir: &Path, r: &mut Report) {
         }
     }
     if r.checks.is_empty() {
-        r.push("keys.empty", Outcome::Warn,
-            "no operator certs or signing keys present (kernel may not have booted)");
+        r.push(
+            "keys.empty",
+            Outcome::Warn,
+            "no operator certs or signing keys present (kernel may not have booted)",
+        );
     }
 }
 
@@ -1719,8 +1821,11 @@ fn collect_keys(data_dir: &Path, r: &mut Report) {
 fn collect_bundles(data_dir: &Path, r: &mut Report) {
     let db_path = data_dir.join("kernel.db");
     if !db_path.exists() {
-        r.push("bundles.db", Outcome::Warn,
-            "kernel.db missing — kernel has not booted at least once");
+        r.push(
+            "bundles.db",
+            Outcome::Warn,
+            "kernel.db missing — kernel has not booted at least once",
+        );
         return;
     }
     match raxis_store::open_ro(data_dir) {
@@ -1737,18 +1842,30 @@ fn collect_bundles(data_dir: &Path, r: &mut Report) {
                     } else {
                         Outcome::Warn
                     };
-                    r.push("bundles.db_size_mb", outcome,
-                        format!("kernel.db is {mb} MiB"));
+                    r.push(
+                        "bundles.db_size_mb",
+                        outcome,
+                        format!("kernel.db is {mb} MiB"),
+                    );
                 }
-                Err(e) => r.push("bundles.db_size_mb", Outcome::Warn,
-                    format!("stat kernel.db: {e}")),
+                Err(e) => r.push(
+                    "bundles.db_size_mb",
+                    Outcome::Warn,
+                    format!("stat kernel.db: {e}"),
+                ),
             }
         }
-        Err(e) => r.push("bundles.open", Outcome::Fail,
-            format!("open_ro({}): {e}", data_dir.display())),
+        Err(e) => r.push(
+            "bundles.open",
+            Outcome::Fail,
+            format!("open_ro({}): {e}", data_dir.display()),
+        ),
     }
-    r.push("bundles.row_aggregates", Outcome::Warn,
-        "per-table row counts (V3) — V2 MVP surfaces only kernel.db file size");
+    r.push(
+        "bundles.row_aggregates",
+        Outcome::Warn,
+        "per-table row counts (V3) — V2 MVP surfaces only kernel.db file size",
+    );
 }
 
 /// V2.5 §13 — `raxis doctor vm-images`. Walks the operator-published
@@ -1779,19 +1896,28 @@ fn collect_vm_images(data_dir: &Path, r: &mut Report) {
     let bundle = match raxis_policy::load_policy(&policy_path) {
         Ok((b, _bytes, _sha)) => b,
         Err(e) => {
-            r.push("vm_images.load_policy", Outcome::Fail,
-                format!("policy load failed: {e}"));
+            r.push(
+                "vm_images.load_policy",
+                Outcome::Fail,
+                format!("policy load failed: {e}"),
+            );
             return;
         }
     };
     let entries = bundle.vm_images();
     if entries.is_empty() {
-        r.push("vm_images.count", Outcome::Warn,
+        r.push(
+            "vm_images.count",
+            Outcome::Warn,
             "no [[vm_images]] declared — every Executor task boots the \
-             canonical raxis-executor-starter image");
+             canonical raxis-executor-starter image",
+        );
     } else {
-        r.push("vm_images.count", Outcome::Ok,
-            format!("{} operator-published image(s)", entries.len()));
+        r.push(
+            "vm_images.count",
+            Outcome::Ok,
+            format!("{} operator-published image(s)", entries.len()),
+        );
     }
 
     let oci_cache_root = data_dir.join("oci-cache").join("blobs").join("sha256");
@@ -1835,36 +1961,47 @@ fn collect_vm_images(data_dir: &Path, r: &mut Report) {
             // production layout uses `.../sha256/<aa>/<full>` per
             // image-cache.md §3; the offline `PrePopulatedResolver`
             // uses the same layout. A miss is non-fatal.
-            let hit = std::fs::read_dir(&shard_dir)
-                .ok()
-                .and_then(|mut iter| {
-                    iter.find_map(|e| {
-                        e.ok().and_then(|de| {
-                            let name = de.file_name();
-                            let name = name.to_string_lossy();
-                            if name == digest_hex
-                                || name.starts_with(digest_hex)
-                            {
-                                Some(de.path())
-                            } else {
-                                None
-                            }
-                        })
+            let hit = std::fs::read_dir(&shard_dir).ok().and_then(|mut iter| {
+                iter.find_map(|e| {
+                    e.ok().and_then(|de| {
+                        let name = de.file_name();
+                        let name = name.to_string_lossy();
+                        if name == digest_hex || name.starts_with(digest_hex) {
+                            Some(de.path())
+                        } else {
+                            None
+                        }
                     })
-                });
+                })
+            });
             match hit {
-                Some(p) => r.push("vm_images.cache", Outcome::Ok,
-                    format!("alias={} cached at {}", entry.name, p.display())),
-                None    => r.push("vm_images.cache", Outcome::Warn,
-                    format!("alias={} not yet cached under {} \
+                Some(p) => r.push(
+                    "vm_images.cache",
+                    Outcome::Ok,
+                    format!("alias={} cached at {}", entry.name, p.display()),
+                ),
+                None => r.push(
+                    "vm_images.cache",
+                    Outcome::Warn,
+                    format!(
+                        "alias={} not yet cached under {} \
                              (will pull on first activation)",
-                            entry.name, shard_dir.display())),
+                        entry.name,
+                        shard_dir.display()
+                    ),
+                ),
             }
         } else {
-            r.push("vm_images.cache", Outcome::Warn,
-                format!("alias={} oci-cache directory {} not present \
+            r.push(
+                "vm_images.cache",
+                Outcome::Warn,
+                format!(
+                    "alias={} oci-cache directory {} not present \
                          (will be created on first activation)",
-                        entry.name, shard_dir.display()));
+                    entry.name,
+                    shard_dir.display()
+                ),
+            );
         }
     }
 
@@ -1909,7 +2046,9 @@ fn host_disk_free_mb(path: &Path) -> Option<u64> {
 }
 
 #[cfg(not(unix))]
-fn host_disk_free_mb(_path: &Path) -> Option<u64> { None }
+fn host_disk_free_mb(_path: &Path) -> Option<u64> {
+    None
+}
 
 use std::net::ToSocketAddrs;
 
@@ -1925,7 +2064,7 @@ mod tests {
     #[test]
     fn worst_of_ok_warn_fail_is_fail() {
         let mut r = Report::default();
-        r.push("a", Outcome::Ok,   "ok");
+        r.push("a", Outcome::Ok, "ok");
         r.push("b", Outcome::Warn, "warn");
         r.push("c", Outcome::Fail, "fail");
         assert_eq!(r.worst(), Outcome::Fail);
@@ -1935,7 +2074,7 @@ mod tests {
     #[test]
     fn worst_of_ok_warn_is_warn() {
         let mut r = Report::default();
-        r.push("a", Outcome::Ok,   "ok");
+        r.push("a", Outcome::Ok, "ok");
         r.push("b", Outcome::Warn, "warn");
         assert_eq!(r.worst(), Outcome::Warn);
         assert_eq!(r.exit_code(), 1);
@@ -1993,10 +2132,7 @@ mod tests {
 
     #[test]
     fn parse_args_signing_key_fp_accepts_trailing_json_flag() {
-        let parsed = parse_args(&[
-            "signing-key-fp".to_owned(),
-            "--json".to_owned(),
-        ]).unwrap();
+        let parsed = parse_args(&["signing-key-fp".to_owned(), "--json".to_owned()]).unwrap();
         assert!(matches!(parsed.subcommand, Subcommand::SigningKeyFp));
         assert!(parsed.opts.json);
     }
@@ -2019,7 +2155,9 @@ mod tests {
             other => panic!("unexpected subcommand: {other:?}"),
         }
 
-        if let Some(v) = saved { std::env::set_var("RAXIS_INSTALL_DIR", v); }
+        if let Some(v) = saved {
+            std::env::set_var("RAXIS_INSTALL_DIR", v);
+        }
     }
 
     #[test]
@@ -2028,7 +2166,8 @@ mod tests {
             "canonical-images".to_owned(),
             "--install-dir".to_owned(),
             "/tmp/raxis-test-install".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         match parsed.subcommand {
             Subcommand::CanonicalImages { install_dir } => {
                 assert_eq!(install_dir, PathBuf::from("/tmp/raxis-test-install"));
@@ -2039,10 +2178,8 @@ mod tests {
 
     #[test]
     fn parse_args_canonical_images_install_dir_requires_value() {
-        let err = parse_args(&[
-            "canonical-images".to_owned(),
-            "--install-dir".to_owned(),
-        ]).unwrap_err();
+        let err =
+            parse_args(&["canonical-images".to_owned(), "--install-dir".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -2052,7 +2189,8 @@ mod tests {
             "canonical-images".to_owned(),
             "--install-dir".to_owned(),
             "".to_owned(),
-        ]).unwrap_err();
+        ])
+        .unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -2066,7 +2204,7 @@ mod tests {
     fn render_json_emits_object_with_per_check_array() {
         let mut buf: Vec<u8> = Vec::new();
         let mut report = Report::default();
-        report.push("a.b", Outcome::Ok,   "ok detail");
+        report.push("a.b", Outcome::Ok, "ok detail");
         report.push("c.d", Outcome::Warn, "warning detail");
         render_json(&mut buf, Path::new("/tmp/d"), &report);
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
@@ -2092,20 +2230,18 @@ mod tests {
     // doctor-side mapping (status → Outcome + id format).
 
     fn setup_db_with_cert(
-        tmp:                    &TempDir,
-        fp:                     &str,
-        display_name:           &str,
-        not_before:             i64,
-        not_after:              i64,
-        warn_days:              u32,
-        grace_days:             u32,
-        kind:                   &str,
+        tmp: &TempDir,
+        fp: &str,
+        display_name: &str,
+        not_before: i64,
+        not_after: i64,
+        warn_days: u32,
+        grace_days: u32,
+        kind: &str,
         force_misconfig_bypass: bool,
     ) {
-        const POLICY_EPOCH_HISTORY:  &str =
-            raxis_store::Table::PolicyEpochHistory.as_str();
-        const OPERATOR_CERTIFICATES: &str =
-            raxis_store::Table::OperatorCertificates.as_str();
+        const POLICY_EPOCH_HISTORY: &str = raxis_store::Table::PolicyEpochHistory.as_str();
+        const OPERATOR_CERTIFICATES: &str = raxis_store::Table::OperatorCertificates.as_str();
 
         // Open RW once to apply migrations + insert the row, then
         // drop the handle so the RO open downstream sees a complete
@@ -2125,12 +2261,13 @@ mod tests {
                  ) VALUES (1, 'sha-test', 'auth-test', 'op-test', 0)"
             ),
             [],
-        ).unwrap();
+        )
+        .unwrap();
         // Each cert needs a unique pubkey_hex (UNIQUE constraint on the
         // column), so we derive one from the test-supplied fingerprint
         // padded to 64 hex chars.
         let pubkey_hex = format!("{fp}{}", "0".repeat(64usize.saturating_sub(fp.len())));
-        let self_sig   = "11".repeat(32);
+        let self_sig = "11".repeat(32);
         conn.execute(
             &format!(
                 "INSERT INTO {OPERATOR_CERTIFICATES} (\
@@ -2152,7 +2289,8 @@ mod tests {
                 self_sig,
                 force_misconfig_bypass as i64,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         drop(store);
     }
@@ -2172,17 +2310,27 @@ mod tests {
         check_operator_certs(&mut r, &conn, 1_700_000_000);
 
         let ids: Vec<&str> = r.checks.iter().map(|c| c.id).collect();
-        assert!(ids.contains(&"cert.list"),
-            "must emit cert.list when zero certs are installed; got {ids:?}");
+        assert!(
+            ids.contains(&"cert.list"),
+            "must emit cert.list when zero certs are installed; got {ids:?}"
+        );
         let cert_list = r.checks.iter().find(|c| c.id == "cert.list").unwrap();
-        assert_eq!(cert_list.outcome, Outcome::Fail,
-            "INV-CERT-01: empty operator_certificates MUST be a hard failure");
-        assert!(cert_list.detail.contains("INV-CERT-01"),
+        assert_eq!(
+            cert_list.outcome,
+            Outcome::Fail,
+            "INV-CERT-01: empty operator_certificates MUST be a hard failure"
+        );
+        assert!(
+            cert_list.detail.contains("INV-CERT-01"),
             "detail must cite INV-CERT-01 so an operator can find the spec: {:?}",
-            cert_list.detail);
-        assert!(cert_list.detail.contains("raxis genesis")
+            cert_list.detail
+        );
+        assert!(
+            cert_list.detail.contains("raxis genesis")
                 || cert_list.detail.contains("raxis cert install"),
-            "detail must point at the recovery commands: {:?}", cert_list.detail);
+            "detail must point at the recovery commands: {:?}",
+            cert_list.detail
+        );
     }
 
     #[test]
@@ -2191,21 +2339,32 @@ mod tests {
         let now: i64 = 1_700_000_000;
         let one_year = 365 * 86_400;
         setup_db_with_cert(
-            &tmp, "abcd1234deadbeef", "Chika",
-            now - 86_400, now + one_year, // valid through next year
-            30, 7, "Standard", false,
+            &tmp,
+            "abcd1234deadbeef",
+            "Chika",
+            now - 86_400,
+            now + one_year, // valid through next year
+            30,
+            7,
+            "Standard",
+            false,
         );
 
         let conn = raxis_store::open_ro(tmp.path()).unwrap();
         let mut r = Report::default();
         check_operator_certs(&mut r, &conn, now);
 
-        let status_check = r.checks.iter()
+        let status_check = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.abcd1234deadbeef.status"))
             .expect("must emit per-cert status check");
         assert_eq!(status_check.outcome, Outcome::Ok);
-        assert!(status_check.detail.contains("status=active"),
-            "detail must carry the active tag: {:?}", status_check.detail);
+        assert!(
+            status_check.detail.contains("status=active"),
+            "detail must carry the active tag: {:?}",
+            status_check.detail
+        );
     }
 
     #[test]
@@ -2214,21 +2373,32 @@ mod tests {
         let now: i64 = 1_700_000_000;
         // Cert expires in 5 days, warn window is 30 days → Expiring.
         setup_db_with_cert(
-            &tmp, "expiring00000001", "Jinanwa",
-            now - 86_400 * 60, now + 86_400 * 5,
-            30, 7, "Standard", false,
+            &tmp,
+            "expiring00000001",
+            "Jinanwa",
+            now - 86_400 * 60,
+            now + 86_400 * 5,
+            30,
+            7,
+            "Standard",
+            false,
         );
 
         let conn = raxis_store::open_ro(tmp.path()).unwrap();
         let mut r = Report::default();
         check_operator_certs(&mut r, &conn, now);
 
-        let status = r.checks.iter()
+        let status = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.expiring00000001.status"))
             .expect("must emit per-cert status check");
         assert_eq!(status.outcome, Outcome::Warn);
-        assert!(status.detail.contains("expiring in"),
-            "detail must mention expiry runway: {:?}", status.detail);
+        assert!(
+            status.detail.contains("expiring in"),
+            "detail must mention expiry runway: {:?}",
+            status.detail
+        );
     }
 
     #[test]
@@ -2237,21 +2407,32 @@ mod tests {
         let now: i64 = 1_700_000_000;
         // Cert expired 30 days ago and grace (7d) elapsed → Expired.
         setup_db_with_cert(
-            &tmp, "expired000000001", "Charlie",
-            now - 86_400 * 365, now - 86_400 * 30,
-            30, 7, "Standard", false,
+            &tmp,
+            "expired000000001",
+            "Charlie",
+            now - 86_400 * 365,
+            now - 86_400 * 30,
+            30,
+            7,
+            "Standard",
+            false,
         );
 
         let conn = raxis_store::open_ro(tmp.path()).unwrap();
         let mut r = Report::default();
         check_operator_certs(&mut r, &conn, now);
 
-        let status = r.checks.iter()
+        let status = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.expired000000001.status"))
             .expect("must emit per-cert status check");
         assert_eq!(status.outcome, Outcome::Fail);
-        assert!(status.detail.contains("EXPIRED"),
-            "detail must carry the loud EXPIRED marker: {:?}", status.detail);
+        assert!(
+            status.detail.contains("EXPIRED"),
+            "detail must carry the loud EXPIRED marker: {:?}",
+            status.detail
+        );
     }
 
     #[test]
@@ -2260,25 +2441,37 @@ mod tests {
         let now: i64 = 1_700_000_000;
         let one_year = 365 * 86_400;
         setup_db_with_cert(
-            &tmp, "bypassedcert0001", "Dana",
-            now - 86_400, now + one_year,
-            30, 7, "Standard", true, // ← bypass on
+            &tmp,
+            "bypassedcert0001",
+            "Dana",
+            now - 86_400,
+            now + one_year,
+            30,
+            7,
+            "Standard",
+            true, // ← bypass on
         );
 
         let conn = raxis_store::open_ro(tmp.path()).unwrap();
         let mut r = Report::default();
         check_operator_certs(&mut r, &conn, now);
 
-        let bypass = r.checks.iter()
+        let bypass = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.bypassedcert0001.misconfig_bypass"))
             .expect("must emit a cert.<fp>.misconfig_bypass row");
         assert_eq!(bypass.outcome, Outcome::Warn);
-        assert!(bypass.detail.contains("--force-misconfig"),
+        assert!(
+            bypass.detail.contains("--force-misconfig"),
             "bypass detail must reference the CLI flag for grep-traceability: {:?}",
-            bypass.detail);
+            bypass.detail
+        );
 
         // Status itself is Active (the bypass is orthogonal).
-        let status = r.checks.iter()
+        let status = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.bypassedcert0001.status"))
             .expect("status row must still appear alongside bypass row");
         assert_eq!(status.outcome, Outcome::Ok);
@@ -2293,21 +2486,32 @@ mod tests {
         // pass realistic values so the row passes any future row-level
         // CHECK constraints. The expected outcome is OK regardless.
         setup_db_with_cert(
-            &tmp, "emergency00000001", "Break-Glass",
-            0, 0, 0, 0, "EmergencyRecovery", false,
+            &tmp,
+            "emergency00000001",
+            "Break-Glass",
+            0,
+            0,
+            0,
+            0,
+            "EmergencyRecovery",
+            false,
         );
 
         let conn = raxis_store::open_ro(tmp.path()).unwrap();
         let mut r = Report::default();
         check_operator_certs(&mut r, &conn, now);
 
-        let status = r.checks.iter()
+        let status = r
+            .checks
+            .iter()
             .find(|c| c.id.starts_with("cert.emergency00000001.status"))
             .expect("must emit per-cert status check for emergency cert");
         assert_eq!(status.outcome, Outcome::Ok);
-        assert!(status.detail.contains("always_active_emergency"),
+        assert!(
+            status.detail.contains("always_active_emergency"),
             "emergency cert detail must use the canonical zone tag: {:?}",
-            status.detail);
+            status.detail
+        );
     }
 
     // V2.3 — `raxis doctor <category>` parser tests.
@@ -2315,17 +2519,20 @@ mod tests {
     #[test]
     fn doctor_category_parses_canonical_names() {
         for (s, want) in &[
-            ("policy",    DoctorCategory::Policy),
+            ("policy", DoctorCategory::Policy),
             ("providers", DoctorCategory::Providers),
-            ("host",      DoctorCategory::Host),
-            ("network",   DoctorCategory::Network),
-            ("keys",      DoctorCategory::Keys),
-            ("bundles",   DoctorCategory::Bundles),
+            ("host", DoctorCategory::Host),
+            ("network", DoctorCategory::Network),
+            ("keys", DoctorCategory::Keys),
+            ("bundles", DoctorCategory::Bundles),
             ("vm-images", DoctorCategory::VmImages),
-            ("all",       DoctorCategory::All),
+            ("all", DoctorCategory::All),
         ] {
-            assert_eq!(DoctorCategory::parse(s), Some(*want),
-                "expected {s} to parse");
+            assert_eq!(
+                DoctorCategory::parse(s),
+                Some(*want),
+                "expected {s} to parse"
+            );
         }
     }
 
@@ -2335,8 +2542,10 @@ mod tests {
         // category surfaces a single Fail row.
         let tmp = TempDir::new().unwrap();
         let r = collect_category(tmp.path(), DoctorCategory::VmImages);
-        assert!(r.checks.iter().any(|c| c.id == "vm_images.load_policy"
-            && c.outcome == Outcome::Fail));
+        assert!(r
+            .checks
+            .iter()
+            .any(|c| c.id == "vm_images.load_policy" && c.outcome == Outcome::Fail));
     }
 
     #[test]

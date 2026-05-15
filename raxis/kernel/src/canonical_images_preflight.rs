@@ -103,20 +103,20 @@ use raxis_isolation::ImageKind;
 #[derive(Debug, Clone)]
 struct CachedKindEntry {
     /// Image kind the manifest's `image_format` mapped to.
-    image_kind:     ImageKind,
+    image_kind: ImageKind,
     /// Whether the format came from a verified manifest (vs. a
     /// graceful-degradation fallback).
-    is_trusted:     bool,
+    is_trusted: bool,
     /// File `mtime` at the time of the verifying call. A change
     /// invalidates the entry — the file was rebuilt and we must
     /// re-verify.
-    file_mtime:     SystemTime,
+    file_mtime: SystemTime,
     /// File `len` at the time of the verifying call. A change
     /// invalidates the entry on the same logic as `file_mtime`.
     /// Included so that an mtime-preserving rebuild (rare but
     /// possible with `touch -t` workflows) still trips the
     /// invalidator.
-    file_len:       u64,
+    file_len: u64,
     /// Kernel version string the manifest's `kernel_version`
     /// matched. A change invalidates the entry; the kernel only
     /// ever passes its compile-time `kernel_version` here, but
@@ -187,7 +187,7 @@ pub enum PreflightOutcome {
     /// warning; activations cannot start without the manifest.
     ManifestMissing {
         /// Image file path.
-        image_path:    PathBuf,
+        image_path: PathBuf,
         /// Manifest file path that was missing.
         manifest_path: PathBuf,
     },
@@ -205,23 +205,23 @@ pub enum PreflightOutcome {
     /// role's VMs at activation time.
     Tampered {
         /// Image file the kernel attempted to verify.
-        path:     PathBuf,
+        path: PathBuf,
         /// Hex-encoded SHA-256 the manifest expected.
         expected: String,
         /// Hex-encoded SHA-256 the kernel observed on disk.
-        actual:   String,
+        actual: String,
     },
     /// The manifest could not be loaded, parsed, or its signature /
     /// role / kernel-version failed the kernel's trust contract.
     /// Audit-emitted and treated as a tamper case for activation.
     ManifestRejected {
         /// Image file path.
-        image_path:    PathBuf,
+        image_path: PathBuf,
         /// Manifest file path.
         manifest_path: PathBuf,
         /// Human-readable rejection reason (the canonical-image
         /// crate's `Display` for the underlying error).
-        reason:        String,
+        reason: String,
     },
 }
 
@@ -229,18 +229,18 @@ pub enum PreflightOutcome {
 /// Format pinned by `system-requirements.md §1`:
 /// `raxis-reviewer-core-<kernel_version>.img`.
 pub fn reviewer_image_path(install_dir: &Path, kernel_version: &str) -> PathBuf {
-    install_dir.join("images").join(format!(
-        "raxis-reviewer-core-{kernel_version}.img"
-    ))
+    install_dir
+        .join("images")
+        .join(format!("raxis-reviewer-core-{kernel_version}.img"))
 }
 
 /// Resolve the canonical Orchestrator image filename for
 /// `kernel_version`. Format pinned by `system-requirements.md §1`:
 /// `raxis-orchestrator-core-<kernel_version>.img`.
 pub fn orchestrator_image_path(install_dir: &Path, kernel_version: &str) -> PathBuf {
-    install_dir.join("images").join(format!(
-        "raxis-orchestrator-core-{kernel_version}.img"
-    ))
+    install_dir
+        .join("images")
+        .join(format!("raxis-orchestrator-core-{kernel_version}.img"))
 }
 
 /// Resolve the host-canonical Linux kernel binary path (the
@@ -287,9 +287,9 @@ pub fn linux_kernel_path(install_dir: &Path) -> PathBuf {
 /// activations stay on `raxis-reviewer-core` (Pure-Static Reviewer,
 /// `INV-PLANNER-HARNESS-02`).
 pub fn executor_starter_image_path(install_dir: &Path, kernel_version: &str) -> PathBuf {
-    install_dir.join("images").join(format!(
-        "raxis-executor-starter-{kernel_version}.img"
-    ))
+    install_dir
+        .join("images")
+        .join(format!("raxis-executor-starter-{kernel_version}.img"))
 }
 
 /// Run the canonical-image manifest preflight at boot. Returns one
@@ -300,18 +300,28 @@ pub fn executor_starter_image_path(install_dir: &Path, kernel_version: &str) -> 
 /// image and a tampered Reviewer image are independent failure
 /// modes; we want both audit events when both happen).
 pub fn verify_canonical_images_at_boot(
-    install_dir:    &Path,
+    install_dir: &Path,
     kernel_version: &str,
-    audit:          &dyn AuditSink,
+    audit: &dyn AuditSink,
 ) -> [(CanonicalImageKind, PreflightOutcome); 2] {
-    let reviewer_path     = reviewer_image_path(install_dir, kernel_version);
+    let reviewer_path = reviewer_image_path(install_dir, kernel_version);
     let orchestrator_path = orchestrator_image_path(install_dir, kernel_version);
 
-    let reviewer_outcome     = run_one(&reviewer_path,     CanonicalImageKind::Reviewer,     kernel_version, audit);
-    let orchestrator_outcome = run_one(&orchestrator_path, CanonicalImageKind::Orchestrator, kernel_version, audit);
+    let reviewer_outcome = run_one(
+        &reviewer_path,
+        CanonicalImageKind::Reviewer,
+        kernel_version,
+        audit,
+    );
+    let orchestrator_outcome = run_one(
+        &orchestrator_path,
+        CanonicalImageKind::Orchestrator,
+        kernel_version,
+        audit,
+    );
 
     [
-        (CanonicalImageKind::Reviewer,     reviewer_outcome),
+        (CanonicalImageKind::Reviewer, reviewer_outcome),
         (CanonicalImageKind::Orchestrator, orchestrator_outcome),
     ]
 }
@@ -352,7 +362,7 @@ pub enum KernelBinaryOutcome {
 /// don't replicate the match arms.
 pub fn image_format_to_image_kind(f: ImageFormat) -> ImageKind {
     match f {
-        ImageFormat::RootfsErofs         => ImageKind::RootfsErofs,
+        ImageFormat::RootfsErofs => ImageKind::RootfsErofs,
         ImageFormat::RootfsInitramfsCpio => ImageKind::RootfsInitramfsCpio,
     }
 }
@@ -410,7 +420,7 @@ pub fn image_format_to_image_kind(f: ImageFormat) -> ImageKind {
 /// manifest; callers may use this to gate a noisier audit event for
 /// the un-trusted case.
 pub fn resolve_image_kind_for_role(
-    image_path:     &Path,
+    image_path: &Path,
     canonical_kind: CanonicalImageKind,
     kernel_version: &str,
 ) -> (ImageKind, bool) {
@@ -429,8 +439,8 @@ pub fn resolve_image_kind_for_role(
         if let Ok(file_mtime) = meta.modified() {
             if let Ok(cache) = image_kind_cache().lock() {
                 if let Some(entry) = cache.get(image_path) {
-                    if entry.file_mtime    == file_mtime
-                        && entry.file_len   == file_len
+                    if entry.file_mtime == file_mtime
+                        && entry.file_len == file_len
                         && entry.kernel_version == kernel_version
                         && entry.canonical_kind == canonical_kind
                     {
@@ -456,40 +466,46 @@ pub fn resolve_image_kind_for_role(
         // (typical first-deploy workflow).
         return (ImageKind::RootfsErofs, false);
     }
-    let result =
-        match read_verified_image_format(image_path, &manifest_path, canonical_kind, kernel_version) {
-            Ok(fmt) => (image_format_to_image_kind(fmt), true),
-            Err(e) => {
-                // Verification failed — consult the manifest's
-                // declared `image_format` as an unverified hint so
-                // the substrate dispatch (AVF virtio-blk vs.
-                // initramfs cpio.gz) matches the bytes on disk even
-                // when the trust anchor is the all-zero placeholder.
-                // See `resolve_image_kind_for_role` doc comment for
-                // the trust-model rationale (image_format is
-                // dispatch metadata, not a privilege grant).
-                let (hint_kind, hint_source) =
-                    match read_unverified_image_format_hint(&manifest_path) {
-                        Ok(fmt) => (image_format_to_image_kind(fmt), "manifest_image_format_field"),
-                        Err(_)  => (ImageKind::RootfsErofs,           "rootfs_erofs_default"),
-                    };
-                eprintln!(
-                    "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
+    let result = match read_verified_image_format(
+        image_path,
+        &manifest_path,
+        canonical_kind,
+        kernel_version,
+    ) {
+        Ok(fmt) => (image_format_to_image_kind(fmt), true),
+        Err(e) => {
+            // Verification failed — consult the manifest's
+            // declared `image_format` as an unverified hint so
+            // the substrate dispatch (AVF virtio-blk vs.
+            // initramfs cpio.gz) matches the bytes on disk even
+            // when the trust anchor is the all-zero placeholder.
+            // See `resolve_image_kind_for_role` doc comment for
+            // the trust-model rationale (image_format is
+            // dispatch metadata, not a privilege grant).
+            let (hint_kind, hint_source) = match read_unverified_image_format_hint(&manifest_path) {
+                Ok(fmt) => (
+                    image_format_to_image_kind(fmt),
+                    "manifest_image_format_field",
+                ),
+                Err(_) => (ImageKind::RootfsErofs, "rootfs_erofs_default"),
+            };
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"canonical_image_kind_fallback\",\
                      \"reason\":\"manifest_verify_failed\",\"image\":\"{}\",\
                      \"manifest\":\"{}\",\"fallback_kind\":\"{:?}\",\
                      \"fallback_source\":\"{}\",\"error\":{:?}}}",
-                    image_path.display(),
-                    manifest_path.display(),
-                    hint_kind,
-                    hint_source,
-                    e.to_string(),
-                );
-                // Same fallback-not-cached rationale as above: we
-                // want the next spawn to re-stat once the operator
-                // remediates the manifest.
-                return (hint_kind, false);
-            }
-        };
+                image_path.display(),
+                manifest_path.display(),
+                hint_kind,
+                hint_source,
+                e.to_string(),
+            );
+            // Same fallback-not-cached rationale as above: we
+            // want the next spawn to re-stat once the operator
+            // remediates the manifest.
+            return (hint_kind, false);
+        }
+    };
 
     // Populate the cache for the verified path. Re-stat to capture
     // the mtime+len that pair with the bytes we just verified — if
@@ -502,10 +518,10 @@ pub fn resolve_image_kind_for_role(
                 cache.insert(
                     image_path.to_path_buf(),
                     CachedKindEntry {
-                        image_kind:     result.0,
-                        is_trusted:     result.1,
+                        image_kind: result.0,
+                        is_trusted: result.1,
                         file_mtime,
-                        file_len:       meta.len(),
+                        file_len: meta.len(),
                         kernel_version: kernel_version.to_owned(),
                         canonical_kind,
                     },
@@ -542,33 +558,36 @@ pub fn probe_linux_kernel_binary_at_boot(install_dir: &Path) -> KernelBinaryOutc
 /// audit event on mismatch. Pulled out so the helper is unit-testable
 /// without going through `verify_canonical_images_at_boot`'s pair plumbing.
 fn run_one(
-    image_path:     &Path,
-    kind:           CanonicalImageKind,
+    image_path: &Path,
+    kind: CanonicalImageKind,
     kernel_version: &str,
-    audit:          &dyn AuditSink,
+    audit: &dyn AuditSink,
 ) -> PreflightOutcome {
     if !image_path.exists() {
-        return PreflightOutcome::Missing { path: image_path.to_owned() };
+        return PreflightOutcome::Missing {
+            path: image_path.to_owned(),
+        };
     }
     let manifest_path = manifest_path_for_image(image_path);
     if !manifest_path.exists() {
         return PreflightOutcome::ManifestMissing {
-            image_path:    image_path.to_owned(),
+            image_path: image_path.to_owned(),
             manifest_path,
         };
     }
 
-    match verify_canonical_image_via_manifest(
-        image_path,
-        &manifest_path,
-        kind,
-        kernel_version,
-    ) {
-        Ok(()) => PreflightOutcome::Ok { path: image_path.to_owned() },
+    match verify_canonical_image_via_manifest(image_path, &manifest_path, kind, kernel_version) {
+        Ok(()) => PreflightOutcome::Ok {
+            path: image_path.to_owned(),
+        },
         Err(CanonicalImageError::SigningKeyFpNotPopulated) => {
-            PreflightOutcome::TrustAnchorUnpopulated { path: image_path.to_owned() }
+            PreflightOutcome::TrustAnchorUnpopulated {
+                path: image_path.to_owned(),
+            }
         }
-        Err(CanonicalImageError::DigestMismatch { expected, actual, .. }) => {
+        Err(CanonicalImageError::DigestMismatch {
+            expected, actual, ..
+        }) => {
             // Audit-after-detect (NOT after a state mutation) — the
             // detection itself IS the recorded fact. Emit failures
             // are logged but never short-circuit the preflight pair:
@@ -577,11 +596,13 @@ fn run_one(
             if let Err(e) = audit.emit(
                 AuditEventKind::SecurityViolationDetected {
                     violation_kind: kind.audit_kind().to_owned(),
-                    expected:       Some(expected.clone()),
-                    actual:         Some(actual.clone()),
-                    path:           Some(image_path.display().to_string()),
+                    expected: Some(expected.clone()),
+                    actual: Some(actual.clone()),
+                    path: Some(image_path.display().to_string()),
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             ) {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"SecurityViolationDetected\",\
@@ -606,7 +627,9 @@ fn run_one(
                  \"path\":\"{}\",\"reason\":\"{source}\"}}",
                 image_path.display(),
             );
-            PreflightOutcome::Missing { path: image_path.to_owned() }
+            PreflightOutcome::Missing {
+                path: image_path.to_owned(),
+            }
         }
         Err(other) => {
             // Manifest load / parse / signature / role-mismatch /
@@ -615,11 +638,13 @@ fn run_one(
             if let Err(e) = audit.emit(
                 AuditEventKind::SecurityViolationDetected {
                     violation_kind: kind.audit_kind().to_owned(),
-                    expected:       None,
-                    actual:         None,
-                    path:           Some(manifest_path.display().to_string()),
+                    expected: None,
+                    actual: None,
+                    path: Some(manifest_path.display().to_string()),
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             ) {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"SecurityViolationDetected\",\
@@ -628,7 +653,7 @@ fn run_one(
                 );
             }
             PreflightOutcome::ManifestRejected {
-                image_path:    image_path.to_owned(),
+                image_path: image_path.to_owned(),
                 manifest_path,
                 reason,
             }
@@ -673,7 +698,7 @@ mod tests {
     /// the kernel must boot regardless.
     #[test]
     fn missing_image_is_warning_only_not_audit_event() {
-        let tmp   = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let audit = FakeAuditSink::new();
 
         let outcomes = verify_canonical_images_at_boot(tmp.path(), "0.0.0-test", &audit);
@@ -686,10 +711,7 @@ mod tests {
             other => panic!("expected Missing for Orchestrator; got {other:?}"),
         }
 
-        let kinds: Vec<_> = audit.events()
-            .iter()
-            .map(|e| e.kind.as_str())
-            .collect();
+        let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         assert!(
             !kinds.contains(&"SecurityViolationDetected"),
             "missing-image case must NOT emit SecurityViolationDetected: {kinds:?}",
@@ -703,7 +725,7 @@ mod tests {
     /// the release pipeline has produced a manifest).
     #[test]
     fn present_image_without_manifest_surfaces_manifest_missing_warning_only() {
-        let tmp   = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let audit = FakeAuditSink::new();
 
         let images = tmp.path().join("images");
@@ -724,10 +746,7 @@ mod tests {
             );
         }
 
-        let kinds: Vec<_> = audit.events()
-            .iter()
-            .map(|e| e.kind.as_str())
-            .collect();
+        let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         assert!(
             !kinds.contains(&"SecurityViolationDetected"),
             "manifest-missing case must NOT emit SecurityViolationDetected: {kinds:?}",
@@ -755,8 +774,8 @@ mod tests {
     /// Pins the substrate-spawn-eligible posture.
     #[test]
     fn present_kernel_binary_returns_present_with_resolved_path() {
-        let tmp     = tempfile::tempdir().unwrap();
-        let kernel  = tmp.path().join("kernel");
+        let tmp = tempfile::tempdir().unwrap();
+        let kernel = tmp.path().join("kernel");
         std::fs::create_dir_all(&kernel).unwrap();
         let vmlinux = kernel.join("vmlinux");
         std::fs::write(&vmlinux, b"placeholder-vmlinux-bytes").unwrap();
@@ -808,7 +827,7 @@ mod tests {
             return;
         }
 
-        let tmp   = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let audit = FakeAuditSink::new();
 
         let images = tmp.path().join("images");
@@ -836,10 +855,7 @@ mod tests {
             );
         }
 
-        let kinds: Vec<_> = audit.events()
-            .iter()
-            .map(|e| e.kind.as_str())
-            .collect();
+        let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         assert!(
             !kinds.contains(&"SecurityViolationDetected"),
             "trust-anchor-unpopulated must NOT emit SecurityViolationDetected: {kinds:?}",
@@ -880,7 +896,7 @@ mod tests {
             return;
         }
 
-        let tmp    = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let images = tmp.path().join("images");
         std::fs::create_dir_all(&images).unwrap();
         let img_path = images.join("raxis-orchestrator-core-0.0.0-test.img");
@@ -921,11 +937,8 @@ mode = 493
         )
         .unwrap();
 
-        let (kind, is_trusted) = resolve_image_kind_for_role(
-            &img_path,
-            CanonicalImageKind::Orchestrator,
-            "0.0.0-test",
-        );
+        let (kind, is_trusted) =
+            resolve_image_kind_for_role(&img_path, CanonicalImageKind::Orchestrator, "0.0.0-test");
         assert_eq!(
             kind,
             ImageKind::RootfsInitramfsCpio,
@@ -960,7 +973,7 @@ mode = 493
             return;
         }
 
-        let tmp    = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let images = tmp.path().join("images");
         std::fs::create_dir_all(&images).unwrap();
         let img_path = images.join("raxis-reviewer-core-0.0.0-test.img");
@@ -974,11 +987,8 @@ mode = 493
         )
         .unwrap();
 
-        let (kind, is_trusted) = resolve_image_kind_for_role(
-            &img_path,
-            CanonicalImageKind::Reviewer,
-            "0.0.0-test",
-        );
+        let (kind, is_trusted) =
+            resolve_image_kind_for_role(&img_path, CanonicalImageKind::Reviewer, "0.0.0-test");
         assert_eq!(
             kind,
             ImageKind::RootfsErofs,

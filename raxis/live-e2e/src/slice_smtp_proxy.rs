@@ -68,14 +68,14 @@
 //! `spawn_upstream`, `drive_upstream`, base64 helpers) is fully
 //! deleted; no half-removed mock module remains.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -117,7 +117,7 @@ const TENANT_MAILDIR_NEW: &str = "/var/mail/live-e2e.test/raxis-tenant/new";
 // ---------------------------------------------------------------------------
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -134,16 +134,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -161,25 +170,24 @@ pub(crate) async fn run() -> Result<()> {
     let pre_files = list_maildir_new()?;
 
     let backend = Arc::new(LiveBackend {
-        value:    UPSTREAM_PASS.as_bytes().to_vec(),
+        value: UPSTREAM_PASS.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
     let cfg = ProxyConfig {
-        listen_addr:           "127.0.0.1:0".to_owned(),
-        upstream_host_port:    SMTP_HOST_PORT.to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
+        upstream_host_port: SMTP_HOST_PORT.to_owned(),
         // The Docker Mailserver in compose is configured with
         // `SSL_TYPE=""` (plaintext) on its inbound port 25 path,
         // so the proxy's outbound dial does not need to STARTTLS.
         // Production deployments would set this `true`.
-        require_upstream_tls:  false,
-        credential_name:       CredentialName::new("live-e2e"),
-        auth_mode:             AuthMode::Plain { user: UPSTREAM_USER.to_owned() },
-        consumer:              OwnedConsumer::new(
-            "credential_proxy",
-            "live-e2e:smtp:0",
-        ),
-        restrictions:          Restrictions::default(),
+        require_upstream_tls: false,
+        credential_name: CredentialName::new("live-e2e"),
+        auth_mode: AuthMode::Plain {
+            user: UPSTREAM_USER.to_owned(),
+        },
+        consumer: OwnedConsumer::new("credential_proxy", "live-e2e:smtp:0"),
+        restrictions: Restrictions::default(),
     };
     let proxy = SmtpProxy::bind(backend.clone(), cfg, Arc::new(NoopEnvelopeAuditSink))
         .await
@@ -292,11 +300,11 @@ pub(crate) async fn run() -> Result<()> {
     }
 
     tracing::info!(
-        messages_relayed    = snap.messages_relayed,
+        messages_relayed = snap.messages_relayed,
         recipients_accepted = snap.recipients_accepted,
-        bytes_relayed       = snap.bytes_relayed,
-        backend_resolves    = backend.resolves.load(Ordering::Relaxed),
-        delivered_files     = landed.new_files.len(),
+        bytes_relayed = snap.bytes_relayed,
+        backend_resolves = backend.resolves.load(Ordering::Relaxed),
+        delivered_files = landed.new_files.len(),
         "smtp-proxy slice OK (real upstream)",
     );
     Ok(())
@@ -310,8 +318,10 @@ async fn require_smtp_container() -> Result<()> {
     match tokio::time::timeout(
         Duration::from_millis(800),
         TcpStream::connect(SMTP_HOST_PORT),
-    ).await {
-        Ok(Ok(_))  => Ok(()),
+    )
+    .await
+    {
+        Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "SMTP (docker-mailserver) container not reachable at {SMTP_HOST_PORT} ({e}).\n\
              Run:\n  \
@@ -344,25 +354,21 @@ fn list_maildir_new() -> Result<Vec<String>> {
 }
 
 struct LandingProbe {
-    found:     bool,
+    found: bool,
     new_files: Vec<String>,
 }
 
 /// Poll the tenant's Maildir for a file that is NEW (not in
 /// `before`) AND whose body contains `run_tag`. Returns once at
 /// least one such file lands or `deadline` elapses.
-fn wait_for_delivery(
-    before:   &[String],
-    run_tag:  &str,
-    deadline: Duration,
-) -> Result<LandingProbe> {
+fn wait_for_delivery(before: &[String], run_tag: &str, deadline: Duration) -> Result<LandingProbe> {
     let started = Instant::now();
-    let before_set: std::collections::BTreeSet<&str> =
-        before.iter().map(String::as_str).collect();
+    let before_set: std::collections::BTreeSet<&str> = before.iter().map(String::as_str).collect();
 
     loop {
         let now = list_maildir_new()?;
-        let new_files: Vec<String> = now.into_iter()
+        let new_files: Vec<String> = now
+            .into_iter()
             .filter(|f| !before_set.contains(f.as_str()))
             .collect();
 
@@ -371,12 +377,18 @@ fn wait_for_delivery(
             for f in &new_files {
                 let body = read_maildir_file(f)?;
                 if body.contains(run_tag) {
-                    return Ok(LandingProbe { found: true, new_files });
+                    return Ok(LandingProbe {
+                        found: true,
+                        new_files,
+                    });
                 }
             }
         }
         if started.elapsed() >= deadline {
-            return Ok(LandingProbe { found: false, new_files });
+            return Ok(LandingProbe {
+                found: false,
+                new_files,
+            });
         }
         std::thread::sleep(Duration::from_millis(250));
     }
@@ -398,14 +410,19 @@ fn read_maildir_file(name: &str) -> Result<String> {
 }
 
 fn cleanup_delivered(files: &[String]) -> Result<()> {
-    if files.is_empty() { return Ok(()); }
-    let mut args = vec!["exec".to_owned(), SMTP_CONTAINER.to_owned(), "rm".to_owned(), "-f".to_owned()];
+    if files.is_empty() {
+        return Ok(());
+    }
+    let mut args = vec![
+        "exec".to_owned(),
+        SMTP_CONTAINER.to_owned(),
+        "rm".to_owned(),
+        "-f".to_owned(),
+    ];
     for f in files {
         args.push(format!("{TENANT_MAILDIR_NEW}/{f}"));
     }
-    let out = std::process::Command::new("docker")
-        .args(&args)
-        .output()?;
+    let out = std::process::Command::new("docker").args(&args).output()?;
     if !out.status.success() {
         return Err(anyhow!(
             "docker exec rm failed: {}",
@@ -416,7 +433,7 @@ fn cleanup_delivered(files: &[String]) -> Result<()> {
 }
 
 async fn wait_for_relay(
-    stats:    &Arc<raxis_credential_proxy_smtp::ProxyStats>,
+    stats: &Arc<raxis_credential_proxy_smtp::ProxyStats>,
     deadline: Duration,
 ) -> Result<raxis_credential_proxy_smtp::ProxyStatsSnapshot> {
     let started = Instant::now();
@@ -447,15 +464,22 @@ async fn read_status_line(s: &mut TcpStream) -> Result<(u16, bool, String)> {
     let mut byte = [0u8; 1];
     loop {
         let n = s.read(&mut byte).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         acc.push(byte[0]);
-        if byte[0] == b'\n' { break; }
+        if byte[0] == b'\n' {
+            break;
+        }
     }
-    let line = String::from_utf8_lossy(&acc).trim_end_matches(['\r', '\n']).to_owned();
+    let line = String::from_utf8_lossy(&acc)
+        .trim_end_matches(['\r', '\n'])
+        .to_owned();
     if line.len() < 4 {
         return Err(anyhow!("short SMTP status line {line:?}"));
     }
-    let code: u16 = line[..3].parse()
+    let code: u16 = line[..3]
+        .parse()
         .map_err(|_| anyhow!("malformed SMTP code in {line:?}"))?;
     let sep = line.as_bytes()[3];
     let text = line[4..].to_owned();
@@ -468,7 +492,9 @@ async fn expect_status(s: &mut TcpStream, want: u16) -> Result<()> {
         if code != want {
             return Err(anyhow!("expected status {want}, got {code} ({text})"));
         }
-        if !continued { return Ok(()); }
+        if !continued {
+            return Ok(());
+        }
     }
 }
 
@@ -478,6 +504,8 @@ async fn drain_continued_status(s: &mut TcpStream, want: u16) -> Result<()> {
         if code != want {
             return Err(anyhow!("expected status {want}, got {code} ({text})"));
         }
-        if !continued { return Ok(()); }
+        if !continued {
+            return Ok(());
+        }
     }
 }

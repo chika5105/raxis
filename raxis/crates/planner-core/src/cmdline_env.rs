@@ -152,7 +152,7 @@ pub fn apply_envb64_payload(b64: &str) -> HydrationOutcome {
         }
     };
 
-    let mut applied:             usize = 0;
+    let mut applied: usize = 0;
     let mut skipped_already_set: usize = 0;
     for line in payload.split('\n') {
         if line.is_empty() {
@@ -260,7 +260,10 @@ mod tests {
 
         let out = hydrate_from_path(&path);
         match out {
-            HydrationOutcome::Hydrated { applied, skipped_already_set } => {
+            HydrationOutcome::Hydrated {
+                applied,
+                skipped_already_set,
+            } => {
                 assert_eq!(applied, 3);
                 assert_eq!(skipped_already_set, 0);
             }
@@ -302,7 +305,10 @@ mod tests {
 
         let out = hydrate_from_path(&path);
         match out {
-            HydrationOutcome::Hydrated { applied, skipped_already_set } => {
+            HydrationOutcome::Hydrated {
+                applied,
+                skipped_already_set,
+            } => {
                 assert_eq!(applied, 0);
                 assert_eq!(skipped_already_set, 1);
             }
@@ -323,7 +329,10 @@ mod tests {
         let b64 = base64::engine::general_purpose::STANDARD.encode(payload);
         let out = apply_envb64_payload(&b64);
         match out {
-            HydrationOutcome::Hydrated { applied, skipped_already_set } => {
+            HydrationOutcome::Hydrated {
+                applied,
+                skipped_already_set,
+            } => {
                 assert_eq!(applied, 1);
                 assert_eq!(skipped_already_set, 0);
             }

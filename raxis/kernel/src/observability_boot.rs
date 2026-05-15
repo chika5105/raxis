@@ -67,15 +67,15 @@ pub(crate) fn build_obs_hub(
     };
     let ring_cfg = raxis_observability::ring::RingConfig {
         segment_max_bytes: oc.ring.segment_max_bytes,
-        max_total_bytes:   oc.ring.max_total_bytes,
+        max_total_bytes: oc.ring.max_total_bytes,
     };
     let hub_cfg = raxis_observability::HubConfig {
-        enabled:             true,
-        max_queue_depth:     oc.ring.max_queue_depth,
-        sample_rate:         oc.traces.sample_rate,
-        max_attrs_per_span:  oc.traces.max_attrs_per_span,
+        enabled: true,
+        max_queue_depth: oc.ring.max_queue_depth,
+        sample_rate: oc.traces.sample_rate,
+        max_attrs_per_span: oc.traces.max_attrs_per_span,
         max_events_per_span: oc.traces.max_events_per_span,
-        histogram_buckets:   oc.metrics.histogram_buckets.clone(),
+        histogram_buckets: oc.metrics.histogram_buckets.clone(),
     };
     match raxis_observability::ObservabilityHub::with_ring_at(
         hub_cfg,
@@ -118,10 +118,7 @@ pub(crate) fn build_obs_hub(
 /// the per-tick `flush()` cost is bounded by `max_queue_depth` and
 /// the exporter's serial I/O. Aborting the kernel cancels the task
 /// via runtime drop.
-fn spawn_periodic_flush(
-    hub: Arc<raxis_observability::ObservabilityHub>,
-    interval: Duration,
-) {
+fn spawn_periodic_flush(hub: Arc<raxis_observability::ObservabilityHub>, interval: Duration) {
     if interval.is_zero() || !hub.enabled() {
         return;
     }
@@ -173,9 +170,7 @@ mod tests {
     use std::sync::Arc;
     use std::time::Duration;
 
-    use raxis_observability::{
-        ring::RingConfig, HubConfig, ObservabilityHub,
-    };
+    use raxis_observability::{ring::RingConfig, HubConfig, ObservabilityHub};
 
     use super::spawn_periodic_flush;
 
@@ -184,18 +179,18 @@ mod tests {
         max_queue_depth: usize,
     ) -> Arc<ObservabilityHub> {
         let cfg = HubConfig {
-            enabled:             true,
+            enabled: true,
             max_queue_depth,
-            sample_rate:         1.0,
-            max_attrs_per_span:  32,
+            sample_rate: 1.0,
+            max_attrs_per_span: 32,
             max_events_per_span: 16,
-            histogram_buckets:   vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
+            histogram_buckets: vec![1.0, 5.0, 10.0, 25.0, 50.0, 100.0],
         };
         // Lift caps so the test never trips a rotate / GC mid-flush.
         // The witness only cares about "ring file grew past 0 bytes".
         let ring_cfg = RingConfig {
             segment_max_bytes: 16 * 1024 * 1024,
-            max_total_bytes:   64 * 1024 * 1024,
+            max_total_bytes: 64 * 1024 * 1024,
         };
         let (hub, _exp) = ObservabilityHub::with_ring_at(
             cfg,
@@ -231,12 +226,7 @@ mod tests {
         // that's actually wired in production via
         // `handlers::intent::handle`). Use the kernel's emit-site
         // wrapper so we're not duplicating its closed-allow-list shape.
-        crate::observability::record_intent_admission(
-            hub.as_ref(),
-            "SingleCommit",
-            "Accepted",
-            42,
-        );
+        crate::observability::record_intent_admission(hub.as_ref(), "SingleCommit", "Accepted", 42);
 
         // BEFORE one interval has elapsed: the ring file MUST still
         // be 0 bytes — the flush task discards its immediate first
@@ -248,7 +238,8 @@ mod tests {
             .map(|m| m.len())
             .unwrap_or(0);
         assert_eq!(
-            pre_size, 0,
+            pre_size,
+            0,
             "ring file at {} should be 0 bytes before first flush \
              fires; observed {pre_size}",
             metrics_jsonl.display(),
@@ -314,12 +305,7 @@ mod tests {
         // spawned task would have a chance to fire (and tip us off
         // via a non-empty ring file). Even with a record submitted,
         // the ring file must remain 0 bytes because no flush ever fires.
-        crate::observability::record_intent_admission(
-            hub.as_ref(),
-            "SingleCommit",
-            "Accepted",
-            1,
-        );
+        crate::observability::record_intent_admission(hub.as_ref(), "SingleCommit", "Accepted", 1);
         tokio::time::sleep(Duration::from_millis(120)).await;
         let metrics_jsonl = first_metrics_segment(tmp.path());
         let size = std::fs::metadata(&metrics_jsonl)

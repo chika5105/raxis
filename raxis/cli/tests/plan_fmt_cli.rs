@@ -31,7 +31,11 @@ fn check_passes_on_canonical_file() {
     std::fs::write(&plan, canonical).unwrap();
 
     let out = run(&["plan", "fmt", plan.to_str().unwrap(), "--check"]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 }
 
 #[test]
@@ -41,7 +45,11 @@ fn check_fails_on_non_canonical_file() {
     std::fs::write(&plan, NON_CANONICAL).unwrap();
 
     let out = run(&["plan", "fmt", plan.to_str().unwrap(), "--check"]);
-    assert!(!out.status.success(), "stdout: {}", String::from_utf8_lossy(&out.stdout));
+    assert!(
+        !out.status.success(),
+        "stdout: {}",
+        String::from_utf8_lossy(&out.stdout)
+    );
     assert!(
         String::from_utf8_lossy(&out.stderr).contains("not in canonical form"),
         "stderr: {}",
@@ -56,7 +64,11 @@ fn rewrites_in_place_by_default() {
     std::fs::write(&plan, NON_CANONICAL).unwrap();
 
     let out = run(&["plan", "fmt", plan.to_str().unwrap()]);
-    assert!(out.status.success(), "stderr: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     let after = std::fs::read_to_string(&plan).unwrap();
     assert!(!after.contains("\n\n\n"), "after: {after:?}");
@@ -77,7 +89,10 @@ fn stdout_does_not_modify_file() {
     assert!(!stdout_str.contains("\n\n\n"), "stdout: {stdout_str:?}");
 
     let unchanged = std::fs::read_to_string(&plan).unwrap();
-    assert_eq!(unchanged, NON_CANONICAL, "file was modified despite --stdout");
+    assert_eq!(
+        unchanged, NON_CANONICAL,
+        "file was modified despite --stdout"
+    );
 }
 
 #[test]

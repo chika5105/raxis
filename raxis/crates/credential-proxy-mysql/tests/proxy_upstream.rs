@@ -37,8 +37,8 @@ use raxis_credential_proxy_mysql::{
     AuditChannel, AuditEvent, MysqlProxy, OwnedConsumer, ProxyConfig, Restrictions,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 
 use support::{FakeBackend, FakeResponse};
@@ -71,11 +71,17 @@ impl CredentialBackend for StaticBackend {
         Ok(())
     }
 
-    fn exists(&self, _name: &CredentialName) -> bool { true }
+    fn exists(&self, _name: &CredentialName) -> bool {
+        true
+    }
 
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
 
-    fn backend_kind(&self) -> &'static str { "test_static" }
+    fn backend_kind(&self) -> &'static str {
+        "test_static"
+    }
 }
 
 #[derive(Default, Clone)]
@@ -134,7 +140,10 @@ async fn drive_agent_handshake(s: &mut TcpStream) {
     s.flush().await.unwrap();
     // Read OK_Packet (seq=2).
     let (_, ok) = read_packet(s).await.unwrap();
-    assert!(!ok.is_empty() && ok[0] == 0x00, "expected OK_Packet from proxy");
+    assert!(
+        !ok.is_empty() && ok[0] == 0x00,
+        "expected OK_Packet from proxy"
+    );
 }
 
 /// Send a COM_QUERY with the given SQL.
@@ -233,7 +242,9 @@ fn decode_lenenc_with_len(buf: &[u8]) -> Option<(u64, usize)> {
             4,
         )),
         0xfe if buf.len() >= 9 => Some((
-            u64::from_le_bytes([buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8]]),
+            u64::from_le_bytes([
+                buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+            ]),
             9,
         )),
         _ => None,
@@ -261,12 +272,14 @@ async fn allowed_select_round_trips_through_real_upstream() {
         if sql == "SELECT 1" {
             Some(FakeResponse::Rows {
                 columns: vec!["one".into()],
-                rows:    vec![vec![Some(b"1".to_vec())]],
+                rows: vec![vec![Some(b"1".to_vec())]],
             })
         } else {
             None
         }
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
     let upstream_addr = backend.addr();
 
     let creds = Arc::new(StaticBackend {
@@ -274,12 +287,12 @@ async fn allowed_select_round_trips_through_real_upstream() {
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mysql"),
-        consumer:        OwnedConsumer::new("session", "s-1"),
-        server_version:  "8.0.0-raxis-test".into(),
-        restrictions:    Restrictions::default(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("session", "s-1"),
+        server_version: "8.0.0-raxis-test".into(),
+        restrictions: Restrictions::default(),
+        log_content: false,
     };
     let proxy = MysqlProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
         .await
@@ -320,7 +333,9 @@ async fn allowed_select_round_trips_through_real_upstream() {
                 panic!("UpstreamFailed unexpected on success path");
             }
             AuditEvent::DatabaseQueryCompleted {
-                rows_returned, upstream_error, ..
+                rows_returned,
+                upstream_error,
+                ..
             } => {
                 assert_eq!(*rows_returned, 1);
                 assert!(upstream_error.is_none());
@@ -329,8 +344,10 @@ async fn allowed_select_round_trips_through_real_upstream() {
             }
         }
     }
-    assert!(saw_executed && saw_connected && saw_completed,
-        "missing one of the expected V2.1 audit events: events = {events:#?}");
+    assert!(
+        saw_executed && saw_connected && saw_completed,
+        "missing one of the expected V2.1 audit events: events = {events:#?}"
+    );
 }
 
 #[tokio::test]
@@ -340,7 +357,9 @@ async fn blocked_query_short_circuits_without_upstream_contact() {
     let backend = FakeBackend::start(Arc::new(move |_sql: &str| -> Option<FakeResponse> {
         *calls_clone.lock().unwrap() += 1;
         Some(FakeResponse::Ok { affected_rows: 0 })
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
     let upstream_addr = backend.addr();
 
     let creds = Arc::new(StaticBackend {
@@ -348,12 +367,12 @@ async fn blocked_query_short_circuits_without_upstream_contact() {
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mysql"),
-        consumer:        OwnedConsumer::new("session", "s-2"),
-        server_version:  "8.0.0-raxis-test".into(),
-        restrictions:    Restrictions::select_only(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("session", "s-2"),
+        server_version: "8.0.0-raxis-test".into(),
+        restrictions: Restrictions::select_only(),
+        log_content: false,
     };
     let proxy = MysqlProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
         .await
@@ -366,7 +385,11 @@ async fn blocked_query_short_circuits_without_upstream_contact() {
     send_query(&mut s, "INSERT INTO t VALUES (1)").await;
     // Expect ERR_Packet for blocked DML.
     let (_, p) = read_packet(&mut s).await.unwrap();
-    assert_eq!(p[0], 0xff, "expected ERR_Packet for blocked INSERT, got 0x{:02x}", p[0]);
+    assert_eq!(
+        p[0], 0xff,
+        "expected ERR_Packet for blocked INSERT, got 0x{:02x}",
+        p[0]
+    );
     let code = u16::from_le_bytes([p[1], p[2]]);
     assert_eq!(code, 1142, "expected ER_TABLEACCESS_DENIED_ERROR");
 
@@ -374,7 +397,11 @@ async fn blocked_query_short_circuits_without_upstream_contact() {
     drop(s);
 
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert_eq!(*backend_calls.lock().unwrap(), 0, "fake upstream was called for a blocked query");
+    assert_eq!(
+        *backend_calls.lock().unwrap(),
+        0,
+        "fake upstream was called for a blocked query"
+    );
     let events = audit.snapshot();
     for ev in &events {
         match ev {
@@ -387,10 +414,12 @@ async fn blocked_query_short_circuits_without_upstream_contact() {
             _ => {}
         }
     }
-    assert!(events.iter().any(|e| matches!(
-        e,
-        AuditEvent::DatabaseQueryExecuted { blocked: true, .. }
-    )), "expected DatabaseQueryExecuted with blocked=true: events = {events:#?}");
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(e, AuditEvent::DatabaseQueryExecuted { blocked: true, .. })),
+        "expected DatabaseQueryExecuted with blocked=true: events = {events:#?}"
+    );
 }
 
 #[tokio::test]
@@ -398,26 +427,28 @@ async fn upstream_error_response_is_forwarded_and_audited() {
     let backend = FakeBackend::start(Arc::new(|sql: &str| {
         if sql == "SELECT FROM bad_syntax" {
             Some(FakeResponse::Err {
-                code:     1064,
+                code: 1064,
                 sqlstate: "42000".into(),
-                message:  "fake-mysql: syntax error".into(),
+                message: "fake-mysql: syntax error".into(),
             })
         } else {
             None
         }
-    })).await.unwrap();
+    }))
+    .await
+    .unwrap();
 
     let creds = Arc::new(StaticBackend {
         url: format!("mysql://demo@{}/", backend.addr()),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mysql"),
-        consumer:        OwnedConsumer::new("session", "s-3"),
-        server_version:  "8.0.0-raxis-test".into(),
-        restrictions:    Restrictions::default(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("session", "s-3"),
+        server_version: "8.0.0-raxis-test".into(),
+        restrictions: Restrictions::default(),
+        log_content: false,
     };
     let proxy = MysqlProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
         .await
@@ -452,26 +483,28 @@ async fn password_validates_against_native_password_challenge() {
             if sql == "SELECT auth_check" {
                 Some(FakeResponse::Rows {
                     columns: vec!["status".into()],
-                    rows:    vec![vec![Some(b"ok".to_vec())]],
+                    rows: vec![vec![Some(b"ok".to_vec())]],
                 })
             } else {
                 Some(FakeResponse::Ok { affected_rows: 0 })
             }
         }),
         Some(b"correct-horse-battery".to_vec()),
-    ).await.unwrap();
+    )
+    .await
+    .unwrap();
 
     let creds = Arc::new(StaticBackend {
         url: format!("mysql://demo:correct-horse-battery@{}/", backend.addr()),
     });
     let audit = Arc::new(CapturingChannel::default());
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".into(),
+        listen_addr: "127.0.0.1:0".into(),
         credential_name: CredentialName::new("demo-mysql"),
-        consumer:        OwnedConsumer::new("session", "s-4"),
-        server_version:  "8.0.0-raxis-test".into(),
-        restrictions:    Restrictions::default(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("session", "s-4"),
+        server_version: "8.0.0-raxis-test".into(),
+        restrictions: Restrictions::default(),
+        log_content: false,
     };
     let proxy = MysqlProxy::bind(creds.clone(), cfg, audit.clone() as Arc<dyn AuditChannel>)
         .await

@@ -113,7 +113,7 @@ pub enum MainMergeError {
     #[error("main repo at {path} cannot be opened: {reason}")]
     MainRepoUnopenable {
         /// Path the kernel asked to open.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying gix error string.
         reason: String,
     },
@@ -124,7 +124,7 @@ pub enum MainMergeError {
     #[error("orchestrator worktree at {path} cannot be opened: {reason}")]
     SourceUnopenable {
         /// Path the kernel asked to fetch from.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying gix error string.
         reason: String,
     },
@@ -158,7 +158,7 @@ pub enum MainMergeError {
     #[error("invalid commit SHA {sha}: {reason}")]
     InvalidSha {
         /// The bad SHA.
-        sha:    String,
+        sha: String,
         /// Why it failed parse.
         reason: String,
     },
@@ -180,7 +180,7 @@ pub struct MainAdvance {
     /// Where main points after this call. Equals the `commit_sha`
     /// argument on success, or equals `previous_sha` when the
     /// idempotency short-circuit fires.
-    pub current_sha:  String,
+    pub current_sha: String,
     /// `true` iff this call was a no-op because main already
     /// pointed at the requested SHA. The kernel's audit chain
     /// emits `IntegrationMergeCompleted` once per advancement,
@@ -221,10 +221,10 @@ pub struct MainAdvance {
 /// `commit_sha`. Subsequent calls observe `already_at_target =
 /// true` and perform no work.
 pub fn commit_merge_to_target_ref(
-    main_repo_root:   &Path,
+    main_repo_root: &Path,
     orch_worktree_root: &Path,
-    commit_sha:         &str,
-    target_ref:         &str,
+    commit_sha: &str,
+    target_ref: &str,
 ) -> Result<MainAdvance, MainMergeError> {
     let oid = parse_oid(commit_sha)?;
 
@@ -237,8 +237,8 @@ pub fn commit_merge_to_target_ref(
     // Idempotency short-circuit: target ref already at the SHA.
     if previous.as_ref().map(|p| p == &oid).unwrap_or(false) {
         return Ok(MainAdvance {
-            previous_sha:      previous.as_ref().map(|p| p.to_string()),
-            current_sha:       oid.to_string(),
+            previous_sha: previous.as_ref().map(|p| p.to_string()),
+            current_sha: oid.to_string(),
             already_at_target: true,
         });
     }
@@ -260,8 +260,8 @@ pub fn commit_merge_to_target_ref(
     update_target_ref(&main_repo, &oid, previous.as_ref(), target_ref)?;
 
     Ok(MainAdvance {
-        previous_sha:      previous.as_ref().map(|p| p.to_string()),
-        current_sha:       oid.to_string(),
+        previous_sha: previous.as_ref().map(|p| p.to_string()),
+        current_sha: oid.to_string(),
         already_at_target: false,
     })
 }
@@ -277,9 +277,9 @@ pub fn commit_merge_to_target_ref(
 /// and the in-crate test helpers, both of which target
 /// `refs/heads/main` explicitly.
 pub fn commit_merge_to_main(
-    main_repo_root:   &Path,
+    main_repo_root: &Path,
     orch_worktree_root: &Path,
-    commit_sha:         &str,
+    commit_sha: &str,
 ) -> Result<MainAdvance, MainMergeError> {
     commit_merge_to_target_ref(
         main_repo_root,
@@ -310,30 +310,29 @@ pub fn commit_merge_to_main(
 /// `Repository::write_object`. Each write is automatically a
 /// no-op if the object already exists (gix dedups by hash).
 pub fn fetch_into_main(
-    main_repo_root:   &Path,
+    main_repo_root: &Path,
     orch_worktree_root: &Path,
-    commit_sha:         &gix::ObjectId,
+    commit_sha: &gix::ObjectId,
 ) -> Result<(), MainMergeError> {
     if !main_repo_root.exists() {
         return Err(MainMergeError::MainRepoUnopenable {
-            path:   main_repo_root.to_path_buf(),
+            path: main_repo_root.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
     if !orch_worktree_root.exists() {
         return Err(MainMergeError::SourceUnopenable {
-            path:   orch_worktree_root.to_path_buf(),
+            path: orch_worktree_root.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
 
     let main_repo = open_main(main_repo_root)?;
-    let orch_repo = gix::open(orch_worktree_root).map_err(|e| {
-        MainMergeError::SourceUnopenable {
-            path:   orch_worktree_root.to_path_buf(),
+    let orch_repo =
+        gix::open(orch_worktree_root).map_err(|e| MainMergeError::SourceUnopenable {
+            path: orch_worktree_root.to_path_buf(),
             reason: e.to_string(),
-        }
-    })?;
+        })?;
 
     // Short-circuit if the object is already present.
     if main_repo.find_object(*commit_sha).is_ok() {
@@ -360,17 +359,17 @@ pub fn fetch_into_main(
 /// `start` in `src` and write each into `dst` if not already
 /// present.
 fn walk_and_copy(
-    src:   &gix::Repository,
-    dst:   &gix::Repository,
+    src: &gix::Repository,
+    dst: &gix::Repository,
     start: gix::ObjectId,
 ) -> Result<(), MainMergeError> {
     use gix::objs::tree::EntryKind;
     use std::collections::{HashSet, VecDeque};
 
-    let mut seen:    HashSet<gix::ObjectId> = HashSet::new();
+    let mut seen: HashSet<gix::ObjectId> = HashSet::new();
     let mut commits: VecDeque<gix::ObjectId> = VecDeque::new();
-    let mut trees:   VecDeque<gix::ObjectId> = VecDeque::new();
-    let mut blobs:   VecDeque<gix::ObjectId> = VecDeque::new();
+    let mut trees: VecDeque<gix::ObjectId> = VecDeque::new();
+    let mut blobs: VecDeque<gix::ObjectId> = VecDeque::new();
 
     commits.push_back(start);
 
@@ -381,19 +380,17 @@ fn walk_and_copy(
         if dst.find_object(commit_oid).is_ok() {
             continue;
         }
-        let obj = src.find_object(commit_oid).map_err(|e| {
-            MainMergeError::FetchFailed(format!("find_object({commit_oid}): {e}"))
-        })?;
+        let obj = src
+            .find_object(commit_oid)
+            .map_err(|e| MainMergeError::FetchFailed(format!("find_object({commit_oid}): {e}")))?;
         let commit = obj.try_into_commit().map_err(|e| {
-            MainMergeError::FetchFailed(format!(
-                "object {commit_oid} is not a commit: {e}"
-            ))
+            MainMergeError::FetchFailed(format!("object {commit_oid} is not a commit: {e}"))
         })?;
 
         // Decode and queue parents + tree.
-        let raw = commit.decode().map_err(|e| {
-            MainMergeError::FetchFailed(format!("decode commit {commit_oid}: {e}"))
-        })?;
+        let raw = commit
+            .decode()
+            .map_err(|e| MainMergeError::FetchFailed(format!("decode commit {commit_oid}: {e}")))?;
         let tree_oid = raw.tree();
         trees.push_back(tree_oid);
         for parent in raw.parents() {
@@ -413,25 +410,23 @@ fn walk_and_copy(
         if dst.find_object(tree_oid).is_ok() {
             continue;
         }
-        let obj = src.find_object(tree_oid).map_err(|e| {
-            MainMergeError::FetchFailed(format!("find_object({tree_oid}): {e}"))
-        })?;
+        let obj = src
+            .find_object(tree_oid)
+            .map_err(|e| MainMergeError::FetchFailed(format!("find_object({tree_oid}): {e}")))?;
         let tree = obj.try_into_tree().map_err(|e| {
-            MainMergeError::FetchFailed(format!(
-                "object {tree_oid} is not a tree: {e}"
-            ))
+            MainMergeError::FetchFailed(format!("object {tree_oid} is not a tree: {e}"))
         })?;
-        let decoded = tree.decode().map_err(|e| {
-            MainMergeError::FetchFailed(format!("decode tree {tree_oid}: {e}"))
-        })?;
+        let decoded = tree
+            .decode()
+            .map_err(|e| MainMergeError::FetchFailed(format!("decode tree {tree_oid}: {e}")))?;
         for entry in decoded.entries.iter() {
             let oid: gix::ObjectId = entry.oid.into();
             match entry.mode.kind() {
-                EntryKind::Tree            => trees.push_back(oid),
-                EntryKind::Blob
-                | EntryKind::BlobExecutable
-                | EntryKind::Link          => blobs.push_back(oid),
-                EntryKind::Commit          => {
+                EntryKind::Tree => trees.push_back(oid),
+                EntryKind::Blob | EntryKind::BlobExecutable | EntryKind::Link => {
+                    blobs.push_back(oid)
+                }
+                EntryKind::Commit => {
                     // Submodule pointer; we never recurse into it.
                 }
             }
@@ -446,9 +441,9 @@ fn walk_and_copy(
         if dst.find_object(blob_oid).is_ok() {
             continue;
         }
-        let obj = src.find_object(blob_oid).map_err(|e| {
-            MainMergeError::FetchFailed(format!("find_object({blob_oid}): {e}"))
-        })?;
+        let obj = src
+            .find_object(blob_oid)
+            .map_err(|e| MainMergeError::FetchFailed(format!("find_object({blob_oid}): {e}")))?;
         write_object_bytes(dst, obj.data.as_slice(), gix::object::Kind::Blob)?;
     }
 
@@ -460,22 +455,21 @@ fn walk_and_copy(
 /// minimise allocations, and the generic `write_buf` shim for
 /// commits and trees. All three are dedup-by-hash.
 fn write_object_bytes(
-    dst:  &gix::Repository,
+    dst: &gix::Repository,
     body: &[u8],
     kind: gix::object::Kind,
 ) -> Result<(), MainMergeError> {
     use gix::object::Kind;
     match kind {
         Kind::Blob => {
-            dst.write_blob(body).map_err(|e| {
-                MainMergeError::FetchFailed(format!("write_blob: {e}"))
-            })?;
+            dst.write_blob(body)
+                .map_err(|e| MainMergeError::FetchFailed(format!("write_blob: {e}")))?;
         }
         _ => {
             use gix::prelude::Write as _;
-            dst.objects.write_buf(kind, body).map_err(|e| {
-                MainMergeError::FetchFailed(format!("write_buf: {e}"))
-            })?;
+            dst.objects
+                .write_buf(kind, body)
+                .map_err(|e| MainMergeError::FetchFailed(format!("write_buf: {e}")))?;
         }
     }
     Ok(())
@@ -497,42 +491,39 @@ fn write_object_bytes(
 /// caller resolves the per-initiative override + policy default per
 /// `V2_GAPS.md §12.8`; this function performs no resolution.
 pub fn update_target_ref(
-    repo:              &gix::Repository,
-    oid:               &gix::ObjectId,
+    repo: &gix::Repository,
+    oid: &gix::ObjectId,
     expected_previous: Option<&gix::ObjectId>,
-    target_ref:        &str,
+    target_ref: &str,
 ) -> Result<(), MainMergeError> {
-    use gix::refs::transaction::{Change, LogChange, RefEdit, RefLog, PreviousValue};
+    use gix::refs::transaction::{Change, LogChange, PreviousValue, RefEdit, RefLog};
     use gix::refs::{FullName, Target};
 
     let full_name = FullName::try_from(target_ref).map_err(|e| {
-        MainMergeError::RefUpdateFailed(format!(
-            "FullName::try_from({target_ref:?}): {e}"
-        ))
+        MainMergeError::RefUpdateFailed(format!("FullName::try_from({target_ref:?}): {e}"))
     })?;
 
     let previous = match expected_previous {
         Some(prev) => PreviousValue::MustExistAndMatch(Target::Object(*prev)),
-        None       => PreviousValue::MustNotExist,
+        None => PreviousValue::MustNotExist,
     };
 
     let edit = RefEdit {
         change: Change::Update {
             log: LogChange {
-                mode:           RefLog::AndReference,
+                mode: RefLog::AndReference,
                 force_create_reflog: false,
-                message:        "raxis: IntegrationMerge fast-forward".into(),
+                message: "raxis: IntegrationMerge fast-forward".into(),
             },
             expected: previous,
-            new:      Target::Object(*oid),
+            new: Target::Object(*oid),
         },
         name: full_name,
         deref: false,
     };
 
-    repo.edit_reference(edit).map_err(|e| {
-        MainMergeError::RefUpdateFailed(format!("edit_reference: {e}"))
-    })?;
+    repo.edit_reference(edit)
+        .map_err(|e| MainMergeError::RefUpdateFailed(format!("edit_reference: {e}")))?;
     Ok(())
 }
 
@@ -549,12 +540,12 @@ pub fn update_target_ref(
 /// missed (Case B).
 pub fn current_target_ref_oid(
     main_repo_root: &Path,
-    target_ref:     &str,
+    target_ref: &str,
 ) -> Result<Option<String>, MainMergeError> {
     let repo = open_main(main_repo_root)?;
     match current_ref_oid(&repo, target_ref) {
         Ok(oid) => Ok(Some(oid.to_string())),
-        Err(_)  => Ok(None),
+        Err(_) => Ok(None),
     }
 }
 
@@ -564,7 +555,7 @@ pub fn current_target_ref_oid(
 
 fn open_main(path: &Path) -> Result<gix::Repository, MainMergeError> {
     gix::open(path).map_err(|e| MainMergeError::MainRepoUnopenable {
-        path:   path.to_path_buf(),
+        path: path.to_path_buf(),
         reason: e.to_string(),
     })
 }
@@ -573,19 +564,17 @@ fn current_ref_oid(
     repo: &gix::Repository,
     target_ref: &str,
 ) -> Result<gix::ObjectId, MainMergeError> {
-    let r = repo
-        .find_reference(target_ref)
-        .map_err(|e| MainMergeError::RefUpdateFailed(format!("find_reference({target_ref:?}): {e}")))?;
+    let r = repo.find_reference(target_ref).map_err(|e| {
+        MainMergeError::RefUpdateFailed(format!("find_reference({target_ref:?}): {e}"))
+    })?;
     Ok(r.target().try_id().map(|id| id.to_owned()).ok_or_else(|| {
-        MainMergeError::RefUpdateFailed(format!(
-            "{target_ref} is symbolic, expected direct"
-        ))
+        MainMergeError::RefUpdateFailed(format!("{target_ref} is symbolic, expected direct"))
     })?)
 }
 
 fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {
     gix::ObjectId::from_hex(sha.as_bytes()).map_err(|e| MainMergeError::InvalidSha {
-        sha:    sha.to_owned(),
+        sha: sha.to_owned(),
         reason: e.to_string(),
     })
 }
@@ -605,12 +594,12 @@ fn display_exit_code(code: Option<i32>) -> String {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PushOutcome {
     /// The remote name pushed to (e.g. `"origin"`).
-    pub remote:    String,
+    pub remote: String,
     /// The refspec used (e.g. `"refs/heads/main:refs/heads/main"`).
-    pub refspec:   String,
+    pub refspec: String,
     /// First-line summary of the push, captured from `git push`'s
     /// stderr. Useful for the audit-record `transport_id` slot.
-    pub summary:   String,
+    pub summary: String,
 }
 
 /// Errors specific to the `push_to_remote` operation.
@@ -621,7 +610,7 @@ pub enum PushError {
     #[error("push: main repo {path} unopenable: {reason}")]
     MainRepoUnopenable {
         /// Repository path the kernel asked to push from.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying error.
         reason: String,
     },
@@ -630,14 +619,14 @@ pub enum PushError {
     #[error("push: `git push {remote} {refspec}` exited {}: {stderr}", display_exit_code(*.code))]
     PushFailed {
         /// Remote name.
-        remote:   String,
+        remote: String,
         /// Refspec.
-        refspec:  String,
+        refspec: String,
         /// Exit code from `git push`.
-        code:     Option<i32>,
+        code: Option<i32>,
         /// Captured stderr (truncated at 4 KiB to keep audit rows
         /// bounded).
-        stderr:   String,
+        stderr: String,
     },
     /// `git push` could not be spawned (PATH / permission issue).
     #[error("push: `git push` spawn failed: {0}")]
@@ -663,29 +652,32 @@ pub enum PushError {
 /// [`PushError::PushFailed`] and the caller emits `PushFailed`.
 pub fn push_to_remote(
     main_repo_root: &Path,
-    remote:         &str,
-    refspec:        &str,
-    deadline:       std::time::Duration,
+    remote: &str,
+    refspec: &str,
+    deadline: std::time::Duration,
 ) -> Result<PushOutcome, PushError> {
     if !main_repo_root.exists() {
         return Err(PushError::MainRepoUnopenable {
-            path:   main_repo_root.to_path_buf(),
+            path: main_repo_root.to_path_buf(),
             reason: "path does not exist".to_owned(),
         });
     }
     let mut cmd = std::process::Command::new("git");
-    cmd.arg("-C").arg(main_repo_root)
-       .arg("push")
-       .arg(remote)
-       .arg(refspec)
-       .stdin (std::process::Stdio::null())
-       .stdout(std::process::Stdio::piped())
-       .stderr(std::process::Stdio::piped());
+    cmd.arg("-C")
+        .arg(main_repo_root)
+        .arg("push")
+        .arg(remote)
+        .arg(refspec)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped());
 
     // Bound the subprocess by spawning + polling. Avoids the
     // platform-specific timeout APIs `Command` doesn't ship with.
     let started = std::time::Instant::now();
-    let mut child = cmd.spawn().map_err(|e| PushError::SpawnFailed(e.to_string()))?;
+    let mut child = cmd
+        .spawn()
+        .map_err(|e| PushError::SpawnFailed(e.to_string()))?;
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
@@ -704,19 +696,21 @@ pub fn push_to_remote(
                     let mut t = stderr[..CAP].to_owned();
                     t.push_str(&format!("\n... <truncated {} bytes>", stderr.len() - CAP));
                     t
-                } else { stderr };
+                } else {
+                    stderr
+                };
                 if status.success() {
                     let summary = stderr.lines().next().unwrap_or(&stdout).to_owned();
                     return Ok(PushOutcome {
-                        remote:  remote.to_owned(),
+                        remote: remote.to_owned(),
                         refspec: refspec.to_owned(),
                         summary,
                     });
                 }
                 return Err(PushError::PushFailed {
-                    remote:  remote.to_owned(),
+                    remote: remote.to_owned(),
                     refspec: refspec.to_owned(),
-                    code:    status.code(),
+                    code: status.code(),
                     stderr,
                 });
             }
@@ -746,9 +740,7 @@ mod tests {
     /// containing two commits (`base_sha` and `merge_sha`). The
     /// orchestrator worktree was cloned from the main repo, then
     /// advanced.
-    fn fixture_main_and_orchestrator(
-        tmp: &Path,
-    ) -> Option<(PathBuf, PathBuf, String, String)> {
+    fn fixture_main_and_orchestrator(tmp: &Path) -> Option<(PathBuf, PathBuf, String, String)> {
         if Command::new("git").arg("--version").output().is_err() {
             return None;
         }
@@ -783,8 +775,10 @@ mod tests {
         std::fs::write(main.join("README.md"), "v1\n").ok()?;
         run(&["add", "README.md"], &main);
         run(&["commit", "-q", "-m", "initial"], &main);
-        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout).ok()?
-            .trim().to_owned();
+        let base = String::from_utf8(run(&["rev-parse", "HEAD"], &main).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
 
         // Now mint an "orchestrator worktree" by cloning main
         // and advancing it by one more commit.
@@ -796,8 +790,10 @@ mod tests {
         std::fs::write(orch.join("README.md"), "v1\nv2\n").ok()?;
         run(&["add", "README.md"], &orch);
         run(&["commit", "-q", "-m", "merge: add v2"], &orch);
-        let merge_sha = String::from_utf8(run(&["rev-parse", "HEAD"], &orch).stdout).ok()?
-            .trim().to_owned();
+        let merge_sha = String::from_utf8(run(&["rev-parse", "HEAD"], &orch).stdout)
+            .ok()?
+            .trim()
+            .to_owned();
 
         Some((main, orch, base, merge_sha))
     }
@@ -805,9 +801,7 @@ mod tests {
     #[test]
     fn commit_merge_to_main_fast_forwards_main_branch() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((main, orch, base, merge)) =
-            fixture_main_and_orchestrator(tmp.path())
-        else {
+        let Some((main, orch, base, merge)) = fixture_main_and_orchestrator(tmp.path()) else {
             eprintln!("skipping: git CLI not available");
             return;
         };
@@ -829,16 +823,13 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned();
-        assert_eq!(head, merge,
-            "main must fast-forward to the merge commit");
+        assert_eq!(head, merge, "main must fast-forward to the merge commit");
     }
 
     #[test]
     fn commit_merge_to_main_is_idempotent_on_replay() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((main, orch, base, merge)) =
-            fixture_main_and_orchestrator(tmp.path())
-        else {
+        let Some((main, orch, base, merge)) = fixture_main_and_orchestrator(tmp.path()) else {
             eprintln!("skipping: git CLI not available");
             return;
         };
@@ -848,9 +839,11 @@ mod tests {
 
         // Re-run — idempotency guard: returns already_at_target.
         let second = commit_merge_to_main(&main, &orch, &merge).unwrap();
-        assert!(second.already_at_target,
+        assert!(
+            second.already_at_target,
             "second commit_merge_to_main must be a no-op when main \
-             is already at the target SHA (Check 8 Phase 2 idempotency)");
+             is already at the target SHA (Check 8 Phase 2 idempotency)"
+        );
         assert_eq!(second.previous_sha.as_deref(), Some(merge.as_str()));
         assert_eq!(second.current_sha, merge);
         let _ = base;
@@ -859,18 +852,12 @@ mod tests {
     #[test]
     fn commit_merge_to_main_fails_closed_on_bogus_sha() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((main, orch, _base, _merge)) =
-            fixture_main_and_orchestrator(tmp.path())
-        else {
+        let Some((main, orch, _base, _merge)) = fixture_main_and_orchestrator(tmp.path()) else {
             eprintln!("skipping: git CLI not available");
             return;
         };
 
-        let result = commit_merge_to_main(
-            &main,
-            &orch,
-            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
-        );
+        let result = commit_merge_to_main(&main, &orch, "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef");
         match result {
             Err(MainMergeError::ShaMissingPostFetch { sha }) => {
                 assert!(sha.starts_with("deadbeef"));
@@ -903,9 +890,7 @@ mod tests {
     #[test]
     fn commit_merge_to_main_copies_full_object_graph() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((main, orch, _base, _merge)) =
-            fixture_main_and_orchestrator(tmp.path())
-        else {
+        let Some((main, orch, _base, _merge)) = fixture_main_and_orchestrator(tmp.path()) else {
             eprintln!("skipping: git CLI not available");
             return;
         };
@@ -919,7 +904,8 @@ mod tests {
                 .env("GIT_COMMITTER_EMAIL", "test@raxis.local")
                 .env("GIT_AUTHOR_DATE", "1700000000 +0000")
                 .env("GIT_COMMITTER_DATE", "1700000000 +0000")
-                .output().expect("git invocation")
+                .output()
+                .expect("git invocation")
         };
 
         // Add two more commits to the orchestrator worktree to
@@ -931,7 +917,9 @@ mod tests {
         run(&["add", "b.txt"], &orch);
         run(&["commit", "-q", "-m", "add beta"], &orch);
         let final_sha = String::from_utf8(run(&["rev-parse", "HEAD"], &orch).stdout)
-            .unwrap().trim().to_owned();
+            .unwrap()
+            .trim()
+            .to_owned();
 
         // Now run the main fast-forward. Every intermediate
         // commit, tree, and blob must land in main's ODB.
@@ -943,12 +931,10 @@ mod tests {
         for entry in ["README.md", "a.txt", "b.txt"] {
             let body = std::fs::read(orch.join(entry)).unwrap();
             let blob_oid = gix::ObjectId::from_hex(
-                String::from_utf8(
-                    run(&["hash-object", "--", entry], &orch).stdout,
-                )
-                .unwrap()
-                .trim()
-                .as_bytes(),
+                String::from_utf8(run(&["hash-object", "--", entry], &orch).stdout)
+                    .unwrap()
+                    .trim()
+                    .as_bytes(),
             )
             .unwrap();
             let copied = main_repo.find_object(blob_oid).unwrap();
@@ -968,9 +954,7 @@ mod tests {
     #[test]
     fn commit_merge_to_target_ref_advances_pr_style_branch() {
         let tmp = tempfile::tempdir().unwrap();
-        let Some((main, orch, base, merge)) =
-            fixture_main_and_orchestrator(tmp.path())
-        else {
+        let Some((main, orch, base, merge)) = fixture_main_and_orchestrator(tmp.path()) else {
             eprintln!("skipping: git CLI not available");
             return;
         };
@@ -981,22 +965,18 @@ mod tests {
         // `initial_sha` during `approve_plan` per V2_GAPS §12.8
         // step 1.)
         let create_branch = std::process::Command::new("git")
-            .args([
-                "branch",
-                "raxis/auth-refactor",
-                base.as_str(),
-            ])
+            .args(["branch", "raxis/auth-refactor", base.as_str()])
             .current_dir(&main)
             .output()
             .expect("git branch");
-        assert!(create_branch.status.success(),
+        assert!(
+            create_branch.status.success(),
             "pre-creating PR branch failed: {}",
-            String::from_utf8_lossy(&create_branch.stderr));
+            String::from_utf8_lossy(&create_branch.stderr)
+        );
 
         let target_ref = "refs/heads/raxis/auth-refactor";
-        let advance = commit_merge_to_target_ref(
-            &main, &orch, &merge, target_ref,
-        ).unwrap();
+        let advance = commit_merge_to_target_ref(&main, &orch, &merge, target_ref).unwrap();
         assert_eq!(advance.previous_sha.as_deref(), Some(base.as_str()));
         assert_eq!(advance.current_sha, merge);
         assert!(!advance.already_at_target);
@@ -1029,9 +1009,11 @@ mod tests {
         .unwrap()
         .trim()
         .to_owned();
-        assert_eq!(main_head, base,
+        assert_eq!(
+            main_head, base,
             "refs/heads/main MUST NOT advance when the resolved \
-             target_ref is a non-main PR branch (V2_GAPS §12.8)");
+             target_ref is a non-main PR branch (V2_GAPS §12.8)"
+        );
     }
 
     #[test]
@@ -1056,9 +1038,7 @@ mod tests {
     /// Build a fixture where `main` is the main repo and `bare` is
     /// a freshly-init'd bare repository acting as the upstream
     /// remote. The main repo has `bare` configured as `origin`.
-    fn fixture_main_with_bare_remote(tmp: &Path)
-        -> Option<(PathBuf, PathBuf)>
-    {
+    fn fixture_main_with_bare_remote(tmp: &Path) -> Option<(PathBuf, PathBuf)> {
         if Command::new("git").arg("--version").output().is_err() {
             return None;
         }
@@ -1077,7 +1057,8 @@ mod tests {
                 .env("GIT_COMMITTER_DATE", "1700000000 +0000")
                 .output()
                 .expect("git invocation");
-            assert!(s.status.success(),
+            assert!(
+                s.status.success(),
                 "git {args:?} in {} failed: {}",
                 cwd.display(),
                 String::from_utf8_lossy(&s.stderr),
@@ -1103,14 +1084,17 @@ mod tests {
     fn push_to_remote_succeeds_against_local_bare() {
         let tmp = tempfile::tempdir().unwrap();
         let Some((main, bare)) = fixture_main_with_bare_remote(tmp.path()) else {
-            eprintln!("skipping: git CLI not available"); return;
+            eprintln!("skipping: git CLI not available");
+            return;
         };
         let outcome = push_to_remote(
-            &main, "origin",
+            &main,
+            "origin",
             "refs/heads/main:refs/heads/main",
             std::time::Duration::from_secs(30),
-        ).expect("push must succeed against a fresh bare upstream");
-        assert_eq!(outcome.remote,  "origin");
+        )
+        .expect("push must succeed against a fresh bare upstream");
+        assert_eq!(outcome.remote, "origin");
         assert_eq!(outcome.refspec, "refs/heads/main:refs/heads/main");
 
         // Verify the bare repo now has the same SHA the main has.
@@ -1118,35 +1102,58 @@ mod tests {
             std::process::Command::new("git")
                 .args(["rev-parse", "refs/heads/main"])
                 .current_dir(&main)
-                .output().unwrap().stdout,
-        ).unwrap().trim().to_owned();
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
         let bare_head = String::from_utf8(
             std::process::Command::new("git")
                 .args(["rev-parse", "refs/heads/main"])
                 .current_dir(&bare)
-                .output().unwrap().stdout,
-        ).unwrap().trim().to_owned();
-        assert_eq!(main_head, bare_head,
-            "bare upstream MUST now point at the main repo's HEAD");
+                .output()
+                .unwrap()
+                .stdout,
+        )
+        .unwrap()
+        .trim()
+        .to_owned();
+        assert_eq!(
+            main_head, bare_head,
+            "bare upstream MUST now point at the main repo's HEAD"
+        );
     }
 
     #[test]
     fn push_to_remote_returns_push_failed_for_unknown_remote() {
         let tmp = tempfile::tempdir().unwrap();
         let Some((main, _bare)) = fixture_main_with_bare_remote(tmp.path()) else {
-            eprintln!("skipping: git CLI not available"); return;
+            eprintln!("skipping: git CLI not available");
+            return;
         };
         // `nonexistent-remote` is not configured → `git push` fails.
         let err = push_to_remote(
-            &main, "nonexistent-remote", "refs/heads/main:refs/heads/main",
+            &main,
+            "nonexistent-remote",
+            "refs/heads/main:refs/heads/main",
             std::time::Duration::from_secs(15),
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
-            PushError::PushFailed { remote, code, stderr, .. } => {
+            PushError::PushFailed {
+                remote,
+                code,
+                stderr,
+                ..
+            } => {
                 assert_eq!(remote, "nonexistent-remote");
-                assert!(code.is_some(),
+                assert!(
+                    code.is_some(),
                     "git push to a missing remote must produce a numeric \
-                     exit code, got: {code:?}");
+                     exit code, got: {code:?}"
+                );
                 assert!(
                     stderr.contains("nonexistent-remote")
                         || stderr.contains("does not appear to be a git repository"),
@@ -1161,9 +1168,12 @@ mod tests {
     fn push_to_remote_unopenable_main_repo_surfaces_typed_error() {
         let nonexistent = Path::new("/nonexistent/raxis-push-test/main");
         let err = push_to_remote(
-            nonexistent, "origin", "refs/heads/main:refs/heads/main",
+            nonexistent,
+            "origin",
+            "refs/heads/main:refs/heads/main",
             std::time::Duration::from_secs(5),
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(matches!(err, PushError::MainRepoUnopenable { .. }));
     }
 }

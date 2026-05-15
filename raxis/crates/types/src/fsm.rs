@@ -324,18 +324,14 @@ impl SessionAgentType {
     /// this array, (b) a new migration that ALTERs the CHECK constraint
     /// on already-installed databases, AND (c) refreshing the static
     /// dispatch matrix in `raxis-kernel` (v2-deep-spec.md §Step 20).
-    pub const ALL: [Self; 3] = [
-        Self::Orchestrator,
-        Self::Executor,
-        Self::Reviewer,
-    ];
+    pub const ALL: [Self; 3] = [Self::Orchestrator, Self::Executor, Self::Reviewer];
 
     /// Canonical SQL string used in CHECK constraints and at-rest storage.
     pub fn as_sql_str(self) -> &'static str {
         match self {
             Self::Orchestrator => "Orchestrator",
-            Self::Executor     => "Executor",
-            Self::Reviewer     => "Reviewer",
+            Self::Executor => "Executor",
+            Self::Reviewer => "Reviewer",
         }
     }
 
@@ -343,8 +339,8 @@ impl SessionAgentType {
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
             "Orchestrator" => Some(Self::Orchestrator),
-            "Executor"     => Some(Self::Executor),
-            "Reviewer"     => Some(Self::Reviewer),
+            "Executor" => Some(Self::Executor),
+            "Reviewer" => Some(Self::Reviewer),
             _ => None,
         }
     }
@@ -433,9 +429,9 @@ impl CloneStrategy {
     /// surface (`clone_strategy = "blobless"`).
     pub fn as_sql_str(self) -> &'static str {
         match self {
-            Self::Full     => "full",
+            Self::Full => "full",
             Self::Blobless => "blobless",
-            Self::Sparse   => "sparse",
+            Self::Sparse => "sparse",
         }
     }
 
@@ -443,9 +439,9 @@ impl CloneStrategy {
     /// spelling — case-sensitive.
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
-            "full"     => Some(Self::Full),
+            "full" => Some(Self::Full),
             "blobless" => Some(Self::Blobless),
-            "sparse"   => Some(Self::Sparse),
+            "sparse" => Some(Self::Sparse),
             _ => None,
         }
     }
@@ -530,9 +526,9 @@ impl SubtaskActivationState {
     pub fn as_sql_str(self) -> &'static str {
         match self {
             Self::PendingActivation => "PendingActivation",
-            Self::Active            => "Active",
-            Self::Completed         => "Completed",
-            Self::Failed            => "Failed",
+            Self::Active => "Active",
+            Self::Completed => "Completed",
+            Self::Failed => "Failed",
         }
     }
 
@@ -540,9 +536,9 @@ impl SubtaskActivationState {
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
             "PendingActivation" => Some(Self::PendingActivation),
-            "Active"            => Some(Self::Active),
-            "Completed"         => Some(Self::Completed),
-            "Failed"            => Some(Self::Failed),
+            "Active" => Some(Self::Active),
+            "Completed" => Some(Self::Completed),
+            "Failed" => Some(Self::Failed),
             _ => None,
         }
     }
@@ -650,11 +646,11 @@ impl IntegrationMergeAttemptState {
     pub fn as_sql_str(self) -> &'static str {
         match self {
             Self::AwaitingPreMergeVerifiers => "AwaitingPreMergeVerifiers",
-            Self::PreMergeVerifiersPassed   => "PreMergeVerifiersPassed",
+            Self::PreMergeVerifiersPassed => "PreMergeVerifiersPassed",
             Self::BlockedByPreMergeVerifier => "BlockedByPreMergeVerifier",
-            Self::CompletedAdvanceApplied   => "CompletedAdvanceApplied",
-            Self::DiscardedCandidateOnly    => "DiscardedCandidateOnly",
-            Self::DiscardedCrashRecovery    => "DiscardedCrashRecovery",
+            Self::CompletedAdvanceApplied => "CompletedAdvanceApplied",
+            Self::DiscardedCandidateOnly => "DiscardedCandidateOnly",
+            Self::DiscardedCrashRecovery => "DiscardedCrashRecovery",
         }
     }
 
@@ -662,11 +658,11 @@ impl IntegrationMergeAttemptState {
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
             "AwaitingPreMergeVerifiers" => Some(Self::AwaitingPreMergeVerifiers),
-            "PreMergeVerifiersPassed"   => Some(Self::PreMergeVerifiersPassed),
+            "PreMergeVerifiersPassed" => Some(Self::PreMergeVerifiersPassed),
             "BlockedByPreMergeVerifier" => Some(Self::BlockedByPreMergeVerifier),
-            "CompletedAdvanceApplied"   => Some(Self::CompletedAdvanceApplied),
-            "DiscardedCandidateOnly"    => Some(Self::DiscardedCandidateOnly),
-            "DiscardedCrashRecovery"    => Some(Self::DiscardedCrashRecovery),
+            "CompletedAdvanceApplied" => Some(Self::CompletedAdvanceApplied),
+            "DiscardedCandidateOnly" => Some(Self::DiscardedCandidateOnly),
+            "DiscardedCrashRecovery" => Some(Self::DiscardedCrashRecovery),
             _ => None,
         }
     }
@@ -740,20 +736,20 @@ impl IntegrationMergeAttemptDiscardReason {
     /// `integration-merge.md §11.10.3`.
     pub fn as_sql_str(self) -> &'static str {
         match self {
-            Self::VerifierBlocked            => "verifier_blocked",
+            Self::VerifierBlocked => "verifier_blocked",
             Self::CandidateComputationFailed => "candidate_computation_failed",
-            Self::CrashRecovery              => "crash_recovery",
-            Self::MergeAbortedByOperator     => "merge_aborted_by_operator",
+            Self::CrashRecovery => "crash_recovery",
+            Self::MergeAbortedByOperator => "merge_aborted_by_operator",
         }
     }
 
     /// Parse from the SQL at-rest string.
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
-            "verifier_blocked"            => Some(Self::VerifierBlocked),
+            "verifier_blocked" => Some(Self::VerifierBlocked),
             "candidate_computation_failed" => Some(Self::CandidateComputationFailed),
-            "crash_recovery"              => Some(Self::CrashRecovery),
-            "merge_aborted_by_operator"   => Some(Self::MergeAbortedByOperator),
+            "crash_recovery" => Some(Self::CrashRecovery),
+            "merge_aborted_by_operator" => Some(Self::MergeAbortedByOperator),
             _ => None,
         }
     }
@@ -764,9 +760,7 @@ impl IntegrationMergeAttemptDiscardReason {
     /// from the reason without a separate parameter.
     pub fn terminal_state(self) -> IntegrationMergeAttemptState {
         match self {
-            Self::VerifierBlocked => {
-                IntegrationMergeAttemptState::BlockedByPreMergeVerifier
-            }
+            Self::VerifierBlocked => IntegrationMergeAttemptState::BlockedByPreMergeVerifier,
             Self::CandidateComputationFailed => {
                 IntegrationMergeAttemptState::DiscardedCandidateOnly
             }
@@ -949,7 +943,7 @@ impl PlanBundleNonceOutcome {
     /// storage.
     pub fn as_sql_str(self) -> &'static str {
         match self {
-            Self::Admitted           => "Admitted",
+            Self::Admitted => "Admitted",
             Self::TerminallyRejected => "TerminallyRejected",
         }
     }
@@ -958,9 +952,9 @@ impl PlanBundleNonceOutcome {
     /// — every nonce row carries one of the two variants.
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
-            "Admitted"           => Some(Self::Admitted),
+            "Admitted" => Some(Self::Admitted),
             "TerminallyRejected" => Some(Self::TerminallyRejected),
-            _                    => None,
+            _ => None,
         }
     }
 }
@@ -988,19 +982,31 @@ mod tests {
     fn session_agent_type_sql_round_trip_is_total() {
         for &variant in &SessionAgentType::ALL {
             let s = variant.as_sql_str();
-            assert!(!s.is_empty(), "SessionAgentType::{variant:?} → empty string");
-            assert_eq!(SessionAgentType::from_sql_str(s), Some(variant),
-                "round-trip failed for {variant:?}: as_sql_str → {s}");
+            assert!(
+                !s.is_empty(),
+                "SessionAgentType::{variant:?} → empty string"
+            );
+            assert_eq!(
+                SessionAgentType::from_sql_str(s),
+                Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}"
+            );
         }
     }
 
     #[test]
     fn session_agent_type_unknown_sql_returns_none() {
         assert_eq!(SessionAgentType::from_sql_str(""), None);
-        assert_eq!(SessionAgentType::from_sql_str("orchestrator"), None,
-            "case-sensitive match: lowercase must NOT round-trip");
-        assert_eq!(SessionAgentType::from_sql_str("Planner"), None,
-            "V1 'Planner' role MUST NOT decode as a V2 agent type");
+        assert_eq!(
+            SessionAgentType::from_sql_str("orchestrator"),
+            None,
+            "case-sensitive match: lowercase must NOT round-trip"
+        );
+        assert_eq!(
+            SessionAgentType::from_sql_str("Planner"),
+            None,
+            "V1 'Planner' role MUST NOT decode as a V2 agent type"
+        );
     }
 
     /// INV-DELEGATE-01: only the Orchestrator may delegate.
@@ -1018,10 +1024,13 @@ mod tests {
     /// dispatch matrix and migration to be updated in lock-step.
     #[test]
     fn session_agent_type_variant_count_is_pinned_to_v2() {
-        assert_eq!(SessionAgentType::ALL.len(), 3,
+        assert_eq!(
+            SessionAgentType::ALL.len(),
+            3,
             "V2 has exactly 3 SessionAgentType variants \
              (Orchestrator, Executor, Reviewer); bumping this requires \
-             a new migration AND dispatch-matrix refresh.");
+             a new migration AND dispatch-matrix refresh."
+        );
     }
 
     #[test]
@@ -1051,25 +1060,34 @@ mod tests {
     fn clone_strategy_canonical_strings_match_spec() {
         // v2-deep-spec.md §Step 27 declares exactly these three lower-case
         // strings on the wire surface (TOML key) and at-rest (SQL CHECK).
-        assert_eq!(CloneStrategy::Full.as_sql_str(),     "full");
+        assert_eq!(CloneStrategy::Full.as_sql_str(), "full");
         assert_eq!(CloneStrategy::Blobless.as_sql_str(), "blobless");
-        assert_eq!(CloneStrategy::Sparse.as_sql_str(),   "sparse");
+        assert_eq!(CloneStrategy::Sparse.as_sql_str(), "sparse");
     }
 
     #[test]
     fn clone_strategy_unknown_sql_returns_none() {
         assert_eq!(CloneStrategy::from_sql_str(""), None);
-        assert_eq!(CloneStrategy::from_sql_str("Full"), None,
-            "case-sensitive match: PascalCase must NOT round-trip");
-        assert_eq!(CloneStrategy::from_sql_str("treeless"), None,
-            "git's treeless filter is NOT a V2 strategy");
+        assert_eq!(
+            CloneStrategy::from_sql_str("Full"),
+            None,
+            "case-sensitive match: PascalCase must NOT round-trip"
+        );
+        assert_eq!(
+            CloneStrategy::from_sql_str("treeless"),
+            None,
+            "git's treeless filter is NOT a V2 strategy"
+        );
     }
 
     #[test]
     fn clone_strategy_variant_count_is_pinned_to_v2() {
-        assert_eq!(CloneStrategy::ALL.len(), 3,
+        assert_eq!(
+            CloneStrategy::ALL.len(),
+            3,
             "V2 has exactly 3 CloneStrategy variants (full, blobless, sparse); \
-             bumping this requires a v2-deep-spec.md §Step 27 update.");
+             bumping this requires a v2-deep-spec.md §Step 27 update."
+        );
     }
 
     #[test]
@@ -1094,8 +1112,7 @@ mod tests {
     fn session_agent_type_serde_uses_pascal_case() {
         let json = serde_json::to_string(&SessionAgentType::Orchestrator).unwrap();
         assert_eq!(json, r#""Orchestrator""#);
-        let parsed: SessionAgentType =
-            serde_json::from_str(r#""Reviewer""#).unwrap();
+        let parsed: SessionAgentType = serde_json::from_str(r#""Reviewer""#).unwrap();
         assert_eq!(parsed, SessionAgentType::Reviewer);
     }
 
@@ -1105,9 +1122,15 @@ mod tests {
     fn subtask_activation_state_sql_round_trip_is_total() {
         for &variant in &SubtaskActivationState::ALL {
             let s = variant.as_sql_str();
-            assert!(!s.is_empty(), "SubtaskActivationState::{variant:?} → empty string");
-            assert_eq!(SubtaskActivationState::from_sql_str(s), Some(variant),
-                "round-trip failed for {variant:?}: as_sql_str → {s}");
+            assert!(
+                !s.is_empty(),
+                "SubtaskActivationState::{variant:?} → empty string"
+            );
+            assert_eq!(
+                SubtaskActivationState::from_sql_str(s),
+                Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}"
+            );
         }
     }
 
@@ -1117,7 +1140,10 @@ mod tests {
         // V1 task states must NOT decode as activation states; the two
         // FSMs are deliberately separate (v2-deep-spec.md §Step 5).
         assert_eq!(SubtaskActivationState::from_sql_str("Admitted"), None);
-        assert_eq!(SubtaskActivationState::from_sql_str("BlockedRecoveryPending"), None);
+        assert_eq!(
+            SubtaskActivationState::from_sql_str("BlockedRecoveryPending"),
+            None
+        );
     }
 
     #[test]
@@ -1125,17 +1151,22 @@ mod tests {
         assert!(!SubtaskActivationState::PendingActivation.is_terminal());
         assert!(!SubtaskActivationState::Active.is_terminal());
         assert!(SubtaskActivationState::Completed.is_terminal());
-        assert!(SubtaskActivationState::Failed.is_terminal(),
+        assert!(
+            SubtaskActivationState::Failed.is_terminal(),
             "Failed is terminal w.r.t. THIS activation; retries insert a \
-             new subtask_activations row, not a transition.");
+             new subtask_activations row, not a transition."
+        );
     }
 
     #[test]
     fn subtask_activation_state_variant_count_is_pinned_to_v2() {
-        assert_eq!(SubtaskActivationState::ALL.len(), 4,
+        assert_eq!(
+            SubtaskActivationState::ALL.len(),
+            4,
             "V2 has exactly 4 SubtaskActivationState variants; \
              bumping this requires a new migration that ALTERs the \
-             CHECK constraint on already-installed databases.");
+             CHECK constraint on already-installed databases."
+        );
     }
 
     #[test]
@@ -1152,8 +1183,11 @@ mod tests {
         for &variant in &ReviewVerdict::ALL {
             let s = variant.as_sql_str();
             assert!(!s.is_empty());
-            assert_eq!(ReviewVerdict::from_sql_str(s), Some(variant),
-                "round-trip failed for {variant:?}: as_sql_str → {s}");
+            assert_eq!(
+                ReviewVerdict::from_sql_str(s),
+                Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}"
+            );
         }
         // Pin the wire-stable strings — these are persisted in
         // `tasks.review_verdict` and embedded in the SQL CHECK
@@ -1177,10 +1211,13 @@ mod tests {
 
     #[test]
     fn review_verdict_variant_count_is_pinned() {
-        assert_eq!(ReviewVerdict::ALL.len(), 2,
+        assert_eq!(
+            ReviewVerdict::ALL.len(),
+            2,
             "ReviewVerdict has exactly 2 variants (Approved | Rejected); \
              bumping this requires a new migration that ALTERs the CHECK \
-             constraint on already-installed databases.");
+             constraint on already-installed databases."
+        );
     }
 
     #[test]
@@ -1197,15 +1234,20 @@ mod tests {
         for &variant in &PlanBundleNonceOutcome::ALL {
             let s = variant.as_sql_str();
             assert!(!s.is_empty());
-            assert_eq!(PlanBundleNonceOutcome::from_sql_str(s), Some(variant),
-                "round-trip failed for {variant:?}: as_sql_str → {s}");
+            assert_eq!(
+                PlanBundleNonceOutcome::from_sql_str(s),
+                Some(variant),
+                "round-trip failed for {variant:?}: as_sql_str → {s}"
+            );
         }
         // Pin the wire-stable strings — these are persisted in
         // `plan_bundle_nonces_seen.outcome` and embedded in the SQL CHECK
         // constraint emitted by Migration 8.
         assert_eq!(PlanBundleNonceOutcome::Admitted.as_sql_str(), "Admitted");
-        assert_eq!(PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
-                   "TerminallyRejected");
+        assert_eq!(
+            PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
+            "TerminallyRejected"
+        );
     }
 
     #[test]
@@ -1213,7 +1255,10 @@ mod tests {
         assert_eq!(PlanBundleNonceOutcome::from_sql_str(""), None);
         // Defensive: lowercase / kebab-case must NOT round-trip.
         assert_eq!(PlanBundleNonceOutcome::from_sql_str("admitted"), None);
-        assert_eq!(PlanBundleNonceOutcome::from_sql_str("terminally-rejected"), None);
+        assert_eq!(
+            PlanBundleNonceOutcome::from_sql_str("terminally-rejected"),
+            None
+        );
         // Defensive: avoid accidental collision with the InitiativeState
         // family — distinct columns, distinct vocab.
         assert_eq!(PlanBundleNonceOutcome::from_sql_str("Aborted"), None);
@@ -1222,11 +1267,14 @@ mod tests {
 
     #[test]
     fn plan_bundle_nonce_outcome_variant_count_is_pinned() {
-        assert_eq!(PlanBundleNonceOutcome::ALL.len(), 2,
+        assert_eq!(
+            PlanBundleNonceOutcome::ALL.len(),
+            2,
             "PlanBundleNonceOutcome has exactly 2 variants \
              (Admitted | TerminallyRejected); bumping this requires a new \
              migration that ALTERs the CHECK constraint on already-installed \
-             databases (plan-bundle-sealing.md §8.2).");
+             databases (plan-bundle-sealing.md §8.2)."
+        );
     }
 
     #[test]
@@ -1286,8 +1334,8 @@ impl CircuitBreakerState {
     /// Canonical SQL string used in CHECK constraints and at-rest storage.
     pub fn as_sql_str(self) -> &'static str {
         match self {
-            Self::Closed   => "Closed",
-            Self::Open     => "Open",
+            Self::Closed => "Closed",
+            Self::Open => "Open",
             Self::HalfOpen => "HalfOpen",
         }
     }
@@ -1295,10 +1343,10 @@ impl CircuitBreakerState {
     /// Parse from the SQL at-rest string.
     pub fn from_sql_str(s: &str) -> Option<Self> {
         match s {
-            "Closed"   => Some(Self::Closed),
-            "Open"     => Some(Self::Open),
+            "Closed" => Some(Self::Closed),
+            "Open" => Some(Self::Open),
             "HalfOpen" => Some(Self::HalfOpen),
-            _          => None,
+            _ => None,
         }
     }
 

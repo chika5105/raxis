@@ -42,14 +42,13 @@
 /// they're already short enough for Ed25519's internal SHA-512 to
 /// handle as the message in one shot.
 pub fn approval_scope_signing_input(
-    escalation_id:     &str,
-    capability_class:  &str,
-    max_uses:          i64,
+    escalation_id: &str,
+    capability_class: &str,
+    max_uses: i64,
     valid_for_seconds: u64,
 ) -> Vec<u8> {
-    format!(
-        "approval|{escalation_id}|{capability_class}|{max_uses}|{valid_for_seconds}"
-    ).into_bytes()
+    format!("approval|{escalation_id}|{capability_class}|{max_uses}|{valid_for_seconds}")
+        .into_bytes()
 }
 
 #[cfg(test)]
@@ -69,8 +68,9 @@ mod tests {
     fn signing_input_uses_escalation_id_verbatim() {
         // Pin: no normalization. Operators sign the exact wire bytes.
         let bytes = approval_scope_signing_input("Esc With Spaces", "WriteCode", 1, 60);
-        assert!(std::str::from_utf8(&bytes).unwrap()
-                .starts_with("approval|Esc With Spaces|"));
+        assert!(std::str::from_utf8(&bytes)
+            .unwrap()
+            .starts_with("approval|Esc With Spaces|"));
     }
 
     #[test]

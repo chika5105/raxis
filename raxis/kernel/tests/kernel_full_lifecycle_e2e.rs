@@ -54,11 +54,10 @@ use uuid::Uuid;
 
 use common::kernel_harness::KernelInstance;
 
-const READY_DEADLINE:    Duration = Duration::from_secs(10);
+const READY_DEADLINE: Duration = Duration::from_secs(10);
 const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(10);
 
-const FAKE_TOKEN: &str =
-    "deadbeefcafebabefeedfacefadedfeed1122334455667788abcd1234efef0011";
+const FAKE_TOKEN: &str = "deadbeefcafebabefeedfacefadedfeed1122334455667788abcd1234efef0011";
 
 // ────────────────────────────────────────────────────────────────────
 // Helpers
@@ -71,24 +70,22 @@ const FAKE_TOKEN: &str =
 fn build_bogus_intent(seq: u64) -> IntentRequest {
     let nonce = format!("{:032x}", u128::from(seq).wrapping_add(0xc0de_d00d));
     IntentRequest {
-        session_token:    FAKE_TOKEN.to_owned(),
-        sequence_number:  seq,
-        envelope_nonce:   nonce,
-        intent_kind:      IntentKind::SingleCommit,
-        task_id:          TaskId::parse(
-            &format!("e2e-task-{}", Uuid::new_v4().simple()),
-        )
-        .expect("synthesized TaskId"),
-        base_sha:         None,
-        head_sha:         None,
+        session_token: FAKE_TOKEN.to_owned(),
+        sequence_number: seq,
+        envelope_nonce: nonce,
+        intent_kind: IntentKind::SingleCommit,
+        task_id: TaskId::parse(&format!("e2e-task-{}", Uuid::new_v4().simple()))
+            .expect("synthesized TaskId"),
+        base_sha: None,
+        head_sha: None,
         submitted_claims: vec![],
-        justification:    None,
-        idempotency_key:  None,
-        approval_token:   None,
-        approved:         None,
-        critique:         None,
+        justification: None,
+        idempotency_key: None,
+        approval_token: None,
+        approved: None,
+        critique: None,
         resolved_via_escalation: None,
-        tokens_used:      None,
+        tokens_used: None,
         structured_output: None,
     }
 }
@@ -104,9 +101,7 @@ async fn fire_one_intent(socket_path: &std::path::Path, seq: u64) {
     write_frame(&mut stream, &req)
         .await
         .expect("write intent frame");
-    let _reply: IpcMessage = read_frame(&mut stream)
-        .await
-        .expect("read intent reply");
+    let _reply: IpcMessage = read_frame(&mut stream).await.expect("read intent reply");
 }
 
 /// Locate the `raxis` CLI binary built by Cargo for this test.
@@ -172,16 +167,16 @@ async fn heartbeat_is_fresh_and_well_formed_after_boot() {
     // every 100ms keeps the test fast on a warm machine but tolerant
     // of CI load.
     let data_dir = kernel.data_dir().to_owned();
-    let snapshot = poll_for_heartbeat(&data_dir, Duration::from_secs(5))
-        .unwrap_or_else(|| {
-            panic!(
-                "heartbeat.json never appeared; kernel stderr:\n{}",
-                kernel.captured_stderr()
-            )
-        });
+    let snapshot = poll_for_heartbeat(&data_dir, Duration::from_secs(5)).unwrap_or_else(|| {
+        panic!(
+            "heartbeat.json never appeared; kernel stderr:\n{}",
+            kernel.captured_stderr()
+        )
+    });
 
     assert_eq!(
-        snapshot.kernel_pid as i32, kernel.pid(),
+        snapshot.kernel_pid as i32,
+        kernel.pid(),
         "heartbeat must report the kernel's actual PID"
     );
     assert_eq!(
@@ -290,9 +285,7 @@ async fn audit_chain_resumes_monotonically_across_restart() {
     // gap or prev_sha256 break, but we ALSO assert the boot boundary
     // is monotonic by hand so a future regression in the chain
     // walker doesn't silently mask a kernel-side reset.
-    let across_boundary = final_chain
-        .iter()
-        .find(|r| r.seq == boot1_max_seq + 1);
+    let across_boundary = final_chain.iter().find(|r| r.seq == boot1_max_seq + 1);
     assert!(
         across_boundary.is_some(),
         "boot 2's first row must have seq = boot1_max_seq + 1 = {}; \
@@ -306,15 +299,12 @@ async fn audit_chain_resumes_monotonically_across_restart() {
 /// monotonicity + prev_sha256 link integrity end-to-end), then enumerate
 /// every record so callers can also assert on the boundary `seq` value.
 /// Panics with a friendly diagnostic on any chain break.
-fn walk_chain_or_panic(
-    data_dir: &std::path::Path,
-) -> Vec<raxis_audit_tools::ChainRecord> {
+fn walk_chain_or_panic(data_dir: &std::path::Path) -> Vec<raxis_audit_tools::ChainRecord> {
     let audit_dir = data_dir.join("audit");
     verify_chain_full(&audit_dir)
         .unwrap_or_else(|e| panic!("verify_chain_full({audit_dir:?}) failed: {e:?}"));
-    let reader = ChainReader::open(&audit_dir).unwrap_or_else(|e| {
-        panic!("ChainReader::open({audit_dir:?}) failed: {e:?}")
-    });
+    let reader = ChainReader::open(&audit_dir)
+        .unwrap_or_else(|e| panic!("ChainReader::open({audit_dir:?}) failed: {e:?}"));
     reader
         .records()
         .map(|r| r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}")))
@@ -397,13 +387,12 @@ async fn raxis_status_json_against_live_kernel_reports_running() {
         String::from_utf8_lossy(&output.stderr),
     );
 
-    let json: serde_json::Value =
-        serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
-            panic!(
-                "raxis status --json must emit valid JSON: {e}; raw stdout:\n{}",
-                String::from_utf8_lossy(&output.stdout),
-            )
-        });
+    let json: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap_or_else(|e| {
+        panic!(
+            "raxis status --json must emit valid JSON: {e}; raw stdout:\n{}",
+            String::from_utf8_lossy(&output.stdout),
+        )
+    });
 
     // The status JSON shape (cli/src/commands/status.rs):
     //

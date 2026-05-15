@@ -32,16 +32,15 @@ use raxis_observability::{redact, MetricName, ObservabilityHub};
 /// caps the value at 16 bytes anyway. `latency_ms` is the wall-clock
 /// admission latency, used as the histogram observation.
 pub fn record_intent_admission(
-    hub:         &ObservabilityHub,
+    hub: &ObservabilityHub,
     intent_kind: &str,
-    verdict:     &str,
-    latency_ms:  i64,
+    verdict: &str,
+    latency_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("intent_kind", intent_kind),
-        ("verdict",     verdict),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("intent_kind", intent_kind), ("verdict", verdict)]);
     hub.record_counter(MetricName::IntentAdmissionTotal, labels.clone(), 1.0);
     hub.record_histogram(
         MetricName::IntentAdmissionDuration,
@@ -54,20 +53,22 @@ pub fn record_intent_admission(
 /// `raxis.tokens.consumed` counter when the response carries token
 /// usage. Called from the gateway-fetch outbound path.
 pub fn record_gateway_fetch(
-    hub:           &ObservabilityHub,
-    provider:      &str,
-    model:         Option<&str>,
-    status_code:   i64,
-    latency_ms:    i64,
-    cached:        bool,
-    tokens_in:     Option<i64>,
-    tokens_out:    Option<i64>,
+    hub: &ObservabilityHub,
+    provider: &str,
+    model: Option<&str>,
+    status_code: i64,
+    latency_ms: i64,
+    cached: bool,
+    tokens_in: Option<i64>,
+    tokens_out: Option<i64>,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([
-        ("provider",   provider),
-        ("status_code", "0"),         // overwritten below as I64
-        ("cached",     "false"),      // overwritten below as Bool
+        ("provider", provider),
+        ("status_code", "0"), // overwritten below as I64
+        ("cached", "false"),  // overwritten below as Bool
     ]);
     labels.insert(
         "status_code".to_owned(),
@@ -90,17 +91,18 @@ pub fn record_gateway_fetch(
         latency_ms.max(0) as f64,
     );
     if let (Some(i_n), Some(o_n)) = (tokens_in, tokens_out) {
-        let mut tlabels = redact::attrs([
-            ("provider",  provider),
-            ("direction", "in"),
-        ]);
+        let mut tlabels = redact::attrs([("provider", provider), ("direction", "in")]);
         if let Some(m) = model {
             tlabels.insert(
                 "model".to_owned(),
                 raxis_observability::AttrValue::Str(m.to_owned()),
             );
         }
-        hub.record_counter(MetricName::TokensConsumed, tlabels.clone(), i_n.max(0) as f64);
+        hub.record_counter(
+            MetricName::TokensConsumed,
+            tlabels.clone(),
+            i_n.max(0) as f64,
+        );
         tlabels.insert(
             "direction".to_owned(),
             raxis_observability::AttrValue::Str("out".to_owned()),
@@ -113,18 +115,20 @@ pub fn record_gateway_fetch(
 /// Called by the notification dispatcher after a single channel
 /// attempt completes.
 pub fn record_notification_delivery(
-    hub:           &ObservabilityHub,
-    channel_kind:  &str,
-    channel_id:    &str,
-    event_kind:    &str,
-    success:       bool,
-    delivery_ms:   i64,
+    hub: &ObservabilityHub,
+    channel_kind: &str,
+    channel_id: &str,
+    event_kind: &str,
+    success: bool,
+    delivery_ms: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([
         ("channel_kind", channel_kind),
-        ("channel_id",   channel_id),
-        ("event_kind",   event_kind),
+        ("channel_id", channel_id),
+        ("event_kind", event_kind),
     ]);
     labels.insert(
         "success".to_owned(),
@@ -139,12 +143,10 @@ pub fn record_notification_delivery(
 }
 
 /// Record `raxis.session.active` gauge.
-pub fn record_sessions_active(
-    hub:    &ObservabilityHub,
-    role:   &str,
-    count:  i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_sessions_active(hub: &ObservabilityHub, role: &str, count: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("role", role)]);
     hub.record_gauge(MetricName::SessionsActive, labels, count.max(0) as f64);
 }
@@ -154,7 +156,9 @@ pub fn record_sessions_active(
 /// `policy_manager::advance_epoch` and from the audit chain warmup
 /// surface during boot.
 pub fn record_audit_chain_length(hub: &ObservabilityHub, seq: i64) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = raxis_observability::AttrMap::new();
     hub.record_gauge(MetricName::AuditChainLength, labels, seq.max(0) as f64);
 }
@@ -178,18 +182,20 @@ pub fn record_audit_chain_length(hub: &ObservabilityHub, seq: i64) {
 /// `raxis.session.lifecycle.transition.total` — counter bumped on
 /// every session-FSM transition the lifecycle module commits.
 pub fn record_session_lifecycle_transition(
-    hub:        &ObservabilityHub,
+    hub: &ObservabilityHub,
     from_state: &str,
-    to_state:   &str,
+    to_state: &str,
     agent_type: &str,
-    outcome:    &str,
+    outcome: &str,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([
         ("from_state", from_state),
-        ("to_state",   to_state),
+        ("to_state", to_state),
         ("agent_type", agent_type),
-        ("outcome",    outcome),
+        ("outcome", outcome),
     ]);
     hub.record_counter(MetricName::SessionLifecycleTransitionTotal, labels, 1.0);
 }
@@ -197,16 +203,15 @@ pub fn record_session_lifecycle_transition(
 /// `raxis.session.duration` histogram — total wall-clock between
 /// session spawn and session terminate.
 pub fn record_session_duration(
-    hub:        &ObservabilityHub,
+    hub: &ObservabilityHub,
     agent_type: &str,
-    outcome:    &str,
+    outcome: &str,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("agent_type", agent_type),
-        ("outcome",    outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("agent_type", agent_type), ("outcome", outcome)]);
     hub.record_histogram(
         MetricName::SessionDuration,
         labels,
@@ -217,16 +222,15 @@ pub fn record_session_duration(
 /// `raxis.initiative.duration` histogram — full initiative wall-clock
 /// from approve_plan through final terminal transition.
 pub fn record_initiative_duration(
-    hub:              &ObservabilityHub,
+    hub: &ObservabilityHub,
     initiative_class: &str,
-    outcome:          &str,
-    duration_ms:      i64,
+    outcome: &str,
+    duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("initiative_class", initiative_class),
-        ("outcome",          outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("initiative_class", initiative_class), ("outcome", outcome)]);
     hub.record_histogram(
         MetricName::InitiativeDuration,
         labels,
@@ -237,11 +241,13 @@ pub fn record_initiative_duration(
 /// `raxis.initiative.task.in_flight` gauge — sampled by the scheduler
 /// after every admit / complete tick.
 pub fn record_initiative_task_in_flight(
-    hub:              &ObservabilityHub,
+    hub: &ObservabilityHub,
     initiative_class: &str,
-    count:            i64,
+    count: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("initiative_class", initiative_class)]);
     hub.record_gauge(
         MetricName::InitiativeTaskInFlight,
@@ -253,12 +259,14 @@ pub fn record_initiative_task_in_flight(
 /// `raxis.audit.event.append.{total,duration}` — fired by the
 /// `FileAuditSink` `append_event` path after a successful fsync.
 pub fn record_audit_event_append(
-    hub:        &ObservabilityHub,
-    kind:       &str,
-    append_ms:  i64,
+    hub: &ObservabilityHub,
+    kind: &str,
+    append_ms: i64,
     confirmed_ms: Option<i64>,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("kind", kind)]);
     hub.record_counter(MetricName::AuditEventAppendTotal, labels.clone(), 1.0);
     hub.record_histogram(
@@ -279,14 +287,18 @@ pub fn record_audit_event_append(
 /// `fdatasync` failure path (NOT on every append). The kernel will
 /// already be on its way to crashing fail-closed when this fires.
 pub fn record_audit_fsync_failure(hub: &ObservabilityHub, reason: &str) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("reason", reason)]);
     hub.record_counter(MetricName::AuditFsyncFailureTotal, labels, 1.0);
 }
 
 /// `raxis.audit.chain.lag` gauge — events behind the in-memory tip.
 pub fn record_audit_chain_lag(hub: &ObservabilityHub, lag_events: i64) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     hub.record_gauge(
         MetricName::AuditChainLag,
         raxis_observability::AttrMap::new(),
@@ -298,20 +310,22 @@ pub fn record_audit_chain_lag(hub: &ObservabilityHub, lag_events: i64) {
 /// planner provider client after a turn completes.
 #[allow(clippy::too_many_arguments)]
 pub fn record_planner_inference(
-    hub:           &ObservabilityHub,
-    provider:      &str,
-    model:         &str,
-    outcome:       &str,
-    streaming:     bool,
-    duration_ms:   i64,
-    tokens_in:     i64,
-    tokens_out:    i64,
+    hub: &ObservabilityHub,
+    provider: &str,
+    model: &str,
+    outcome: &str,
+    streaming: bool,
+    duration_ms: i64,
+    tokens_in: i64,
+    tokens_out: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([
         ("provider", provider),
-        ("model",    model),
-        ("outcome",  outcome),
+        ("model", model),
+        ("outcome", outcome),
     ]);
     labels.insert(
         "streaming".to_owned(),
@@ -348,32 +362,26 @@ pub fn record_planner_inference(
 
 /// `raxis.planner.dispatch.turn.total` — counter for every planner
 /// dispatch turn that completes (success / failure / cancel).
-pub fn record_planner_dispatch_turn(
-    hub:        &ObservabilityHub,
-    agent_type: &str,
-    outcome:    &str,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("agent_type", agent_type),
-        ("outcome",    outcome),
-    ]);
+pub fn record_planner_dispatch_turn(hub: &ObservabilityHub, agent_type: &str, outcome: &str) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("agent_type", agent_type), ("outcome", outcome)]);
     hub.record_counter(MetricName::PlannerDispatchTurnTotal, labels, 1.0);
 }
 
 /// `raxis.planner.tool_call.duration` — fired by the planner's
 /// tool-dispatch substrate after every tool invocation.
 pub fn record_planner_tool_call(
-    hub:         &ObservabilityHub,
-    tool_name:   &str,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    tool_name: &str,
+    outcome: &str,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("tool_name", tool_name),
-        ("outcome",   outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("tool_name", tool_name), ("outcome", outcome)]);
     hub.record_histogram(
         MetricName::PlannerToolCallDuration,
         labels,
@@ -384,16 +392,15 @@ pub fn record_planner_tool_call(
 /// `raxis.planner.retry.total` — counter for every retry the
 /// planner's circuit-breaker / transient-error retry loop attempts.
 pub fn record_planner_retry(
-    hub:           &ObservabilityHub,
-    provider:      &str,
-    attempt:       i64,
+    hub: &ObservabilityHub,
+    provider: &str,
+    attempt: i64,
     final_outcome: &str,
 ) {
-    if !hub.enabled() { return; }
-    let mut labels = redact::attrs([
-        ("provider",      provider),
-        ("final_outcome", final_outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let mut labels = redact::attrs([("provider", provider), ("final_outcome", final_outcome)]);
     labels.insert(
         "attempt".to_owned(),
         raxis_observability::AttrValue::I64(attempt),
@@ -405,17 +412,20 @@ pub fn record_planner_retry(
 /// the per-protocol proxy after a client connection completes its
 /// handshake (or fails).
 pub fn record_credproxy_connection(
-    hub:         &ObservabilityHub,
-    service:     &str,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    service: &str,
+    outcome: &str,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("service", service),
-        ("outcome", outcome),
-    ]);
-    hub.record_counter(MetricName::CredentialProxyConnectionTotal, labels.clone(), 1.0);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("service", service), ("outcome", outcome)]);
+    hub.record_counter(
+        MetricName::CredentialProxyConnectionTotal,
+        labels.clone(),
+        1.0,
+    );
     hub.record_histogram(
         MetricName::CredentialProxyConnectionDuration,
         labels,
@@ -426,18 +436,20 @@ pub fn record_credproxy_connection(
 /// `raxis.credential_proxy.statement.duration` — fired per
 /// statement / wire-protocol message the proxy processes.
 pub fn record_credproxy_statement(
-    hub:         &ObservabilityHub,
-    service:     &str,
-    operation:   &str,
-    outcome:     &str,
-    blocked:    bool,
+    hub: &ObservabilityHub,
+    service: &str,
+    operation: &str,
+    outcome: &str,
+    blocked: bool,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([
-        ("service",   service),
+        ("service", service),
         ("operation", operation),
-        ("outcome",   outcome),
+        ("outcome", outcome),
     ]);
     labels.insert(
         "blocked".to_owned(),
@@ -451,17 +463,11 @@ pub fn record_credproxy_statement(
 }
 
 /// `raxis.credential_proxy.bytes.total` — direction = "in" | "out".
-pub fn record_credproxy_bytes(
-    hub:       &ObservabilityHub,
-    service:   &str,
-    direction: &str,
-    bytes:     i64,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("service",   service),
-        ("direction", direction),
-    ]);
+pub fn record_credproxy_bytes(hub: &ObservabilityHub, service: &str, direction: &str, bytes: i64) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("service", service), ("direction", direction)]);
     hub.record_counter(
         MetricName::CredentialProxyBytesTotal,
         labels,
@@ -471,28 +477,25 @@ pub fn record_credproxy_bytes(
 
 /// `raxis.credential_proxy.policy_block.total` — fired every time a
 /// statement / message is rejected by the per-credential policy.
-pub fn record_credproxy_policy_block(
-    hub:     &ObservabilityHub,
-    service: &str,
-    reason:  &str,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("service", service),
-        ("reason",  reason),
-    ]);
+pub fn record_credproxy_policy_block(hub: &ObservabilityHub, service: &str, reason: &str) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("service", service), ("reason", reason)]);
     hub.record_counter(MetricName::CredentialProxyPolicyBlockTotal, labels, 1.0);
 }
 
 /// `raxis.egress.allowlist.check.duration` plus
 /// `raxis.egress.allowlist.block.total` (the latter only on `block`).
 pub fn record_egress_check(
-    hub:         &ObservabilityHub,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    outcome: &str,
     duration_ms: i64,
     block_reason: Option<&str>,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("outcome", outcome)]);
     hub.record_histogram(
         MetricName::EgressAllowlistCheckDuration,
@@ -508,16 +511,15 @@ pub fn record_egress_check(
 /// `raxis.gateway.upstream.duration` — gateway-side upstream RTT
 /// (one observation per upstream call, success or failure).
 pub fn record_gateway_upstream(
-    hub:         &ObservabilityHub,
-    provider:    &str,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    provider: &str,
+    outcome: &str,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("provider", provider),
-        ("outcome",  outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("provider", provider), ("outcome", outcome)]);
     hub.record_histogram(
         MetricName::GatewayUpstreamDuration,
         labels,
@@ -534,18 +536,14 @@ pub fn record_gateway_upstream(
 // even though the re-export is part of the public surface.
 #[allow(unused_imports)]
 pub use raxis_observability::{
-    record_dashboard_http_request,
-    record_dashboard_sse_active,
-    record_dashboard_sse_event,
+    record_dashboard_http_request, record_dashboard_sse_active, record_dashboard_sse_event,
 };
 
 /// `raxis.reviewer.review.duration` plus `raxis.reviewer.outcome.total`.
-pub fn record_reviewer_review(
-    hub:         &ObservabilityHub,
-    outcome:     &str,
-    duration_ms: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_reviewer_review(hub: &ObservabilityHub, outcome: &str, duration_ms: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("outcome", outcome)]);
     hub.record_histogram(
         MetricName::ReviewerReviewDuration,
@@ -557,11 +555,10 @@ pub fn record_reviewer_review(
 
 /// `raxis.reviewer.disagreement.total` — bumped when the reviewer
 /// dissents on a planner-proposed terminal artefact.
-pub fn record_reviewer_disagreement(
-    hub:            &ObservabilityHub,
-    revision_round: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_reviewer_disagreement(hub: &ObservabilityHub, revision_round: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = raxis_observability::AttrMap::new();
     labels.insert(
         "revision_round".to_owned(),
@@ -574,7 +571,9 @@ pub fn record_reviewer_disagreement(
 /// review (so quantile pivots show how many rounds reviews typically
 /// take).
 pub fn record_review_revision_round(hub: &ObservabilityHub, rounds: i64) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     hub.record_histogram(
         MetricName::ReviewRevisionRound,
         raxis_observability::AttrMap::new(),
@@ -585,16 +584,15 @@ pub fn record_review_revision_round(hub: &ObservabilityHub, rounds: i64) {
 /// `raxis.git.worktree.provision.duration` — wall-clock for
 /// `worktree-provision::provision`.
 pub fn record_git_worktree_provision(
-    hub:         &ObservabilityHub,
-    role:        &str,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    role: &str,
+    outcome: &str,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("role",    role),
-        ("outcome", outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("role", role), ("outcome", outcome)]);
     hub.record_histogram(
         MetricName::GitWorktreeProvisionDuration,
         labels,
@@ -604,12 +602,10 @@ pub fn record_git_worktree_provision(
 
 /// `raxis.git.merge.duration` — wall-clock for the IntegrationMerge
 /// path.
-pub fn record_git_merge(
-    hub:         &ObservabilityHub,
-    outcome:     &str,
-    duration_ms: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_git_merge(hub: &ObservabilityHub, outcome: &str, duration_ms: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("outcome", outcome)]);
     hub.record_histogram(
         MetricName::GitMergeDuration,
@@ -621,14 +617,18 @@ pub fn record_git_merge(
 /// `raxis.git.commit.total` — counter, one bump per commit recorded
 /// in a worktree (planner-author, reviewer-author).
 pub fn record_git_commit(hub: &ObservabilityHub, author_role: &str) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("author_role", author_role)]);
     hub.record_counter(MetricName::GitCommitTotal, labels, 1.0);
 }
 
 /// `raxis.kernel.uptime.seconds` — gauge sampled by the heartbeat task.
 pub fn record_kernel_uptime(hub: &ObservabilityHub, uptime_secs: i64) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     hub.record_gauge(
         MetricName::KernelUptimeSeconds,
         raxis_observability::AttrMap::new(),
@@ -660,7 +660,9 @@ pub fn record_kernel_uptime(hub: &ObservabilityHub, uptime_secs: i64) {
 /// "kernel_mediated_fetch" }` — values defined in the dashboard
 /// taxonomy at `grafana/dashboards/60-egress.json`.
 pub fn record_egress_admit(hub: &ObservabilityHub, chokepoint: &str) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("chokepoint", chokepoint)]);
     hub.record_counter(MetricName::EgressAdmitTotal, labels, 1.0);
 }
@@ -670,16 +672,11 @@ pub fn record_egress_admit(hub: &ObservabilityHub, chokepoint: &str) {
 /// lexicon (e.g. `"host_not_allowlisted"`, `"port_blocked"`,
 /// `"policy_strict_egress"`) — the redactor caps it at 64 bytes but
 /// emit-site convention pins it to a small enumerated set.
-pub fn record_egress_deny(
-    hub:        &ObservabilityHub,
-    chokepoint: &str,
-    reason:     &str,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("chokepoint", chokepoint),
-        ("reason",     reason),
-    ]);
+pub fn record_egress_deny(hub: &ObservabilityHub, chokepoint: &str, reason: &str) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("chokepoint", chokepoint), ("reason", reason)]);
     hub.record_counter(MetricName::EgressDenyTotal, labels, 1.0);
 }
 
@@ -688,11 +685,10 @@ pub fn record_egress_deny(
 /// path applies a `DefaultProviderEgressApplied` grant. `provider_kind`
 /// matches the audit event's `provider_kind` field (`"openai"`,
 /// `"anthropic"`, `"gemini"`, etc.).
-pub fn record_egress_default_provider_grant(
-    hub:           &ObservabilityHub,
-    provider_kind: &str,
-) {
-    if !hub.enabled() { return; }
+pub fn record_egress_default_provider_grant(hub: &ObservabilityHub, provider_kind: &str) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("provider_kind", provider_kind)]);
     hub.record_counter(MetricName::EgressDefaultProviderGrantTotal, labels, 1.0);
 }
@@ -703,16 +699,11 @@ pub fn record_egress_default_provider_grant(
 /// one of these; they label themselves with the originating
 /// `chokepoint` and a stall `reason` (`"idle_timeout"`,
 /// `"planner_fetch_no_progress"`).
-pub fn record_egress_stall_detected(
-    hub:        &ObservabilityHub,
-    chokepoint: &str,
-    reason:     &str,
-) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("chokepoint", chokepoint),
-        ("reason",     reason),
-    ]);
+pub fn record_egress_stall_detected(hub: &ObservabilityHub, chokepoint: &str, reason: &str) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("chokepoint", chokepoint), ("reason", reason)]);
     hub.record_counter(MetricName::EgressStallDetectedTotal, labels, 1.0);
 }
 
@@ -725,11 +716,10 @@ pub fn record_egress_stall_detected(
 /// (`"postgres"`, `"mysql"`, `"mssql"`, `"mongo"`, `"redis"`,
 /// `"smtp"`, …) — keep aligned with `crates/credential-proxy/src/`'s
 /// per-service modules.
-pub fn record_credential_proxy_substitution(
-    hub:     &ObservabilityHub,
-    service: &str,
-) {
-    if !hub.enabled() { return; }
+pub fn record_credential_proxy_substitution(hub: &ObservabilityHub, service: &str) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("service", service)]);
     hub.record_counter(MetricName::CredentialProxySubstitutionTotal, labels, 1.0);
 }
@@ -773,13 +763,13 @@ pub fn record_credential_proxy_substitution(
 /// Allowed `respawn_kind` label values. Production emit sites MUST
 /// pick exactly one of these strings; the unit-test witness for
 /// `INV-OBS-RESPAWN-KIND-LABEL-01` re-asserts the closed set.
-pub const RESPAWN_KIND_VM_CRASH:               &str = "vm_crash";
+pub const RESPAWN_KIND_VM_CRASH: &str = "vm_crash";
 /// Orchestrator post-exit respawn (Mode A or Mode B).
 pub const RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS: &str = "orchestrator_no_progress";
 /// Reviewer-disagreement-driven `RetrySubTask` continuation respawn.
-pub const RESPAWN_KIND_REVIEWER_REJECTION:     &str = "reviewer_rejection";
+pub const RESPAWN_KIND_REVIEWER_REJECTION: &str = "reviewer_rejection";
 /// Fallback for code paths whose respawn taxonomy hasn't been mapped.
-pub const RESPAWN_KIND_UNKNOWN:                &str = "unknown";
+pub const RESPAWN_KIND_UNKNOWN: &str = "unknown";
 
 /// Closed set of every `respawn_kind` value the kernel may emit.
 /// The dashboard taxonomy at `grafana/dashboards/10-isolation.json`
@@ -806,16 +796,18 @@ pub const RESPAWN_KIND_CLOSED_SET: &[&str] = &[
 /// no natural attempt counter (orchestrator post-exit / reviewer-
 /// rejection respawns) pass `1`.
 pub fn record_isolation_respawn_attempted(
-    hub:          &ObservabilityHub,
-    backend:      &str,
-    image_kind:   &str,
+    hub: &ObservabilityHub,
+    backend: &str,
+    image_kind: &str,
     respawn_kind: &str,
-    attempt:      i64,
+    attempt: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([
-        ("backend",      backend),
-        ("image_kind",   image_kind),
+        ("backend", backend),
+        ("image_kind", image_kind),
         ("respawn_kind", respawn_kind),
     ]);
     labels.insert(
@@ -837,7 +829,7 @@ mod respawn_kind_tests {
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 1.0,
             ..HubConfig::default()
         };
@@ -857,17 +849,12 @@ mod respawn_kind_tests {
     fn every_closed_set_value_is_emitted_with_known_label() {
         for kind in RESPAWN_KIND_CLOSED_SET {
             let (hub, exp) = enabled_hub();
-            record_isolation_respawn_attempted(
-                hub.as_ref(),
-                "subprocess",
-                "executor",
-                kind,
-                1,
-            );
+            record_isolation_respawn_attempted(hub.as_ref(), "subprocess", "executor", kind, 1);
             hub.flush();
             let metrics = exp.metrics();
             assert_eq!(
-                metrics.len(), 1,
+                metrics.len(),
+                1,
                 "expected exactly one metric for kind={kind}",
             );
             let m = &metrics[0];
@@ -1015,12 +1002,12 @@ pub const RESPAWN_OUTCOME_CLOSED_SET: &[&str] = &[
 /// the supervisor sentinel's `sub_state` field for `Halted` rows;
 /// `other` is the fallback for forward-compat with future supervisor
 /// revisions that may invent new sub-states.
-pub const REFUSED_REASON_CIRCUIT_OPEN:         &str = "circuit_open";
+pub const REFUSED_REASON_CIRCUIT_OPEN: &str = "circuit_open";
 /// Operator initiated the stop (`raxis-supervisor stop` / SIGTERM /
 /// SIGINT). Recorded so the dashboard can distinguish "supervisor
 /// halted us because the breaker tripped" from "operator
 /// deliberately stopped the supervisor".
-pub const REFUSED_REASON_OPERATOR_STOP:        &str = "operator_stop";
+pub const REFUSED_REASON_OPERATOR_STOP: &str = "operator_stop";
 /// Operator forced the stop (`raxis-supervisor stop --force` /
 /// SIGKILL).
 pub const REFUSED_REASON_OPERATOR_STOP_FORCED: &str = "operator_stop_forced";
@@ -1028,10 +1015,10 @@ pub const REFUSED_REASON_OPERATOR_STOP_FORCED: &str = "operator_stop_forced";
 /// `kernel_lifecycle_status.json` handler synthesises this when the
 /// sentinel is stale + the supervisor PID is missing
 /// (`SentinelSubState::SupervisorGone`).
-pub const REFUSED_REASON_SUPERVISOR_GONE:      &str = "supervisor_gone";
+pub const REFUSED_REASON_SUPERVISOR_GONE: &str = "supervisor_gone";
 /// Anything else — forward-compat fallback for sub-state values not
 /// covered above.
-pub const REFUSED_REASON_OTHER:                &str = "other";
+pub const REFUSED_REASON_OTHER: &str = "other";
 
 /// Closed set of every `reason` lexeme `SupervisorRefusedRestartTotal`
 /// may carry.
@@ -1091,7 +1078,7 @@ pub fn classify_respawn_trigger(
             // SIGABRT (6).
             Some(134) => RESPAWN_TRIGGER_SIGABRT,
             _ => RESPAWN_TRIGGER_OTHER,
-        }
+        },
         Some("PanicAbort") if prev_run_exit_code == Some(70) => RESPAWN_TRIGGER_EXIT_70,
         Some("PanicAbort") => RESPAWN_TRIGGER_OTHER,
         _ => RESPAWN_TRIGGER_OTHER,
@@ -1104,11 +1091,11 @@ pub fn classify_respawn_trigger(
 /// maps to one of [`REFUSED_REASON_CLOSED_SET`].
 pub fn supervisor_refused_reason(sub_state: Option<&str>) -> &'static str {
     match sub_state {
-        Some("CircuitOpen")        => REFUSED_REASON_CIRCUIT_OPEN,
-        Some("OperatorStop")       => REFUSED_REASON_OPERATOR_STOP,
+        Some("CircuitOpen") => REFUSED_REASON_CIRCUIT_OPEN,
+        Some("OperatorStop") => REFUSED_REASON_OPERATOR_STOP,
         Some("OperatorStopForced") => REFUSED_REASON_OPERATOR_STOP_FORCED,
-        Some("SupervisorGone")     => REFUSED_REASON_SUPERVISOR_GONE,
-        _                           => REFUSED_REASON_OTHER,
+        Some("SupervisorGone") => REFUSED_REASON_SUPERVISOR_GONE,
+        _ => REFUSED_REASON_OTHER,
     }
 }
 
@@ -1127,16 +1114,15 @@ pub fn supervisor_refused_reason(sub_state: Option<&str>) -> &'static str {
 /// `last_restart_unix_ts` (older supervisor binaries) — only the
 /// counter is emitted in that case.
 pub fn record_kernel_respawn(
-    hub:         &ObservabilityHub,
-    trigger:     &str,
-    outcome:     &str,
+    hub: &ObservabilityHub,
+    trigger: &str,
+    outcome: &str,
     duration_ms: Option<i64>,
 ) {
-    if !hub.enabled() { return; }
-    let labels_total = redact::attrs([
-        ("trigger", trigger),
-        ("outcome", outcome),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels_total = redact::attrs([("trigger", trigger), ("outcome", outcome)]);
     hub.record_counter(MetricName::KernelRespawnTotal, labels_total, 1.0);
     if let Some(ms) = duration_ms {
         let labels_dur = redact::attrs([("trigger", trigger)]);
@@ -1156,11 +1142,10 @@ pub fn record_kernel_respawn(
 /// path is the structural witness for "an operator manually bypassed
 /// a halted supervisor", which is the operationally interesting
 /// event the operator dashboard wants to surface.
-pub fn record_supervisor_refused_restart(
-    hub:    &ObservabilityHub,
-    reason: &str,
-) {
-    if !hub.enabled() { return; }
+pub fn record_supervisor_refused_restart(hub: &ObservabilityHub, reason: &str) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("reason", reason)]);
     hub.record_counter(MetricName::SupervisorRefusedRestartTotal, labels, 1.0);
 }
@@ -1177,7 +1162,7 @@ mod kernel_respawn_tests {
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 1.0,
             ..HubConfig::default()
         };
@@ -1201,12 +1186,17 @@ mod kernel_respawn_tests {
                 hub.flush();
                 let metrics = exp.metrics();
                 assert_eq!(
-                    metrics.len(), 2,
+                    metrics.len(),
+                    2,
                     "expected counter+histogram pair for trigger={trigger} outcome={outcome}",
                 );
-                let counter = metrics.iter().find(|m| m.name == MetricName::KernelRespawnTotal)
+                let counter = metrics
+                    .iter()
+                    .find(|m| m.name == MetricName::KernelRespawnTotal)
                     .expect("KernelRespawnTotal present");
-                let histogram = metrics.iter().find(|m| m.name == MetricName::KernelRespawnDuration)
+                let histogram = metrics
+                    .iter()
+                    .find(|m| m.name == MetricName::KernelRespawnDuration)
                     .expect("KernelRespawnDuration present");
                 assert!(matches!(
                     counter.datapoint,
@@ -1214,23 +1204,28 @@ mod kernel_respawn_tests {
                 ));
                 match counter.labels.get("trigger").unwrap() {
                     AttrValue::Str(s) => assert_eq!(s, trigger),
-                    other            => panic!("trigger must be Str, got {other:?}"),
+                    other => panic!("trigger must be Str, got {other:?}"),
                 }
                 match counter.labels.get("outcome").unwrap() {
                     AttrValue::Str(s) => assert_eq!(s, outcome),
-                    other            => panic!("outcome must be Str, got {other:?}"),
+                    other => panic!("outcome must be Str, got {other:?}"),
                 }
                 match histogram.labels.get("trigger").unwrap() {
                     AttrValue::Str(s) => assert_eq!(s, trigger),
-                    other            => panic!("histogram trigger must be Str, got {other:?}"),
+                    other => panic!("histogram trigger must be Str, got {other:?}"),
                 }
                 // Histogram's bucket spread must use the iter44
                 // wide-bucket override, not the hub's global default.
                 if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
-                    assert_eq!(buckets, RESPAWN_DURATION_BUCKETS_MS,
-                        "histogram MUST use the wide kernel-respawn buckets");
+                    assert_eq!(
+                        buckets, RESPAWN_DURATION_BUCKETS_MS,
+                        "histogram MUST use the wide kernel-respawn buckets"
+                    );
                 } else {
-                    panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+                    panic!(
+                        "histogram datapoint must be Histo, got {:?}",
+                        histogram.datapoint
+                    );
                 }
             }
         }
@@ -1271,8 +1266,11 @@ mod kernel_respawn_tests {
             assert!(RESPAWN_OUTCOME_CLOSED_SET.contains(&e));
         }
         let reason_expected = [
-            "circuit_open", "operator_stop", "operator_stop_forced",
-            "supervisor_gone", "other",
+            "circuit_open",
+            "operator_stop",
+            "operator_stop_forced",
+            "supervisor_gone",
+            "other",
         ];
         assert_eq!(REFUSED_REASON_CLOSED_SET.len(), reason_expected.len());
         for &e in &reason_expected {
@@ -1286,25 +1284,27 @@ mod kernel_respawn_tests {
     #[test]
     fn classify_respawn_trigger_is_total_and_in_closed_set() {
         let cases: &[(Option<&str>, Option<i32>, &str)] = &[
-            (Some("DeadlockDetected"), Some(70),  RESPAWN_TRIGGER_DEADLOCK),
-            (Some("DeadlockDetected"), None,      RESPAWN_TRIGGER_DEADLOCK),
-            (Some("SignalCrash"),      Some(139), RESPAWN_TRIGGER_SIGSEGV),
-            (Some("SignalCrash"),      Some(134), RESPAWN_TRIGGER_SIGABRT),
-            (Some("SignalCrash"),      Some(135), RESPAWN_TRIGGER_SIGSEGV),
-            (Some("SignalCrash"),      Some(138), RESPAWN_TRIGGER_SIGSEGV),
-            (Some("SignalCrash"),      Some(137), RESPAWN_TRIGGER_OTHER),
-            (Some("PanicAbort"),       Some(70),  RESPAWN_TRIGGER_EXIT_70),
-            (Some("PanicAbort"),       Some(1),   RESPAWN_TRIGGER_OTHER),
-            (Some("OomKilled"),        Some(137), RESPAWN_TRIGGER_OTHER),
-            (Some("CleanExit"),        Some(0),   RESPAWN_TRIGGER_OTHER),
+            (Some("DeadlockDetected"), Some(70), RESPAWN_TRIGGER_DEADLOCK),
+            (Some("DeadlockDetected"), None, RESPAWN_TRIGGER_DEADLOCK),
+            (Some("SignalCrash"), Some(139), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"), Some(134), RESPAWN_TRIGGER_SIGABRT),
+            (Some("SignalCrash"), Some(135), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"), Some(138), RESPAWN_TRIGGER_SIGSEGV),
+            (Some("SignalCrash"), Some(137), RESPAWN_TRIGGER_OTHER),
+            (Some("PanicAbort"), Some(70), RESPAWN_TRIGGER_EXIT_70),
+            (Some("PanicAbort"), Some(1), RESPAWN_TRIGGER_OTHER),
+            (Some("OomKilled"), Some(137), RESPAWN_TRIGGER_OTHER),
+            (Some("CleanExit"), Some(0), RESPAWN_TRIGGER_OTHER),
             (Some("OperatorSignalExit"), Some(143), RESPAWN_TRIGGER_OTHER),
-            (None,                     None,      RESPAWN_TRIGGER_OTHER),
+            (None, None, RESPAWN_TRIGGER_OTHER),
             (Some("UnknownFutureValue"), Some(42), RESPAWN_TRIGGER_OTHER),
         ];
         for (reason, exit, want) in cases {
             let got = classify_respawn_trigger(*reason, *exit);
-            assert_eq!(got, *want,
-                "classify_respawn_trigger({reason:?}, {exit:?}) → {got}, want {want}");
+            assert_eq!(
+                got, *want,
+                "classify_respawn_trigger({reason:?}, {exit:?}) → {got}, want {want}"
+            );
             assert!(RESPAWN_TRIGGER_CLOSED_SET.contains(&got));
         }
     }
@@ -1314,12 +1314,15 @@ mod kernel_respawn_tests {
     #[test]
     fn supervisor_refused_reason_is_total_and_in_closed_set() {
         let cases: &[(Option<&str>, &str)] = &[
-            (Some("CircuitOpen"),        REFUSED_REASON_CIRCUIT_OPEN),
-            (Some("OperatorStop"),       REFUSED_REASON_OPERATOR_STOP),
-            (Some("OperatorStopForced"), REFUSED_REASON_OPERATOR_STOP_FORCED),
-            (Some("SupervisorGone"),     REFUSED_REASON_SUPERVISOR_GONE),
-            (Some("UnknownFuture"),      REFUSED_REASON_OTHER),
-            (None,                       REFUSED_REASON_OTHER),
+            (Some("CircuitOpen"), REFUSED_REASON_CIRCUIT_OPEN),
+            (Some("OperatorStop"), REFUSED_REASON_OPERATOR_STOP),
+            (
+                Some("OperatorStopForced"),
+                REFUSED_REASON_OPERATOR_STOP_FORCED,
+            ),
+            (Some("SupervisorGone"), REFUSED_REASON_SUPERVISOR_GONE),
+            (Some("UnknownFuture"), REFUSED_REASON_OTHER),
+            (None, REFUSED_REASON_OTHER),
         ];
         for (sub, want) in cases {
             let got = supervisor_refused_reason(*sub);
@@ -1341,7 +1344,7 @@ mod kernel_respawn_tests {
             assert_eq!(metrics[0].name, MetricName::SupervisorRefusedRestartTotal);
             match metrics[0].labels.get("reason").unwrap() {
                 AttrValue::Str(s) => assert_eq!(s, reason),
-                other            => panic!("reason must be Str, got {other:?}"),
+                other => panic!("reason must be Str, got {other:?}"),
             }
         }
     }
@@ -1370,21 +1373,21 @@ mod kernel_respawn_tests {
 // ---------------------------------------------------------------------------
 
 /// Predicate evaluation succeeded; the intent was accepted.
-pub const ADMIT_REASON_OK:                 &str = "ok";
+pub const ADMIT_REASON_OK: &str = "ok";
 /// The retry was rejected because the prior activation row was in
 /// a state for which retry is not legal (e.g. `Completed` without a
 /// review-rejection witness).
 pub const ADMIT_REASON_RETRY_INADMISSIBLE: &str = "retry_inadmissible";
 /// The retry was rejected because the per-task ceiling
 /// (`max_crash_retries` / `max_review_rejections`) is exhausted.
-pub const ADMIT_REASON_BUDGET_EXHAUSTED:   &str = "budget_exhausted";
+pub const ADMIT_REASON_BUDGET_EXHAUSTED: &str = "budget_exhausted";
 /// The intent referenced an unknown task / lane / activation —
 /// useful for the kernel-store gate when it cannot resolve the
 /// addressee row.
-pub const ADMIT_REASON_UNKNOWN_LANE:       &str = "unknown_lane";
+pub const ADMIT_REASON_UNKNOWN_LANE: &str = "unknown_lane";
 /// Anything else (DB error, FSM gate violation, transactional
 /// fault). Should be vanishingly rare on the dashboard.
-pub const ADMIT_REASON_OTHER:              &str = "other";
+pub const ADMIT_REASON_OTHER: &str = "other";
 
 /// Closed set of admit-predicate `reason` lexemes. The dashboard
 /// PromQL pivots on this set; an emit site that smuggled in a
@@ -1402,25 +1405,20 @@ pub const ADMIT_REASON_CLOSED_SET: &[&str] = &[
 /// alongside the audit/eprintln payload, so dashboard rate ==
 /// audit rate and the operator can pivot from one to the other.
 pub fn record_intent_admit_predicate(
-    hub:         &ObservabilityHub,
+    hub: &ObservabilityHub,
     intent_kind: &str,
-    admissible:  bool,
-    reason:      &str,
+    admissible: bool,
+    reason: &str,
 ) {
-    if !hub.enabled() { return; }
-    let mut labels = redact::attrs([
-        ("intent_kind", intent_kind),
-        ("reason",      reason),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let mut labels = redact::attrs([("intent_kind", intent_kind), ("reason", reason)]);
     labels.insert(
         "admissible".to_owned(),
         raxis_observability::AttrValue::Bool(admissible),
     );
-    hub.record_counter(
-        MetricName::IntentAdmitPredicateEvaluatedTotal,
-        labels,
-        1.0,
-    );
+    hub.record_counter(MetricName::IntentAdmitPredicateEvaluatedTotal, labels, 1.0);
 }
 
 #[cfg(test)]
@@ -1435,7 +1433,7 @@ mod admit_predicate_tests {
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 1.0,
             ..HubConfig::default()
         };
@@ -1454,12 +1452,7 @@ mod admit_predicate_tests {
         for &reason in ADMIT_REASON_CLOSED_SET {
             let admissible = reason == ADMIT_REASON_OK;
             let (hub, exp) = enabled_hub();
-            record_intent_admit_predicate(
-                hub.as_ref(),
-                "RetrySubTask",
-                admissible,
-                reason,
-            );
+            record_intent_admit_predicate(hub.as_ref(), "RetrySubTask", admissible, reason);
             hub.flush();
             let metrics = exp.metrics();
             assert_eq!(metrics.len(), 1);
@@ -1471,15 +1464,15 @@ mod admit_predicate_tests {
             ));
             match m.labels.get("reason").unwrap() {
                 AttrValue::Str(s) => assert_eq!(s, reason),
-                other            => panic!("reason must be Str, got {other:?}"),
+                other => panic!("reason must be Str, got {other:?}"),
             }
             match m.labels.get("admissible").unwrap() {
                 AttrValue::Bool(b) => assert_eq!(*b, admissible),
-                other              => panic!("admissible must be Bool, got {other:?}"),
+                other => panic!("admissible must be Bool, got {other:?}"),
             }
             match m.labels.get("intent_kind").unwrap() {
                 AttrValue::Str(s) => assert_eq!(s, "RetrySubTask"),
-                other             => panic!("intent_kind must be Str, got {other:?}"),
+                other => panic!("intent_kind must be Str, got {other:?}"),
             }
         }
     }
@@ -1519,48 +1512,48 @@ mod admit_predicate_tests {
 /// [`operator_command_kind`]. Adding a new request variant MUST extend
 /// both this slice AND the match arm; the witness tests keep them in
 /// lock-step.
-pub const COMMAND_KIND_CREATE_SESSION:             &str = "create_session";
+pub const COMMAND_KIND_CREATE_SESSION: &str = "create_session";
 /// Operator-initiated session revocation.
-pub const COMMAND_KIND_REVOKE_SESSION:             &str = "revoke_session";
+pub const COMMAND_KIND_REVOKE_SESSION: &str = "revoke_session";
 /// Operator-initiated delegation grant.
-pub const COMMAND_KIND_GRANT_DELEGATION:           &str = "grant_delegation";
+pub const COMMAND_KIND_GRANT_DELEGATION: &str = "grant_delegation";
 /// Plan-bundle-sealed initiative creation.
-pub const COMMAND_KIND_CREATE_INITIATIVE:          &str = "create_initiative";
+pub const COMMAND_KIND_CREATE_INITIATIVE: &str = "create_initiative";
 /// Operator approves an admission-pending plan.
-pub const COMMAND_KIND_APPROVE_PLAN:               &str = "approve_plan";
+pub const COMMAND_KIND_APPROVE_PLAN: &str = "approve_plan";
 /// Operator rejects an admission-pending plan.
-pub const COMMAND_KIND_REJECT_PLAN:                &str = "reject_plan";
+pub const COMMAND_KIND_REJECT_PLAN: &str = "reject_plan";
 /// Operator aborts an in-flight task.
-pub const COMMAND_KIND_ABORT_TASK:                 &str = "abort_task";
+pub const COMMAND_KIND_ABORT_TASK: &str = "abort_task";
 /// Operator resumes a paused task.
-pub const COMMAND_KIND_RESUME_TASK:                &str = "resume_task";
+pub const COMMAND_KIND_RESUME_TASK: &str = "resume_task";
 /// Operator retries a failed task (`RetryTask` lifecycle FSM step).
-pub const COMMAND_KIND_RETRY_TASK:                 &str = "retry_task";
+pub const COMMAND_KIND_RETRY_TASK: &str = "retry_task";
 /// Operator aborts an in-flight initiative.
-pub const COMMAND_KIND_ABORT_INITIATIVE:           &str = "abort_initiative";
+pub const COMMAND_KIND_ABORT_INITIATIVE: &str = "abort_initiative";
 /// Operator approves a planner-submitted escalation.
-pub const COMMAND_KIND_APPROVE_ESCALATION:         &str = "approve_escalation";
+pub const COMMAND_KIND_APPROVE_ESCALATION: &str = "approve_escalation";
 /// Operator denies a planner-submitted escalation.
-pub const COMMAND_KIND_DENY_ESCALATION:            &str = "deny_escalation";
+pub const COMMAND_KIND_DENY_ESCALATION: &str = "deny_escalation";
 /// Operator rotates the active policy artifact in-process.
-pub const COMMAND_KIND_ROTATE_EPOCH:               &str = "rotate_epoch";
+pub const COMMAND_KIND_ROTATE_EPOCH: &str = "rotate_epoch";
 /// Operator quarantines a single initiative.
-pub const COMMAND_KIND_QUARANTINE_INITIATIVE:      &str = "quarantine_initiative";
+pub const COMMAND_KIND_QUARANTINE_INITIATIVE: &str = "quarantine_initiative";
 /// Operator quarantines every initiative whose plan a given
 /// fingerprint signed.
-pub const COMMAND_KIND_QUARANTINE_PLANS_BY:        &str = "quarantine_plans_by";
+pub const COMMAND_KIND_QUARANTINE_PLANS_BY: &str = "quarantine_plans_by";
 /// V2_GAPS §12.4 — operator-ergonomics `propose-defaults` stub.
-pub const COMMAND_KIND_PROPOSE_DEFAULTS:           &str = "propose_defaults";
+pub const COMMAND_KIND_PROPOSE_DEFAULTS: &str = "propose_defaults";
 /// V2_GAPS §12.4 — operator-ergonomics `cost-estimate` stub.
-pub const COMMAND_KIND_ESTIMATE_COST:              &str = "estimate_cost";
+pub const COMMAND_KIND_ESTIMATE_COST: &str = "estimate_cost";
 /// V2_GAPS §12.4 — operator-ergonomics `submit --dry-run` stub.
-pub const COMMAND_KIND_DRY_RUN_ADMIT:              &str = "dry_run_admit";
+pub const COMMAND_KIND_DRY_RUN_ADMIT: &str = "dry_run_admit";
 /// V2_GAPS §12.4 — operator-ergonomics `initiative watch` stub.
-pub const COMMAND_KIND_SUBSCRIBE_INITIATIVE:       &str = "subscribe_initiative";
+pub const COMMAND_KIND_SUBSCRIBE_INITIATIVE: &str = "subscribe_initiative";
 /// V2_GAPS §12.4 — operator-ergonomics `initiative resume` stub.
-pub const COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE:  &str = "describe_initiative_pause";
+pub const COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE: &str = "describe_initiative_pause";
 /// V2_extended_gaps §3.2 — `task outputs` listing.
-pub const COMMAND_KIND_LIST_TASK_OUTPUTS:          &str = "list_task_outputs";
+pub const COMMAND_KIND_LIST_TASK_OUTPUTS: &str = "list_task_outputs";
 /// Forward-compat fallback for any future variant the
 /// [`operator_command_kind`] mapping has not yet been extended for.
 /// The witness test pins this to a wire never produced by today's
@@ -1568,7 +1561,7 @@ pub const COMMAND_KIND_LIST_TASK_OUTPUTS:          &str = "list_task_outputs";
 /// keep the closed lexicon stable across future variant additions
 /// during the brief moment between adding the variant and updating
 /// the match arm.
-pub const COMMAND_KIND_UNKNOWN:                    &str = "unknown";
+pub const COMMAND_KIND_UNKNOWN: &str = "unknown";
 
 /// Closed set of every `command_kind` lexeme the operator IPC
 /// dispatcher may emit. The dashboard PromQL pivots on this set; an
@@ -1619,32 +1612,30 @@ pub const OPERATOR_IPC_BUCKETS_MS: &[f64] = &[
 /// The lexeme is a `snake_case` projection of the variant name, kept
 /// verbatim in [`COMMAND_KIND_CLOSED_SET`] so the witness test can
 /// pin the byte shape.
-pub fn operator_command_kind(
-    req: &raxis_types::operator_wire::OperatorRequest,
-) -> &'static str {
+pub fn operator_command_kind(req: &raxis_types::operator_wire::OperatorRequest) -> &'static str {
     use raxis_types::operator_wire::OperatorRequest as R;
     match req {
-        R::CreateSession            { .. } => COMMAND_KIND_CREATE_SESSION,
-        R::RevokeSession            { .. } => COMMAND_KIND_REVOKE_SESSION,
-        R::GrantDelegation          { .. } => COMMAND_KIND_GRANT_DELEGATION,
-        R::CreateInitiative         { .. } => COMMAND_KIND_CREATE_INITIATIVE,
-        R::ApprovePlan              { .. } => COMMAND_KIND_APPROVE_PLAN,
-        R::RejectPlan               { .. } => COMMAND_KIND_REJECT_PLAN,
-        R::AbortInitiative          { .. } => COMMAND_KIND_ABORT_INITIATIVE,
-        R::AbortTask                { .. } => COMMAND_KIND_ABORT_TASK,
-        R::ResumeTask               { .. } => COMMAND_KIND_RESUME_TASK,
-        R::RetryTask                { .. } => COMMAND_KIND_RETRY_TASK,
-        R::ApproveEscalation        { .. } => COMMAND_KIND_APPROVE_ESCALATION,
-        R::DenyEscalation           { .. } => COMMAND_KIND_DENY_ESCALATION,
-        R::RotateEpoch              { .. } => COMMAND_KIND_ROTATE_EPOCH,
-        R::QuarantineInitiative     { .. } => COMMAND_KIND_QUARANTINE_INITIATIVE,
-        R::QuarantinePlansBy        { .. } => COMMAND_KIND_QUARANTINE_PLANS_BY,
-        R::ProposeDefaults          { .. } => COMMAND_KIND_PROPOSE_DEFAULTS,
-        R::EstimateCost             { .. } => COMMAND_KIND_ESTIMATE_COST,
-        R::DryRunAdmit              { .. } => COMMAND_KIND_DRY_RUN_ADMIT,
-        R::SubscribeInitiative      { .. } => COMMAND_KIND_SUBSCRIBE_INITIATIVE,
-        R::DescribeInitiativePause  { .. } => COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE,
-        R::ListTaskOutputs          { .. } => COMMAND_KIND_LIST_TASK_OUTPUTS,
+        R::CreateSession { .. } => COMMAND_KIND_CREATE_SESSION,
+        R::RevokeSession { .. } => COMMAND_KIND_REVOKE_SESSION,
+        R::GrantDelegation { .. } => COMMAND_KIND_GRANT_DELEGATION,
+        R::CreateInitiative { .. } => COMMAND_KIND_CREATE_INITIATIVE,
+        R::ApprovePlan { .. } => COMMAND_KIND_APPROVE_PLAN,
+        R::RejectPlan { .. } => COMMAND_KIND_REJECT_PLAN,
+        R::AbortInitiative { .. } => COMMAND_KIND_ABORT_INITIATIVE,
+        R::AbortTask { .. } => COMMAND_KIND_ABORT_TASK,
+        R::ResumeTask { .. } => COMMAND_KIND_RESUME_TASK,
+        R::RetryTask { .. } => COMMAND_KIND_RETRY_TASK,
+        R::ApproveEscalation { .. } => COMMAND_KIND_APPROVE_ESCALATION,
+        R::DenyEscalation { .. } => COMMAND_KIND_DENY_ESCALATION,
+        R::RotateEpoch { .. } => COMMAND_KIND_ROTATE_EPOCH,
+        R::QuarantineInitiative { .. } => COMMAND_KIND_QUARANTINE_INITIATIVE,
+        R::QuarantinePlansBy { .. } => COMMAND_KIND_QUARANTINE_PLANS_BY,
+        R::ProposeDefaults { .. } => COMMAND_KIND_PROPOSE_DEFAULTS,
+        R::EstimateCost { .. } => COMMAND_KIND_ESTIMATE_COST,
+        R::DryRunAdmit { .. } => COMMAND_KIND_DRY_RUN_ADMIT,
+        R::SubscribeInitiative { .. } => COMMAND_KIND_SUBSCRIBE_INITIATIVE,
+        R::DescribeInitiativePause { .. } => COMMAND_KIND_DESCRIBE_INITIATIVE_PAUSE,
+        R::ListTaskOutputs { .. } => COMMAND_KIND_LIST_TASK_OUTPUTS,
     }
 }
 
@@ -1654,9 +1645,7 @@ pub fn operator_command_kind(
 /// (the sole error envelope per `peripherals.md §3 "Operator
 /// socket"`); every other variant — including the generic `Ack` —
 /// is a structured success and maps to `accepted = true`.
-pub fn operator_response_accepted(
-    resp: &raxis_types::operator_wire::OperatorResponse,
-) -> bool {
+pub fn operator_response_accepted(resp: &raxis_types::operator_wire::OperatorResponse) -> bool {
     !matches!(
         resp,
         raxis_types::operator_wire::OperatorResponse::Error { .. },
@@ -1675,12 +1664,14 @@ pub fn operator_response_accepted(
 /// from frame-received to response-built (the dispatcher's existing
 /// `started.elapsed()` timer).
 pub fn record_operator_ipc(
-    hub:          &ObservabilityHub,
+    hub: &ObservabilityHub,
     command_kind: &str,
-    accepted:     bool,
-    duration_ms:  i64,
+    accepted: bool,
+    duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
+    if !hub.enabled() {
+        return;
+    }
     let mut labels = redact::attrs([("command_kind", command_kind)]);
     labels.insert(
         "accepted".to_owned(),
@@ -1702,15 +1693,13 @@ mod operator_ipc_tests {
         exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
         ObservabilityExporter, ObservabilityHub,
     };
-    use raxis_types::operator_wire::{
-        ApprovalScopeWire, OperatorRequest, OperatorResponse,
-    };
+    use raxis_types::operator_wire::{ApprovalScopeWire, OperatorRequest, OperatorResponse};
     use std::sync::Arc;
 
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 1.0,
             ..HubConfig::default()
         };
@@ -1728,84 +1717,90 @@ mod operator_ipc_tests {
     fn every_operator_request() -> Vec<OperatorRequest> {
         vec![
             OperatorRequest::CreateSession {
-                role:              "planner".into(),
-                worktree_root:     None,
-                base_sha:          None,
+                role: "planner".into(),
+                worktree_root: None,
+                base_sha: None,
                 base_tracking_ref: None,
-                lineage_id:        "lin-1".into(),
-                task_id:           None,
+                lineage_id: "lin-1".into(),
+                task_id: None,
             },
-            OperatorRequest::RevokeSession { session_id: "sess-1".into() },
+            OperatorRequest::RevokeSession {
+                session_id: "sess-1".into(),
+            },
             OperatorRequest::GrantDelegation {
-                session_id:       "sess-1".into(),
-                delegation_id:    "del-1".into(),
+                session_id: "sess-1".into(),
+                delegation_id: "del-1".into(),
                 capability_class: "FsRead".into(),
-                scope_json:       None,
-                ttl_secs:         3600,
-                max_uses:         Some(10),
-                signature_hex:    "deadbeef".into(),
+                scope_json: None,
+                ttl_secs: 3600,
+                max_uses: Some(10),
+                signature_hex: "deadbeef".into(),
             },
             OperatorRequest::CreateInitiative {
-                initiative_id:     "init-1".into(),
-                plan_bundle_hex:   "deadbeef".into(),
+                initiative_id: "init-1".into(),
+                plan_bundle_hex: "deadbeef".into(),
                 bundle_sha256_hex: "ab".repeat(32),
-                signature_hex:     "cd".repeat(64),
-                signed_by_hex:     "ef".repeat(8),
+                signature_hex: "cd".repeat(64),
+                signed_by_hex: "ef".repeat(8),
             },
             OperatorRequest::ApprovePlan {
-                initiative_id:      "init-1".into(),
+                initiative_id: "init-1".into(),
                 approving_operator: "op-prime".into(),
             },
             OperatorRequest::RejectPlan {
                 initiative_id: "init-1".into(),
-                rejected_by:   "op-prime".into(),
-                reason:        None,
+                rejected_by: "op-prime".into(),
+                reason: None,
             },
             OperatorRequest::AbortInitiative {
                 initiative_id: "init-1".into(),
-                aborted_by:    "op-prime".into(),
+                aborted_by: "op-prime".into(),
             },
             OperatorRequest::AbortTask {
-                task_id:    "t1".into(),
+                task_id: "t1".into(),
                 aborted_by: "op-prime".into(),
             },
             OperatorRequest::ResumeTask {
-                task_id:    "t1".into(),
+                task_id: "t1".into(),
                 resumed_by: "op-prime".into(),
             },
-            OperatorRequest::RetryTask { task_id: "t1".into() },
+            OperatorRequest::RetryTask {
+                task_id: "t1".into(),
+            },
             OperatorRequest::ApproveEscalation {
-                escalation_id:    "esc-1".into(),
-                approval_scope:   ApprovalScopeWire {
-                    capability_class:  "WriteSecrets".into(),
-                    max_uses:          1,
+                escalation_id: "esc-1".into(),
+                approval_scope: ApprovalScopeWire {
+                    capability_class: "WriteSecrets".into(),
+                    max_uses: 1,
                     valid_for_seconds: 3600,
                 },
                 operator_sig_hex: "deadbeef".into(),
             },
             OperatorRequest::DenyEscalation {
                 escalation_id: "esc-1".into(),
-                reason:        None,
+                reason: None,
             },
             OperatorRequest::RotateEpoch {
                 policy_path: "/p".into(),
-                sig_path:    "/s".into(),
+                sig_path: "/s".into(),
             },
             OperatorRequest::QuarantineInitiative {
                 initiative_id: "init-1".into(),
-                reason:        None,
+                reason: None,
             },
             OperatorRequest::QuarantinePlansBy {
                 target_fingerprint: "ab".repeat(8),
-                reason:             None,
+                reason: None,
             },
-            OperatorRequest::ProposeDefaults { initiative_id: None },
+            OperatorRequest::ProposeDefaults {
+                initiative_id: None,
+            },
             OperatorRequest::EstimateCost {
-                plan_toml:    "[[tasks]]".into(),
+                plan_toml: "[[tasks]]".into(),
                 plan_sig_hex: "ab".into(),
             },
             OperatorRequest::DryRunAdmit {
-                plan_toml:    "[[tasks]]".into(),
+                plan_toml: "[[tasks]]".into(),
                 plan_sig_hex: "ab".into(),
                 submitted_by: "op-prime".into(),
             },
@@ -1815,7 +1810,9 @@ mod operator_ipc_tests {
             OperatorRequest::DescribeInitiativePause {
                 initiative_id: "init-1".into(),
             },
-            OperatorRequest::ListTaskOutputs { task_id: "t1".into() },
+            OperatorRequest::ListTaskOutputs {
+                task_id: "t1".into(),
+            },
         ]
     }
 
@@ -1837,12 +1834,17 @@ mod operator_ipc_tests {
             hub.flush();
             let metrics = exp.metrics();
             assert_eq!(
-                metrics.len(), 2,
+                metrics.len(),
+                2,
                 "expected counter+histogram pair for {req:?} (kind={kind})",
             );
-            let counter = metrics.iter().find(|m| m.name == MetricName::OperatorIpcTotal)
+            let counter = metrics
+                .iter()
+                .find(|m| m.name == MetricName::OperatorIpcTotal)
                 .expect("OperatorIpcTotal present");
-            let histogram = metrics.iter().find(|m| m.name == MetricName::OperatorIpcDuration)
+            let histogram = metrics
+                .iter()
+                .find(|m| m.name == MetricName::OperatorIpcDuration)
                 .expect("OperatorIpcDuration present");
             assert!(matches!(
                 counter.datapoint,
@@ -1850,19 +1852,24 @@ mod operator_ipc_tests {
             ));
             match counter.labels.get("command_kind").unwrap() {
                 AttrValue::Str(s) => assert_eq!(s, kind),
-                other            => panic!("command_kind must be Str, got {other:?}"),
+                other => panic!("command_kind must be Str, got {other:?}"),
             }
             match counter.labels.get("accepted").unwrap() {
                 AttrValue::Bool(b) => assert!(*b),
-                other              => panic!("accepted must be Bool, got {other:?}"),
+                other => panic!("accepted must be Bool, got {other:?}"),
             }
             // Histogram MUST use the iter44 operator-IPC bucket
             // override, not the hub's global default.
             if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
-                assert_eq!(buckets, OPERATOR_IPC_BUCKETS_MS,
-                    "histogram MUST use the iter44 operator-IPC buckets");
+                assert_eq!(
+                    buckets, OPERATOR_IPC_BUCKETS_MS,
+                    "histogram MUST use the iter44 operator-IPC buckets"
+                );
             } else {
-                panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+                panic!(
+                    "histogram datapoint must be Histo, got {:?}",
+                    histogram.datapoint
+                );
             }
         }
     }
@@ -1876,7 +1883,7 @@ mod operator_ipc_tests {
         let (hub, exp) = enabled_hub();
         let kind = COMMAND_KIND_APPROVE_PLAN;
         let resp = OperatorResponse::Error {
-            code:   "FAIL_APPROVE_PLAN".into(),
+            code: "FAIL_APPROVE_PLAN".into(),
             detail: "bad signature".into(),
         };
         assert!(!operator_response_accepted(&resp));
@@ -1887,7 +1894,7 @@ mod operator_ipc_tests {
         for m in &metrics {
             match m.labels.get("accepted").unwrap() {
                 AttrValue::Bool(b) => assert!(!*b),
-                other              => panic!("accepted must be Bool, got {other:?}"),
+                other => panic!("accepted must be Bool, got {other:?}"),
             }
         }
     }
@@ -1915,9 +1922,11 @@ mod operator_ipc_tests {
         for req in every_operator_request() {
             let kind = operator_command_kind(&req);
             assert!(COMMAND_KIND_CLOSED_SET.contains(&kind));
-            assert_ne!(kind, COMMAND_KIND_UNKNOWN,
+            assert_ne!(
+                kind, COMMAND_KIND_UNKNOWN,
                 "operator_command_kind MUST NOT return `unknown` for \
-                 a known variant ({req:?})");
+                 a known variant ({req:?})"
+            );
         }
     }
 
@@ -1929,15 +1938,20 @@ mod operator_ipc_tests {
     fn response_accepted_is_total() {
         // Every non-Error envelope must flip true.
         let success = vec![
-            OperatorResponse::Ack { message: "ok".into() },
+            OperatorResponse::Ack {
+                message: "ok".into(),
+            },
             OperatorResponse::SessionRevoked {
-                session_id: "s".into(), revoked_at: 0,
+                session_id: "s".into(),
+                revoked_at: 0,
             },
             OperatorResponse::PlanApproved {
-                initiative_id: "i".into(), tasks_admitted: 0,
+                initiative_id: "i".into(),
+                tasks_admitted: 0,
             },
             OperatorResponse::EpochAdvanced {
-                new_epoch_id: 1, policy_sha256: "ab".into(),
+                new_epoch_id: 1,
+                policy_sha256: "ab".into(),
                 signed_by_authority: "cd".into(),
                 n_delegations_marked_stale: 0,
                 n_sessions_invalidated: 0,
@@ -1945,11 +1959,14 @@ mod operator_ipc_tests {
             },
         ];
         for r in &success {
-            assert!(operator_response_accepted(r),
-                "non-Error response must report accepted=true ({r:?})");
+            assert!(
+                operator_response_accepted(r),
+                "non-Error response must report accepted=true ({r:?})"
+            );
         }
         let err = OperatorResponse::Error {
-            code: "E".into(), detail: "d".into(),
+            code: "E".into(),
+            detail: "d".into(),
         };
         assert!(!operator_response_accepted(&err));
     }
@@ -2022,18 +2039,18 @@ mod operator_ipc_tests {
 /// Closed `role` lexicon for the kernel↔substrate IPC family. Every
 /// dispatched [`raxis_ipc::IpcMessage`] variant maps to exactly one
 /// of these values via [`kernel_substrate_ipc_route`].
-pub const IPC_ROLE_PLANNER:  &str = "planner";
+pub const IPC_ROLE_PLANNER: &str = "planner";
 /// Verifier-subprocess role. Pairs with `message_kind =
 /// witness_submission`.
 pub const IPC_ROLE_VERIFIER: &str = "verifier";
 /// Reserved for a future gateway-side dispatcher migration (slice
 /// 4c+). Pinned in the closed set so the dashboard PromQL stays
 /// stable when the gateway dispatcher starts emitting.
-pub const IPC_ROLE_GATEWAY:  &str = "gateway";
+pub const IPC_ROLE_GATEWAY: &str = "gateway";
 /// Forward-compat fallback for any [`raxis_ipc::IpcMessage`] variant
 /// that arrives on the planner socket without an expected handler.
 /// Pairs with `message_kind = unexpected`.
-pub const IPC_ROLE_UNKNOWN:  &str = "unknown";
+pub const IPC_ROLE_UNKNOWN: &str = "unknown";
 
 /// Closed set of every `role` lexeme the kernel↔substrate IPC
 /// dispatcher may emit. The dashboard PromQL pivots on this set;
@@ -2050,13 +2067,13 @@ pub const KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET: &[&str] = &[
 /// projection of the dispatched [`raxis_ipc::IpcMessage`] request
 /// variant; every non-dispatched variant collapses to
 /// [`IPC_MSG_KIND_UNEXPECTED`].
-pub const IPC_MSG_KIND_INTENT_REQUEST:        &str = "intent_request";
+pub const IPC_MSG_KIND_INTENT_REQUEST: &str = "intent_request";
 /// Pairs with `role = verifier`. Witness submission from a verifier
 /// subprocess.
-pub const IPC_MSG_KIND_WITNESS_SUBMISSION:    &str = "witness_submission";
+pub const IPC_MSG_KIND_WITNESS_SUBMISSION: &str = "witness_submission";
 /// Pairs with `role = planner`. Escalation request from the
 /// orchestrator subprocess.
-pub const IPC_MSG_KIND_ESCALATION_REQUEST:    &str = "escalation_request";
+pub const IPC_MSG_KIND_ESCALATION_REQUEST: &str = "escalation_request";
 /// Pairs with `role = planner`. Gateway-mediated egress request.
 pub const IPC_MSG_KIND_PLANNER_FETCH_REQUEST: &str = "planner_fetch_request";
 /// Pairs with `role = planner`. The structured
@@ -2065,13 +2082,13 @@ pub const IPC_MSG_KIND_PLANNER_FETCH_REQUEST: &str = "planner_fetch_request";
 /// The kernel uses it to format a concrete `block_reason` for
 /// the Mode-B premature-exit synthesis in
 /// `session_spawn_orchestrator`.
-pub const IPC_MSG_KIND_PLANNER_EXIT_NOTICE:   &str = "planner_exit_notice";
+pub const IPC_MSG_KIND_PLANNER_EXIT_NOTICE: &str = "planner_exit_notice";
 /// Pairs with `role = unknown`. Any [`raxis_ipc::IpcMessage`]
 /// variant that arrives on planner.sock without an expected handler
 /// (response variants, operator-socket variants routed to the wrong
 /// socket, etc.). Keeps the closed lexicon stable across future
 /// wire-variant additions.
-pub const IPC_MSG_KIND_UNEXPECTED:            &str = "unexpected";
+pub const IPC_MSG_KIND_UNEXPECTED: &str = "unexpected";
 
 /// Closed set of every `message_kind` lexeme the kernel↔substrate
 /// IPC dispatcher may emit.
@@ -2098,17 +2115,15 @@ pub const KERNEL_SUBSTRATE_IPC_BUCKETS_MS: &[f64] = &[
 /// message_kind)` pair. The match arm is exhaustive over the wire
 /// enum; adding a new variant produces a compile error here, which
 /// is the structural guarantee that the closed lexicons stay total.
-pub fn kernel_substrate_ipc_route(
-    msg: &raxis_ipc::IpcMessage,
-) -> (&'static str, &'static str) {
+pub fn kernel_substrate_ipc_route(msg: &raxis_ipc::IpcMessage) -> (&'static str, &'static str) {
     use raxis_ipc::IpcMessage as M;
     match msg {
         // ── Dispatched on planner.sock ──
-        M::IntentRequest(_)         => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_INTENT_REQUEST),
-        M::WitnessSubmission(_)     => (IPC_ROLE_VERIFIER, IPC_MSG_KIND_WITNESS_SUBMISSION),
-        M::EscalationRequest(_)     => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_ESCALATION_REQUEST),
-        M::PlannerFetchRequest(_)   => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_PLANNER_FETCH_REQUEST),
-        M::PlannerExitNotice { .. } => (IPC_ROLE_PLANNER,  IPC_MSG_KIND_PLANNER_EXIT_NOTICE),
+        M::IntentRequest(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_INTENT_REQUEST),
+        M::WitnessSubmission(_) => (IPC_ROLE_VERIFIER, IPC_MSG_KIND_WITNESS_SUBMISSION),
+        M::EscalationRequest(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_ESCALATION_REQUEST),
+        M::PlannerFetchRequest(_) => (IPC_ROLE_PLANNER, IPC_MSG_KIND_PLANNER_FETCH_REQUEST),
+        M::PlannerExitNotice { .. } => (IPC_ROLE_PLANNER, IPC_MSG_KIND_PLANNER_EXIT_NOTICE),
 
         // ── Response variants, operator-socket variants, tproxy /
         //    dns admission variants — all wire-shape oddities on
@@ -2142,17 +2157,17 @@ pub fn kernel_substrate_ipc_route(
 
 use std::sync::atomic::{AtomicI64, Ordering};
 
-static INFLIGHT_PLANNER:  AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_PLANNER: AtomicI64 = AtomicI64::new(0);
 static INFLIGHT_VERIFIER: AtomicI64 = AtomicI64::new(0);
-static INFLIGHT_GATEWAY:  AtomicI64 = AtomicI64::new(0);
-static INFLIGHT_UNKNOWN:  AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_GATEWAY: AtomicI64 = AtomicI64::new(0);
+static INFLIGHT_UNKNOWN: AtomicI64 = AtomicI64::new(0);
 
 fn inflight_counter_for(role: &str) -> &'static AtomicI64 {
     match role {
-        IPC_ROLE_PLANNER  => &INFLIGHT_PLANNER,
+        IPC_ROLE_PLANNER => &INFLIGHT_PLANNER,
         IPC_ROLE_VERIFIER => &INFLIGHT_VERIFIER,
-        IPC_ROLE_GATEWAY  => &INFLIGHT_GATEWAY,
-        _                 => &INFLIGHT_UNKNOWN,
+        IPC_ROLE_GATEWAY => &INFLIGHT_GATEWAY,
+        _ => &INFLIGHT_UNKNOWN,
     }
 }
 
@@ -2161,12 +2176,10 @@ fn inflight_counter_for(role: &str) -> &'static AtomicI64 {
 /// in both `start` and `Drop`; exposed separately so tests can
 /// observe the gauge shape without going through the static
 /// counters.
-pub fn record_kernel_substrate_ipc_inflight(
-    hub:   &ObservabilityHub,
-    role:  &str,
-    count: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_kernel_substrate_ipc_inflight(hub: &ObservabilityHub, role: &str, count: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("role", role)]);
     hub.record_gauge(
         MetricName::KernelSubstrateIpcInflight,
@@ -2186,16 +2199,15 @@ pub fn record_kernel_substrate_ipc_inflight(
 /// drawn from [`KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET`].
 /// `duration_ms` is the wall-clock round-trip in milliseconds.
 pub fn record_kernel_substrate_ipc_roundtrip(
-    hub:          &ObservabilityHub,
-    role:         &str,
+    hub: &ObservabilityHub,
+    role: &str,
     message_kind: &str,
-    duration_ms:  i64,
+    duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let labels = redact::attrs([
-        ("role",         role),
-        ("message_kind", message_kind),
-    ]);
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("role", role), ("message_kind", message_kind)]);
     hub.record_counter(
         MetricName::KernelSubstrateIpcMessagesTotal,
         labels.clone(),
@@ -2228,10 +2240,10 @@ pub fn record_kernel_substrate_ipc_roundtrip(
 /// from `write_frame`, panic unwind) flushes the full metric tuple
 /// exactly once.
 pub struct KernelSubstrateIpcRoundtrip<'a> {
-    hub:          &'a ObservabilityHub,
-    role:         &'static str,
+    hub: &'a ObservabilityHub,
+    role: &'static str,
     message_kind: &'static str,
-    started:      std::time::Instant,
+    started: std::time::Instant,
 }
 
 impl<'a> KernelSubstrateIpcRoundtrip<'a> {
@@ -2244,8 +2256,8 @@ impl<'a> KernelSubstrateIpcRoundtrip<'a> {
     /// caller cannot pass a heap string and accidentally smuggle
     /// in a free-form lexeme.
     pub fn start(
-        hub:          &'a ObservabilityHub,
-        role:         &'static str,
+        hub: &'a ObservabilityHub,
+        role: &'static str,
         message_kind: &'static str,
     ) -> Self {
         if hub.enabled() {
@@ -2263,14 +2275,11 @@ impl<'a> KernelSubstrateIpcRoundtrip<'a> {
 
 impl Drop for KernelSubstrateIpcRoundtrip<'_> {
     fn drop(&mut self) {
-        if !self.hub.enabled() { return; }
+        if !self.hub.enabled() {
+            return;
+        }
         let duration_ms = self.started.elapsed().as_millis() as i64;
-        record_kernel_substrate_ipc_roundtrip(
-            self.hub,
-            self.role,
-            self.message_kind,
-            duration_ms,
-        );
+        record_kernel_substrate_ipc_roundtrip(self.hub, self.role, self.message_kind, duration_ms);
         let cur = inflight_counter_for(self.role).fetch_sub(1, Ordering::Relaxed) - 1;
         record_kernel_substrate_ipc_inflight(self.hub, self.role, cur);
     }
@@ -2313,7 +2322,7 @@ mod substrate_ipc_tests {
     fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
         static LOCK: Mutex<()> = Mutex::new(());
         match LOCK.lock() {
-            Ok(g)  => g,
+            Ok(g) => g,
             Err(p) => p.into_inner(),
         }
     }
@@ -2321,7 +2330,7 @@ mod substrate_ipc_tests {
     fn enabled_hub() -> (Arc<ObservabilityHub>, Arc<InMemoryExporter>) {
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:     true,
+            enabled: true,
             sample_rate: 1.0,
             ..HubConfig::default()
         };
@@ -2341,10 +2350,9 @@ mod substrate_ipc_tests {
     fn fixture_ipc_messages() -> Vec<raxis_ipc::IpcMessage> {
         use raxis_ipc::IpcMessage as M;
         use raxis_types::{
-            IntentKind, IntentRequest, EscalationClass, EscalationRequest,
-            PlannerFetchRequest, PlannerFetchKind, RequestedEscalationScope,
-            WitnessSubmission, WitnessResultClass, GateType, CommitSha, TaskId,
-            CapabilityClass,
+            CapabilityClass, CommitSha, EscalationClass, EscalationRequest, GateType, IntentKind,
+            IntentRequest, PlannerFetchKind, PlannerFetchRequest, RequestedEscalationScope, TaskId,
+            WitnessResultClass, WitnessSubmission,
         };
 
         let task = TaskId::parse("task-substrate-ipc").unwrap();
@@ -2353,53 +2361,53 @@ mod substrate_ipc_tests {
         vec![
             // ── Dispatched: planner / IntentRequest ──
             M::IntentRequest(IntentRequest {
-                session_token:           "tok".into(),
-                sequence_number:         1,
-                envelope_nonce:          "00000000000000000000000000000001".into(),
-                intent_kind:             IntentKind::SingleCommit,
-                task_id:                 task.clone(),
-                base_sha:                None,
-                head_sha:                None,
-                submitted_claims:        vec![],
-                justification:           None,
-                idempotency_key:         None,
-                approval_token:          None,
-                approved:                None,
-                critique:                None,
+                session_token: "tok".into(),
+                sequence_number: 1,
+                envelope_nonce: "00000000000000000000000000000001".into(),
+                intent_kind: IntentKind::SingleCommit,
+                task_id: task.clone(),
+                base_sha: None,
+                head_sha: None,
+                submitted_claims: vec![],
+                justification: None,
+                idempotency_key: None,
+                approval_token: None,
+                approved: None,
+                critique: None,
                 resolved_via_escalation: None,
-                tokens_used:             None,
-                structured_output:       None,
+                tokens_used: None,
+                structured_output: None,
             }),
             // ── Dispatched: verifier / WitnessSubmission ──
             M::WitnessSubmission(WitnessSubmission {
                 verifier_token: "v-tok".into(),
-                task_id:        task.clone(),
-                gate_type:      GateType::parse("TestCoverage").unwrap(),
+                task_id: task.clone(),
+                gate_type: GateType::parse("TestCoverage").unwrap(),
                 evaluation_sha,
-                result_class:   WitnessResultClass::Pass,
-                body:           serde_json::json!({}),
+                result_class: WitnessResultClass::Pass,
+                body: serde_json::json!({}),
             }),
             // ── Dispatched: planner / EscalationRequest ──
             M::EscalationRequest(EscalationRequest {
-                session_token:   "tok".into(),
-                task_id:         task.clone(),
-                class:           EscalationClass::CapabilityUpgrade,
+                session_token: "tok".into(),
+                task_id: task.clone(),
+                class: EscalationClass::CapabilityUpgrade,
                 requested_scope: RequestedEscalationScope::CapabilityUpgrade {
                     capability: CapabilityClass::WriteSecrets,
                 },
-                justification:   "test fixture".into(),
+                justification: "test fixture".into(),
                 idempotency_key: uuid::Uuid::nil(),
             }),
             // ── Dispatched: planner / PlannerFetchRequest ──
             M::PlannerFetchRequest(PlannerFetchRequest {
-                request_id:    uuid::Uuid::nil(),
+                request_id: uuid::Uuid::nil(),
                 session_token: "tok".into(),
-                fetch_kind:    PlannerFetchKind::Inference,
-                url:           "https://example.invalid/v1/messages".into(),
-                method:        "POST".into(),
-                headers:       vec![],
-                body_bytes:    vec![],
-                timeout_ms:    30_000,
+                fetch_kind: PlannerFetchKind::Inference,
+                url: "https://example.invalid/v1/messages".into(),
+                method: "POST".into(),
+                headers: vec![],
+                body_bytes: vec![],
+                timeout_ms: 30_000,
             }),
             // ── Dispatched: planner / PlannerExitNotice ──
             //   `INV-FAILURE-REASON-CONCRETE-01` — the planner ships
@@ -2408,7 +2416,7 @@ mod substrate_ipc_tests {
             //   can format a concrete `block_reason`.
             M::PlannerExitNotice {
                 outcome: raxis_types::PlannerExitOutcome::MaxTurnsReached {
-                    used:  60,
+                    used: 60,
                     limit: 60,
                 },
             },
@@ -2419,8 +2427,8 @@ mod substrate_ipc_tests {
             //    full match-arm syntax.
             M::WitnessAck {
                 verifier_run_id: uuid::Uuid::nil(),
-                accepted:        true,
-                reason:          None,
+                accepted: true,
+                reason: None,
             },
         ]
     }
@@ -2478,10 +2486,14 @@ mod substrate_ipc_tests {
                     assert_eq!(kind, IPC_MSG_KIND_PLANNER_EXIT_NOTICE);
                 }
                 _ => {
-                    assert_eq!(role, IPC_ROLE_UNKNOWN,
-                        "unexpected variant {msg:?} must map to role=unknown");
-                    assert_eq!(kind, IPC_MSG_KIND_UNEXPECTED,
-                        "unexpected variant {msg:?} must map to message_kind=unexpected");
+                    assert_eq!(
+                        role, IPC_ROLE_UNKNOWN,
+                        "unexpected variant {msg:?} must map to role=unknown"
+                    );
+                    assert_eq!(
+                        kind, IPC_MSG_KIND_UNEXPECTED,
+                        "unexpected variant {msg:?} must map to message_kind=unexpected"
+                    );
                 }
             }
         }
@@ -2497,19 +2509,20 @@ mod substrate_ipc_tests {
         for &role in KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET {
             for &kind in KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET {
                 let (hub, exp) = enabled_hub();
-                record_kernel_substrate_ipc_roundtrip(
-                    hub.as_ref(), role, kind, 42,
-                );
+                record_kernel_substrate_ipc_roundtrip(hub.as_ref(), role, kind, 42);
                 hub.flush();
                 let metrics = exp.metrics();
                 assert_eq!(
-                    metrics.len(), 2,
+                    metrics.len(),
+                    2,
                     "expected counter+histogram pair for role={role} kind={kind}",
                 );
-                let counter = metrics.iter()
+                let counter = metrics
+                    .iter()
                     .find(|m| m.name == MetricName::KernelSubstrateIpcMessagesTotal)
                     .expect("KernelSubstrateIpcMessagesTotal present");
-                let histogram = metrics.iter()
+                let histogram = metrics
+                    .iter()
                     .find(|m| m.name == MetricName::KernelSubstrateIpcRoundtripDuration)
                     .expect("KernelSubstrateIpcRoundtripDuration present");
                 assert!(matches!(
@@ -2518,17 +2531,22 @@ mod substrate_ipc_tests {
                 ));
                 match counter.labels.get("role").unwrap() {
                     AttrValue::Str(s) => assert_eq!(s, role),
-                    other            => panic!("role must be Str, got {other:?}"),
+                    other => panic!("role must be Str, got {other:?}"),
                 }
                 match counter.labels.get("message_kind").unwrap() {
                     AttrValue::Str(s) => assert_eq!(s, kind),
-                    other            => panic!("message_kind must be Str, got {other:?}"),
+                    other => panic!("message_kind must be Str, got {other:?}"),
                 }
                 if let DataPoint::Histo { ref buckets, .. } = histogram.datapoint {
-                    assert_eq!(buckets, KERNEL_SUBSTRATE_IPC_BUCKETS_MS,
-                        "histogram MUST use the iter44 IPC bucket override");
+                    assert_eq!(
+                        buckets, KERNEL_SUBSTRATE_IPC_BUCKETS_MS,
+                        "histogram MUST use the iter44 IPC bucket override"
+                    );
                 } else {
-                    panic!("histogram datapoint must be Histo, got {:?}", histogram.datapoint);
+                    panic!(
+                        "histogram datapoint must be Histo, got {:?}",
+                        histogram.datapoint
+                    );
                 }
             }
         }
@@ -2570,24 +2588,36 @@ mod substrate_ipc_tests {
         // Metric tape MUST contain exactly 2N gauge samples (one
         // per start, one per Drop) + N counters + N histograms.
         let metrics = exp.metrics();
-        let n_gauges = metrics.iter()
+        let n_gauges = metrics
+            .iter()
             .filter(|m| m.name == MetricName::KernelSubstrateIpcInflight)
             .count();
-        let n_counters = metrics.iter()
+        let n_counters = metrics
+            .iter()
             .filter(|m| m.name == MetricName::KernelSubstrateIpcMessagesTotal)
             .count();
-        let n_histograms = metrics.iter()
+        let n_histograms = metrics
+            .iter()
             .filter(|m| m.name == MetricName::KernelSubstrateIpcRoundtripDuration)
             .count();
-        assert_eq!(n_gauges, 2 * N,
-            "expected {} gauge samples (start+drop per round-trip), got {n_gauges}", 2 * N);
-        assert_eq!(n_counters, N,
-            "expected {N} counter increments, got {n_counters}");
-        assert_eq!(n_histograms, N,
-            "expected {N} histogram observations, got {n_histograms}");
+        assert_eq!(
+            n_gauges,
+            2 * N,
+            "expected {} gauge samples (start+drop per round-trip), got {n_gauges}",
+            2 * N
+        );
+        assert_eq!(
+            n_counters, N,
+            "expected {N} counter increments, got {n_counters}"
+        );
+        assert_eq!(
+            n_histograms, N,
+            "expected {N} histogram observations, got {n_histograms}"
+        );
 
         // Final gauge sample MUST be 0.
-        let last_gauge = metrics.iter()
+        let last_gauge = metrics
+            .iter()
             .rev()
             .find(|m| m.name == MetricName::KernelSubstrateIpcInflight)
             .expect("at least one gauge sample present");
@@ -2606,10 +2636,15 @@ mod substrate_ipc_tests {
     #[test]
     fn closed_sets_match_spec_tables() {
         let role_expected: &[&str] = &["planner", "verifier", "gateway", "unknown"];
-        assert_eq!(KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.len(), role_expected.len());
+        assert_eq!(
+            KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.len(),
+            role_expected.len()
+        );
         for &e in role_expected {
-            assert!(KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.contains(&e),
-                "role lexeme {e:?} missing from closed set");
+            assert!(
+                KERNEL_SUBSTRATE_IPC_ROLE_CLOSED_SET.contains(&e),
+                "role lexeme {e:?} missing from closed set"
+            );
         }
         let kind_expected: &[&str] = &[
             "intent_request",
@@ -2619,10 +2654,15 @@ mod substrate_ipc_tests {
             "planner_exit_notice",
             "unexpected",
         ];
-        assert_eq!(KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.len(), kind_expected.len());
+        assert_eq!(
+            KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.len(),
+            kind_expected.len()
+        );
         for &e in kind_expected {
-            assert!(KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.contains(&e),
-                "message_kind lexeme {e:?} missing from closed set");
+            assert!(
+                KERNEL_SUBSTRATE_IPC_MESSAGE_KIND_CLOSED_SET.contains(&e),
+                "message_kind lexeme {e:?} missing from closed set"
+            );
         }
     }
 }

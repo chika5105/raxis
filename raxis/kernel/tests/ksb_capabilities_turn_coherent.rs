@@ -72,8 +72,7 @@
 use raxis_ksb::TaskCapabilityView;
 use raxis_store::{migration::apply_pending, Table};
 use raxis_types::intent_admit::{
-    admit_retry_subtask_check, AdmitOutcome, RetryAdmitInputs,
-    RetryInadmissibleReason,
+    admit_retry_subtask_check, AdmitOutcome, RetryAdmitInputs, RetryInadmissibleReason,
 };
 use rusqlite::{params, Connection};
 
@@ -94,7 +93,7 @@ use rusqlite::{params, Connection};
 /// (`orch_respawn_no_progress_ceiling`); this witness is scoped
 /// to the row-read + predicate-projection contract.
 fn fresh_disk_conn() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
-    let tmp  = tempfile::tempdir().expect("tempdir");
+    let tmp = tempfile::tempdir().expect("tempdir");
     let path = tmp.path().join("kernel.db");
     let conn = Connection::open(&path).expect("open sqlite file");
     conn.pragma_update(None, "journal_mode", "WAL").ok();
@@ -108,13 +107,13 @@ fn fresh_disk_conn() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
 /// terminal-row CHECK (activated_at + terminated_at NOT NULL +
 /// session_id NOT NULL).
 fn seed_terminal_activation(
-    conn:                &Connection,
-    activation_id:       &str,
-    task_id:             &str,
-    initiative_id:       &str,
-    session_id:          &str,
-    state:               &str,
-    crash_retry_count:   i64,
+    conn: &Connection,
+    activation_id: &str,
+    task_id: &str,
+    initiative_id: &str,
+    session_id: &str,
+    state: &str,
+    crash_retry_count: i64,
     review_reject_count: i64,
 ) {
     conn.execute(
@@ -130,10 +129,16 @@ fn seed_terminal_activation(
             acts = Table::SubtaskActivations.as_str(),
         ),
         params![
-            activation_id, task_id, initiative_id, state,
-            session_id, crash_retry_count, review_reject_count,
+            activation_id,
+            task_id,
+            initiative_id,
+            state,
+            session_id,
+            crash_retry_count,
+            review_reject_count,
         ],
-    ).expect("insert activation");
+    )
+    .expect("insert activation");
 }
 
 /// Mirror the kernel's `build_task_capability_view` SQL +
@@ -141,49 +146,54 @@ fn seed_terminal_activation(
 /// (most-recent activation, ordered by `created_at DESC`), drives
 /// the same predicate, builds the same wire-shape view.
 fn read_and_project_view(
-    conn:        &Connection,
-    task_id:     &str,
-    max_crash:   u32,
-    max_review:  u32,
+    conn: &Connection,
+    task_id: &str,
+    max_crash: u32,
+    max_review: u32,
 ) -> TaskCapabilityView {
-    let row: Option<(String, i64, i64)> = conn.query_row(
-        &format!(
-            "SELECT activation_state, crash_retry_count, review_reject_count
+    let row: Option<(String, i64, i64)> = conn
+        .query_row(
+            &format!(
+                "SELECT activation_state, crash_retry_count, review_reject_count
                FROM {acts}
               WHERE task_id = ?1
               ORDER BY created_at DESC
               LIMIT 1",
-            acts = Table::SubtaskActivations.as_str(),
-        ),
-        params![task_id],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).ok();
+                acts = Table::SubtaskActivations.as_str(),
+            ),
+            params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .ok();
     let (prior_state, crash, review) = match row {
         Some(t) => t,
-        None    => (String::new(), 0_i64, 0_i64),
+        None => (String::new(), 0_i64, 0_i64),
     };
-    let crash_u  = u32::try_from(crash).unwrap_or(0);
+    let crash_u = u32::try_from(crash).unwrap_or(0);
     let review_u = u32::try_from(review).unwrap_or(0);
     let admit_inputs = RetryAdmitInputs {
-        prior_activation_state:
-            if prior_state.is_empty() { None } else { Some(prior_state.as_str()) },
-        crash_retry_count:      crash_u,
-        review_reject_count:    review_u,
-        max_crash_retries:      max_crash,
-        max_review_rejections:  max_review,
+        prior_activation_state: if prior_state.is_empty() {
+            None
+        } else {
+            Some(prior_state.as_str())
+        },
+        crash_retry_count: crash_u,
+        review_reject_count: review_u,
+        max_crash_retries: max_crash,
+        max_review_rejections: max_review,
     };
     let (retry_admissible, retry_inadmissible_reason) =
         match admit_retry_subtask_check(&admit_inputs) {
-            AdmitOutcome::Admissible    => (true,  None),
+            AdmitOutcome::Admissible => (true, None),
             AdmitOutcome::Inadmissible(r) => (false, Some(r.human())),
         };
     TaskCapabilityView {
-        task_id:                  task_id.to_owned(),
-        crash_retry_count:        crash_u,
-        review_reject_count:      review_u,
-        max_crash_retries:        max_crash,
-        max_review_rejections:    max_review,
-        crash_retries_remaining:  max_crash.saturating_sub(crash_u),
+        task_id: task_id.to_owned(),
+        crash_retry_count: crash_u,
+        review_reject_count: review_u,
+        max_crash_retries: max_crash,
+        max_review_rejections: max_review,
+        crash_retries_remaining: max_crash.saturating_sub(crash_u),
         review_retries_remaining: max_review.saturating_sub(review_u),
         retry_admissible,
         retry_inadmissible_reason,
@@ -200,15 +210,18 @@ fn turn_coherent_single_conn_sees_evolving_state_correctly() {
     let (_tmp, _path, conn) = fresh_disk_conn();
 
     // ── Phase A: seeded state, predicate admits, view reflects ──
-    seed_terminal_activation(&conn, "act-1", "task-A", "init-A", "ses-A",
-                             "Failed", 1, 0);
+    seed_terminal_activation(&conn, "act-1", "task-A", "init-A", "ses-A", "Failed", 1, 0);
     let view_a = read_and_project_view(&conn, "task-A", 3, 2);
-    assert!(view_a.retry_admissible,
-        "Phase A: prior=Failed + crash=1/3 + review=0/2 MUST be admissible");
-    assert!(view_a.retry_inadmissible_reason.is_none(),
-        "Phase A: admissible MUST carry no reason");
-    assert_eq!(view_a.crash_retry_count,        1);
-    assert_eq!(view_a.crash_retries_remaining,  2);
+    assert!(
+        view_a.retry_admissible,
+        "Phase A: prior=Failed + crash=1/3 + review=0/2 MUST be admissible"
+    );
+    assert!(
+        view_a.retry_inadmissible_reason.is_none(),
+        "Phase A: admissible MUST carry no reason"
+    );
+    assert_eq!(view_a.crash_retry_count, 1);
+    assert_eq!(view_a.crash_retries_remaining, 2);
     assert_eq!(view_a.review_retries_remaining, 2);
 
     // ── Phase B: mutate counter to ceiling on the SAME conn ──
@@ -218,15 +231,21 @@ fn turn_coherent_single_conn_sees_evolving_state_correctly() {
             acts = Table::SubtaskActivations.as_str(),
         ),
         params!["act-1"],
-    ).expect("bump crash counter");
+    )
+    .expect("bump crash counter");
     let view_b = read_and_project_view(&conn, "task-A", 3, 2);
-    assert!(!view_b.retry_admissible,
-        "Phase B: post-mutation crash=3/3 MUST flip retry_admissible to false");
-    let reason = view_b.retry_inadmissible_reason
+    assert!(
+        !view_b.retry_admissible,
+        "Phase B: post-mutation crash=3/3 MUST flip retry_admissible to false"
+    );
+    let reason = view_b
+        .retry_inadmissible_reason
         .expect("Phase B: inadmissible MUST carry reason");
-    assert!(reason.starts_with("crash_retry_count 3"),
-        "Phase B: reason MUST carry the `crash_retry_count <n>` lexeme; got: {reason}");
-    assert_eq!(view_b.crash_retry_count,       3);
+    assert!(
+        reason.starts_with("crash_retry_count 3"),
+        "Phase B: reason MUST carry the `crash_retry_count <n>` lexeme; got: {reason}"
+    );
+    assert_eq!(view_b.crash_retry_count, 3);
     assert_eq!(view_b.crash_retries_remaining, 0);
 }
 
@@ -255,8 +274,16 @@ fn turn_coherent_single_conn_sees_evolving_state_correctly() {
 #[test]
 fn explicit_transaction_isolates_reads_from_concurrent_writer() {
     let (_tmp, path, mut reader_conn) = fresh_disk_conn();
-    seed_terminal_activation(&reader_conn, "act-2", "task-B", "init-B", "ses-B",
-                             "Failed", 0, 0);
+    seed_terminal_activation(
+        &reader_conn,
+        "act-2",
+        "task-B",
+        "init-B",
+        "ses-B",
+        "Failed",
+        0,
+        0,
+    );
 
     // Open a SECOND connection against the same on-disk db. WAL
     // mode is required for parallel readers + writers; the
@@ -268,45 +295,55 @@ fn explicit_transaction_isolates_reads_from_concurrent_writer() {
     // Open a deferred-read tx on the reader. The first SELECT
     // pins the snapshot.
     let tx = reader_conn.transaction().expect("begin reader tx");
-    let snapshot_a: i64 = tx.query_row(
-        &format!(
-            "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
-            acts = Table::SubtaskActivations.as_str(),
-        ),
-        params!["act-2"],
-        |r| r.get(0),
-    ).expect("read pre-mutation snapshot");
-    assert_eq!(snapshot_a, 0,
-        "pre-mutation snapshot MUST read the seeded zero");
+    let snapshot_a: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
+                acts = Table::SubtaskActivations.as_str(),
+            ),
+            params!["act-2"],
+            |r| r.get(0),
+        )
+        .expect("read pre-mutation snapshot");
+    assert_eq!(
+        snapshot_a, 0,
+        "pre-mutation snapshot MUST read the seeded zero"
+    );
 
     // Concurrent writer commits a mutation OUTSIDE the reader's
     // tx. WAL-mode lets the writer proceed despite the open
     // reader-tx — the writer commits a new WAL frame while the
     // reader's snapshot still points at the pre-mutation frame.
-    writer_conn.execute(
-        &format!(
-            "UPDATE {acts} SET crash_retry_count = 7 WHERE activation_id = ?1",
-            acts = Table::SubtaskActivations.as_str(),
-        ),
-        params!["act-2"],
-    ).expect("writer commits mutation");
+    writer_conn
+        .execute(
+            &format!(
+                "UPDATE {acts} SET crash_retry_count = 7 WHERE activation_id = ?1",
+                acts = Table::SubtaskActivations.as_str(),
+            ),
+            params!["act-2"],
+        )
+        .expect("writer commits mutation");
 
     // The reader's IN-TRANSACTION re-read MUST still see the
     // pre-mutation snapshot. This is the load-bearing
     // turn-coherency property: two sub-reads inside the same
     // projection-transaction MUST agree.
-    let snapshot_b: i64 = tx.query_row(
-        &format!(
-            "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
-            acts = Table::SubtaskActivations.as_str(),
-        ),
-        params!["act-2"],
-        |r| r.get(0),
-    ).expect("read in-tx re-read");
-    assert_eq!(snapshot_a, snapshot_b,
+    let snapshot_b: i64 = tx
+        .query_row(
+            &format!(
+                "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
+                acts = Table::SubtaskActivations.as_str(),
+            ),
+            params!["act-2"],
+            |r| r.get(0),
+        )
+        .expect("read in-tx re-read");
+    assert_eq!(
+        snapshot_a, snapshot_b,
         "BUG: torn read across two in-tx sub-reads — INV-KSB-CAPABILITIES-\
          TURN-COHERENT-01 violated; got snapshot_a={snapshot_a}, \
-         snapshot_b={snapshot_b}");
+         snapshot_b={snapshot_b}"
+    );
 
     tx.commit().expect("commit reader tx");
 
@@ -315,16 +352,20 @@ fn explicit_transaction_isolates_reads_from_concurrent_writer() {
     // PRE-mutation value (not stale-cached / incidentally equal)
     // — without this, the test would pass even if both reads
     // returned the post-mutation value as long as they agreed.
-    let post_commit: i64 = reader_conn.query_row(
-        &format!(
-            "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
-            acts = Table::SubtaskActivations.as_str(),
-        ),
-        params!["act-2"],
-        |r| r.get(0),
-    ).expect("post-commit read");
-    assert_eq!(post_commit, 7,
-        "post-tx-commit read MUST observe the writer's committed mutation");
+    let post_commit: i64 = reader_conn
+        .query_row(
+            &format!(
+                "SELECT crash_retry_count FROM {acts} WHERE activation_id = ?1",
+                acts = Table::SubtaskActivations.as_str(),
+            ),
+            params!["act-2"],
+            |r| r.get(0),
+        )
+        .expect("post-commit read");
+    assert_eq!(
+        post_commit, 7,
+        "post-tx-commit read MUST observe the writer's committed mutation"
+    );
 
     // Drive the predicate with the post-commit value to pin the
     // contract closure: post-coherent-snapshot, the verdict
@@ -332,10 +373,10 @@ fn explicit_transaction_isolates_reads_from_concurrent_writer() {
     // crash=7 > max_crash=3).
     let admit = admit_retry_subtask_check(&RetryAdmitInputs {
         prior_activation_state: Some("Failed"),
-        crash_retry_count:      u32::try_from(post_commit).unwrap_or(0),
-        review_reject_count:    0,
-        max_crash_retries:      3,
-        max_review_rejections:  2,
+        crash_retry_count: u32::try_from(post_commit).unwrap_or(0),
+        review_reject_count: 0,
+        max_crash_retries: 3,
+        max_review_rejections: 2,
     });
     match admit {
         AdmitOutcome::Inadmissible(RetryInadmissibleReason::CrashCeiling { .. }) => {}

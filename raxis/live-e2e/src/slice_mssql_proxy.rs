@@ -38,21 +38,21 @@
 //! 4. Counters: `connections_served ≥ 1`, `queries_audited == 2`,
 //!    `queries_blocked == 1`.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use raxis_credential_proxy_mssql::{
-    NoopAuditChannel, OwnedConsumer, ProxyConfig, MssqlProxy, Restrictions,
-    wire::{frame_packet, PacketHeader, pkt as tds_pkt, HEADER_LEN},
+    wire::{frame_packet, pkt as tds_pkt, PacketHeader, HEADER_LEN},
+    MssqlProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig, Restrictions,
 };
 
 /// Default upstream URL — the loopback published by
@@ -66,7 +66,7 @@ const DEFAULT_UPSTREAM_URL: &str =
 const MSSQL_HOST_PORT: &str = "127.0.0.1:14399";
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -83,16 +83,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub async fn run() -> Result<()> {
@@ -113,19 +122,19 @@ pub async fn run() -> Result<()> {
     let hermetic = false;
 
     let backend = Arc::new(LiveBackend {
-        value:    upstream_url.as_bytes().to_vec(),
+        value: upstream_url.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
     let credential_name = CredentialName::try_from("live-e2e".to_owned())
         .map_err(|e| anyhow!("CredentialName: {e}"))?;
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: credential_name.clone(),
-        consumer:        OwnedConsumer::new("live-e2e", "mssql-slice"),
-        server_version:  "raxis-mssql-handshake".to_owned(),
-        restrictions:    Restrictions::select_only(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("live-e2e", "mssql-slice"),
+        server_version: "raxis-mssql-handshake".to_owned(),
+        restrictions: Restrictions::select_only(),
+        log_content: false,
     };
 
     let proxy = MssqlProxy::bind(
@@ -141,17 +150,20 @@ pub async fn run() -> Result<()> {
 
     tokio::time::sleep(Duration::from_millis(50)).await;
 
-    let mut sock = TcpStream::connect(proxy_addr).await
+    let mut sock = TcpStream::connect(proxy_addr)
+        .await
         .context("connect to MssqlProxy")?;
 
     // 1. PRELOGIN — send a minimal stub. The proxy doesn't validate
     //    options; it just needs to see the packet type.
     let prelogin_body = build_minimal_prelogin();
-    sock.write_all(&frame_packet(tds_pkt::PRELOGIN, &prelogin_body)).await
+    sock.write_all(&frame_packet(tds_pkt::PRELOGIN, &prelogin_body))
+        .await
         .context("write PRELOGIN")?;
     sock.flush().await?;
 
-    let prelogin_reply = read_packet(&mut sock).await
+    let prelogin_reply = read_packet(&mut sock)
+        .await
         .context("read PRELOGIN reply")?
         .ok_or_else(|| anyhow!("EOF before PRELOGIN reply"))?;
     if prelogin_reply.0.packet_type != tds_pkt::TABULAR_RESULT {
@@ -162,7 +174,9 @@ pub async fn run() -> Result<()> {
     }
     // Body sanity-check: VERSION (0x00) + ENCRYPTION (0x01) + terminator (0xff).
     if prelogin_reply.1.first().copied() != Some(0x00) {
-        return Err(anyhow!("PRELOGIN reply body did not start with VERSION option"));
+        return Err(anyhow!(
+            "PRELOGIN reply body did not start with VERSION option"
+        ));
     }
     if !prelogin_reply.1.contains(&0xff) {
         return Err(anyhow!("PRELOGIN reply body missing terminator byte 0xff"));
@@ -171,11 +185,13 @@ pub async fn run() -> Result<()> {
     // 2. LOGIN7 — minimal payload. The proxy discards the contents,
     //    but the framing must parse.
     let login7_body = build_minimal_login7();
-    sock.write_all(&frame_packet(tds_pkt::LOGIN7, &login7_body)).await
+    sock.write_all(&frame_packet(tds_pkt::LOGIN7, &login7_body))
+        .await
         .context("write LOGIN7")?;
     sock.flush().await?;
 
-    let login_reply = read_packet(&mut sock).await
+    let login_reply = read_packet(&mut sock)
+        .await
         .context("read LOGINACK reply")?
         .ok_or_else(|| anyhow!("EOF before LOGINACK"))?;
     if login_reply.0.packet_type != tds_pkt::TABULAR_RESULT {
@@ -197,14 +213,16 @@ pub async fn run() -> Result<()> {
     //    the agent. Real-upstream mode: COLMETADATA + ROW + DONE
     //    flow through verbatim.
     let select_body = build_sql_batch_body("SELECT 1");
-    sock.write_all(&frame_packet(tds_pkt::SQL_BATCH, &select_body)).await
+    sock.write_all(&frame_packet(tds_pkt::SQL_BATCH, &select_body))
+        .await
         .context("write SQLBatch SELECT")?;
     sock.flush().await?;
-    let sel_reply = read_packet(&mut sock).await
+    let sel_reply = read_packet(&mut sock)
+        .await
         .context("read SELECT reply")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
     let has_error = sel_reply.1.iter().any(|&b| b == 0xAA);
-    let has_done  = sel_reply.1.iter().any(|&b| b == 0xFD);
+    let has_done = sel_reply.1.iter().any(|&b| b == 0xFD);
     let _ = hermetic;
     if has_error {
         return Err(anyhow!(
@@ -212,17 +230,17 @@ pub async fn run() -> Result<()> {
         ));
     }
     if !has_done {
-        return Err(anyhow!(
-            "SELECT reply missing DONE token (0xFD)"
-        ));
+        return Err(anyhow!("SELECT reply missing DONE token (0xFD)"));
     }
 
     // 4. SQLBatch "INSERT INTO t VALUES (1)" — must yield ERROR + DONE.
     let insert_body = build_sql_batch_body("INSERT INTO t VALUES (1)");
-    sock.write_all(&frame_packet(tds_pkt::SQL_BATCH, &insert_body)).await
+    sock.write_all(&frame_packet(tds_pkt::SQL_BATCH, &insert_body))
+        .await
         .context("write SQLBatch INSERT")?;
     sock.flush().await?;
-    let ins_reply = read_packet(&mut sock).await
+    let ins_reply = read_packet(&mut sock)
+        .await
         .context("read INSERT reply")?
         .ok_or_else(|| anyhow!("EOF after INSERT"))?;
     if ins_reply.1.first().copied() != Some(0xAA) {
@@ -241,17 +259,20 @@ pub async fn run() -> Result<()> {
     let snap = stats.snapshot();
     if snap.connections_served < 1 {
         return Err(anyhow!(
-            "expected ≥1 connection_served, got {}", snap.connections_served,
+            "expected ≥1 connection_served, got {}",
+            snap.connections_served,
         ));
     }
     if snap.queries_audited != 2 {
         return Err(anyhow!(
-            "expected queries_audited=2, got {}", snap.queries_audited,
+            "expected queries_audited=2, got {}",
+            snap.queries_audited,
         ));
     }
     if snap.queries_blocked != 1 {
         return Err(anyhow!(
-            "expected queries_blocked=1, got {}", snap.queries_blocked,
+            "expected queries_blocked=1, got {}",
+            snap.queries_blocked,
         ));
     }
     if backend.resolves.load(Ordering::Relaxed) < 1 {
@@ -271,11 +292,11 @@ pub async fn run() -> Result<()> {
 
     tracing::info!(
         connections_served = snap.connections_served,
-        queries_audited    = snap.queries_audited,
-        queries_blocked    = snap.queries_blocked,
+        queries_audited = snap.queries_audited,
+        queries_blocked = snap.queries_blocked,
         upstream_succeeded = snap.upstream_connects_succeeded,
-        upstream_failed    = snap.upstream_connects_failed,
-        backend_resolves   = backend.resolves.load(Ordering::Relaxed),
+        upstream_failed = snap.upstream_connects_failed,
+        backend_resolves = backend.resolves.load(Ordering::Relaxed),
         "mssql-proxy slice OK",
     );
     Ok(())
@@ -340,10 +361,7 @@ fn build_sql_batch_body(sql: &str) -> Vec<u8> {
 
 /// TCP-preflight the SQL Server container.
 async fn require_mssql_container() -> Result<()> {
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        TcpStream::connect(MSSQL_HOST_PORT),
-    ).await {
+    match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(MSSQL_HOST_PORT)).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "mssql container not reachable at {MSSQL_HOST_PORT}: {e}\n\
@@ -367,13 +385,12 @@ async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u
     let h = PacketHeader::parse(header_buf);
     if (h.length as usize) < HEADER_LEN {
         return Err(anyhow!(
-            "TDS packet length {} smaller than header", h.length,
+            "TDS packet length {} smaller than header",
+            h.length,
         ));
     }
     let body_len = (h.length as usize) - HEADER_LEN;
     let mut body = vec![0u8; body_len];
-    sock.read_exact(&mut body).await
-        .context("read TDS body")?;
+    sock.read_exact(&mut body).await.context("read TDS body")?;
     Ok(Some((h, body)))
 }
-

@@ -118,9 +118,7 @@ pub fn run_check(args: &[String]) -> anyhow::Result<()> {
              `cargo xtask hygiene` to prune stale worktrees, then retry."
         );
     }
-    eprintln!(
-        "[hygiene-check] all monitored volumes below {threshold_pct}% — clear"
-    );
+    eprintln!("[hygiene-check] all monitored volumes below {threshold_pct}% — clear");
     Ok(())
 }
 
@@ -160,11 +158,10 @@ impl HygieneOpts {
                     let val = args
                         .get(i + 1)
                         .ok_or_else(|| anyhow!("--max-age-days requires an integer"))?;
-                    max_age_days = Some(
-                        val.parse().with_context(|| {
+                    max_age_days =
+                        Some(val.parse().with_context(|| {
                             format!("--max-age-days {val:?} is not an integer")
-                        })?,
-                    );
+                        })?);
                     i += 2;
                 }
                 "--keep" => {
@@ -249,9 +246,7 @@ pub fn parse_symbolic_ref_output(raw: &str) -> Option<String> {
     if trimmed.is_empty() {
         return None;
     }
-    let stripped = trimmed
-        .strip_prefix("refs/remotes/")
-        .unwrap_or(trimmed);
+    let stripped = trimmed.strip_prefix("refs/remotes/").unwrap_or(trimmed);
     if stripped.is_empty() {
         return None;
     }
@@ -571,9 +566,8 @@ fn remove_worktree_with_force(path: &Path, repo_root: &Path) -> anyhow::Result<(
         repo_root,
     );
     if path.exists() {
-        std::fs::remove_dir_all(path).with_context(|| {
-            format!("rm -rf {} after `git worktree remove`", path.display())
-        })?;
+        std::fs::remove_dir_all(path)
+            .with_context(|| format!("rm -rf {} after `git worktree remove`", path.display()))?;
     }
     Ok(())
 }
@@ -811,7 +805,10 @@ detached
         assert_eq!(entries.len(), 3);
         assert!(entries[0].is_main);
         assert_eq!(entries[0].path, PathBuf::from("/repo/main"));
-        assert_eq!(entries[1].branch.as_deref(), Some("refs/heads/worker/feature-1"));
+        assert_eq!(
+            entries[1].branch.as_deref(),
+            Some("refs/heads/worker/feature-1")
+        );
         assert!(!entries[1].is_main);
         assert!(entries[2].is_detached);
         assert!(entries[2].branch.is_none());
@@ -823,7 +820,10 @@ detached
         wt.is_main = true;
         let keep = HashSet::new();
         let ctx = ctx_default(&keep, None);
-        assert_eq!(classify(&wt, &ctx), Decision::Keep(KeepReason::MainCheckout));
+        assert_eq!(
+            classify(&wt, &ctx),
+            Decision::Keep(KeepReason::MainCheckout)
+        );
     }
 
     #[test]
@@ -834,8 +834,14 @@ detached
         keep.insert("worker/keep-me".to_string());
         keep.insert("refs/heads/worker/keep-full".to_string());
         let ctx = ctx_default(&keep, None);
-        assert_eq!(classify(&wt_short, &ctx), Decision::Keep(KeepReason::OnKeepList));
-        assert_eq!(classify(&wt_full, &ctx), Decision::Keep(KeepReason::OnKeepList));
+        assert_eq!(
+            classify(&wt_short, &ctx),
+            Decision::Keep(KeepReason::OnKeepList)
+        );
+        assert_eq!(
+            classify(&wt_full, &ctx),
+            Decision::Keep(KeepReason::OnKeepList)
+        );
     }
 
     #[test]
@@ -926,7 +932,10 @@ detached
         wt.is_detached = true;
         let keep = HashSet::new();
         let ctx = ctx_default(&keep, None);
-        assert_eq!(classify(&wt, &ctx), Decision::Keep(KeepReason::DetachedHead));
+        assert_eq!(
+            classify(&wt, &ctx),
+            Decision::Keep(KeepReason::DetachedHead)
+        );
     }
 
     #[test]
@@ -1019,10 +1028,7 @@ branch refs/heads/worker/landed-empty
 
     #[test]
     fn opts_parser_accepts_main_ref_short_form() {
-        let args = vec![
-            "--main-ref".to_string(),
-            "origin/master".to_string(),
-        ];
+        let args = vec!["--main-ref".to_string(), "origin/master".to_string()];
         let opts = HygieneOpts::parse(&args).expect("parse --main-ref");
         assert_eq!(opts.main_ref.as_deref(), Some("origin/master"));
     }
@@ -1135,7 +1141,10 @@ branch refs/heads/worker/landed-empty
         // Pinned: the log line
         // `[hygiene] main_ref=<ref> (<source>)` is the only
         // operator-visible audit hook for the resolved ref.
-        assert_eq!(MainRefSource::OperatorOverride.label(), "--main-ref override");
+        assert_eq!(
+            MainRefSource::OperatorOverride.label(),
+            "--main-ref override"
+        );
         assert_eq!(MainRefSource::AutoDetected.label(), "auto");
         assert_eq!(MainRefSource::Fallback.label(), "fallback");
     }

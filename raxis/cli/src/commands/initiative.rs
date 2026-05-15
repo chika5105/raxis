@@ -11,14 +11,14 @@ use crate::errors::CliError;
 use crate::GlobalFlags;
 
 pub fn run_abort(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let initiative_id = args.first().ok_or_else(|| {
-        CliError::Usage("initiative abort requires <initiative_id>".to_owned())
-    })?;
+    let initiative_id = args
+        .first()
+        .ok_or_else(|| CliError::Usage("initiative abort requires <initiative_id>".to_owned()))?;
 
     let (mut conn, fingerprint) = open_conn(flags)?;
     let req = OperatorRequest::AbortInitiative {
         initiative_id: initiative_id.clone(),
-        aborted_by:    fingerprint,
+        aborted_by: fingerprint,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |_| {
@@ -49,12 +49,12 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
     let initiative_id = parsed.initiative_id.clone();
     let req = OperatorRequest::QuarantineInitiative {
         initiative_id: parsed.initiative_id,
-        reason:        parsed.reason,
+        reason: parsed.reason,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
         let was_already = ok["was_already_quarantined"].as_bool().unwrap_or(false);
-        let at          = ok["quarantined_at"].as_i64().unwrap_or(0);
+        let at = ok["quarantined_at"].as_i64().unwrap_or(0);
         if was_already {
             println!(
                 "Initiative {initiative_id} was already quarantined (no-op). \
@@ -87,9 +87,9 @@ pub fn run_quarantine(flags: &GlobalFlags, args: &[String]) -> Result<(), CliErr
 /// watch with Ctrl-C (the `read_frame` blocking call surfaces the
 /// closed connection on the next iteration).
 pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let initiative_id = args.first().ok_or_else(|| {
-        CliError::Usage("initiative watch requires <initiative_id>".to_owned())
-    })?;
+    let initiative_id = args
+        .first()
+        .ok_or_else(|| CliError::Usage("initiative watch requires <initiative_id>".to_owned()))?;
 
     let (mut conn, _fp) = open_conn(flags)?;
     let req = OperatorRequest::SubscribeInitiative {
@@ -103,9 +103,12 @@ pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // and return immediately on Error.
     let status = ack["status"].as_str().unwrap_or("");
     if status == "Error" {
-        let code   = ack["payload"]["code"].as_str().unwrap_or("UNKNOWN");
+        let code = ack["payload"]["code"].as_str().unwrap_or("UNKNOWN");
         let detail = ack["payload"]["detail"].as_str().unwrap_or("(no detail)");
-        return Err(CliError::KernelError { code: code.to_owned(), detail: detail.to_owned() });
+        return Err(CliError::KernelError {
+            code: code.to_owned(),
+            detail: detail.to_owned(),
+        });
     }
     if status != "InitiativeSubscribed" {
         return Err(CliError::Usage(format!(
@@ -118,7 +121,7 @@ pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     loop {
         let frame = match conn.read_frame()? {
             Some(v) => v,
-            None    => {
+            None => {
                 println!("(stream closed by kernel)");
                 return Ok(());
             }
@@ -163,7 +166,8 @@ pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
                 payload["head_sha"].as_str().unwrap_or("?"),
             ),
             "StructuredOutputEmitted" => {
-                let sev = payload["severity"].as_str()
+                let sev = payload["severity"]
+                    .as_str()
                     .map(|s| format!("/{s}"))
                     .unwrap_or_default();
                 println!(
@@ -190,7 +194,7 @@ pub fn run_watch(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedQuarantineArgs {
     initiative_id: String,
-    reason:        Option<String>,
+    reason: Option<String>,
 }
 
 fn parse_quarantine_args(args: &[String]) -> Result<ParsedQuarantineArgs, CliError> {
@@ -208,9 +212,9 @@ fn parse_quarantine_args(args: &[String]) -> Result<ParsedQuarantineArgs, CliErr
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--reason" => {
-                let v = iter.next().ok_or_else(|| {
-                    CliError::Usage("--reason requires a value".to_owned())
-                })?;
+                let v = iter
+                    .next()
+                    .ok_or_else(|| CliError::Usage("--reason requires a value".to_owned()))?;
                 reason = Some(v.clone());
             }
             other => {
@@ -257,7 +261,7 @@ mod tests {
             parsed,
             ParsedQuarantineArgs {
                 initiative_id: "init-abc".to_owned(),
-                reason:        None,
+                reason: None,
             }
         );
     }
@@ -270,7 +274,7 @@ mod tests {
             parsed,
             ParsedQuarantineArgs {
                 initiative_id: "init-abc".to_owned(),
-                reason:        Some("leaked key in #ops".to_owned()),
+                reason: Some("leaked key in #ops".to_owned()),
             }
         );
     }

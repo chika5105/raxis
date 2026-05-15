@@ -97,16 +97,16 @@ pub(crate) const DEFAULT_TASK_LIMIT: usize = 100;
 pub(crate) struct ShowOpts {
     pub initiative_id: String,
     /// `true` when the operator passed `--bundle` (extended mode).
-    pub bundle:        bool,
+    pub bundle: bool,
     /// `Some(dir)` when the operator passed `--to <dir>`. Implies
     /// `--bundle`; rejected at parse time when `--bundle` is absent.
-    pub to:            Option<PathBuf>,
-    pub json:          bool,
+    pub to: Option<PathBuf>,
+    pub json: bool,
     /// `true` when the operator passed `--with-tasks` — the per-task
     /// table is opt-in so the default render stays bytes-free.
-    pub with_tasks:    bool,
+    pub with_tasks: bool,
     /// Per-task table cap; honoured only when `with_tasks` is set.
-    pub task_limit:    usize,
+    pub task_limit: usize,
 }
 
 pub(crate) fn parse_args(args: &[String]) -> Result<ShowOpts, CliError> {
@@ -124,9 +124,9 @@ pub(crate) fn parse_args(args: &[String]) -> Result<ShowOpts, CliError> {
             }
             "--to" => {
                 i += 1;
-                let v = args.get(i).ok_or_else(|| {
-                    CliError::Usage("--to requires a directory path".to_owned())
-                })?;
+                let v = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--to requires a directory path".to_owned()))?;
                 to = Some(PathBuf::from(v));
             }
             "--json" => {
@@ -146,9 +146,7 @@ pub(crate) fn parse_args(args: &[String]) -> Result<ShowOpts, CliError> {
                     ))
                 })?;
                 if parsed == 0 {
-                    return Err(CliError::Usage(
-                        "--task-limit must be > 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--task-limit must be > 0".to_owned()));
                 }
                 task_limit = parsed;
             }
@@ -199,29 +197,26 @@ pub(crate) fn parse_args(args: &[String]) -> Result<ShowOpts, CliError> {
 pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
 
-    let conn = open_ro(flags.data_dir()).map_err(|e| {
-        CliError::Policy(format!("kernel.db open failed: {e}"))
-    })?;
+    let conn = open_ro(flags.data_dir())
+        .map_err(|e| CliError::Policy(format!("kernel.db open failed: {e}")))?;
 
     let initiative = initiative_by_id(&conn, &opts.initiative_id)
         .map_err(|e| CliError::Policy(format!("initiatives::by_id failed: {e}")))?
         .ok_or_else(|| CliError::KernelError {
-            code:   "INITIATIVE_NOT_FOUND".to_owned(),
+            code: "INITIATIVE_NOT_FOUND".to_owned(),
             detail: format!("no initiative with id {:?}", opts.initiative_id),
         })?;
 
     let bundle_sha = plan_bundle_sha256_by_id(&conn, &opts.initiative_id)
         .map_err(|e| {
-            CliError::Policy(format!(
-                "initiatives::plan_bundle_sha256_by_id failed: {e}"
-            ))
+            CliError::Policy(format!("initiatives::plan_bundle_sha256_by_id failed: {e}"))
         })?
         .ok_or_else(|| CliError::KernelError {
             // V2 admits all plans through the bundle path; reaching
             // this with no `plan_bundle_sha256` would mean the
             // initiative was created but the bundle row was never
             // written (a torn-write bug or external DB corruption).
-            code:   "PLAN_BUNDLE_NOT_FOUND".to_owned(),
+            code: "PLAN_BUNDLE_NOT_FOUND".to_owned(),
             detail: format!(
                 "initiative {} has no plan_bundle_sha256 — every V2 \
                  admission writes one (plan-bundle-sealing.md §8); \
@@ -230,20 +225,19 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             ),
         })?;
 
-    let header = header_by_sha256(&conn, &bundle_sha).map_err(|e| {
-        CliError::Policy(format!("plan_bundles::header_by_sha256 failed: {e}"))
-    })?.ok_or_else(|| CliError::KernelError {
-        code:   "PLAN_BUNDLE_HEADER_MISSING".to_owned(),
-        detail: format!(
+    let header = header_by_sha256(&conn, &bundle_sha)
+        .map_err(|e| CliError::Policy(format!("plan_bundles::header_by_sha256 failed: {e}")))?
+        .ok_or_else(|| CliError::KernelError {
+            code: "PLAN_BUNDLE_HEADER_MISSING".to_owned(),
+            detail: format!(
             "initiative {} references plan_bundle_sha256={} but no row exists in `plan_bundles`",
             opts.initiative_id,
             bundle_sha.to_hex(),
         ),
-    })?;
+        })?;
 
-    let artifact_names = list_artifact_names(&conn, &bundle_sha).map_err(|e| {
-        CliError::Policy(format!("plan_bundles::list_artifact_names failed: {e}"))
-    })?;
+    let artifact_names = list_artifact_names(&conn, &bundle_sha)
+        .map_err(|e| CliError::Policy(format!("plan_bundles::list_artifact_names failed: {e}")))?;
 
     // Extract-mode short-circuit: write artifacts to disk and exit.
     // This deliberately skips quarantine + tasks reads (the mode IS
@@ -257,15 +251,14 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     // read the rows so the renderer has a consistent struct shape
     // (operator-meaningful "this initiative was quarantined" must
     // never be silently elided).
-    let quarantine = quarantine_for_initiative(&conn, &opts.initiative_id)
-        .map_err(|e| CliError::Policy(format!(
+    let quarantine = quarantine_for_initiative(&conn, &opts.initiative_id).map_err(|e| {
+        CliError::Policy(format!(
             "initiative_quarantines::get_by_initiative_id failed: {e}"
-        )))?;
+        ))
+    })?;
     let tasks = if opts.with_tasks {
         list_by_initiative(&conn, &opts.initiative_id, opts.task_limit)
-            .map_err(|e| {
-                CliError::Policy(format!("tasks::list_by_initiative failed: {e}"))
-            })?
+            .map_err(|e| CliError::Policy(format!("tasks::list_by_initiative failed: {e}")))?
     } else {
         // Fast path: count only. We still need the count for the
         // "Tasks (N): pass --with-tasks to expand" hint. The view's
@@ -274,9 +267,7 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
         // SQL projection, but the cap is generous enough that this
         // is fine.
         list_by_initiative(&conn, &opts.initiative_id, opts.task_limit)
-            .map_err(|e| {
-                CliError::Policy(format!("tasks::list_by_initiative failed: {e}"))
-            })?
+            .map_err(|e| CliError::Policy(format!("tasks::list_by_initiative failed: {e}")))?
     };
 
     // Drop the read-only handle before opening the operator-name
@@ -294,15 +285,26 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut out = stdout.lock();
     if opts.json {
         render_json(
-            &mut out, &opts.initiative_id, &initiative,
-            &header, &artifact_names,
-            quarantine.as_ref(), &tasks, &name_lookup,
+            &mut out,
+            &opts.initiative_id,
+            &initiative,
+            &header,
+            &artifact_names,
+            quarantine.as_ref(),
+            &tasks,
+            &name_lookup,
         );
     } else {
         render_text(
-            &mut out, &opts.initiative_id, &initiative,
-            &header, opts.bundle, &artifact_names,
-            quarantine.as_ref(), &tasks, opts.with_tasks,
+            &mut out,
+            &opts.initiative_id,
+            &initiative,
+            &header,
+            opts.bundle,
+            &artifact_names,
+            quarantine.as_ref(),
+            &tasks,
+            opts.with_tasks,
             &name_lookup,
         );
     }
@@ -314,11 +316,11 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 // ---------------------------------------------------------------------------
 
 fn extract_artifacts(
-    conn:           &raxis_store::ro::RoConn,
-    bundle_sha:     &raxis_types::BundleSha256,
-    header:         &PlanBundleHeader,
+    conn: &raxis_store::ro::RoConn,
+    bundle_sha: &raxis_types::BundleSha256,
+    header: &PlanBundleHeader,
     artifact_names: &[raxis_store::views::plan_bundles::PlanBundleArtifactName],
-    out_dir:        &std::path::Path,
+    out_dir: &std::path::Path,
 ) -> Result<(), CliError> {
     // Refuse to write into an existing non-empty directory: the
     // operator-visible blast radius of an accidental `--to ~/work` is
@@ -340,31 +342,34 @@ fn extract_artifacts(
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
             std::fs::create_dir_all(out_dir).map_err(|e| CliError::Io {
-                path:   out_dir.display().to_string(),
+                path: out_dir.display().to_string(),
                 source: e,
             })?;
         }
         Err(e) => {
             return Err(CliError::Io {
-                path:   out_dir.display().to_string(),
+                path: out_dir.display().to_string(),
                 source: e,
             });
         }
     }
 
     for a in artifact_names {
-        let bytes = read_artifact(conn, bundle_sha, a.artifact_seq).map_err(|e| {
-            CliError::Policy(format!(
-                "plan_bundles::read_artifact failed for seq={}: {e}",
-                a.artifact_seq,
-            ))
-        })?.ok_or_else(|| CliError::KernelError {
-            code:   "PLAN_BUNDLE_ARTIFACT_MISSING".to_owned(),
-            detail: format!(
-                "bundle {} declared artifact_seq={} but no row in `plan_bundle_artifacts`",
-                bundle_sha.to_hex(), a.artifact_seq,
-            ),
-        })?;
+        let bytes = read_artifact(conn, bundle_sha, a.artifact_seq)
+            .map_err(|e| {
+                CliError::Policy(format!(
+                    "plan_bundles::read_artifact failed for seq={}: {e}",
+                    a.artifact_seq,
+                ))
+            })?
+            .ok_or_else(|| CliError::KernelError {
+                code: "PLAN_BUNDLE_ARTIFACT_MISSING".to_owned(),
+                detail: format!(
+                    "bundle {} declared artifact_seq={} but no row in `plan_bundle_artifacts`",
+                    bundle_sha.to_hex(),
+                    a.artifact_seq,
+                ),
+            })?;
 
         // Defence-in-depth against a malformed bundle on disk. The
         // §8.1 admission-time check already rejects names that
@@ -380,12 +385,12 @@ fn extract_artifacts(
         let target = out_dir.join(&a.artifact_name);
         if let Some(parent) = target.parent() {
             std::fs::create_dir_all(parent).map_err(|e| CliError::Io {
-                path:   parent.display().to_string(),
+                path: parent.display().to_string(),
                 source: e,
             })?;
         }
         std::fs::write(&target, &bytes).map_err(|e| CliError::Io {
-            path:   target.display().to_string(),
+            path: target.display().to_string(),
             source: e,
         })?;
     }
@@ -429,16 +434,16 @@ fn is_safe_artifact_name(name: &str) -> bool {
 
 #[allow(clippy::too_many_arguments)]
 fn render_text(
-    out:            &mut dyn Write,
-    initiative_id:  &str,
-    initiative:     &InitiativeRow,
-    header:         &PlanBundleHeader,
-    bundle:         bool,
+    out: &mut dyn Write,
+    initiative_id: &str,
+    initiative: &InitiativeRow,
+    header: &PlanBundleHeader,
+    bundle: bool,
     artifact_names: &[raxis_store::views::plan_bundles::PlanBundleArtifactName],
-    quarantine:     Option<&InitiativeQuarantineRow>,
-    tasks:          &[TaskRow],
-    with_tasks:     bool,
-    name_lookup:    &OperatorNameLookup,
+    quarantine: Option<&InitiativeQuarantineRow>,
+    tasks: &[TaskRow],
+    with_tasks: bool,
+    name_lookup: &OperatorNameLookup,
 ) {
     let _ = writeln!(out, "Initiative   : {initiative_id}");
     let _ = writeln!(out, "  state              : {}", initiative.state);
@@ -502,7 +507,11 @@ fn render_text(
         let _ = writeln!(out, "  bundle_nonce       : {}", hex::encode(nonce));
     }
     let _ = writeln!(out, "  artifact_count     : {}", header.artifact_count);
-    let _ = writeln!(out, "  bundle_bytes_len   : {} bytes", header.bundle_bytes_len);
+    let _ = writeln!(
+        out,
+        "  bundle_bytes_len   : {} bytes",
+        header.bundle_bytes_len
+    );
 
     let _ = writeln!(out);
     render_quarantine_block(out, quarantine, name_lookup);
@@ -539,8 +548,8 @@ fn render_text(
 }
 
 fn render_quarantine_block<W: Write + ?Sized>(
-    out:         &mut W,
-    quarantine:  Option<&InitiativeQuarantineRow>,
+    out: &mut W,
+    quarantine: Option<&InitiativeQuarantineRow>,
     name_lookup: &OperatorNameLookup,
 ) {
     match quarantine {
@@ -556,8 +565,7 @@ fn render_quarantine_block<W: Write + ?Sized>(
                 let _ = writeln!(out, "  reason             : {reason}");
             }
             if let Some(target) = &q.sweep_target {
-                let target_rendered =
-                    format_operator_with_lookup(target, None, name_lookup);
+                let target_rendered = format_operator_with_lookup(target, None, name_lookup);
                 let _ = writeln!(out, "  sweep_target       : {target_rendered}");
             }
         }
@@ -573,20 +581,20 @@ fn render_task_table<W: Write + ?Sized>(out: &mut W, tasks: &[TaskRow]) {
     let _ = writeln!(
         out,
         "  {tid:<24} {state:<24} {lane:<14} {ts:<12} {actor}",
-        tid   = "task_id",
+        tid = "task_id",
         state = "state",
-        lane  = "lane",
-        ts    = "transitioned_at",
+        lane = "lane",
+        ts = "transitioned_at",
         actor = "actor",
     );
     for t in tasks {
         let _ = writeln!(
             out,
             "  {tid:<24} {state:<24} {lane:<14} {ts:<12} {actor}",
-            tid   = truncate(&t.task_id, 24),
+            tid = truncate(&t.task_id, 24),
             state = truncate(&t.state, 24),
-            lane  = truncate(&t.lane_id, 14),
-            ts    = t.transitioned_at,
+            lane = truncate(&t.lane_id, 14),
+            ts = t.transitioned_at,
             actor = truncate(&t.actor, 16),
         );
     }
@@ -604,14 +612,14 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[allow(clippy::too_many_arguments)]
 fn render_json(
-    out:            &mut dyn Write,
-    initiative_id:  &str,
-    initiative:     &InitiativeRow,
-    header:         &PlanBundleHeader,
+    out: &mut dyn Write,
+    initiative_id: &str,
+    initiative: &InitiativeRow,
+    header: &PlanBundleHeader,
     artifact_names: &[raxis_store::views::plan_bundles::PlanBundleArtifactName],
-    quarantine:     Option<&InitiativeQuarantineRow>,
-    tasks:          &[TaskRow],
-    name_lookup:    &OperatorNameLookup,
+    quarantine: Option<&InitiativeQuarantineRow>,
+    tasks: &[TaskRow],
+    name_lookup: &OperatorNameLookup,
 ) {
     let artifacts: Vec<serde_json::Value> = artifact_names
         .iter()
@@ -654,7 +662,7 @@ fn render_json(
 }
 
 fn serialize_quarantine(
-    q:           Option<&InitiativeQuarantineRow>,
+    q: Option<&InitiativeQuarantineRow>,
     name_lookup: &OperatorNameLookup,
 ) -> serde_json::Value {
     match q {
@@ -719,7 +727,7 @@ fn format_unix_secs(unix: i64) -> String {
         let total_secs = t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
         let secs = (total_secs % 60) as u32;
         let mins = ((total_secs / 60) % 60) as u32;
-        let hrs  = ((total_secs / 3600) % 24) as u32;
+        let hrs = ((total_secs / 3600) % 24) as u32;
         let days = (total_secs / 86_400) as i64;
         let (y, m, d) = civil_from_days(days);
         format!("{y:04}-{m:02}-{d:02}T{hrs:02}:{mins:02}:{secs:02}Z")
@@ -785,9 +793,7 @@ mod tests {
 
     #[test]
     fn parse_with_tasks_and_task_limit_compose() {
-        let opts = parse_args(
-            &s(&["init-1", "--with-tasks", "--task-limit", "42"]),
-        ).unwrap();
+        let opts = parse_args(&s(&["init-1", "--with-tasks", "--task-limit", "42"])).unwrap();
         assert!(opts.with_tasks);
         assert_eq!(opts.task_limit, 42);
     }
@@ -806,7 +812,10 @@ mod tests {
         let err = parse_args(&s(&["init-1", "--task-limit", "lots"])).unwrap_err();
         match err {
             CliError::Usage(m) => {
-                assert!(m.contains("--task-limit must be a positive integer"), "msg = {m:?}");
+                assert!(
+                    m.contains("--task-limit must be a positive integer"),
+                    "msg = {m:?}"
+                );
             }
             other => panic!("expected Usage, got {other:?}"),
         }
@@ -839,8 +848,8 @@ mod tests {
 
     #[test]
     fn parse_to_plus_json_is_rejected() {
-        let err = parse_args(&s(&["init-1", "--bundle", "--to", "/tmp/foo", "--json"]))
-            .unwrap_err();
+        let err =
+            parse_args(&s(&["init-1", "--bundle", "--to", "/tmp/foo", "--json"])).unwrap_err();
         match err {
             CliError::Usage(m) => assert!(m.contains("--json is not meaningful"), "msg = {m:?}"),
             other => panic!("expected Usage, got {other:?}"),
@@ -852,7 +861,10 @@ mod tests {
         let err = parse_args(&s(&["init-1", "--bogus"])).unwrap_err();
         match err {
             CliError::Usage(m) => {
-                assert!(m.contains("--bogus") || m.contains("unknown flag"), "msg = {m:?}");
+                assert!(
+                    m.contains("--bogus") || m.contains("unknown flag"),
+                    "msg = {m:?}"
+                );
             }
             other => panic!("expected Usage, got {other:?}"),
         }
@@ -944,7 +956,9 @@ mod tests {
         Vec<(String, Vec<u8>)>,
     ) {
         use raxis_store::{Store, Table};
-        use raxis_types::{BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle};
+        use raxis_types::{
+            BundleArtifact, BundleNonce, BundleSha256, OperatorFingerprint, PlanBundle,
+        };
         use sha2::{Digest, Sha256};
 
         let tmp = tempfile::TempDir::new().unwrap();
@@ -954,39 +968,52 @@ mod tests {
         let plan_bytes = b"[orchestrator]\ntitle = \"e2e\"\n".to_vec();
         let extra_bytes = b"forensic notes\n".to_vec();
         let plan_sha = {
-            let mut h = Sha256::new(); h.update(&plan_bytes);
+            let mut h = Sha256::new();
+            h.update(&plan_bytes);
             BundleSha256::new(h.finalize().into())
         };
         let extra_sha = {
-            let mut h = Sha256::new(); h.update(&extra_bytes);
+            let mut h = Sha256::new();
+            h.update(&extra_bytes);
             BundleSha256::new(h.finalize().into())
         };
         let bundle = PlanBundle::new_v2_1(
-            1_700_000_100, 1_700_000_200,
+            1_700_000_100,
+            1_700_000_200,
             BundleNonce::new([0xCDu8; 16]),
             "demo".to_owned(),
             vec![
-                BundleArtifact { name: "plan.toml".into(),     bytes: plan_bytes.clone(),  sha256: plan_sha },
-                BundleArtifact { name: "notes/ref.md".into(),  bytes: extra_bytes.clone(), sha256: extra_sha },
+                BundleArtifact {
+                    name: "plan.toml".into(),
+                    bytes: plan_bytes.clone(),
+                    sha256: plan_sha,
+                },
+                BundleArtifact {
+                    name: "notes/ref.md".into(),
+                    bytes: extra_bytes.clone(),
+                    sha256: extra_sha,
+                },
             ],
         );
         let bundle_sha = BundleSha256::new([0x12u8; 32]);
 
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            ).unwrap();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
             raxis_store::plan_bundles::insert_bundle(
-                &tx, &bundle_sha,
+                &tx,
+                &bundle_sha,
                 b"placeholder-canonical-bytes",
                 &[0x77u8; 64],
                 &OperatorFingerprint::new([0x88u8; 8]),
-                &bundle, 1_700_000_999,
-            ).unwrap();
-            raxis_store::plan_bundles::insert_artifacts(
-                &tx, &bundle_sha, &bundle.artifacts,
-            ).unwrap();
+                &bundle,
+                1_700_000_999,
+            )
+            .unwrap();
+            raxis_store::plan_bundles::insert_artifacts(&tx, &bundle_sha, &bundle.artifacts)
+                .unwrap();
             tx.execute(
                 &format!(
                     "INSERT INTO {} \
@@ -996,13 +1023,18 @@ mod tests {
                     Table::Initiatives.as_str(),
                 ),
                 rusqlite::params![bundle_sha.to_hex(), bundle_sha.as_bytes().as_slice()],
-            ).unwrap();
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
-        (tmp, bundle_sha, vec![
-            ("plan.toml".to_owned(), plan_bytes),
-            ("notes/ref.md".to_owned(), extra_bytes),
-        ])
+        (
+            tmp,
+            bundle_sha,
+            vec![
+                ("plan.toml".to_owned(), plan_bytes),
+                ("notes/ref.md".to_owned(), extra_bytes),
+            ],
+        )
     }
 
     fn flags_with_data_dir(data_dir: &std::path::Path) -> crate::GlobalFlags {
@@ -1012,8 +1044,8 @@ mod tests {
         // local and avoids growing a `Default` impl on the type
         // (which would silently leak default paths into the binary).
         crate::GlobalFlags {
-            data_dir:          data_dir.to_path_buf(),
-            socket_path:       None,
+            data_dir: data_dir.to_path_buf(),
+            socket_path: None,
             operator_key_path: None,
         }
     }
@@ -1063,7 +1095,8 @@ mod tests {
                     Table::Initiatives.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         let flags = flags_with_data_dir(tmp.path());
         let err = run(&flags, &s(&["init-torn"])).unwrap_err();
@@ -1082,16 +1115,18 @@ mod tests {
         let flags = flags_with_data_dir(tmp.path());
         let out = tempfile::TempDir::new().unwrap();
         // The directory exists but is empty; extract should succeed.
-        let r = run(&flags, &s(&[
-            "init-e2e", "--bundle", "--to",
-            out.path().to_str().unwrap(),
-        ]));
+        let r = run(
+            &flags,
+            &s(&["init-e2e", "--bundle", "--to", out.path().to_str().unwrap()]),
+        );
         assert!(r.is_ok(), "extract failed: {r:?}");
         for (name, expected_bytes) in &expected {
             let actual = std::fs::read(out.path().join(name))
                 .unwrap_or_else(|e| panic!("missing extract for {name:?}: {e}"));
-            assert_eq!(actual, *expected_bytes,
-                "byte mismatch for {name}: extract is not byte-identical");
+            assert_eq!(
+                actual, *expected_bytes,
+                "byte mismatch for {name}: extract is not byte-identical"
+            );
         }
     }
 
@@ -1105,39 +1140,39 @@ mod tests {
         // IDs.
         use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
-            bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
-            schema_version:      SchemaVersion::V2_1,
-            signed_by:           OperatorFingerprint::new([0x88u8; 8]),
+            bundle_sha256: BundleSha256::new([0xAAu8; 32]),
+            schema_version: SchemaVersion::V2_1,
+            signed_by: OperatorFingerprint::new([0x88u8; 8]),
             sealed_at_unix_secs: 1_700_000_100,
             signed_at_unix_secs: Some(1_700_000_200),
-            bundle_nonce:        Some([0xCDu8; 16]),
-            artifact_count:      2,
-            bundle_bytes_len:    256,
+            bundle_nonce: Some([0xCDu8; 16]),
+            artifact_count: 2,
+            bundle_bytes_len: 256,
         };
         let initiative = InitiativeRow {
-            initiative_id:        "init-render".to_owned(),
-            state:                "Executing".to_owned(),
+            initiative_id: "init-render".to_owned(),
+            state: "Executing".to_owned(),
             plan_artifact_sha256: "deadbeef".to_owned(),
-            created_at:           1_700_000_000,
-            approved_at:          Some(1_700_000_010),
-            completed_at:         None,
+            created_at: 1_700_000_000,
+            approved_at: Some(1_700_000_010),
+            completed_at: None,
         };
         let tasks = vec![TaskRow {
-            task_id:                  "t-rendered".to_owned(),
-            initiative_id:            "init-render".to_owned(),
-            initiative_state:         "Executing".to_owned(),
-            lane_id:                  "default".to_owned(),
-            state:                    "Running".to_owned(),
-            block_reason:             None,
-            actor:                    "executor".to_owned(),
-            policy_epoch:             1,
-            admitted_at:              1_700_000_020,
-            transitioned_at:          1_700_000_030,
-            session_id:               None,
-            evaluation_sha:           None,
-            base_sha:                 None,
+            task_id: "t-rendered".to_owned(),
+            initiative_id: "init-render".to_owned(),
+            initiative_state: "Executing".to_owned(),
+            lane_id: "default".to_owned(),
+            state: "Running".to_owned(),
+            block_reason: None,
+            actor: "executor".to_owned(),
+            policy_epoch: 1,
+            admitted_at: 1_700_000_020,
+            transitioned_at: 1_700_000_030,
+            session_id: None,
+            evaluation_sha: None,
+            base_sha: None,
             admission_reserved_units: None,
-            actual_cost:              0,
+            actual_cost: 0,
         }];
         let lookup = OperatorNameLookup::empty();
         let mut buf: Vec<u8> = Vec::new();
@@ -1146,15 +1181,18 @@ mod tests {
             "init-render",
             &initiative,
             &header,
-            false,           // bundle
+            false, // bundle
             &[],
-            None,            // quarantine
+            None, // quarantine
             &tasks,
-            false,           // with_tasks (count-only mode)
+            false, // with_tasks (count-only mode)
             &lookup,
         );
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("Initiative   : init-render"), "header missing: {s}");
+        assert!(
+            s.contains("Initiative   : init-render"),
+            "header missing: {s}"
+        );
         assert!(
             s.contains("Tasks (1): pass --with-tasks to expand"),
             "task-count hint missing in summary mode: {s}",
@@ -1163,57 +1201,59 @@ mod tests {
             !s.contains("t-rendered"),
             "task IDs MUST NOT render in summary mode: {s}",
         );
-        assert!(s.contains("Quarantine  : NO"), "quarantine block missing: {s}");
+        assert!(
+            s.contains("Quarantine  : NO"),
+            "quarantine block missing: {s}"
+        );
     }
 
     #[test]
     fn render_text_with_tasks_expands_table_and_shows_quarantine_block() {
         use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
-            bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
-            schema_version:      SchemaVersion::V2_1,
-            signed_by:           OperatorFingerprint::new([0x88u8; 8]),
+            bundle_sha256: BundleSha256::new([0xAAu8; 32]),
+            schema_version: SchemaVersion::V2_1,
+            signed_by: OperatorFingerprint::new([0x88u8; 8]),
             sealed_at_unix_secs: 1_700_000_100,
             signed_at_unix_secs: None,
-            bundle_nonce:        Some([0xCDu8; 16]),
-            artifact_count:      1,
-            bundle_bytes_len:    128,
+            bundle_nonce: Some([0xCDu8; 16]),
+            artifact_count: 1,
+            bundle_bytes_len: 128,
         };
         let initiative = InitiativeRow {
-            initiative_id:        "init-q".to_owned(),
-            state:                "Quarantined".to_owned(),
+            initiative_id: "init-q".to_owned(),
+            state: "Quarantined".to_owned(),
             plan_artifact_sha256: "abc".to_owned(),
-            created_at:           1_700_000_000,
-            approved_at:          None,
-            completed_at:         None,
+            created_at: 1_700_000_000,
+            approved_at: None,
+            completed_at: None,
         };
         let tasks = vec![TaskRow {
-            task_id:                  "task-alpha".to_owned(),
-            initiative_id:            "init-q".to_owned(),
-            initiative_state:         "Quarantined".to_owned(),
-            lane_id:                  "default".to_owned(),
-            state:                    "Running".to_owned(),
-            block_reason:             None,
-            actor:                    "executor".to_owned(),
-            policy_epoch:             1,
-            admitted_at:              1_700_000_020,
-            transitioned_at:          1_700_000_030,
-            session_id:               None,
-            evaluation_sha:           None,
-            base_sha:                 None,
+            task_id: "task-alpha".to_owned(),
+            initiative_id: "init-q".to_owned(),
+            initiative_state: "Quarantined".to_owned(),
+            lane_id: "default".to_owned(),
+            state: "Running".to_owned(),
+            block_reason: None,
+            actor: "executor".to_owned(),
+            policy_epoch: 1,
+            admitted_at: 1_700_000_020,
+            transitioned_at: 1_700_000_030,
+            session_id: None,
+            evaluation_sha: None,
+            base_sha: None,
             admission_reserved_units: None,
-            actual_cost:              0,
+            actual_cost: 0,
         }];
         let q = InitiativeQuarantineRow {
-            initiative_id:  "init-q".to_owned(),
+            initiative_id: "init-q".to_owned(),
             quarantined_at: 1_700_000_040,
             quarantined_by: "abcd1234abcd1234abcd1234abcd1234".to_owned(),
-            reason:         Some("compromised key suspected".to_owned()),
-            sweep_target:   None,
+            reason: Some("compromised key suspected".to_owned()),
+            sweep_target: None,
         };
-        let lookup = OperatorNameLookup::from_pairs([
-            ("abcd1234abcd1234abcd1234abcd1234", "Chika"),
-        ]);
+        let lookup =
+            OperatorNameLookup::from_pairs([("abcd1234abcd1234abcd1234abcd1234", "Chika")]);
         let mut buf: Vec<u8> = Vec::new();
         render_text(
             &mut buf,
@@ -1224,37 +1264,46 @@ mod tests {
             &[],
             Some(&q),
             &tasks,
-            true,       // with_tasks
+            true, // with_tasks
             &lookup,
         );
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("Quarantine  : YES"),  "got: {s}");
-        assert!(s.contains("compromised key suspected"), "reason MUST surface: {s}");
-        assert!(s.contains("Chika (abcd1234"),    "operator display MUST resolve: {s}");
-        assert!(s.contains("task-alpha"),         "task row MUST surface in --with-tasks mode: {s}");
-        assert!(s.contains("Running"),            "state MUST surface: {s}");
+        assert!(s.contains("Quarantine  : YES"), "got: {s}");
+        assert!(
+            s.contains("compromised key suspected"),
+            "reason MUST surface: {s}"
+        );
+        assert!(
+            s.contains("Chika (abcd1234"),
+            "operator display MUST resolve: {s}"
+        );
+        assert!(
+            s.contains("task-alpha"),
+            "task row MUST surface in --with-tasks mode: {s}"
+        );
+        assert!(s.contains("Running"), "state MUST surface: {s}");
     }
 
     #[test]
     fn render_json_emits_quarantine_and_task_keys() {
         use raxis_types::{BundleSha256, OperatorFingerprint, SchemaVersion};
         let header = PlanBundleHeader {
-            bundle_sha256:       BundleSha256::new([0xAAu8; 32]),
-            schema_version:      SchemaVersion::V2_1,
-            signed_by:           OperatorFingerprint::new([0x88u8; 8]),
+            bundle_sha256: BundleSha256::new([0xAAu8; 32]),
+            schema_version: SchemaVersion::V2_1,
+            signed_by: OperatorFingerprint::new([0x88u8; 8]),
             sealed_at_unix_secs: 1_700_000_100,
             signed_at_unix_secs: None,
-            bundle_nonce:        Some([0xCDu8; 16]),
-            artifact_count:      0,
-            bundle_bytes_len:    0,
+            bundle_nonce: Some([0xCDu8; 16]),
+            artifact_count: 0,
+            bundle_bytes_len: 0,
         };
         let initiative = InitiativeRow {
-            initiative_id:        "init-json".to_owned(),
-            state:                "Executing".to_owned(),
+            initiative_id: "init-json".to_owned(),
+            state: "Executing".to_owned(),
             plan_artifact_sha256: "abc".to_owned(),
-            created_at:           1_700_000_000,
-            approved_at:          None,
-            completed_at:         None,
+            created_at: 1_700_000_000,
+            approved_at: None,
+            completed_at: None,
         };
         let lookup = OperatorNameLookup::empty();
         let mut buf: Vec<u8> = Vec::new();
@@ -1271,17 +1320,25 @@ mod tests {
         let v: serde_json::Value =
             serde_json::from_slice(&buf).expect("render_json MUST emit valid JSON");
         for k in [
-            "initiative_id", "state", "created_at", "approved_at",
-            "completed_at", "plan_bundle", "quarantine", "tasks",
+            "initiative_id",
+            "state",
+            "created_at",
+            "approved_at",
+            "completed_at",
+            "plan_bundle",
+            "quarantine",
+            "tasks",
         ] {
             assert!(v.get(k).is_some(), "missing top-level key {k}; got {v}");
         }
         assert_eq!(
-            v["quarantine"], serde_json::json!({ "quarantined": false }),
+            v["quarantine"],
+            serde_json::json!({ "quarantined": false }),
             "quarantine block MUST surface a discriminated `quarantined: false` shape: {v}",
         );
         assert_eq!(
-            v["tasks"], serde_json::json!([]),
+            v["tasks"],
+            serde_json::json!([]),
             "tasks key MUST always be an array, even when empty: {v}",
         );
     }
@@ -1293,10 +1350,11 @@ mod tests {
         let out = tempfile::TempDir::new().unwrap();
         // Plant an unrelated file so the directory is non-empty.
         std::fs::write(out.path().join("unrelated.txt"), b"do not clobber").unwrap();
-        let err = run(&flags, &s(&[
-            "init-e2e", "--bundle", "--to",
-            out.path().to_str().unwrap(),
-        ])).unwrap_err();
+        let err = run(
+            &flags,
+            &s(&["init-e2e", "--bundle", "--to", out.path().to_str().unwrap()]),
+        )
+        .unwrap_err();
         match err {
             CliError::Usage(m) => {
                 assert!(m.contains("non-empty directory"), "msg = {m:?}");

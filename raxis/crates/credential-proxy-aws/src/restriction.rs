@@ -86,9 +86,9 @@ pub struct Restrictions {
 impl Default for Restrictions {
     fn default() -> Self {
         Self {
-            allowed_paths:    default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_services: Vec::new(),
-            allowed_regions:  Vec::new(),
+            allowed_regions: Vec::new(),
         }
     }
 }
@@ -118,7 +118,10 @@ impl Restrictions {
             if s.is_empty() {
                 return Err(RestrictionValidationError::EmptyServiceId);
             }
-            if !s.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            if !s
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
                 return Err(RestrictionValidationError::MalformedServiceId(s.clone()));
             }
         }
@@ -128,7 +131,10 @@ impl Restrictions {
             }
             // AWS region pattern: `[a-z]+-[a-z]+-\d` (us-east-1,
             // eu-west-2, ap-northeast-1, ca-central-1, ...).
-            if !r.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-') {
+            if !r
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+            {
                 return Err(RestrictionValidationError::MalformedRegionId(r.clone()));
             }
         }
@@ -168,9 +174,9 @@ mod tests {
     #[test]
     fn empty_allowlist_blocks_everything() {
         let r = Restrictions {
-            allowed_paths:    vec![],
+            allowed_paths: vec![],
             allowed_services: vec![],
-            allowed_regions:  vec![],
+            allowed_regions: vec![],
         };
         assert!(!r.allows_path("/creds"));
     }
@@ -183,9 +189,9 @@ mod tests {
     #[test]
     fn validate_accepts_well_formed_services_and_regions() {
         let r = Restrictions {
-            allowed_paths:    default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_services: vec!["s3".into(), "sqs".into(), "dynamodb".into()],
-            allowed_regions:  vec!["us-east-1".into(), "eu-west-2".into()],
+            allowed_regions: vec!["us-east-1".into(), "eu-west-2".into()],
         };
         r.validate().unwrap();
     }
@@ -193,9 +199,9 @@ mod tests {
     #[test]
     fn validate_rejects_uppercase_service_id() {
         let r = Restrictions {
-            allowed_paths:    default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_services: vec!["S3".into()],
-            allowed_regions:  vec![],
+            allowed_regions: vec![],
         };
         assert_eq!(
             r.validate(),
@@ -206,9 +212,9 @@ mod tests {
     #[test]
     fn validate_rejects_empty_region_id() {
         let r = Restrictions {
-            allowed_paths:    default_allowed_paths(),
+            allowed_paths: default_allowed_paths(),
             allowed_services: vec![],
-            allowed_regions:  vec!["".into()],
+            allowed_regions: vec!["".into()],
         };
         assert_eq!(r.validate(), Err(RestrictionValidationError::EmptyRegionId));
     }

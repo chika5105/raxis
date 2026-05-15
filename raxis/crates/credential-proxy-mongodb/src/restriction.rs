@@ -60,21 +60,26 @@ pub struct Restrictions {
 impl Default for Restrictions {
     fn default() -> Self {
         Self {
-            allow_read_only:        false,
-            allowed_collections:    Vec::new(),
-            forbidden_collections:  Vec::new(),
-            max_documents:          0,
-            enforce:                true,
+            allow_read_only: false,
+            allowed_collections: Vec::new(),
+            forbidden_collections: Vec::new(),
+            max_documents: 0,
+            enforce: true,
         }
     }
 }
 
-fn default_enforce_true() -> bool { true }
+fn default_enforce_true() -> bool {
+    true
+}
 
 impl Restrictions {
     /// Convenience constructor.
     pub fn read_only() -> Self {
-        Self { allow_read_only: true, ..Self::default() }
+        Self {
+            allow_read_only: true,
+            ..Self::default()
+        }
     }
 
     /// Verb-class block check used by [`Self::check`] as the first
@@ -87,8 +92,7 @@ impl Restrictions {
 
     /// True iff a non-empty allowlist or denylist is configured.
     pub fn has_collection_lists(&self) -> bool {
-        !self.allowed_collections.is_empty()
-        || !self.forbidden_collections.is_empty()
+        !self.allowed_collections.is_empty() || !self.forbidden_collections.is_empty()
     }
 
     /// Apply the full V2 restriction surface to a parsed
@@ -96,13 +100,13 @@ impl Restrictions {
     pub fn check(&self, target: &CommandTarget) -> RestrictionDecision {
         if let CommandTarget::Resolved { command, .. } = target {
             if self.is_blocked(command) {
-                return self.block_or_audit_only(
-                    RestrictionReason::AllowReadOnly, None,
-                );
+                return self.block_or_audit_only(RestrictionReason::AllowReadOnly, None);
             }
         }
         if !self.has_collection_lists() {
-            return RestrictionDecision::Admit { collection: target.fully_qualified() };
+            return RestrictionDecision::Admit {
+                collection: target.fully_qualified(),
+            };
         }
         match target {
             CommandTarget::Resolved { collection, db, .. } => {
@@ -129,24 +133,18 @@ impl Restrictions {
                     // `hello` keep their None collection); but
                     // when an allowlist is configured we cannot
                     // prove admissibility → block.
-                    return self.block_or_audit_only(
-                        RestrictionReason::CollectionNotInAllowedList,
-                        None,
-                    );
+                    return self
+                        .block_or_audit_only(RestrictionReason::CollectionNotInAllowedList, None);
                 }
                 RestrictionDecision::Admit { collection: fq }
             }
             CommandTarget::SecondaryCollectionDetected { collection, db, .. } => {
                 let fq = fully_qualified(db.as_deref(), Some(collection.as_str()));
-                self.block_or_audit_only(
-                    RestrictionReason::SecondaryCollectionInPipeline,
-                    fq,
-                )
+                self.block_or_audit_only(RestrictionReason::SecondaryCollectionInPipeline, fq)
             }
-            CommandTarget::Ambiguous => self.block_or_audit_only(
-                RestrictionReason::AmbiguousBson,
-                None,
-            ),
+            CommandTarget::Ambiguous => {
+                self.block_or_audit_only(RestrictionReason::AmbiguousBson, None)
+            }
         }
     }
 
@@ -171,42 +169,42 @@ pub fn is_read_command(name: &str) -> bool {
     matches!(
         name,
         "find"
-        | "aggregate"
-        | "count"
-        | "distinct"
-        | "geoSearch"
-        | "getMore"
-        | "parallelCollectionScan"
-        | "hello"
-        | "isMaster"
-        | "ismaster"
-        | "ping"
-        | "buildInfo"
-        | "buildinfo"
-        | "serverStatus"
-        | "hostInfo"
-        | "connectionStatus"
-        | "whatsmyuri"
-        | "listCollections"
-        | "listIndexes"
-        | "listDatabases"
-        | "dbStats"
-        | "collStats"
-        | "explain"
-        | "validate"
-        | "currentOp"
-        | "getParameter"
-        | "saslStart"
-        | "saslContinue"
-        | "logout"
-        | "endSessions"
-        | "killCursors"
-        | "killAllSessions"
-        | "killAllSessionsByPattern"
-        | "killSessions"
-        | "abortTransaction"
-        | "commitTransaction"
-        | "startSession"
+            | "aggregate"
+            | "count"
+            | "distinct"
+            | "geoSearch"
+            | "getMore"
+            | "parallelCollectionScan"
+            | "hello"
+            | "isMaster"
+            | "ismaster"
+            | "ping"
+            | "buildInfo"
+            | "buildinfo"
+            | "serverStatus"
+            | "hostInfo"
+            | "connectionStatus"
+            | "whatsmyuri"
+            | "listCollections"
+            | "listIndexes"
+            | "listDatabases"
+            | "dbStats"
+            | "collStats"
+            | "explain"
+            | "validate"
+            | "currentOp"
+            | "getParameter"
+            | "saslStart"
+            | "saslContinue"
+            | "logout"
+            | "endSessions"
+            | "killCursors"
+            | "killAllSessions"
+            | "killAllSessionsByPattern"
+            | "killSessions"
+            | "abortTransaction"
+            | "commitTransaction"
+            | "startSession"
     )
 }
 
@@ -238,12 +236,12 @@ impl RestrictionReason {
     /// Stable grep key for the audit chain.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AllowReadOnly                 => "allow_read_only",
-            Self::CollectionNotInAllowedList    => "collection_not_in_allowed_list",
-            Self::CollectionInForbiddenList     => "collection_in_forbidden_list",
+            Self::AllowReadOnly => "allow_read_only",
+            Self::CollectionNotInAllowedList => "collection_not_in_allowed_list",
+            Self::CollectionInForbiddenList => "collection_in_forbidden_list",
             Self::SecondaryCollectionInPipeline => "secondary_collection_in_pipeline",
-            Self::AmbiguousBson                 => "ambiguous_bson",
-            Self::MaxDocumentsExceeded          => "max_documents_exceeded",
+            Self::AmbiguousBson => "ambiguous_bson",
+            Self::MaxDocumentsExceeded => "max_documents_exceeded",
         }
     }
 }
@@ -281,25 +279,25 @@ pub enum CommandTarget {
     /// for non-collection commands like `hello` / `ping`).
     Resolved {
         /// First BSON field name (e.g. `"find"`, `"insert"`).
-        command:    String,
+        command: String,
         /// Value of the command field when the command takes a
         /// collection name; `None` for `hello` / `ping` / etc.
         collection: Option<String>,
         /// `$db` field value.
-        db:         Option<String>,
+        db: Option<String>,
     },
     /// Walker detected secondary-collection references it cannot
     /// prove are admissible (`$lookup.from`, `$graphLookup.from`,
     /// `$unionWith.coll`, `$merge.into`, `$out`).
     SecondaryCollectionDetected {
         /// First BSON field name.
-        command:    String,
+        command: String,
         /// Primary collection from the command's first field value.
         collection: String,
         /// `$db` field value.
-        db:         Option<String>,
+        db: Option<String>,
         /// Detected secondary collection names (best-effort heuristic).
-        secondary:  Vec<String>,
+        secondary: Vec<String>,
     },
     /// Malformed BSON.
     Ambiguous,
@@ -309,10 +307,12 @@ impl CommandTarget {
     /// Convenience: produce `<db>.<coll>` when both are known.
     pub fn fully_qualified(&self) -> Option<String> {
         match self {
-            Self::Resolved { collection, db, .. } =>
-                fully_qualified(db.as_deref(), collection.as_deref()),
-            Self::SecondaryCollectionDetected { collection, db, .. } =>
-                fully_qualified(db.as_deref(), Some(collection.as_str())),
+            Self::Resolved { collection, db, .. } => {
+                fully_qualified(db.as_deref(), collection.as_deref())
+            }
+            Self::SecondaryCollectionDetected { collection, db, .. } => {
+                fully_qualified(db.as_deref(), Some(collection.as_str()))
+            }
             Self::Ambiguous => None,
         }
     }
@@ -321,8 +321,7 @@ impl CommandTarget {
 /// Compose `<db>.<coll>` when both are non-empty.
 pub fn fully_qualified(db: Option<&str>, coll: Option<&str>) -> Option<String> {
     match (db, coll) {
-        (Some(d), Some(c)) if !d.is_empty() && !c.is_empty() =>
-            Some(format!("{d}.{c}")),
+        (Some(d), Some(c)) if !d.is_empty() && !c.is_empty() => Some(format!("{d}.{c}")),
         _ => None,
     }
 }
@@ -338,7 +337,7 @@ pub fn fully_qualified(db: Option<&str>, coll: Option<&str>) -> Option<String> {
 /// commands.
 pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
     let mut primary: Option<(String, BsonValue)> = None;
-    let mut db:      Option<String> = None;
+    let mut db: Option<String> = None;
     // We iterate kind-0 (Body) sections of the OP_MSG body. The
     // proxy is only ever called with bodies that contain exactly
     // one kind-0 section (the command document) — kind-1 sections
@@ -359,7 +358,9 @@ pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
                         primary = Some((p.command_name.clone(), p.command_value));
                         primary_bson_doc = Some(p.raw_doc);
                     }
-                    if db.is_none() { db = p.db; }
+                    if db.is_none() {
+                        db = p.db;
+                    }
                     i += p.consumed;
                 }
                 None => return CommandTarget::Ambiguous,
@@ -367,10 +368,11 @@ pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
         } else if kind == 1 {
             // Document Sequence: int32 size + cstring identifier +
             // BSON docs. Skip whole section.
-            if i + 4 > body.len() { return CommandTarget::Ambiguous; }
-            let section_size = i32::from_le_bytes(
-                body[i..i + 4].try_into().unwrap_or([0; 4]),
-            ) as usize;
+            if i + 4 > body.len() {
+                return CommandTarget::Ambiguous;
+            }
+            let section_size =
+                i32::from_le_bytes(body[i..i + 4].try_into().unwrap_or([0; 4])) as usize;
             if section_size < 4 || i + section_size > body.len() {
                 return CommandTarget::Ambiguous;
             }
@@ -382,7 +384,7 @@ pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
 
     let (command, value) = match primary {
         Some(p) => p,
-        None    => return CommandTarget::Ambiguous,
+        None => return CommandTarget::Ambiguous,
     };
     let collection = match value {
         BsonValue::String(s) => Some(s),
@@ -395,8 +397,12 @@ pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
     let collection = if collection.is_none() && command == "getMore" {
         if let Some(doc) = primary_bson_doc {
             scan_top_string_field(doc, "collection")
-        } else { None }
-    } else { collection };
+        } else {
+            None
+        }
+    } else {
+        collection
+    };
 
     // Secondary-collection heuristic — only run when an allowlist
     // is configured (per D6 of §3 / §6.1 step 4).
@@ -415,7 +421,11 @@ pub fn walk_command(body: &[u8], inspect_pipeline: bool) -> CommandTarget {
         }
     }
 
-    CommandTarget::Resolved { command, collection, db }
+    CommandTarget::Resolved {
+        command,
+        collection,
+        db,
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -428,19 +438,25 @@ enum BsonValue {
 }
 
 struct ParsedTopDoc<'a> {
-    command_name:  String,
+    command_name: String,
     command_value: BsonValue,
-    db:            Option<String>,
-    raw_doc:       &'a [u8],
-    consumed:      usize,
+    db: Option<String>,
+    raw_doc: &'a [u8],
+    consumed: usize,
 }
 
 fn parse_top_doc(doc: &[u8]) -> Option<ParsedTopDoc<'_>> {
-    if doc.len() < 5 { return None; }
+    if doc.len() < 5 {
+        return None;
+    }
     let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
-    if total < 5 || total > doc.len() { return None; }
+    if total < 5 || total > doc.len() {
+        return None;
+    }
     let body = &doc[4..total];
-    if body.is_empty() || body[body.len() - 1] != 0x00 { return None; }
+    if body.is_empty() || body[body.len() - 1] != 0x00 {
+        return None;
+    }
     let elems = &body[..body.len() - 1];
     let mut command_name: Option<String> = None;
     let mut command_value: BsonValue = BsonValue::Other;
@@ -460,56 +476,78 @@ fn parse_top_doc(doc: &[u8]) -> Option<ParsedTopDoc<'_>> {
             first = false;
         }
         if name == "$db" {
-            if let BsonValue::String(ref s) = val { db = Some(s.clone()); }
+            if let BsonValue::String(ref s) = val {
+                db = Some(s.clone());
+            }
         }
         p += val_len;
     }
     Some(ParsedTopDoc {
-        command_name:  command_name?,
+        command_name: command_name?,
         command_value,
         db,
-        raw_doc:       &doc[..total],
-        consumed:      total,
+        raw_doc: &doc[..total],
+        consumed: total,
     })
 }
 
 fn read_value(type_byte: u8, data: &[u8]) -> Option<(BsonValue, usize)> {
     Some(match type_byte {
         0x01 => {
-            if data.len() < 8 { return None; }
+            if data.len() < 8 {
+                return None;
+            }
             let f = f64::from_le_bytes(data[..8].try_into().ok()?);
             (BsonValue::Double(f), 8)
         }
         0x02 => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if len < 1 || 4 + len > data.len() { return None; }
+            if len < 1 || 4 + len > data.len() {
+                return None;
+            }
             let s = std::str::from_utf8(&data[4..4 + len - 1]).ok()?.to_owned();
             (BsonValue::String(s), 4 + len)
         }
         0x03 | 0x04 => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let total = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if total < 5 || total > data.len() { return None; }
+            if total < 5 || total > data.len() {
+                return None;
+            }
             (BsonValue::Other, total)
         }
         0x05 => {
-            if data.len() < 5 { return None; }
+            if data.len() < 5 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if 5 + len > data.len() { return None; }
+            if 5 + len > data.len() {
+                return None;
+            }
             (BsonValue::Other, 5 + len)
         }
         0x06 => (BsonValue::Other, 0), // Undefined (deprecated).
         0x07 => {
-            if data.len() < 12 { return None; }
+            if data.len() < 12 {
+                return None;
+            }
             (BsonValue::Other, 12)
         }
         0x08 => {
-            if data.is_empty() { return None; }
+            if data.is_empty() {
+                return None;
+            }
             (BsonValue::Other, 1)
         }
         0x09 => {
-            if data.len() < 8 { return None; }
+            if data.len() < 8 {
+                return None;
+            }
             (BsonValue::Other, 8)
         }
         0x0A => (BsonValue::Other, 0),
@@ -521,41 +559,63 @@ fn read_value(type_byte: u8, data: &[u8]) -> Option<(BsonValue, usize)> {
             (BsonValue::Other, n1 + 1 + n2 + 1)
         }
         0x0C => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if 4 + len + 12 > data.len() { return None; }
+            if 4 + len + 12 > data.len() {
+                return None;
+            }
             (BsonValue::Other, 4 + len + 12)
         }
         0x0D => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if 4 + len > data.len() { return None; }
+            if 4 + len > data.len() {
+                return None;
+            }
             (BsonValue::Other, 4 + len)
         }
         0x0E => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let len = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if 4 + len > data.len() { return None; }
+            if 4 + len > data.len() {
+                return None;
+            }
             (BsonValue::Other, 4 + len)
         }
         0x0F => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let total = i32::from_le_bytes(data[..4].try_into().ok()?) as usize;
-            if total > data.len() { return None; }
+            if total > data.len() {
+                return None;
+            }
             (BsonValue::Other, total)
         }
         0x10 => {
-            if data.len() < 4 { return None; }
+            if data.len() < 4 {
+                return None;
+            }
             let v = i32::from_le_bytes(data[..4].try_into().ok()?);
             (BsonValue::Int(v as i64), 4)
         }
         0x11 | 0x12 => {
-            if data.len() < 8 { return None; }
+            if data.len() < 8 {
+                return None;
+            }
             let v = i64::from_le_bytes(data[..8].try_into().ok()?);
             (BsonValue::Int(v), 8)
         }
         0x13 => {
-            if data.len() < 16 { return None; }
+            if data.len() < 16 {
+                return None;
+            }
             (BsonValue::Other, 16)
         }
         0xFF | 0x7F => (BsonValue::Other, 0),
@@ -566,11 +626,17 @@ fn read_value(type_byte: u8, data: &[u8]) -> Option<(BsonValue, usize)> {
 /// Scan a BSON doc's top-level elements for a string field
 /// with the given name. Returns the string value if found.
 fn scan_top_string_field(doc: &[u8], target: &str) -> Option<String> {
-    if doc.len() < 5 { return None; }
+    if doc.len() < 5 {
+        return None;
+    }
     let total = i32::from_le_bytes(doc[..4].try_into().ok()?) as usize;
-    if total > doc.len() { return None; }
+    if total > doc.len() {
+        return None;
+    }
     let body = &doc[4..total];
-    if body.is_empty() || body[body.len() - 1] != 0x00 { return None; }
+    if body.is_empty() || body[body.len() - 1] != 0x00 {
+        return None;
+    }
     let elems = &body[..body.len() - 1];
     let mut p = 0;
     while p < elems.len() {
@@ -581,7 +647,9 @@ fn scan_top_string_field(doc: &[u8], target: &str) -> Option<String> {
         p += nul + 1;
         let (val, val_len) = read_value(type_byte, &elems[p..])?;
         if name == target {
-            if let BsonValue::String(s) = val { return Some(s); }
+            if let BsonValue::String(s) = val {
+                return Some(s);
+            }
         }
         p += val_len;
     }
@@ -608,18 +676,21 @@ fn scan_secondary_collections(doc: &[u8]) -> Vec<String> {
             let rest = &doc[i + 1..];
             let nul = match rest.iter().position(|&b| b == 0) {
                 Some(n) => n,
-                None    => break,
+                None => break,
             };
             let field_name = match std::str::from_utf8(&rest[..nul]) {
                 Ok(s) => s,
-                Err(_) => { i += 1; continue; }
+                Err(_) => {
+                    i += 1;
+                    continue;
+                }
             };
             if names.contains(&field_name) {
                 let after_name = &rest[nul + 1..];
-                if after_name.len() < 4 { break; }
-                let len = i32::from_le_bytes(
-                    after_name[..4].try_into().unwrap_or([0; 4]),
-                ) as usize;
+                if after_name.len() < 4 {
+                    break;
+                }
+                let len = i32::from_le_bytes(after_name[..4].try_into().unwrap_or([0; 4])) as usize;
                 if len >= 1 && 4 + len <= after_name.len() {
                     if let Ok(s) = std::str::from_utf8(&after_name[4..4 + len - 1]) {
                         if !s.is_empty() && !out.iter().any(|e: &String| e == s) {
@@ -653,7 +724,9 @@ mod tests {
         body
     }
 
-    fn build_doc(builder: BsonBuilder) -> Vec<u8> { builder.finish() }
+    fn build_doc(builder: BsonBuilder) -> Vec<u8> {
+        builder.finish()
+    }
 
     #[test]
     fn find_simple() {
@@ -665,10 +738,14 @@ mod tests {
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
-            CommandTarget::Resolved { command, collection, db } => {
+            CommandTarget::Resolved {
+                command,
+                collection,
+                db,
+            } => {
                 assert_eq!(command, "find");
                 assert_eq!(collection.as_deref(), Some("users"));
-                assert_eq!(db.as_deref(),         Some("appdb"));
+                assert_eq!(db.as_deref(), Some("appdb"));
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
@@ -684,10 +761,14 @@ mod tests {
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
-            CommandTarget::Resolved { command, collection, db } => {
+            CommandTarget::Resolved {
+                command,
+                collection,
+                db,
+            } => {
                 assert_eq!(command, "insert");
                 assert_eq!(collection.as_deref(), Some("orders"));
-                assert_eq!(db.as_deref(),         Some("appdb"));
+                assert_eq!(db.as_deref(), Some("appdb"));
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
@@ -695,15 +776,15 @@ mod tests {
 
     #[test]
     fn hello_has_no_collection() {
-        let doc = build_doc(
-            BsonBuilder::new()
-                .int32("hello", 1)
-                .string("$db", "admin"),
-        );
+        let doc = build_doc(BsonBuilder::new().int32("hello", 1).string("$db", "admin"));
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
-            CommandTarget::Resolved { command, collection, db } => {
+            CommandTarget::Resolved {
+                command,
+                collection,
+                db,
+            } => {
                 assert_eq!(command, "hello");
                 assert_eq!(collection, None);
                 assert_eq!(db.as_deref(), Some("admin"));
@@ -714,11 +795,7 @@ mod tests {
 
     #[test]
     fn ping_has_no_collection() {
-        let doc = build_doc(
-            BsonBuilder::new()
-                .int32("ping", 1)
-                .string("$db", "admin"),
-        );
+        let doc = build_doc(BsonBuilder::new().int32("ping", 1).string("$db", "admin"));
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
@@ -740,10 +817,14 @@ mod tests {
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
-            CommandTarget::Resolved { command, collection, db } => {
+            CommandTarget::Resolved {
+                command,
+                collection,
+                db,
+            } => {
                 assert_eq!(command, "getMore");
                 assert_eq!(collection.as_deref(), Some("users"));
-                assert_eq!(db.as_deref(),         Some("appdb"));
+                assert_eq!(db.as_deref(), Some("appdb"));
             }
             other => panic!("expected Resolved, got {other:?}"),
         }
@@ -754,10 +835,10 @@ mod tests {
         // Inner $lookup doc: { from: "orders", localField: "_id", foreignField: "user_id", as: "orders" }
         let inner_lookup = build_doc(
             BsonBuilder::new()
-                .string("from",         "orders")
-                .string("localField",   "_id")
+                .string("from", "orders")
+                .string("localField", "_id")
                 .string("foreignField", "user_id")
-                .string("as",           "orders"),
+                .string("as", "orders"),
         );
         let stage = build_doc(BsonBuilder::new().document("$lookup", inner_lookup));
         // Pipeline is an array; BSON arrays are just docs with
@@ -766,19 +847,26 @@ mod tests {
         let pipeline = build_doc(BsonBuilder::new().document("0", stage));
         let doc = build_doc(
             BsonBuilder::new()
-                .string  ("aggregate", "users")
-                .document("pipeline",  pipeline)
-                .string  ("$db",       "appdb"),
+                .string("aggregate", "users")
+                .document("pipeline", pipeline)
+                .string("$db", "appdb"),
         );
         let body = op_msg_body(&doc);
         let target = walk_command(&body, true);
         match target {
-            CommandTarget::SecondaryCollectionDetected { command, collection, db, secondary } => {
-                assert_eq!(command,    "aggregate");
+            CommandTarget::SecondaryCollectionDetected {
+                command,
+                collection,
+                db,
+                secondary,
+            } => {
+                assert_eq!(command, "aggregate");
                 assert_eq!(collection, "users");
                 assert_eq!(db.as_deref(), Some("appdb"));
-                assert!(secondary.iter().any(|s| s == "orders"),
-                    "missing 'orders' in secondary {secondary:?}");
+                assert!(
+                    secondary.iter().any(|s| s == "orders"),
+                    "missing 'orders' in secondary {secondary:?}"
+                );
             }
             other => panic!("expected SecondaryCollectionDetected, got {other:?}"),
         }
@@ -786,22 +874,23 @@ mod tests {
 
     #[test]
     fn aggregate_lookup_not_flagged_when_inspect_off() {
-        let inner_lookup = build_doc(
-            BsonBuilder::new()
-                .string("from", "orders"),
-        );
+        let inner_lookup = build_doc(BsonBuilder::new().string("from", "orders"));
         let stage = build_doc(BsonBuilder::new().document("$lookup", inner_lookup));
         let pipeline = build_doc(BsonBuilder::new().document("0", stage));
         let doc = build_doc(
             BsonBuilder::new()
-                .string  ("aggregate", "users")
-                .document("pipeline",  pipeline)
-                .string  ("$db",       "appdb"),
+                .string("aggregate", "users")
+                .document("pipeline", pipeline)
+                .string("$db", "appdb"),
         );
         let body = op_msg_body(&doc);
         let target = walk_command(&body, false);
         match target {
-            CommandTarget::Resolved { command, collection, .. } => {
+            CommandTarget::Resolved {
+                command,
+                collection,
+                ..
+            } => {
                 assert_eq!(command, "aggregate");
                 assert_eq!(collection.as_deref(), Some("users"));
             }
@@ -822,9 +911,9 @@ mod tests {
 
     fn target_for(command: &str, coll: Option<&str>, db: Option<&str>) -> CommandTarget {
         CommandTarget::Resolved {
-            command:    command.to_owned(),
+            command: command.to_owned(),
             collection: coll.map(str::to_owned),
-            db:         db.map(str::to_owned),
+            db: db.map(str::to_owned),
         }
     }
 
@@ -862,8 +951,9 @@ mod tests {
         let t = target_for("find", Some("users"), Some("appdb"));
         let decision = r.check(&t);
         match decision {
-            RestrictionDecision::Admit { collection } =>
-                assert_eq!(collection.as_deref(), Some("appdb.users")),
+            RestrictionDecision::Admit { collection } => {
+                assert_eq!(collection.as_deref(), Some("appdb.users"))
+            }
             other => panic!("expected Admit, got {other:?}"),
         }
     }
@@ -877,8 +967,9 @@ mod tests {
         let t = target_for("find", Some("users"), Some("appdb"));
         let decision = r.check(&t);
         match decision {
-            RestrictionDecision::Block { reason, .. } =>
-                assert_eq!(reason.as_str(), "collection_in_forbidden_list"),
+            RestrictionDecision::Block { reason, .. } => {
+                assert_eq!(reason.as_str(), "collection_in_forbidden_list")
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
@@ -893,8 +984,9 @@ mod tests {
         let t = target_for("find", Some("users"), Some("appdb"));
         let decision = r.check(&t);
         match decision {
-            RestrictionDecision::AuditOnly { reason, .. } =>
-                assert_eq!(reason.as_str(), "collection_in_forbidden_list"),
+            RestrictionDecision::AuditOnly { reason, .. } => {
+                assert_eq!(reason.as_str(), "collection_in_forbidden_list")
+            }
             other => panic!("expected AuditOnly, got {other:?}"),
         }
     }
@@ -917,15 +1009,16 @@ mod tests {
             ..Default::default()
         };
         let t = CommandTarget::SecondaryCollectionDetected {
-            command:    "aggregate".into(),
+            command: "aggregate".into(),
             collection: "users".into(),
-            db:         Some("appdb".into()),
-            secondary:  vec!["orders".into()],
+            db: Some("appdb".into()),
+            secondary: vec!["orders".into()],
         };
         let decision = r.check(&t);
         match decision {
-            RestrictionDecision::Block { reason, .. } =>
-                assert_eq!(reason.as_str(), "secondary_collection_in_pipeline"),
+            RestrictionDecision::Block { reason, .. } => {
+                assert_eq!(reason.as_str(), "secondary_collection_in_pipeline")
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
@@ -938,8 +1031,9 @@ mod tests {
         };
         let decision = r.check(&CommandTarget::Ambiguous);
         match decision {
-            RestrictionDecision::Block { reason, .. } =>
-                assert_eq!(reason.as_str(), "ambiguous_bson"),
+            RestrictionDecision::Block { reason, .. } => {
+                assert_eq!(reason.as_str(), "ambiguous_bson")
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
@@ -947,40 +1041,47 @@ mod tests {
     #[test]
     fn allow_read_only_short_circuits() {
         let r = Restrictions {
-            allow_read_only:    true,
+            allow_read_only: true,
             allowed_collections: vec!["appdb.users".into()],
             ..Default::default()
         };
         let t = target_for("insert", Some("users"), Some("appdb"));
         let decision = r.check(&t);
         match decision {
-            RestrictionDecision::Block { reason, .. } =>
-                assert_eq!(reason.as_str(), "allow_read_only"),
+            RestrictionDecision::Block { reason, .. } => {
+                assert_eq!(reason.as_str(), "allow_read_only")
+            }
             other => panic!("expected Block, got {other:?}"),
         }
     }
 
     #[test]
     fn reason_strings_pinned() {
-        assert_eq!(RestrictionReason::AllowReadOnly.as_str(),
-            "allow_read_only");
-        assert_eq!(RestrictionReason::CollectionNotInAllowedList.as_str(),
-            "collection_not_in_allowed_list");
-        assert_eq!(RestrictionReason::CollectionInForbiddenList.as_str(),
-            "collection_in_forbidden_list");
-        assert_eq!(RestrictionReason::SecondaryCollectionInPipeline.as_str(),
-            "secondary_collection_in_pipeline");
-        assert_eq!(RestrictionReason::AmbiguousBson.as_str(),
-            "ambiguous_bson");
-        assert_eq!(RestrictionReason::MaxDocumentsExceeded.as_str(),
-            "max_documents_exceeded");
+        assert_eq!(RestrictionReason::AllowReadOnly.as_str(), "allow_read_only");
+        assert_eq!(
+            RestrictionReason::CollectionNotInAllowedList.as_str(),
+            "collection_not_in_allowed_list"
+        );
+        assert_eq!(
+            RestrictionReason::CollectionInForbiddenList.as_str(),
+            "collection_in_forbidden_list"
+        );
+        assert_eq!(
+            RestrictionReason::SecondaryCollectionInPipeline.as_str(),
+            "secondary_collection_in_pipeline"
+        );
+        assert_eq!(RestrictionReason::AmbiguousBson.as_str(), "ambiguous_bson");
+        assert_eq!(
+            RestrictionReason::MaxDocumentsExceeded.as_str(),
+            "max_documents_exceeded"
+        );
     }
 
     #[test]
     fn is_blocked_pins_allow_read_only_semantics() {
         let r = Restrictions::read_only();
         assert!(!r.is_blocked("find"));
-        assert!( r.is_blocked("insert"));
-        assert!( r.is_blocked("update"));
+        assert!(r.is_blocked("insert"));
+        assert!(r.is_blocked("update"));
     }
 }

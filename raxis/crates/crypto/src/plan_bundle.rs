@@ -27,9 +27,7 @@
 // the exact bytes for a small fixture so a silent change is caught
 // in code review.
 
-use raxis_types::{
-    BundleArtifact, BundleNonce, BundleSha256, PlanBundle, SchemaVersion,
-};
+use raxis_types::{BundleArtifact, BundleNonce, BundleSha256, PlanBundle, SchemaVersion};
 use sha2::{Digest, Sha256};
 
 use crate::{verify::verify_ed25519, CryptoError};
@@ -102,11 +100,9 @@ pub enum PlanBundleCodecError {
     /// A per-artifact `sha256` does not match `SHA-256(artifact.bytes)`.
     /// Maps to `FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH` per §8.1
     /// step 5.
-    #[error(
-        "artifact[{artifact_seq}] (\"{artifact_name}\"): per-artifact sha256 mismatch"
-    )]
+    #[error("artifact[{artifact_seq}] (\"{artifact_name}\"): per-artifact sha256 mismatch")]
     ArtifactHashMismatch {
-        artifact_seq:  usize,
+        artifact_seq: usize,
         artifact_name: String,
     },
 
@@ -147,19 +143,23 @@ pub enum PlanBundleCodecError {
 /// at encode time so the CLI cannot produce a malformed bundle.
 pub fn canonical_encode(bundle: &PlanBundle) -> Result<Vec<u8>, PlanBundleCodecError> {
     let envelope_ok = match bundle.schema_version {
-        SchemaVersion::V2_0 =>
-            bundle.signed_at_unix_secs.is_none() && bundle.bundle_nonce.is_none(),
-        SchemaVersion::V2_1 =>
-            bundle.signed_at_unix_secs.is_some() && bundle.bundle_nonce.is_some(),
+        SchemaVersion::V2_0 => {
+            bundle.signed_at_unix_secs.is_none() && bundle.bundle_nonce.is_none()
+        }
+        SchemaVersion::V2_1 => {
+            bundle.signed_at_unix_secs.is_some() && bundle.bundle_nonce.is_some()
+        }
     };
     if !envelope_ok {
         return Err(PlanBundleCodecError::SchemaEnvelopeMismatch {
             schema: bundle.schema_version,
             detail: match bundle.schema_version {
-                SchemaVersion::V2_0 =>
-                    "schema_version = 1 must NOT carry signed_at_unix_secs / bundle_nonce",
-                SchemaVersion::V2_1 =>
-                    "schema_version = 2 MUST carry both signed_at_unix_secs and bundle_nonce",
+                SchemaVersion::V2_0 => {
+                    "schema_version = 1 must NOT carry signed_at_unix_secs / bundle_nonce"
+                }
+                SchemaVersion::V2_1 => {
+                    "schema_version = 2 MUST carry both signed_at_unix_secs and bundle_nonce"
+                }
             },
         });
     }
@@ -175,9 +175,11 @@ pub fn canonical_encode(bundle: &PlanBundle) -> Result<Vec<u8>, PlanBundleCodecE
         // keep them as `expect("envelope_ok")` to make the invariant
         // self-documenting in stack traces if the contract ever
         // breaks.
-        let signed_at = bundle.signed_at_unix_secs
+        let signed_at = bundle
+            .signed_at_unix_secs
             .expect("envelope_ok: V2.1 has signed_at_unix_secs");
-        let nonce = bundle.bundle_nonce
+        let nonce = bundle
+            .bundle_nonce
             .expect("envelope_ok: V2.1 has bundle_nonce");
         out.extend_from_slice(&signed_at.to_be_bytes());
         out.extend_from_slice(nonce.as_bytes());
@@ -208,12 +210,18 @@ pub fn canonical_encode(bundle: &PlanBundle) -> Result<Vec<u8>, PlanBundleCodecE
 /// (overshoots by at most a few hundred bytes for typical bundles)
 /// — only matters for allocator efficiency.
 fn estimate_size(bundle: &PlanBundle) -> usize {
-    let envelope = if bundle.schema_version.carries_freshness_envelope() { 24 } else { 0 };
-    let header   = CANONICAL_INPUT_PREFIX.len() + 2 + 8 + envelope + 4
-                 + bundle.plan_root_relpath.len() + 4;
-    let artifacts = bundle.artifacts.iter().map(|a| {
-        4 + a.name.len() + 8 + a.bytes.len() + 32
-    }).sum::<usize>();
+    let envelope = if bundle.schema_version.carries_freshness_envelope() {
+        24
+    } else {
+        0
+    };
+    let header =
+        CANONICAL_INPUT_PREFIX.len() + 2 + 8 + envelope + 4 + bundle.plan_root_relpath.len() + 4;
+    let artifacts = bundle
+        .artifacts
+        .iter()
+        .map(|a| 4 + a.name.len() + 8 + a.bytes.len() + 32)
+        .sum::<usize>();
     header + artifacts
 }
 
@@ -241,7 +249,10 @@ fn estimate_size(bundle: &PlanBundle) -> usize {
 pub fn canonical_decode(bytes: &[u8]) -> Result<PlanBundle, PlanBundleCodecError> {
     let mut cur = Cursor::new(bytes);
 
-    cur.expect_prefix(CANONICAL_INPUT_PREFIX, PlanBundleCodecError::BadDomainPrefix)?;
+    cur.expect_prefix(
+        CANONICAL_INPUT_PREFIX,
+        PlanBundleCodecError::BadDomainPrefix,
+    )?;
 
     let schema_v_u16 = cur.read_u16_be()?;
     let schema_version = SchemaVersion::from_u16(schema_v_u16)
@@ -266,12 +277,11 @@ pub fn canonical_decode(bytes: &[u8]) -> Result<PlanBundle, PlanBundleCodecError
     for seq in 0..artifact_count {
         let name = cur.read_string_u32()?;
         let bytes_len = cur.read_u64_be()?;
-        let bytes_len_usize = usize::try_from(bytes_len).map_err(|_| {
-            PlanBundleCodecError::LengthOverflow {
+        let bytes_len_usize =
+            usize::try_from(bytes_len).map_err(|_| PlanBundleCodecError::LengthOverflow {
                 field: "artifact.bytes.len()",
                 value: bytes_len,
-            }
-        })?;
+            })?;
         let mut artifact_bytes = vec![0u8; bytes_len_usize];
         cur.read_exact(&mut artifact_bytes)?;
 
@@ -283,7 +293,7 @@ pub fn canonical_decode(bytes: &[u8]) -> Result<PlanBundle, PlanBundleCodecError
         let actual_sha = sha256_of_artifact_bytes(&artifact_bytes);
         if actual_sha != recorded_sha {
             return Err(PlanBundleCodecError::ArtifactHashMismatch {
-                artifact_seq:  seq,
+                artifact_seq: seq,
                 artifact_name: name,
             });
         }
@@ -343,16 +353,16 @@ pub fn signing_input(bundle_sha256: &BundleSha256) -> Vec<u8> {
 /// the CLI's `submit plan` does not (it signs, doesn't verify).
 pub fn verify_plan_bundle_signature(
     pubkey_bytes: &[u8],
-    bundle:       &PlanBundle,
-    signature:    &[u8],
+    bundle: &PlanBundle,
+    signature: &[u8],
 ) -> Result<(), CryptoError> {
     // `canonical_encode` failure projects through `From` into
     // `CryptoError::PlanBundleEncode` — the CLI cannot construct a
     // schema-mismatch bundle, so this branch is dead in normal
     // operation (it exists for defense in depth).
     let canonical = canonical_encode(bundle)?;
-    let sha       = bundle_sha256(&canonical);
-    let input     = signing_input(&sha);
+    let sha = bundle_sha256(&canonical);
+    let input = signing_input(&sha);
     verify_ed25519(pubkey_bytes, &input, signature)
 }
 
@@ -377,7 +387,7 @@ pub fn mint_bundle_nonce() -> Result<BundleNonce, CryptoError> {
 // ---------------------------------------------------------------------------
 
 struct Cursor<'a> {
-    bytes:  &'a [u8],
+    bytes: &'a [u8],
     offset: usize,
 }
 
@@ -467,7 +477,7 @@ mod tests {
 
     fn fixture_v2_1_bundle() -> PlanBundle {
         let plan_toml = b"[orchestrator]\ncross_cutting_artifacts = []\n".to_vec();
-        let plan_sha  = sha256_of_artifact_bytes(&plan_toml);
+        let plan_sha = sha256_of_artifact_bytes(&plan_toml);
         PlanBundle::new_v2_1(
             100,
             200,
@@ -483,7 +493,7 @@ mod tests {
 
     fn fixture_v2_0_legacy_bundle() -> PlanBundle {
         let plan_toml = b"[initiative]\nname = \"x\"\n".to_vec();
-        let plan_sha  = sha256_of_artifact_bytes(&plan_toml);
+        let plan_sha = sha256_of_artifact_bytes(&plan_toml);
         PlanBundle::new_v2_0_legacy(
             42,
             "old".to_owned(),
@@ -521,10 +531,12 @@ mod tests {
     #[test]
     fn canonical_round_trip_v2_1() {
         let original = fixture_v2_1_bundle();
-        let encoded  = canonical_encode(&original).unwrap();
-        let decoded  = canonical_decode(&encoded).unwrap();
-        assert_eq!(decoded, original,
-            "V2.1 canonical_encode/decode must be an identity");
+        let encoded = canonical_encode(&original).unwrap();
+        let decoded = canonical_decode(&encoded).unwrap();
+        assert_eq!(
+            decoded, original,
+            "V2.1 canonical_encode/decode must be an identity"
+        );
     }
 
     /// V2.0 legacy bundle round-trips. Confirms the schema-1 envelope
@@ -533,8 +545,8 @@ mod tests {
     #[test]
     fn canonical_round_trip_v2_0_legacy() {
         let original = fixture_v2_0_legacy_bundle();
-        let encoded  = canonical_encode(&original).unwrap();
-        let decoded  = canonical_decode(&encoded).unwrap();
+        let encoded = canonical_encode(&original).unwrap();
+        let decoded = canonical_decode(&encoded).unwrap();
         assert_eq!(decoded, original);
         assert!(decoded.signed_at_unix_secs.is_none());
         assert!(decoded.bundle_nonce.is_none());
@@ -545,27 +557,43 @@ mod tests {
     #[test]
     fn canonical_round_trip_preserves_artifact_order() {
         let a1_bytes = b"first".to_vec();
-        let a1_sha   = sha256_of_artifact_bytes(&a1_bytes);
+        let a1_sha = sha256_of_artifact_bytes(&a1_bytes);
         let a2_bytes = b"second".to_vec();
-        let a2_sha   = sha256_of_artifact_bytes(&a2_bytes);
+        let a2_sha = sha256_of_artifact_bytes(&a2_bytes);
         let a3_bytes = b"third".to_vec();
-        let a3_sha   = sha256_of_artifact_bytes(&a3_bytes);
+        let a3_sha = sha256_of_artifact_bytes(&a3_bytes);
 
         let original = PlanBundle::new_v2_1(
-            1, 2, BundleNonce::new([0u8; 16]),
+            1,
+            2,
+            BundleNonce::new([0u8; 16]),
             String::new(),
             vec![
-                BundleArtifact { name: "plan.toml".into(), bytes: a1_bytes, sha256: a1_sha },
-                BundleArtifact { name: "b.md".into(),      bytes: a2_bytes, sha256: a2_sha },
-                BundleArtifact { name: "a.md".into(),      bytes: a3_bytes, sha256: a3_sha },
+                BundleArtifact {
+                    name: "plan.toml".into(),
+                    bytes: a1_bytes,
+                    sha256: a1_sha,
+                },
+                BundleArtifact {
+                    name: "b.md".into(),
+                    bytes: a2_bytes,
+                    sha256: a2_sha,
+                },
+                BundleArtifact {
+                    name: "a.md".into(),
+                    bytes: a3_bytes,
+                    sha256: a3_sha,
+                },
             ],
         );
         let decoded = canonical_decode(&canonical_encode(&original).unwrap()).unwrap();
         assert_eq!(decoded.artifacts.len(), 3);
         assert_eq!(decoded.artifacts[0].name, "plan.toml");
         assert_eq!(decoded.artifacts[1].name, "b.md");
-        assert_eq!(decoded.artifacts[2].name, "a.md",
-            "encoder MUST preserve the operator's declaration order");
+        assert_eq!(
+            decoded.artifacts[2].name, "a.md",
+            "encoder MUST preserve the operator's declaration order"
+        );
     }
 
     /// `bundle_sha256` is determined purely by `canonical_input`.
@@ -574,18 +602,20 @@ mod tests {
     #[test]
     fn bundle_sha256_is_a_pure_function_of_canonical_input() {
         let bundle = fixture_v2_1_bundle();
-        let enc    = canonical_encode(&bundle).unwrap();
-        let h1     = bundle_sha256(&enc);
-        let h2     = bundle_sha256(&enc);
+        let enc = canonical_encode(&bundle).unwrap();
+        let h1 = bundle_sha256(&enc);
+        let h2 = bundle_sha256(&enc);
         assert_eq!(h1, h2);
 
         // A trivially-different bundle must hash differently.
         let mut bundle2 = bundle.clone();
         bundle2.created_at_unix_secs += 1;
         let enc2 = canonical_encode(&bundle2).unwrap();
-        let h3   = bundle_sha256(&enc2);
-        assert_ne!(h1, h3,
-            "encoder MUST commit to created_at_unix_secs (covered by the signature)");
+        let h3 = bundle_sha256(&enc2);
+        assert_ne!(
+            h1, h3,
+            "encoder MUST commit to created_at_unix_secs (covered by the signature)"
+        );
     }
 
     // ── Envelope mismatches ───────────────────────────────────────────
@@ -600,7 +630,10 @@ mod tests {
         let err = canonical_encode(&b).unwrap_err();
         assert!(matches!(
             err,
-            PlanBundleCodecError::SchemaEnvelopeMismatch { schema: SchemaVersion::V2_1, .. }
+            PlanBundleCodecError::SchemaEnvelopeMismatch {
+                schema: SchemaVersion::V2_1,
+                ..
+            }
         ));
     }
 
@@ -613,7 +646,10 @@ mod tests {
         let err = canonical_encode(&b).unwrap_err();
         assert!(matches!(
             err,
-            PlanBundleCodecError::SchemaEnvelopeMismatch { schema: SchemaVersion::V2_1, .. }
+            PlanBundleCodecError::SchemaEnvelopeMismatch {
+                schema: SchemaVersion::V2_1,
+                ..
+            }
         ));
     }
 
@@ -626,7 +662,10 @@ mod tests {
         let err = canonical_encode(&b).unwrap_err();
         assert!(matches!(
             err,
-            PlanBundleCodecError::SchemaEnvelopeMismatch { schema: SchemaVersion::V2_0, .. }
+            PlanBundleCodecError::SchemaEnvelopeMismatch {
+                schema: SchemaVersion::V2_0,
+                ..
+            }
         ));
     }
 
@@ -655,13 +694,16 @@ mod tests {
     #[test]
     fn decode_unknown_schema_version_fails() {
         let original = fixture_v2_1_bundle();
-        let mut enc  = canonical_encode(&original).unwrap();
+        let mut enc = canonical_encode(&original).unwrap();
         // schema_version is the two bytes immediately after the prefix.
         let off = CANONICAL_INPUT_PREFIX.len();
-        enc[off]     = 0x00;
+        enc[off] = 0x00;
         enc[off + 1] = 0xFF;
         let err = canonical_decode(&enc).unwrap_err();
-        assert!(matches!(err, PlanBundleCodecError::UnknownSchemaVersion(0xFF)));
+        assert!(matches!(
+            err,
+            PlanBundleCodecError::UnknownSchemaVersion(0xFF)
+        ));
     }
 
     /// Tampering an artifact's `bytes` (without re-stamping its
@@ -669,7 +711,7 @@ mod tests {
     #[test]
     fn decode_artifact_hash_mismatch_fails() {
         let original = fixture_v2_1_bundle();
-        let mut enc  = canonical_encode(&original).unwrap();
+        let mut enc = canonical_encode(&original).unwrap();
 
         // Corrupt the LAST byte of the artifact's `bytes` (it sits
         // immediately before the per-artifact 32-byte sha256; we
@@ -680,15 +722,18 @@ mod tests {
         let err = canonical_decode(&enc).unwrap_err();
         assert!(matches!(
             err,
-            PlanBundleCodecError::ArtifactHashMismatch { artifact_seq: 0, .. }
+            PlanBundleCodecError::ArtifactHashMismatch {
+                artifact_seq: 0,
+                ..
+            }
         ));
     }
 
     #[test]
     fn decode_truncated_after_artifact_count_fails() {
         let original = fixture_v2_1_bundle();
-        let enc      = canonical_encode(&original).unwrap();
-        let cut      = enc.len() - 10;
+        let enc = canonical_encode(&original).unwrap();
+        let cut = enc.len() - 10;
         assert!(matches!(
             canonical_decode(&enc[..cut]).unwrap_err(),
             PlanBundleCodecError::Truncated { .. },
@@ -703,7 +748,7 @@ mod tests {
         bytes.extend_from_slice(CANONICAL_INPUT_PREFIX);
         bytes.extend_from_slice(&SchemaVersion::V2_0.as_u16().to_be_bytes());
         bytes.extend_from_slice(&0u64.to_be_bytes()); // created_at
-        // V2.0 carries no envelope — straight to plan_root_relpath.
+                                                      // V2.0 carries no envelope — straight to plan_root_relpath.
         bytes.extend_from_slice(&3u32.to_be_bytes()); // length
         bytes.extend_from_slice(&[0xFF, 0xFE, 0xFD]); // not valid UTF-8
         bytes.extend_from_slice(&0u32.to_be_bytes()); // 0 artifacts
@@ -725,11 +770,11 @@ mod tests {
         let sk = SigningKey::from_bytes(&seed);
         let pk = sk.verifying_key().to_bytes();
 
-        let bundle    = fixture_v2_1_bundle();
+        let bundle = fixture_v2_1_bundle();
         let canonical = canonical_encode(&bundle).unwrap();
-        let sha       = bundle_sha256(&canonical);
-        let input     = signing_input(&sha);
-        let sig       = sk.sign(&input);
+        let sha = bundle_sha256(&canonical);
+        let input = signing_input(&sha);
+        let sig = sk.sign(&input);
 
         assert!(verify_plan_bundle_signature(&pk, &bundle, &sig.to_bytes()).is_ok());
     }
@@ -743,10 +788,10 @@ mod tests {
         let sk = SigningKey::from_bytes(&seed);
         let pk = sk.verifying_key().to_bytes();
 
-        let bundle    = fixture_v2_1_bundle();
+        let bundle = fixture_v2_1_bundle();
         let canonical = canonical_encode(&bundle).unwrap();
-        let sha       = bundle_sha256(&canonical);
-        let sig       = sk.sign(&signing_input(&sha));
+        let sha = bundle_sha256(&canonical);
+        let sig = sk.sign(&signing_input(&sha));
 
         // Same operator, same key, different bundle (one byte off in
         // a field covered by the signature).
@@ -768,8 +813,8 @@ mod tests {
 
         let v2_1 = fixture_v2_1_bundle();
         let canonical = canonical_encode(&v2_1).unwrap();
-        let sha       = bundle_sha256(&canonical);
-        let sig       = sk.sign(&signing_input(&sha));
+        let sha = bundle_sha256(&canonical);
+        let sig = sk.sign(&signing_input(&sha));
 
         // Try to re-cast as a V2.0 legacy with the same `plan.toml`.
         let v2_0 = PlanBundle::new_v2_0_legacy(
@@ -777,8 +822,10 @@ mod tests {
             v2_1.plan_root_relpath.clone(),
             v2_1.artifacts.clone(),
         );
-        assert!(verify_plan_bundle_signature(&pk, &v2_0, &sig.to_bytes()).is_err(),
-            "re-casting V2.1 bundle as V2.0 must not verify under the V2.1 signature");
+        assert!(
+            verify_plan_bundle_signature(&pk, &v2_0, &sig.to_bytes()).is_err(),
+            "re-casting V2.1 bundle as V2.0 must not verify under the V2.1 signature"
+        );
     }
 
     /// Domain separation against the V1 plan signing scheme: a
@@ -792,15 +839,17 @@ mod tests {
         let sk = SigningKey::from_bytes(&seed);
         let pk = sk.verifying_key().to_bytes();
 
-        let bundle    = fixture_v2_1_bundle();
+        let bundle = fixture_v2_1_bundle();
         let plan_toml = &bundle.artifacts[0].bytes;
 
         // V1-style signature over the plan bytes alone.
-        let v1_input  = crate::plan::plan_signing_input(plan_toml);
-        let v1_sig    = sk.sign(&v1_input);
+        let v1_input = crate::plan::plan_signing_input(plan_toml);
+        let v1_sig = sk.sign(&v1_input);
 
-        assert!(verify_plan_bundle_signature(&pk, &bundle, &v1_sig.to_bytes()).is_err(),
-            "V1 plan signature must not verify against the V2 bundle scheme");
+        assert!(
+            verify_plan_bundle_signature(&pk, &bundle, &v1_sig.to_bytes()).is_err(),
+            "V1 plan signature must not verify against the V2 bundle scheme"
+        );
     }
 
     // ── CSPRNG nonce minting ─────────────────────────────────────────
@@ -820,8 +869,10 @@ mod tests {
     fn mint_bundle_nonce_yields_distinct_values_in_practice() {
         let a = mint_bundle_nonce().unwrap();
         let b = mint_bundle_nonce().unwrap();
-        assert_ne!(a, b,
-            "two CSPRNG mints must (with overwhelming probability) be distinct");
+        assert_ne!(
+            a, b,
+            "two CSPRNG mints must (with overwhelming probability) be distinct"
+        );
     }
 
     // ── Wire-format pinning fixture ──────────────────────────────────
@@ -836,8 +887,8 @@ mod tests {
             0,
             String::new(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  Vec::new(),
+                name: "plan.toml".to_owned(),
+                bytes: Vec::new(),
                 sha256: sha256_of_artifact_bytes(&[]),
             }],
         );
@@ -845,19 +896,18 @@ mod tests {
 
         let mut expected = Vec::new();
         expected.extend_from_slice(b"RAXIS-V2-PLAN-BUNDLE\x00");
-        expected.extend_from_slice(&1u16.to_be_bytes());        // schema_version = 1
-        expected.extend_from_slice(&0u64.to_be_bytes());        // created_at_unix_secs
-        // (no envelope for V2.0)
-        expected.extend_from_slice(&0u32.to_be_bytes());        // plan_root_relpath len = 0
-        expected.extend_from_slice(&1u32.to_be_bytes());        // artifacts.len() = 1
-        expected.extend_from_slice(&9u32.to_be_bytes());        // name.len() = 9
+        expected.extend_from_slice(&1u16.to_be_bytes()); // schema_version = 1
+        expected.extend_from_slice(&0u64.to_be_bytes()); // created_at_unix_secs
+                                                         // (no envelope for V2.0)
+        expected.extend_from_slice(&0u32.to_be_bytes()); // plan_root_relpath len = 0
+        expected.extend_from_slice(&1u32.to_be_bytes()); // artifacts.len() = 1
+        expected.extend_from_slice(&9u32.to_be_bytes()); // name.len() = 9
         expected.extend_from_slice(b"plan.toml");
-        expected.extend_from_slice(&0u64.to_be_bytes());        // bytes.len() = 0
-        // (no body bytes)
+        expected.extend_from_slice(&0u64.to_be_bytes()); // bytes.len() = 0
+                                                         // (no body bytes)
         let empty_sha = sha256_of_artifact_bytes(&[]);
         expected.extend_from_slice(empty_sha.as_bytes());
 
-        assert_eq!(bytes, expected,
-            "V2.0 byte layout must match §3.2 exactly");
+        assert_eq!(bytes, expected, "V2.0 byte layout must match §3.2 exactly");
     }
 }

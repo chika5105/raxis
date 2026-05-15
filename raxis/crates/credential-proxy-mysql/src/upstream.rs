@@ -67,10 +67,10 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use raxis_credentials::{CredentialBackend, CredentialError, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
+use rsa::pkcs8::DecodePublicKey;
 use rsa::rand_core::OsRng;
 use rsa::{Oaep, RsaPublicKey};
-use rsa::pkcs8::DecodePublicKey;
 // Brings the `Digest` trait methods (`new`, `update`, `finalize`)
 // into scope for `Sha1`.  `Sha256` re-exports the same inherent
 // methods on the type itself (rustcrypto/hashes 0.10), so it does
@@ -80,8 +80,8 @@ use sha2::Sha256;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::wire::{self, frame_packet, MAX_PACKET_PAYLOAD};
 use crate::OwnedConsumer;
-use crate::wire::{self, MAX_PACKET_PAYLOAD, frame_packet};
 
 /// Maximum bytes we will buffer per upstream response. Mirrors the
 /// MySQL protocol's 16 MiB packet length cap; queries that produce
@@ -259,11 +259,17 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 { 1 }
-    else if lead < 0xc0 { 1 }
-    else if lead < 0xe0 { 2 }
-    else if lead < 0xf0 { 3 }
-    else { 4 }
+    if lead < 0x80 {
+        1
+    } else if lead < 0xc0 {
+        1
+    } else if lead < 0xe0 {
+        2
+    } else if lead < 0xf0 {
+        3
+    } else {
+        4
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -335,9 +341,9 @@ impl ParsedUpstreamUrl {
         let (host, port) = match authority.rfind(':') {
             Some(colon) => {
                 let h = &authority[..colon];
-                let p = authority[colon + 1..].parse::<u16>().map_err(|_| {
-                    UpstreamError::InvalidUrl("port is not a valid u16".into())
-                })?;
+                let p = authority[colon + 1..]
+                    .parse::<u16>()
+                    .map_err(|_| UpstreamError::InvalidUrl("port is not a valid u16".into()))?;
                 (h.to_owned(), p)
             }
             None => (authority.to_owned(), 3306u16),
@@ -470,16 +476,16 @@ pub struct ForwardOutcome {
 /// One live upstream session, held across the lifetime of the agent's
 /// connection (one upstream per agent in V2 — pooling is V3).
 pub struct UpstreamSession {
-    stream:        TcpStream,
+    stream: TcpStream,
     /// Hostname the audit envelope reports.
-    pub host:      String,
+    pub host: String,
     /// Port the audit envelope reports.
-    pub port:      u16,
+    pub port: u16,
     /// True if the URL requested TLS — V2.1 surfaces this in the
     /// audit envelope but the implementation only supports plaintext
     /// so far. A `?ssl-mode=REQUIRED` URL fails fast in `connect()`
     /// with `UpstreamError::Handshake`.
-    pub tls:       bool,
+    pub tls: bool,
     /// Wall-clock for the connect handshake — fed into
     /// `CredentialProxyUpstreamConnected.handshake_ms`.
     pub handshake_ms: u32,
@@ -511,17 +517,20 @@ impl UpstreamSession {
                 "?ssl-mode=REQUIRED is not supported by V2 MVP — \
                  terminate TLS host-side and connect to the proxy in \
                  plaintext, or wait for the TLS-to-upstream landing \
-                 path".into(),
+                 path"
+                    .into(),
             ));
         }
         let started = Instant::now();
         let connect_fut = async {
             let addr = format!("{}:{}", url.host, url.port);
-            let mut stream = TcpStream::connect(&addr).await
+            let mut stream = TcpStream::connect(&addr)
+                .await
                 .map_err(|e| UpstreamError::TcpConnect(redact_for_audit(&e.to_string())))?;
             // Drive the handshake. The first packet (seq=0) is the
             // upstream's HandshakeV10 greeting.
-            let (server_seq, greeting_payload) = read_packet(&mut stream).await
+            let (server_seq, greeting_payload) = read_packet(&mut stream)
+                .await
                 .map_err(|e| UpstreamError::Handshake(format!("read greeting: {e}")))?;
             if server_seq != 0 {
                 return Err(UpstreamError::Handshake(format!(
@@ -548,18 +557,17 @@ impl UpstreamSession {
                         url.database.as_deref(),
                         &greeting.scramble,
                     );
-                    stream.write_all(&frame_packet(&resp, 1)).await
-                        .map_err(|e| UpstreamError::RelayFailed(
-                            redact_for_audit(&e.to_string()),
-                        ))?;
+                    stream
+                        .write_all(&frame_packet(&resp, 1))
+                        .await
+                        .map_err(|e| {
+                            UpstreamError::RelayFailed(redact_for_audit(&e.to_string()))
+                        })?;
                     stream.flush().await.ok();
-                    let (_seq, payload) = read_packet(&mut stream).await
-                        .map_err(|e| UpstreamError::Handshake(
-                            format!("read auth result: {e}"),
-                        ))?;
-                    handle_native_auth_result(
-                        &mut stream, payload, url.password_bytes(),
-                    ).await?;
+                    let (_seq, payload) = read_packet(&mut stream)
+                        .await
+                        .map_err(|e| UpstreamError::Handshake(format!("read auth result: {e}")))?;
+                    handle_native_auth_result(&mut stream, payload, url.password_bytes()).await?;
                 }
                 AUTH_PLUGIN_SHA256_CACHING => {
                     let resp = build_handshake_response_41_sha256(
@@ -568,17 +576,20 @@ impl UpstreamSession {
                         url.database.as_deref(),
                         &greeting.scramble,
                     );
-                    stream.write_all(&frame_packet(&resp, 1)).await
-                        .map_err(|e| UpstreamError::RelayFailed(
-                            redact_for_audit(&e.to_string()),
-                        ))?;
+                    stream
+                        .write_all(&frame_packet(&resp, 1))
+                        .await
+                        .map_err(|e| {
+                            UpstreamError::RelayFailed(redact_for_audit(&e.to_string()))
+                        })?;
                     stream.flush().await.ok();
                     drive_caching_sha2_auth(
                         &mut stream,
                         url.password_bytes(),
                         &greeting.scramble,
                         2, // initial seq for the next packet
-                    ).await?;
+                    )
+                    .await?;
                 }
                 other => {
                     return Err(UpstreamError::Handshake(format!(
@@ -610,16 +621,15 @@ impl UpstreamSession {
 
     /// Forward a SQL string as `COM_QUERY` to the upstream and
     /// collect every response frame.
-    pub async fn forward_query(
-        &mut self,
-        sql: &[u8],
-    ) -> Result<ForwardOutcome, UpstreamError> {
+    pub async fn forward_query(&mut self, sql: &[u8]) -> Result<ForwardOutcome, UpstreamError> {
         let started = Instant::now();
         // Build COM_QUERY (cmd byte + sql) at seq=0.
         let mut payload = Vec::with_capacity(1 + sql.len());
         payload.push(wire::cmd::QUERY);
         payload.extend_from_slice(sql);
-        self.stream.write_all(&frame_packet(&payload, 0)).await
+        self.stream
+            .write_all(&frame_packet(&payload, 0))
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
 
@@ -630,13 +640,14 @@ impl UpstreamSession {
         let mut bytes_returned: u64 = 0;
         let mut row_count: u64 = 0;
         // Read first packet of response.
-        let (seq0, p0) = read_packet(&mut self.stream).await
+        let (seq0, p0) = read_packet(&mut self.stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read response: {e}")))?;
         bytes_returned += 4 + p0.len() as u64;
         if bytes_returned > MAX_RELAY_BYTES {
             return Err(UpstreamError::PayloadTooLarge {
                 bytes: bytes_returned,
-                max:   MAX_RELAY_BYTES,
+                max: MAX_RELAY_BYTES,
             });
         }
         // ERR_Packet: terminal. Forward to agent verbatim and surface
@@ -674,10 +685,11 @@ impl UpstreamSession {
             ));
         }
         // Otherwise it's a ResultSetHeader: lenenc int = column count.
-        let (column_count, _) = decode_lenenc_int(&p0)
-            .ok_or_else(|| UpstreamError::Handshake(
+        let (column_count, _) = decode_lenenc_int(&p0).ok_or_else(|| {
+            UpstreamError::Handshake(
                 "malformed ResultSetHeader: expected lenenc column count".into(),
-            ))?;
+            )
+        })?;
         if column_count == 0 || column_count > 4096 {
             return Err(UpstreamError::Handshake(format!(
                 "implausible column count {column_count} in ResultSetHeader"
@@ -687,19 +699,22 @@ impl UpstreamSession {
         // Read column_count column-definition packets.
         let mut next_seq = seq0.wrapping_add(1);
         for _ in 0..column_count {
-            let (seq, p) = read_packet(&mut self.stream).await
+            let (seq, p) = read_packet(&mut self.stream)
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(format!("read coldef: {e}")))?;
             bytes_returned += 4 + p.len() as u64;
             if bytes_returned > MAX_RELAY_BYTES {
                 return Err(UpstreamError::PayloadTooLarge {
-                    bytes: bytes_returned, max: MAX_RELAY_BYTES,
+                    bytes: bytes_returned,
+                    max: MAX_RELAY_BYTES,
                 });
             }
             frames.push(frame_packet(&p, seq));
             next_seq = seq.wrapping_add(1);
         }
         // Expect EOF marking end of column definitions.
-        let (eof_seq, eof_payload) = read_packet(&mut self.stream).await
+        let (eof_seq, eof_payload) = read_packet(&mut self.stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read eof: {e}")))?;
         if !is_eof_packet(&eof_payload) {
             return Err(UpstreamError::Handshake(
@@ -711,12 +726,14 @@ impl UpstreamSession {
         // Read row packets until we see EOF or ERR.
         let _ = next_seq;
         loop {
-            let (seq, p) = read_packet(&mut self.stream).await
+            let (seq, p) = read_packet(&mut self.stream)
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(format!("read row: {e}")))?;
             bytes_returned += 4 + p.len() as u64;
             if bytes_returned > MAX_RELAY_BYTES {
                 return Err(UpstreamError::PayloadTooLarge {
-                    bytes: bytes_returned, max: MAX_RELAY_BYTES,
+                    bytes: bytes_returned,
+                    max: MAX_RELAY_BYTES,
                 });
             }
             if is_eof_packet(&p) {
@@ -769,17 +786,23 @@ impl UpstreamSession {
         let mut payload = Vec::with_capacity(1 + sql.len());
         payload.push(wire::cmd::STMT_PREPARE);
         payload.extend_from_slice(sql);
-        self.stream.write_all(&frame_packet(&payload, 0)).await
+        self.stream
+            .write_all(&frame_packet(&payload, 0))
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
 
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut bytes_returned: u64 = 0;
-        let (seq0, p0) = read_packet(&mut self.stream).await
+        let (seq0, p0) = read_packet(&mut self.stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read response: {e}")))?;
         bytes_returned += 4 + p0.len() as u64;
         if bytes_returned > MAX_RELAY_BYTES {
-            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+            return Err(UpstreamError::PayloadTooLarge {
+                bytes: bytes_returned,
+                max: MAX_RELAY_BYTES,
+            });
         }
 
         // ERR_Packet: terminal.
@@ -788,7 +811,10 @@ impl UpstreamSession {
             frames.push(frame_packet(&p0, seq0));
             let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
             return Ok(ForwardOutcome {
-                frames, rows_returned: 0, bytes_returned, duration_ms,
+                frames,
+                rows_returned: 0,
+                bytes_returned,
+                duration_ms,
                 upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
             });
         }
@@ -807,28 +833,35 @@ impl UpstreamSession {
             ));
         }
         let num_columns = u16::from_le_bytes([p0[5], p0[6]]) as usize;
-        let num_params  = u16::from_le_bytes([p0[7], p0[8]]) as usize;
+        let num_params = u16::from_le_bytes([p0[7], p0[8]]) as usize;
         frames.push(frame_packet(&p0, seq0));
 
         // num_params ParamDef packets, optionally followed by EOF.
         if num_params > 0 {
             for _ in 0..num_params {
-                let (seq, p) = read_packet(&mut self.stream).await
+                let (seq, p) = read_packet(&mut self.stream)
+                    .await
                     .map_err(|e| UpstreamError::RelayFailed(format!("read paramdef: {e}")))?;
                 bytes_returned += 4 + p.len() as u64;
                 if bytes_returned > MAX_RELAY_BYTES {
-                    return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+                    return Err(UpstreamError::PayloadTooLarge {
+                        bytes: bytes_returned,
+                        max: MAX_RELAY_BYTES,
+                    });
                 }
                 frames.push(frame_packet(&p, seq));
             }
             // EOF terminator for the param defs (only when
             // CLIENT_DEPRECATE_EOF is NOT advertised — the proxy
             // does not advertise it, see CLIENT_CAPS).
-            let (eof_seq, eof_p) = read_packet(&mut self.stream).await
+            let (eof_seq, eof_p) = read_packet(&mut self.stream)
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(format!("read paramdef eof: {e}")))?;
             bytes_returned += 4 + eof_p.len() as u64;
             if !is_eof_packet(&eof_p) {
-                return Err(UpstreamError::Handshake("expected EOF after param defs".into()));
+                return Err(UpstreamError::Handshake(
+                    "expected EOF after param defs".into(),
+                ));
             }
             frames.push(frame_packet(&eof_p, eof_seq));
         }
@@ -836,26 +869,37 @@ impl UpstreamSession {
         // num_columns ColumnDef packets, optionally followed by EOF.
         if num_columns > 0 {
             for _ in 0..num_columns {
-                let (seq, p) = read_packet(&mut self.stream).await
+                let (seq, p) = read_packet(&mut self.stream)
+                    .await
                     .map_err(|e| UpstreamError::RelayFailed(format!("read coldef: {e}")))?;
                 bytes_returned += 4 + p.len() as u64;
                 if bytes_returned > MAX_RELAY_BYTES {
-                    return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+                    return Err(UpstreamError::PayloadTooLarge {
+                        bytes: bytes_returned,
+                        max: MAX_RELAY_BYTES,
+                    });
                 }
                 frames.push(frame_packet(&p, seq));
             }
-            let (eof_seq, eof_p) = read_packet(&mut self.stream).await
+            let (eof_seq, eof_p) = read_packet(&mut self.stream)
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(format!("read coldef eof: {e}")))?;
             bytes_returned += 4 + eof_p.len() as u64;
             if !is_eof_packet(&eof_p) {
-                return Err(UpstreamError::Handshake("expected EOF after col defs".into()));
+                return Err(UpstreamError::Handshake(
+                    "expected EOF after col defs".into(),
+                ));
             }
             frames.push(frame_packet(&eof_p, eof_seq));
         }
 
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         Ok(ForwardOutcome {
-            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error: None,
+            frames,
+            rows_returned: 0,
+            bytes_returned,
+            duration_ms,
+            upstream_error: None,
         })
     }
 
@@ -896,25 +940,34 @@ impl UpstreamSession {
             ));
         }
         let started = Instant::now();
-        self.stream.write_all(&frame_packet(body, 0)).await
+        self.stream
+            .write_all(&frame_packet(body, 0))
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
         let mut frames: Vec<Vec<u8>> = Vec::new();
         let mut bytes_returned: u64 = 0;
         let mut rows_returned: u64 = 0;
         loop {
-            let (seq, p) = read_packet(&mut self.stream).await
+            let (seq, p) = read_packet(&mut self.stream)
+                .await
                 .map_err(|e| UpstreamError::RelayFailed(format!("read row: {e}")))?;
             bytes_returned += 4 + p.len() as u64;
             if bytes_returned > MAX_RELAY_BYTES {
-                return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+                return Err(UpstreamError::PayloadTooLarge {
+                    bytes: bytes_returned,
+                    max: MAX_RELAY_BYTES,
+                });
             }
             if !p.is_empty() && p[0] == 0xff {
                 let (code, sqlstate, message) = parse_err_packet(&p);
                 frames.push(frame_packet(&p, seq));
                 let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
                 return Ok(ForwardOutcome {
-                    frames, rows_returned, bytes_returned, duration_ms,
+                    frames,
+                    rows_returned,
+                    bytes_returned,
+                    duration_ms,
                     upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
                 });
             }
@@ -925,7 +978,13 @@ impl UpstreamSession {
             rows_returned += 1;
         }
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
-        Ok(ForwardOutcome { frames, rows_returned, bytes_returned, duration_ms, upstream_error: None })
+        Ok(ForwardOutcome {
+            frames,
+            rows_returned,
+            bytes_returned,
+            duration_ms,
+            upstream_error: None,
+        })
     }
 
     /// Forward a `COM_STMT_RESET` body to the upstream and collect
@@ -940,10 +999,13 @@ impl UpstreamSession {
             ));
         }
         let started = Instant::now();
-        self.stream.write_all(&frame_packet(body, 0)).await
+        self.stream
+            .write_all(&frame_packet(body, 0))
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
-        let (seq, p) = read_packet(&mut self.stream).await
+        let (seq, p) = read_packet(&mut self.stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read reset reply: {e}")))?;
         let bytes_returned = 4 + p.len() as u64;
         let mut frames = Vec::new();
@@ -956,7 +1018,11 @@ impl UpstreamSession {
         frames.push(frame_packet(&p, seq));
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         Ok(ForwardOutcome {
-            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error,
+            frames,
+            rows_returned: 0,
+            bytes_returned,
+            duration_ms,
+            upstream_error,
         })
     }
 
@@ -976,13 +1042,18 @@ impl UpstreamSession {
             ));
         }
         let started = Instant::now();
-        self.stream.write_all(&frame_packet(body, 0)).await
+        self.stream
+            .write_all(&frame_packet(body, 0))
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         Ok(ForwardOutcome {
-            frames: Vec::new(), rows_returned: 0, bytes_returned: 0,
-            duration_ms, upstream_error: None,
+            frames: Vec::new(),
+            rows_returned: 0,
+            bytes_returned: 0,
+            duration_ms,
+            upstream_error: None,
         })
     }
 
@@ -1008,25 +1079,34 @@ async fn forward_with_resultset_response(
     body: &[u8],
 ) -> Result<ForwardOutcome, UpstreamError> {
     let started = Instant::now();
-    stream.write_all(&frame_packet(body, 0)).await
+    stream
+        .write_all(&frame_packet(body, 0))
+        .await
         .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
     stream.flush().await.ok();
 
     let mut frames: Vec<Vec<u8>> = Vec::new();
     let mut bytes_returned: u64 = 0;
     let mut rows_returned: u64 = 0;
-    let (seq0, p0) = read_packet(stream).await
+    let (seq0, p0) = read_packet(stream)
+        .await
         .map_err(|e| UpstreamError::RelayFailed(format!("read response: {e}")))?;
     bytes_returned += 4 + p0.len() as u64;
     if bytes_returned > MAX_RELAY_BYTES {
-        return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+        return Err(UpstreamError::PayloadTooLarge {
+            bytes: bytes_returned,
+            max: MAX_RELAY_BYTES,
+        });
     }
     if !p0.is_empty() && p0[0] == 0xff {
         let (code, sqlstate, message) = parse_err_packet(&p0);
         frames.push(frame_packet(&p0, seq0));
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         return Ok(ForwardOutcome {
-            frames, rows_returned: 0, bytes_returned, duration_ms,
+            frames,
+            rows_returned: 0,
+            bytes_returned,
+            duration_ms,
             upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
         });
     }
@@ -1034,7 +1114,11 @@ async fn forward_with_resultset_response(
         frames.push(frame_packet(&p0, seq0));
         let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
         return Ok(ForwardOutcome {
-            frames, rows_returned: 0, bytes_returned, duration_ms, upstream_error: None,
+            frames,
+            rows_returned: 0,
+            bytes_returned,
+            duration_ms,
+            upstream_error: None,
         });
     }
     if !p0.is_empty() && p0[0] == 0xfb {
@@ -1042,10 +1126,9 @@ async fn forward_with_resultset_response(
             "LOCAL INFILE Request from upstream is not supported by V2.1 proxy".into(),
         ));
     }
-    let (column_count, _) = decode_lenenc_int(&p0)
-        .ok_or_else(|| UpstreamError::Handshake(
-            "malformed ResultSetHeader: expected lenenc column count".into(),
-        ))?;
+    let (column_count, _) = decode_lenenc_int(&p0).ok_or_else(|| {
+        UpstreamError::Handshake("malformed ResultSetHeader: expected lenenc column count".into())
+    })?;
     if column_count == 0 || column_count > 4096 {
         return Err(UpstreamError::Handshake(format!(
             "implausible column count {column_count} in ResultSetHeader"
@@ -1053,15 +1136,20 @@ async fn forward_with_resultset_response(
     }
     frames.push(frame_packet(&p0, seq0));
     for _ in 0..column_count {
-        let (seq, p) = read_packet(stream).await
+        let (seq, p) = read_packet(stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read coldef: {e}")))?;
         bytes_returned += 4 + p.len() as u64;
         if bytes_returned > MAX_RELAY_BYTES {
-            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+            return Err(UpstreamError::PayloadTooLarge {
+                bytes: bytes_returned,
+                max: MAX_RELAY_BYTES,
+            });
         }
         frames.push(frame_packet(&p, seq));
     }
-    let (eof_seq, eof_payload) = read_packet(stream).await
+    let (eof_seq, eof_payload) = read_packet(stream)
+        .await
         .map_err(|e| UpstreamError::RelayFailed(format!("read eof: {e}")))?;
     if !is_eof_packet(&eof_payload) {
         return Err(UpstreamError::Handshake(
@@ -1071,11 +1159,15 @@ async fn forward_with_resultset_response(
     bytes_returned += 4 + eof_payload.len() as u64;
     frames.push(frame_packet(&eof_payload, eof_seq));
     loop {
-        let (seq, p) = read_packet(stream).await
+        let (seq, p) = read_packet(stream)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read row: {e}")))?;
         bytes_returned += 4 + p.len() as u64;
         if bytes_returned > MAX_RELAY_BYTES {
-            return Err(UpstreamError::PayloadTooLarge { bytes: bytes_returned, max: MAX_RELAY_BYTES });
+            return Err(UpstreamError::PayloadTooLarge {
+                bytes: bytes_returned,
+                max: MAX_RELAY_BYTES,
+            });
         }
         if is_eof_packet(&p) {
             frames.push(frame_packet(&p, seq));
@@ -1086,7 +1178,10 @@ async fn forward_with_resultset_response(
             frames.push(frame_packet(&p, seq));
             let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
             return Ok(ForwardOutcome {
-                frames, rows_returned, bytes_returned, duration_ms,
+                frames,
+                rows_returned,
+                bytes_returned,
+                duration_ms,
                 upstream_error: Some((code, sqlstate, redact_for_audit(&message))),
             });
         }
@@ -1095,7 +1190,11 @@ async fn forward_with_resultset_response(
     }
     let duration_ms = started.elapsed().as_millis().min(u32::MAX as u128) as u32;
     Ok(ForwardOutcome {
-        frames, rows_returned, bytes_returned, duration_ms, upstream_error: None,
+        frames,
+        rows_returned,
+        bytes_returned,
+        duration_ms,
+        upstream_error: None,
     })
 }
 
@@ -1108,8 +1207,8 @@ async fn forward_with_resultset_response(
 /// supports it) and reject the connection otherwise — the proxy
 /// would not know how to encode `HandshakeResponse41` against an
 /// upstream that is so old it predates the 4.1 protocol.
-const CLIENT_PROTOCOL_41:        u32 = 1 << 9;
-const CLIENT_PLUGIN_AUTH:        u32 = 1 << 19;
+const CLIENT_PROTOCOL_41: u32 = 1 << 9;
+const CLIENT_PLUGIN_AUTH: u32 = 1 << 19;
 
 /// `CLIENT_SSL` (bit 11) — the proxy MUST NEVER advertise this. If
 /// it does, the upstream enters its TLS-negotiation state after the
@@ -1125,7 +1224,7 @@ const CLIENT_PLUGIN_AUTH:        u32 = 1 << 19;
 /// constant is carried here so a future change that mistakenly
 /// adds it back fails the bit-position assertion in the unit test.
 #[allow(dead_code)]
-const CLIENT_SSL_FORBIDDEN_BIT:  u32 = 1 << 11;
+const CLIENT_SSL_FORBIDDEN_BIT: u32 = 1 << 11;
 /// `CLIENT_COMPRESS` (bit 5) — also FORBIDDEN. Advertising it
 /// commits the proxy to wrapping every subsequent packet in a
 /// 7-byte zlib-compressed packet header (`[MS-MYS] 4.4`), which the
@@ -1140,10 +1239,14 @@ const CLIENT_COMPRESS_FORBIDDEN_BIT: u32 = 1 << 5;
 /// `CLIENT_CAPS`. (Trivially zero today; the assertions are kept
 /// to fail fast on regression.)
 const _: () = {
-    assert!(CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT == 0,
-        "CLIENT_SSL must NEVER be in upstream caps");
-    assert!(CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT == 0,
-        "CLIENT_COMPRESS must NEVER be in upstream caps");
+    assert!(
+        CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT == 0,
+        "CLIENT_SSL must NEVER be in upstream caps"
+    );
+    assert!(
+        CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT == 0,
+        "CLIENT_COMPRESS must NEVER be in upstream caps"
+    );
 };
 
 /// Capability flags the proxy advertises to the upstream.
@@ -1222,33 +1325,44 @@ fn parse_handshake_v10(payload: &[u8]) -> Result<HandshakeV10Greeting, UpstreamE
             return Err(UpstreamError::Handshake(redact_for_audit(&message)));
         }
         return Err(UpstreamError::Handshake(format!(
-            "unsupported protocol version {}", payload[0]
+            "unsupported protocol version {}",
+            payload[0]
         )));
     }
     let mut i = 1;
     // server_version: NUL-terminated string.
-    let nul = payload[i..].iter().position(|&b| b == 0)
+    let nul = payload[i..]
+        .iter()
+        .position(|&b| b == 0)
         .ok_or_else(|| UpstreamError::Handshake("missing server_version NUL".into()))?;
     i += nul + 1;
     // thread_id: 4 bytes LE.
     if i + 4 > payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at thread_id".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at thread_id".into(),
+        ));
     }
     i += 4;
     // auth_plugin_data_part_1: 8 bytes.
     if i + 8 > payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at auth_plugin_data_part_1".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at auth_plugin_data_part_1".into(),
+        ));
     }
     let scramble1 = payload[i..i + 8].to_vec();
     i += 8;
     // filler: 1 byte.
     if i >= payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at filler".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at filler".into(),
+        ));
     }
     i += 1;
     // capability_flags_lower: 2 bytes LE.
     if i + 2 > payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at cap_lower".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at cap_lower".into(),
+        ));
     }
     let cap_lower = u16::from_le_bytes([payload[i], payload[i + 1]]) as u32;
     i += 2;
@@ -1260,7 +1374,9 @@ fn parse_handshake_v10(payload: &[u8]) -> Result<HandshakeV10Greeting, UpstreamE
     }
     // character_set: 1 byte; status_flags: 2 bytes; cap_upper: 2 bytes.
     if i + 5 > payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at char/status/cap_upper".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at char/status/cap_upper".into(),
+        ));
     }
     let _charset = payload[i];
     i += 1;
@@ -1276,13 +1392,17 @@ fn parse_handshake_v10(payload: &[u8]) -> Result<HandshakeV10Greeting, UpstreamE
     }
     // auth_plugin_data_len: 1 byte.
     if i >= payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at auth_plugin_data_len".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at auth_plugin_data_len".into(),
+        ));
     }
     let auth_plugin_data_len = payload[i] as usize;
     i += 1;
     // 10 reserved bytes.
     if i + 10 > payload.len() {
-        return Err(UpstreamError::Handshake("greeting truncated at reserved".into()));
+        return Err(UpstreamError::Handshake(
+            "greeting truncated at reserved".into(),
+        ));
     }
     i += 10;
     // auth_plugin_data_part_2: max(13, auth_plugin_data_len - 8) bytes.
@@ -1323,7 +1443,7 @@ fn parse_handshake_v10(payload: &[u8]) -> Result<HandshakeV10Greeting, UpstreamE
 /// Auth-plugin name strings the proxy understands. These are pinned
 /// here so a typo at the AuthSwitchRequest dispatch site fails to
 /// compile rather than fails-open as "unknown plugin".
-const AUTH_PLUGIN_NATIVE:         &str = "mysql_native_password";
+const AUTH_PLUGIN_NATIVE: &str = "mysql_native_password";
 const AUTH_PLUGIN_SHA256_CACHING: &str = "caching_sha2_password";
 
 /// Build a `HandshakeResponse41` payload for the proxy → upstream
@@ -1339,12 +1459,7 @@ fn build_handshake_response_41_native(
     } else {
         mysql_native_password_scramble(password, scramble)
     };
-    build_handshake_response_41(
-        user,
-        &auth,
-        database,
-        AUTH_PLUGIN_NATIVE,
-    )
+    build_handshake_response_41(user, &auth, database, AUTH_PLUGIN_NATIVE)
 }
 
 /// Build a `HandshakeResponse41` payload for the proxy → upstream
@@ -1364,12 +1479,7 @@ fn build_handshake_response_41_sha256(
     } else {
         caching_sha2_password_scramble(password, scramble)
     };
-    build_handshake_response_41(
-        user,
-        &auth,
-        database,
-        AUTH_PLUGIN_SHA256_CACHING,
-    )
+    build_handshake_response_41(user, &auth, database, AUTH_PLUGIN_SHA256_CACHING)
 }
 
 /// Shared HandshakeResponse41 builder.  Caller supplies the already-
@@ -1377,10 +1487,10 @@ fn build_handshake_response_41_sha256(
 /// `CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA`) and the plugin name
 /// string the response advertises.
 fn build_handshake_response_41(
-    user:          &str,
+    user: &str,
     auth_response: &[u8],
-    database:      Option<&str>,
-    plugin_name:   &str,
+    database: Option<&str>,
+    plugin_name: &str,
 ) -> Vec<u8> {
     let mut caps = CLIENT_CAPS;
     if database.is_some() {
@@ -1389,9 +1499,11 @@ fn build_handshake_response_41(
         caps &= !(1 << 3);
     }
     let mut buf = Vec::with_capacity(
-        64 + user.len() + auth_response.len()
-        + database.map(str::len).unwrap_or(0)
-        + plugin_name.len() + 1,
+        64 + user.len()
+            + auth_response.len()
+            + database.map(str::len).unwrap_or(0)
+            + plugin_name.len()
+            + 1,
     );
     buf.extend_from_slice(&caps.to_le_bytes());
     // max_packet_size: 16 MiB.
@@ -1513,15 +1625,16 @@ async fn handle_native_auth_result(
                     // Re-do native with the new scramble at seq=3.
                     let scramble = take_scramble(plugin_data);
                     let auth = mysql_native_password_scramble(password, scramble);
-                    stream.write_all(&frame_packet(&auth, 3)).await
-                        .map_err(|e| UpstreamError::RelayFailed(
-                            redact_for_audit(&e.to_string()),
-                        ))?;
+                    stream
+                        .write_all(&frame_packet(&auth, 3))
+                        .await
+                        .map_err(|e| {
+                            UpstreamError::RelayFailed(redact_for_audit(&e.to_string()))
+                        })?;
                     stream.flush().await.ok();
-                    let (_seq, p) = read_packet(stream).await
-                        .map_err(|e| UpstreamError::Handshake(
-                            format!("read auth-switch result: {e}"),
-                        ))?;
+                    let (_seq, p) = read_packet(stream).await.map_err(|e| {
+                        UpstreamError::Handshake(format!("read auth-switch result: {e}"))
+                    })?;
                     classify_terminal_auth_packet(&p)
                 }
                 AUTH_PLUGIN_SHA256_CACHING => {
@@ -1530,10 +1643,12 @@ async fn handle_native_auth_result(
                     // and drive the rest of the state machine.
                     let scramble = take_scramble(plugin_data);
                     let auth = caching_sha2_password_scramble(password, scramble);
-                    stream.write_all(&frame_packet(&auth, 3)).await
-                        .map_err(|e| UpstreamError::RelayFailed(
-                            redact_for_audit(&e.to_string()),
-                        ))?;
+                    stream
+                        .write_all(&frame_packet(&auth, 3))
+                        .await
+                        .map_err(|e| {
+                            UpstreamError::RelayFailed(redact_for_audit(&e.to_string()))
+                        })?;
                     stream.flush().await.ok();
                     drive_caching_sha2_auth(stream, password, scramble, 4).await
                 }
@@ -1580,15 +1695,14 @@ fn take_scramble(plugin_data: &[u8]) -> &[u8] {
 ///        RSA-OAEP-SHA1 and send.
 ///     4. Read the terminal OK / ERR.
 async fn drive_caching_sha2_auth(
-    stream:   &mut TcpStream,
+    stream: &mut TcpStream,
     password: &[u8],
     scramble: &[u8],
     next_seq: u8,
 ) -> Result<(), UpstreamError> {
-    let (seq, payload) = read_packet(stream).await
-        .map_err(|e| UpstreamError::Handshake(
-            format!("read caching_sha2 auth indicator: {e}"),
-        ))?;
+    let (seq, payload) = read_packet(stream)
+        .await
+        .map_err(|e| UpstreamError::Handshake(format!("read caching_sha2 auth indicator: {e}")))?;
     if payload.is_empty() {
         return Err(UpstreamError::Handshake(
             "empty caching_sha2 auth indicator".into(),
@@ -1615,10 +1729,9 @@ async fn drive_caching_sha2_auth(
                 0x03 => {
                     // Fast auth success.  Next packet is the terminal
                     // OK or ERR.
-                    let (_seq, p) = read_packet(stream).await
-                        .map_err(|e| UpstreamError::Handshake(
-                            format!("read caching_sha2 fast-auth result: {e}"),
-                        ))?;
+                    let (_seq, p) = read_packet(stream).await.map_err(|e| {
+                        UpstreamError::Handshake(format!("read caching_sha2 fast-auth result: {e}"))
+                    })?;
                     classify_terminal_auth_packet(&p)
                 }
                 0x04 => {
@@ -1627,9 +1740,7 @@ async fn drive_caching_sha2_auth(
                     // yet — the caller checked `url.require_tls`),
                     // so we must do the RSA leg.
                     let public_key_seq = seq.wrapping_add(1);
-                    full_auth_via_rsa(
-                        stream, password, scramble, public_key_seq,
-                    ).await
+                    full_auth_via_rsa(stream, password, scramble, public_key_seq).await
                 }
                 other => Err(UpstreamError::Handshake(format!(
                     "unexpected caching_sha2 AuthMoreData indicator \
@@ -1656,36 +1767,34 @@ async fn drive_caching_sha2_auth(
 ///   4. Send the ciphertext at `request_seq + 2`.
 ///   5. Read the terminal OK / ERR.
 async fn full_auth_via_rsa(
-    stream:      &mut TcpStream,
-    password:    &[u8],
-    scramble:    &[u8],
+    stream: &mut TcpStream,
+    password: &[u8],
+    scramble: &[u8],
     request_seq: u8,
 ) -> Result<(), UpstreamError> {
     // Step 1: ask for the public key.
-    stream.write_all(&frame_packet(&[0x02u8], request_seq)).await
+    stream
+        .write_all(&frame_packet(&[0x02u8], request_seq))
+        .await
         .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
     stream.flush().await.ok();
 
     // Step 2: read the key.  Layout: `0x01 || PEM bytes` per the
     // MySQL `caching_sha2_password` plugin.  Some servers omit the
     // `0x01` prefix; tolerate both.
-    let (_seq, payload) = read_packet(stream).await
-        .map_err(|e| UpstreamError::Handshake(
-            format!("read RSA public-key reply: {e}"),
-        ))?;
+    let (_seq, payload) = read_packet(stream)
+        .await
+        .map_err(|e| UpstreamError::Handshake(format!("read RSA public-key reply: {e}")))?;
     let pem_bytes: &[u8] = if !payload.is_empty() && payload[0] == 0x01 {
         &payload[1..]
     } else {
         &payload[..]
     };
-    let pem = std::str::from_utf8(pem_bytes)
-        .map_err(|_| UpstreamError::Handshake(
-            "RSA public-key payload is not valid UTF-8".into(),
-        ))?;
+    let pem = std::str::from_utf8(pem_bytes).map_err(|_| {
+        UpstreamError::Handshake("RSA public-key payload is not valid UTF-8".into())
+    })?;
     let key = RsaPublicKey::from_public_key_pem(pem.trim())
-        .map_err(|e| UpstreamError::Handshake(
-            format!("RSA public-key parse: {e}"),
-        ))?;
+        .map_err(|e| UpstreamError::Handshake(format!("RSA public-key parse: {e}")))?;
 
     // Step 3: build the plaintext payload — password including the
     // trailing NUL (per MySQL's RSA leg), XOR'd against the scramble
@@ -1704,23 +1813,23 @@ async fn full_auth_via_rsa(
     // default of `Oaep::new::<Sha1>()`.
     let mut rng = OsRng;
     let padding = Oaep::new::<Sha1>();
-    let cipher = key.encrypt(&mut rng, padding, &plain)
-        .map_err(|e| UpstreamError::Handshake(
-            format!("RSA-OAEP encrypt: {e}"),
-        ))?;
+    let cipher = key
+        .encrypt(&mut rng, padding, &plain)
+        .map_err(|e| UpstreamError::Handshake(format!("RSA-OAEP encrypt: {e}")))?;
 
     // Step 4: send the ciphertext.  +2 because the server's
     // public-key packet was at request_seq+1.
     let send_seq = request_seq.wrapping_add(2);
-    stream.write_all(&frame_packet(&cipher, send_seq)).await
+    stream
+        .write_all(&frame_packet(&cipher, send_seq))
+        .await
         .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
     stream.flush().await.ok();
 
     // Step 5: read the terminal auth result.
-    let (_seq, p) = read_packet(stream).await
-        .map_err(|e| UpstreamError::Handshake(
-            format!("read caching_sha2 RSA-auth result: {e}"),
-        ))?;
+    let (_seq, p) = read_packet(stream)
+        .await
+        .map_err(|e| UpstreamError::Handshake(format!("read caching_sha2 RSA-auth result: {e}")))?;
     classify_terminal_auth_packet(&p)
 }
 
@@ -1747,10 +1856,9 @@ fn classify_terminal_auth_packet(payload: &[u8]) -> Result<(), UpstreamError> {
 
 /// Parse an `AuthSwitchRequest` payload (without the 0xfe header).
 fn parse_auth_switch_request(body: &[u8]) -> Result<(String, &[u8]), UpstreamError> {
-    let nul = body.iter().position(|&b| b == 0)
-        .ok_or_else(|| UpstreamError::Handshake(
-            "AuthSwitchRequest missing plugin name NUL".into(),
-        ))?;
+    let nul = body.iter().position(|&b| b == 0).ok_or_else(|| {
+        UpstreamError::Handshake("AuthSwitchRequest missing plugin name NUL".into())
+    })?;
     let plugin = std::str::from_utf8(&body[..nul])
         .map_err(|_| UpstreamError::Handshake("non-utf8 plugin name".into()))?
         .to_owned();
@@ -1765,9 +1873,7 @@ fn parse_auth_switch_request(body: &[u8]) -> Result<(String, &[u8]), UpstreamErr
 async fn read_packet(stream: &mut TcpStream) -> std::io::Result<(u8, Vec<u8>)> {
     let mut header = [0u8; 4];
     stream.read_exact(&mut header).await?;
-    let len = (header[0] as usize)
-        | ((header[1] as usize) << 8)
-        | ((header[2] as usize) << 16);
+    let len = (header[0] as usize) | ((header[1] as usize) << 8) | ((header[2] as usize) << 16);
     let seq = header[3];
     if len > MAX_PACKET_PAYLOAD {
         return Err(std::io::Error::new(
@@ -1790,24 +1896,17 @@ fn decode_lenenc_int(buf: &[u8]) -> Option<(u64, usize)> {
     }
     match buf[0] {
         0..=250 => Some((buf[0] as u64, 1)),
-        0xfc if buf.len() >= 3 => {
-            Some((u16::from_le_bytes([buf[1], buf[2]]) as u64, 3))
-        }
-        0xfd if buf.len() >= 4 => {
-            Some((
-                (buf[1] as u64) | ((buf[2] as u64) << 8) | ((buf[3] as u64) << 16),
-                4,
-            ))
-        }
-        0xfe if buf.len() >= 9 => {
-            Some((
-                u64::from_le_bytes([
-                    buf[1], buf[2], buf[3], buf[4],
-                    buf[5], buf[6], buf[7], buf[8],
-                ]),
-                9,
-            ))
-        }
+        0xfc if buf.len() >= 3 => Some((u16::from_le_bytes([buf[1], buf[2]]) as u64, 3)),
+        0xfd if buf.len() >= 4 => Some((
+            (buf[1] as u64) | ((buf[2] as u64) << 8) | ((buf[3] as u64) << 16),
+            4,
+        )),
+        0xfe if buf.len() >= 9 => Some((
+            u64::from_le_bytes([
+                buf[1], buf[2], buf[3], buf[4], buf[5], buf[6], buf[7], buf[8],
+            ]),
+            9,
+        )),
         _ => None,
     }
 }
@@ -1886,9 +1985,7 @@ mod tests {
 
     #[test]
     fn parse_url_ssl_required_marks_tls() {
-        let p = ParsedUpstreamUrl::parse(
-            "mysql://demo:hunter2@db/mydb?ssl-mode=REQUIRED",
-        ).unwrap();
+        let p = ParsedUpstreamUrl::parse("mysql://demo:hunter2@db/mydb?ssl-mode=REQUIRED").unwrap();
         assert!(p.require_tls);
     }
 
@@ -1954,8 +2051,8 @@ mod tests {
 
     #[test]
     fn lenenc_int_short_form() {
-        assert_eq!(decode_lenenc_int(&[0]),   Some((0u64, 1)));
-        assert_eq!(decode_lenenc_int(&[42]),  Some((42u64, 1)));
+        assert_eq!(decode_lenenc_int(&[0]), Some((0u64, 1)));
+        assert_eq!(decode_lenenc_int(&[42]), Some((42u64, 1)));
         assert_eq!(decode_lenenc_int(&[250]), Some((250u64, 1)));
     }
 
@@ -2014,9 +2111,7 @@ mod tests {
     #[test]
     fn build_handshake_response_includes_user_and_plugin() {
         let scramble = [0x42u8; 20];
-        let r = build_handshake_response_41_native(
-            "demo", b"hunter2", Some("mydb"), &scramble,
-        );
+        let r = build_handshake_response_41_native("demo", b"hunter2", Some("mydb"), &scramble);
         // Caps (4) + max_packet (4) + charset (1) + reserved (23) = 32.
         let after_reserved = 32;
         let user_end = r[after_reserved..].iter().position(|&b| b == 0).unwrap();
@@ -2037,9 +2132,7 @@ mod tests {
     #[test]
     fn build_handshake_response_sha256_includes_plugin_name() {
         let scramble = [0x42u8; 20];
-        let r = build_handshake_response_41_sha256(
-            "demo", b"hunter2", Some("mydb"), &scramble,
-        );
+        let r = build_handshake_response_41_sha256("demo", b"hunter2", Some("mydb"), &scramble);
         let after_reserved = 32;
         let user_end = r[after_reserved..].iter().position(|&b| b == 0).unwrap();
         let user_bytes = &r[after_reserved..after_reserved + user_end];
@@ -2047,9 +2140,7 @@ mod tests {
         // Auth response: u8 length + 32 SHA-256-XOR bytes.
         let auth_len_idx = after_reserved + user_end + 1;
         assert_eq!(r[auth_len_idx], 32);
-        let tail = std::str::from_utf8(
-            &r[r.len() - "caching_sha2_password\0".len()..],
-        ).unwrap();
+        let tail = std::str::from_utf8(&r[r.len() - "caching_sha2_password\0".len()..]).unwrap();
         assert!(tail.starts_with("caching_sha2_password"));
     }
 
@@ -2068,8 +2159,10 @@ mod tests {
         let other = [0x43u8; 20];
         let t3 = caching_sha2_password_scramble(pwd, &other);
         assert_ne!(t1, t3, "scramble change must change token");
-        assert!(caching_sha2_password_scramble(b"", &scramble).is_empty(),
-            "empty password must yield empty token");
+        assert!(
+            caching_sha2_password_scramble(b"", &scramble).is_empty(),
+            "empty password must yield empty token"
+        );
     }
 
     /// V2 `v2_extended_gaps.md §2.3` — pin the SHA-256 fast-path
@@ -2089,8 +2182,11 @@ mod tests {
         sha2::Digest::update(&mut h, stage2);
         sha2::Digest::update(&mut h, scramble);
         let combined: [u8; 32] = h.finalize().into();
-        let expected: Vec<u8> =
-            stage1.iter().zip(combined.iter()).map(|(a, b)| a ^ b).collect();
+        let expected: Vec<u8> = stage1
+            .iter()
+            .zip(combined.iter())
+            .map(|(a, b)| a ^ b)
+            .collect();
         assert_eq!(token, expected);
     }
 
@@ -2101,7 +2197,10 @@ mod tests {
     #[test]
     fn classify_terminal_auth_packet_maps_known_tags() {
         assert!(classify_terminal_auth_packet(&[0x00]).is_ok());
-        let err_pkt = vec![0xff, 0x86, 0x04, b'#', b'4', b'2', b'5', b'0', b'1', b'd', b'e', b'n', b'i', b'e', b'd'];
+        let err_pkt = vec![
+            0xff, 0x86, 0x04, b'#', b'4', b'2', b'5', b'0', b'1', b'd', b'e', b'n', b'i', b'e',
+            b'd',
+        ];
         match classify_terminal_auth_packet(&err_pkt) {
             Err(UpstreamError::AuthRejected(_)) => {}
             other => panic!("expected AuthRejected, got {other:?}"),
@@ -2177,23 +2276,22 @@ mod tests {
             i += 1;
             let auth_bytes = &resp[i..i + auth_len];
             // Validate the token.
-            let expected = caching_sha2_password_scramble(
-                &password_for_server, &scramble_for_server,
-            );
+            let expected =
+                caching_sha2_password_scramble(&password_for_server, &scramble_for_server);
             if auth_bytes != expected {
-                let err = build_err_packet_bytes(
-                    1045, "28000", "fake-mysql: bad SHA-256 token",
-                );
+                let err = build_err_packet_bytes(1045, "28000", "fake-mysql: bad SHA-256 token");
                 sock.write_all(&frame_packet(&err, 2)).await.unwrap();
                 sock.flush().await.unwrap();
                 return;
             }
             // Send fast-auth-success indicator (seq=2).
             sock.write_all(&frame_packet(&[0x01, 0x03], 2))
-                .await.unwrap();
+                .await
+                .unwrap();
             // Send terminal OK_Packet (seq=3).
             sock.write_all(&frame_packet(&build_ok_packet_bytes(), 3))
-                .await.unwrap();
+                .await
+                .unwrap();
             sock.flush().await.unwrap();
             // Hold the socket open briefly so the proxy's connect
             // path observes the OK before EOF.
@@ -2208,9 +2306,9 @@ mod tests {
             database: None,
             require_tls: false,
         };
-        let session = UpstreamSession::connect(
-            &url, Duration::from_secs(5),
-        ).await.unwrap();
+        let session = UpstreamSession::connect(&url, Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(session.host, "127.0.0.1");
         assert_eq!(session.port, port);
         assert!(!session.tls);
@@ -2242,9 +2340,7 @@ mod tests {
             // Read the HandshakeResponse41 (we don't validate, just
             // unconditionally reject with an ERR_Packet).
             let _ = read_packet(&mut sock).await.unwrap();
-            let err = build_err_packet_bytes(
-                1045, "28000", "Access denied for user (fake)",
-            );
+            let err = build_err_packet_bytes(1045, "28000", "Access denied for user (fake)");
             sock.write_all(&frame_packet(&err, 2)).await.unwrap();
             sock.flush().await.unwrap();
         });
@@ -2257,17 +2353,17 @@ mod tests {
             database: None,
             require_tls: false,
         };
-        let res = UpstreamSession::connect(
-            &url, Duration::from_secs(5),
-        ).await;
+        let res = UpstreamSession::connect(&url, Duration::from_secs(5)).await;
         let err = match res {
-            Ok(_)  => panic!("expected AuthRejected, got Ok(_)"),
+            Ok(_) => panic!("expected AuthRejected, got Ok(_)"),
             Err(e) => e,
         };
         match err {
             UpstreamError::AuthRejected(msg) => {
-                assert!(msg.contains("Access denied"),
-                    "AuthRejected detail must surface upstream message; got {msg}");
+                assert!(
+                    msg.contains("Access denied"),
+                    "AuthRejected detail must surface upstream message; got {msg}"
+                );
             }
             other => panic!("expected AuthRejected, got {other:?}"),
         }
@@ -2287,11 +2383,11 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let initial_scramble: [u8; 20] = [0x77; 20];
-        let switch_scramble:  [u8; 20] = [0x88; 20];
+        let switch_scramble: [u8; 20] = [0x88; 20];
         let password: Vec<u8> = b"hunter2".to_vec();
-        let init_for_server  = initial_scramble;
-        let sw_for_server    = switch_scramble;
-        let pw_for_server    = password.clone();
+        let init_for_server = initial_scramble;
+        let sw_for_server = switch_scramble;
+        let pw_for_server = password.clone();
 
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
@@ -2311,12 +2407,12 @@ mod tests {
             sock.flush().await.unwrap();
             // Read the SHA-256 token reply (seq=3) and validate.
             let (_seq, token) = read_packet(&mut sock).await.unwrap();
-            let expected = caching_sha2_password_scramble(
-                &pw_for_server, &sw_for_server,
-            );
+            let expected = caching_sha2_password_scramble(&pw_for_server, &sw_for_server);
             if token != expected {
                 let err = build_err_packet_bytes(
-                    1045, "28000", "fake-mysql: bad SHA-256 token after switch",
+                    1045,
+                    "28000",
+                    "fake-mysql: bad SHA-256 token after switch",
                 );
                 sock.write_all(&frame_packet(&err, 4)).await.unwrap();
                 sock.flush().await.unwrap();
@@ -2324,10 +2420,12 @@ mod tests {
             }
             // Send fast-auth-success indicator (seq=4).
             sock.write_all(&frame_packet(&[0x01, 0x03], 4))
-                .await.unwrap();
+                .await
+                .unwrap();
             // Send terminal OK_Packet (seq=5).
             sock.write_all(&frame_packet(&build_ok_packet_bytes(), 5))
-                .await.unwrap();
+                .await
+                .unwrap();
             sock.flush().await.unwrap();
             tokio::time::sleep(Duration::from_millis(50)).await;
         });
@@ -2340,9 +2438,9 @@ mod tests {
             database: None,
             require_tls: false,
         };
-        let session = UpstreamSession::connect(
-            &url, Duration::from_secs(5),
-        ).await.unwrap();
+        let session = UpstreamSession::connect(&url, Duration::from_secs(5))
+            .await
+            .unwrap();
         assert_eq!(session.host, "127.0.0.1");
         assert_eq!(session.port, port);
 
@@ -2395,8 +2493,8 @@ mod tests {
     fn build_ok_packet_bytes() -> Vec<u8> {
         let mut p = Vec::with_capacity(11);
         p.push(0x00);
-        p.push(0x00);                        // affected_rows lenenc (0)
-        p.push(0x00);                        // last_insert_id lenenc (0)
+        p.push(0x00); // affected_rows lenenc (0)
+        p.push(0x00); // last_insert_id lenenc (0)
         p.extend_from_slice(&2u16.to_le_bytes()); // status flags
         p.extend_from_slice(&0u16.to_le_bytes()); // warnings
         p
@@ -2417,22 +2515,33 @@ mod tests {
     #[test]
     fn client_caps_does_not_advertise_ssl_or_compress() {
         assert_eq!(
-            CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT, 0,
+            CLIENT_CAPS & CLIENT_SSL_FORBIDDEN_BIT,
+            0,
             "CLIENT_SSL must NEVER be set in upstream caps; \
              see CLIENT_SSL_FORBIDDEN_BIT documentation",
         );
         assert_eq!(
-            CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT, 0,
+            CLIENT_CAPS & CLIENT_COMPRESS_FORBIDDEN_BIT,
+            0,
             "CLIENT_COMPRESS must NEVER be set in upstream caps; \
              see CLIENT_COMPRESS_FORBIDDEN_BIT documentation",
         );
         // Sanity: the bits we DO want must be present.
-        assert_ne!(CLIENT_CAPS & CLIENT_PROTOCOL_41, 0,
-            "CLIENT_PROTOCOL_41 must be set");
-        assert_ne!(CLIENT_CAPS & CLIENT_PLUGIN_AUTH, 0,
-            "CLIENT_PLUGIN_AUTH must be set");
-        assert_ne!(CLIENT_CAPS & (1 << 15), 0,
-            "CLIENT_SECURE_CONNECTION must be set");
+        assert_ne!(
+            CLIENT_CAPS & CLIENT_PROTOCOL_41,
+            0,
+            "CLIENT_PROTOCOL_41 must be set"
+        );
+        assert_ne!(
+            CLIENT_CAPS & CLIENT_PLUGIN_AUTH,
+            0,
+            "CLIENT_PLUGIN_AUTH must be set"
+        );
+        assert_ne!(
+            CLIENT_CAPS & (1 << 15),
+            0,
+            "CLIENT_SECURE_CONNECTION must be set"
+        );
     }
 
     #[test]
@@ -2440,17 +2549,17 @@ mod tests {
         // Build a tiny legitimate-looking V10 greeting and parse it.
         let mut p = vec![0x0a]; // protocol_version
         p.extend_from_slice(b"8.0.30-raxis-fake\0");
-        p.extend_from_slice(&1u32.to_le_bytes());      // thread_id
-        p.extend_from_slice(&[1u8; 8]);                // scramble_part_1
-        p.push(0);                                      // filler
+        p.extend_from_slice(&1u32.to_le_bytes()); // thread_id
+        p.extend_from_slice(&[1u8; 8]); // scramble_part_1
+        p.push(0); // filler
         p.extend_from_slice(&(CLIENT_PROTOCOL_41 as u16).to_le_bytes()); // cap_lower (must include PROTOCOL_41)
-        p.push(0x2d);                                   // charset (utf8mb4)
-        p.extend_from_slice(&0u16.to_le_bytes());      // status
+        p.push(0x2d); // charset (utf8mb4)
+        p.extend_from_slice(&0u16.to_le_bytes()); // status
         p.extend_from_slice(&((CLIENT_PROTOCOL_41 >> 16) as u16).to_le_bytes()); // cap_upper
-        p.push(21);                                     // auth_plugin_data_len
-        p.extend_from_slice(&[0u8; 10]);               // reserved
-        p.extend_from_slice(&[2u8; 12]);               // scramble_part_2 (12 bytes)
-        p.push(0);                                      // NUL
+        p.push(21); // auth_plugin_data_len
+        p.extend_from_slice(&[0u8; 10]); // reserved
+        p.extend_from_slice(&[2u8; 12]); // scramble_part_2 (12 bytes)
+        p.push(0); // NUL
         p.extend_from_slice(b"mysql_native_password\0");
         let g = parse_handshake_v10(&p).expect("parse");
         assert_eq!(g.scramble.len(), 20);

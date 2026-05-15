@@ -132,7 +132,7 @@ pub enum LoopbackBridgeError {
         /// The path the bind targeted (`<base>_<vsock_port>`).
         path: PathBuf,
         /// The underlying `bind(2)` failure.
-        err:  std::io::Error,
+        err: std::io::Error,
     },
 
     /// `tokio::net::UnixListener::from_std` rejected the std-side
@@ -158,20 +158,20 @@ pub enum LoopbackBridgeError {
 /// side of the join handle.
 pub struct LoopbackListenerHandle {
     /// UDS path the listener was bound at; unlinked on Drop.
-    path:               PathBuf,
+    path: PathBuf,
     /// VSock port the listener represents (diagnostic only).
-    vsock_port:         u32,
+    vsock_port: u32,
     /// Host loopback TCP port the accept loop splices to.
     host_loopback_port: u16,
     /// Accept loop join handle. `None` after Drop runs once.
-    accept_task:        Option<JoinHandle<()>>,
+    accept_task: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for LoopbackListenerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LoopbackListenerHandle")
-            .field("path",               &self.path)
-            .field("vsock_port",         &self.vsock_port)
+            .field("path", &self.path)
+            .field("vsock_port", &self.vsock_port)
             .field("host_loopback_port", &self.host_loopback_port)
             .finish()
     }
@@ -236,23 +236,22 @@ impl Drop for LoopbackListenerHandle {
 /// substrate caller (`session-spawn`) does not iterate duplicates;
 /// the wire format prevents it.
 pub fn register_listener(
-    base_path:          &Path,
-    vsock_port:         u32,
+    base_path: &Path,
+    vsock_port: u32,
     host_loopback_port: u16,
 ) -> Result<LoopbackListenerHandle, LoopbackBridgeError> {
     // Require a current tokio runtime BEFORE binding anything;
     // every later error path then has at most one unlink to do.
-    let _handle = tokio::runtime::Handle::try_current()
-        .map_err(|_| LoopbackBridgeError::NoTokioRuntime)?;
+    let _handle =
+        tokio::runtime::Handle::try_current().map_err(|_| LoopbackBridgeError::NoTokioRuntime)?;
 
     let path = host_listener_path(base_path, vsock_port);
 
-    let std_listener = std::os::unix::net::UnixListener::bind(&path).map_err(|err| {
-        LoopbackBridgeError::Bind {
+    let std_listener =
+        std::os::unix::net::UnixListener::bind(&path).map_err(|err| LoopbackBridgeError::Bind {
             path: path.clone(),
             err,
-        }
-    })?;
+        })?;
     if let Err(err) = std_listener.set_nonblocking(true) {
         let _ = std::fs::remove_file(&path);
         return Err(LoopbackBridgeError::TokioHandover(err));
@@ -286,11 +285,7 @@ pub fn register_listener(
 /// Accept loop body. Spawns a per-connection splice task for every
 /// accepted UDS stream. Terminates on `abort()` (drop path) or on
 /// a fatal listener error (EBADF, etc.).
-async fn run_accept_loop(
-    listener:           UnixListener,
-    vsock_port:         u32,
-    host_loopback_port: u16,
-) {
+async fn run_accept_loop(listener: UnixListener, vsock_port: u32, host_loopback_port: u16) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
@@ -334,11 +329,7 @@ async fn run_accept_loop(
 /// allocate any per-read buffer larger than that). The pinning
 /// test `splice_internal_buffer_is_bounded_under_max_frame_bytes`
 /// makes the relationship explicit.
-async fn run_splice(
-    mut uds:            UnixStream,
-    host_loopback_port: u16,
-    vsock_port:         u32,
-) {
+async fn run_splice(mut uds: UnixStream, host_loopback_port: u16, vsock_port: u32) {
     let upstream_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_loopback_port);
     let mut upstream = match TcpStream::connect(upstream_addr).await {
         Ok(s) => s,
@@ -429,19 +420,21 @@ mod tests {
         // Connect as if we were the guest's vsock end (Firecracker
         // translates the guest's `connect(VMADDR_CID_HOST,
         // vsock_port)` into a `connect(2)` on this very UDS).
-        let mut client = UnixStream::connect(&path_expected).await.expect("uds connect");
-        client.write_all(b"hello-firecracker-loopback").await.unwrap();
+        let mut client = UnixStream::connect(&path_expected)
+            .await
+            .expect("uds connect");
+        client
+            .write_all(b"hello-firecracker-loopback")
+            .await
+            .unwrap();
         client.flush().await.unwrap();
         // Read the echoed reply to pin reverse direction. Limit
         // reads so a stuck splice times out rather than hanging
         // the whole test.
         let mut reply = Vec::new();
-        let read = tokio::time::timeout(
-            Duration::from_secs(5),
-            client.read_to_end(&mut reply),
-        )
-        .await
-        .expect("read timed out");
+        let read = tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut reply))
+            .await
+            .expect("read timed out");
         let _n = read.expect("read");
         assert_eq!(reply, b"reply-from-host");
 
@@ -481,13 +474,10 @@ mod tests {
         let handle = register_listener(&base, vsock_port, tcp_port).unwrap();
         let mut client = UnixStream::connect(&path_expected).await.unwrap();
         let mut got = Vec::new();
-        tokio::time::timeout(
-            Duration::from_secs(5),
-            client.read_to_end(&mut got),
-        )
-        .await
-        .expect("read timed out")
-        .unwrap();
+        tokio::time::timeout(Duration::from_secs(5), client.read_to_end(&mut got))
+            .await
+            .expect("read timed out")
+            .unwrap();
         assert_eq!(got, b"banner-from-server");
 
         server.await.unwrap();
@@ -543,17 +533,18 @@ mod tests {
         let _handle = register_listener(&base, 6363, dead_port).expect("register");
         let dead_path = host_listener_path(&base, 6363);
 
-        let mut client = UnixStream::connect(&dead_path).await.expect("guest connect");
+        let mut client = UnixStream::connect(&dead_path)
+            .await
+            .expect("guest connect");
         // Write something so the splice task has a reason to
         // attempt the upstream connect.
         client.write_all(b"will-not-arrive").await.unwrap();
         let mut buf = Vec::new();
-        let r = tokio::time::timeout(
-            Duration::from_secs(3),
-            client.read_to_end(&mut buf),
-        )
-        .await;
-        assert!(r.is_ok(), "read must complete (not hang) on upstream connect failure");
+        let r = tokio::time::timeout(Duration::from_secs(3), client.read_to_end(&mut buf)).await;
+        assert!(
+            r.is_ok(),
+            "read must complete (not hang) on upstream connect failure"
+        );
         assert!(buf.is_empty(), "no bytes from a dead upstream");
 
         // Second connection: prove the accept loop is still alive
@@ -592,12 +583,13 @@ mod tests {
         assert!(nrt.to_string().contains("tokio runtime"));
         let bind = LoopbackBridgeError::Bind {
             path: PathBuf::from("/tmp/raxis-bridge-test"),
-            err:  std::io::Error::new(std::io::ErrorKind::AddrInUse, "EADDRINUSE"),
+            err: std::io::Error::new(std::io::ErrorKind::AddrInUse, "EADDRINUSE"),
         };
         assert!(bind.to_string().contains("bind UDS"));
         assert!(bind.to_string().contains("/tmp/raxis-bridge-test"));
         let handover = LoopbackBridgeError::TokioHandover(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput, "EINVAL",
+            std::io::ErrorKind::InvalidInput,
+            "EINVAL",
         ));
         assert!(handover.to_string().contains("tokio reactor"));
     }

@@ -87,7 +87,7 @@ pub const MAX_FRAME_BYTES: u32 = 16 * 1024 * 1024;
 pub struct HostVsockChannel {
     /// Underlying UDS connection.
     #[cfg(unix)]
-    inner:    UnixStream,
+    inner: UnixStream,
     /// Multiplexer path the channel was opened against (recorded for
     /// diagnostic logging).
     uds_path: PathBuf,
@@ -172,7 +172,9 @@ impl HostVsockChannel {
             });
         }
         let header = len.to_be_bytes();
-        self.inner.write_all(&header).map_err(VsockError::Transport)?;
+        self.inner
+            .write_all(&header)
+            .map_err(VsockError::Transport)?;
         self.inner.write_all(bytes).map_err(VsockError::Transport)?;
         self.inner.flush().map_err(VsockError::Transport)?;
         Ok(())
@@ -189,7 +191,10 @@ impl HostVsockChannel {
         let mut header = [0u8; 4];
         let mut got = 0usize;
         while got < 4 {
-            let n = self.inner.read(&mut header[got..]).map_err(VsockError::Transport)?;
+            let n = self
+                .inner
+                .read(&mut header[got..])
+                .map_err(VsockError::Transport)?;
             if n == 0 {
                 return Err(VsockError::PeerClosed);
             }
@@ -205,7 +210,10 @@ impl HostVsockChannel {
         let mut buf = vec![0u8; len as usize];
         let mut got = 0usize;
         while got < buf.len() {
-            let n = self.inner.read(&mut buf[got..]).map_err(VsockError::Transport)?;
+            let n = self
+                .inner
+                .read(&mut buf[got..])
+                .map_err(VsockError::Transport)?;
             if n == 0 {
                 return Err(VsockError::PeerClosed);
             }
@@ -289,7 +297,10 @@ mod tests {
                 }
             }
             let text = std::str::from_utf8(&line).unwrap().trim_end_matches('\n');
-            assert!(text.starts_with("CONNECT "), "expected CONNECT, got {text:?}");
+            assert!(
+                text.starts_with("CONNECT "),
+                "expected CONNECT, got {text:?}"
+            );
             // Reply OK.
             stream.write_all(b"OK 12345\n").unwrap();
             stream.flush().unwrap();

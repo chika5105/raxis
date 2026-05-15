@@ -90,17 +90,15 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 
 use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 
 pub mod restriction;
 pub mod wire;
 
-pub use restriction::{
-    EnvelopeRejection, RecipientCheck, Restrictions,
-};
+pub use restriction::{EnvelopeRejection, RecipientCheck, Restrictions};
 pub use wire::{ProxyError, SmtpProxy};
 
 // ---------------------------------------------------------------------------
@@ -114,13 +112,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -188,28 +189,28 @@ pub struct ProxyConfig {
 #[derive(Debug, Default)]
 pub struct ProxyStats {
     /// Number of accepted connections served (regardless of success).
-    pub connections_served:  AtomicU32,
+    pub connections_served: AtomicU32,
     /// Number of full message envelopes accepted by the proxy
     /// (passed envelope gates and were submitted to upstream).
-    pub messages_relayed:    AtomicU32,
+    pub messages_relayed: AtomicU32,
     /// Number of full message envelopes rejected before relay
     /// (rate-limit / sender / recipient / size violation).
-    pub messages_rejected:   AtomicU32,
+    pub messages_rejected: AtomicU32,
     /// Number of recipients accepted across all relayed messages.
     pub recipients_accepted: AtomicU32,
     /// Total DATA bytes accepted across all relayed messages.
-    pub bytes_relayed:       AtomicU64,
+    pub bytes_relayed: AtomicU64,
 }
 
 impl ProxyStats {
     /// Snapshot the counters.
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
-            connections_served:  self.connections_served .load(Ordering::Relaxed),
-            messages_relayed:    self.messages_relayed   .load(Ordering::Relaxed),
-            messages_rejected:   self.messages_rejected  .load(Ordering::Relaxed),
+            connections_served: self.connections_served.load(Ordering::Relaxed),
+            messages_relayed: self.messages_relayed.load(Ordering::Relaxed),
+            messages_rejected: self.messages_rejected.load(Ordering::Relaxed),
             recipients_accepted: self.recipients_accepted.load(Ordering::Relaxed),
-            bytes_relayed:       self.bytes_relayed      .load(Ordering::Relaxed),
+            bytes_relayed: self.bytes_relayed.load(Ordering::Relaxed),
         }
     }
 }
@@ -218,15 +219,15 @@ impl ProxyStats {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ProxyStatsSnapshot {
     /// Number of accepted connections served.
-    pub connections_served:  u32,
+    pub connections_served: u32,
     /// Number of full message envelopes accepted by the proxy.
-    pub messages_relayed:    u32,
+    pub messages_relayed: u32,
     /// Number of full message envelopes rejected before relay.
-    pub messages_rejected:   u32,
+    pub messages_rejected: u32,
     /// Number of recipients accepted across all relayed messages.
     pub recipients_accepted: u32,
     /// Total DATA bytes accepted across all relayed messages.
-    pub bytes_relayed:       u64,
+    pub bytes_relayed: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -240,19 +241,19 @@ pub struct ProxyStatsSnapshot {
 #[derive(Debug, Clone)]
 pub struct EnvelopeAudit {
     /// What happened to this envelope.
-    pub outcome:           EnvelopeOutcome,
+    pub outcome: EnvelopeOutcome,
     /// Owned consumer identity (the agent session).
-    pub consumer:          OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// `Sha256("<sender>\n<rcpt1>\n<rcpt2>...")` — the audit key
     /// for cross-correlation with the upstream relay's logs without
     /// revealing the recipient list.
-    pub envelope_sha256:   [u8; 32],
+    pub envelope_sha256: [u8; 32],
     /// Number of recipients in the envelope.
-    pub recipient_count:   u32,
+    pub recipient_count: u32,
     /// Total DATA bytes the agent submitted (before any size cap).
-    pub bytes_submitted:   u64,
+    pub bytes_submitted: u64,
     /// `Some(reason)` for rejected envelopes; `None` for relayed.
-    pub rejection_reason:  Option<String>,
+    pub rejection_reason: Option<String>,
 }
 
 /// Disposition of an envelope at the proxy boundary.
@@ -292,8 +293,8 @@ impl EnvelopeAuditSink for NoopEnvelopeAuditSink {
 /// `postgres::Proxy::bind` and `http::HttpProxy::bind` conventions.
 pub async fn bind(
     backend: Arc<dyn CredentialBackend>,
-    config:  ProxyConfig,
-    audit:   Arc<dyn EnvelopeAuditSink>,
+    config: ProxyConfig,
+    audit: Arc<dyn EnvelopeAuditSink>,
 ) -> Result<SmtpProxy, ProxyError> {
     SmtpProxy::bind(backend, config, audit).await
 }

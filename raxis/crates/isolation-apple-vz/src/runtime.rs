@@ -110,13 +110,13 @@ pub const VSOCK_CONNECT_BACKOFF_STEADY: Duration = Duration::from_millis(100);
 /// listener bind by one cycle). Polling at 5 ms during the boot
 /// window costs only a handful of dispatch hops on AVF's serial
 /// queue and recovers ~50–90 ms per spawn in the typical case.
-pub const VSOCK_CONNECT_BACKOFF_FAST:   Duration = Duration::from_millis(5);
+pub const VSOCK_CONNECT_BACKOFF_FAST: Duration = Duration::from_millis(5);
 
 /// Mid-window backoff: once the guest is past the median boot
 /// budget but not yet "stuck", we relax to 25 ms so polling cost
 /// stays bounded if a slower-than-usual boot drags out into the
 /// hundreds of ms.
-pub const VSOCK_CONNECT_BACKOFF_MID:    Duration = Duration::from_millis(25);
+pub const VSOCK_CONNECT_BACKOFF_MID: Duration = Duration::from_millis(25);
 
 /// Elapsed-time threshold separating the fast (5 ms) and mid (25 ms)
 /// polling regimes. Sized to comfortably cover the median orchestrator
@@ -183,7 +183,7 @@ pub enum RuntimeError {
     #[error("VSock connect to guest port {port}: {reason}")]
     VsockConnect {
         /// Guest port we tried to reach.
-        port:   u32,
+        port: u32,
         /// AVF / kernel error string.
         reason: String,
     },
@@ -210,9 +210,9 @@ pub struct AvfExit {
     /// Final state the VM reached.
     pub final_state: VmStateSnapshot,
     /// Whether the stop path succeeded without escalation.
-    pub graceful:    bool,
+    pub graceful: bool,
     /// Human-readable reason from AVF, if any.
-    pub reason:      Option<String>,
+    pub reason: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -230,14 +230,17 @@ mod stub {
     /// `RuntimeError::Unsupported`.
     #[derive(Debug)]
     pub struct AvfRuntime {
-        cfg:     AvfConfig,
+        cfg: AvfConfig,
         started: bool,
     }
 
     impl AvfRuntime {
         /// Build a stub runtime; never starts a VM on non-macOS.
         pub fn new(cfg: AvfConfig) -> Self {
-            Self { cfg, started: false }
+            Self {
+                cfg,
+                started: false,
+            }
         }
 
         /// Always returns `RuntimeError::Unsupported`.
@@ -307,12 +310,11 @@ mod macos {
     use objc2::AnyThread;
     use objc2_foundation::{NSArray, NSError, NSString, NSURL};
     use objc2_virtualization::{
-        VZDiskImageCachingMode, VZDiskImageStorageDeviceAttachment, VZDiskImageSynchronizationMode,
-        VZDirectoryShare, VZLinuxBootLoader,
-        VZSharedDirectory, VZSingleDirectoryShare,
-        VZSocketDevice, VZSocketDeviceConfiguration, VZStorageDeviceConfiguration,
-        VZVirtioBlockDeviceConfiguration, VZVirtioFileSystemDeviceConfiguration,
-        VZVirtioSocketConnection, VZVirtioSocketDevice,
+        VZDirectoryShare, VZDiskImageCachingMode, VZDiskImageStorageDeviceAttachment,
+        VZDiskImageSynchronizationMode, VZLinuxBootLoader, VZSharedDirectory,
+        VZSingleDirectoryShare, VZSocketDevice, VZSocketDeviceConfiguration,
+        VZStorageDeviceConfiguration, VZVirtioBlockDeviceConfiguration,
+        VZVirtioFileSystemDeviceConfiguration, VZVirtioSocketConnection, VZVirtioSocketDevice,
         VZVirtioSocketDeviceConfiguration, VZVirtualMachine, VZVirtualMachineConfiguration,
         VZVirtualMachineState,
     };
@@ -324,11 +326,11 @@ mod macos {
     /// [`Self::queue`] (a serial dispatch queue) per Apple's
     /// queue-confinement contract.
     pub struct AvfRuntime {
-        cfg:        AvfConfig,
-        queue:      DispatchRetained<DispatchQueue>,
+        cfg: AvfConfig,
+        queue: DispatchRetained<DispatchQueue>,
         config_obj: Option<Retained<VZVirtualMachineConfiguration>>,
-        vm:         Option<VmHandle>,
-        started:    bool,
+        vm: Option<VmHandle>,
+        started: bool,
         last_error: Option<String>,
         /// Background thread that drains AVF's serial-port pipe to
         /// the host-side console log file. Set when
@@ -352,7 +354,7 @@ mod macos {
         /// because the runtime itself is `Send` and the connection
         /// pointer is queue-confined: we never call methods on it
         /// from arbitrary threads after the initial fd extraction.
-        vsock_conn:  Option<VsockConnHandle>,
+        vsock_conn: Option<VsockConnHandle>,
         /// Per-session credential-proxy vsock-loopback listener
         /// handles. Each handle owns a `VZVirtioSocketListener` +
         /// delegate registered on the VM's `VZVirtioSocketDevice`
@@ -425,11 +427,11 @@ mod macos {
     impl std::fmt::Debug for AvfRuntime {
         fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
             f.debug_struct("AvfRuntime")
-                .field("cfg",        &self.cfg)
-                .field("started",    &self.started)
+                .field("cfg", &self.cfg)
+                .field("started", &self.started)
                 .field("last_error", &self.last_error)
                 .field("has_config", &self.config_obj.is_some())
-                .field("has_vm",     &self.vm.is_some())
+                .field("has_vm", &self.vm.is_some())
                 .finish()
         }
     }
@@ -461,14 +463,14 @@ mod macos {
     ///   capture cannot be wired (no silent dropping).
     fn wire_console_pipe(
         log_path: &Path,
-        conf:     &VZVirtualMachineConfiguration,
+        conf: &VZVirtualMachineConfiguration,
     ) -> Result<std::thread::JoinHandle<()>, RuntimeError> {
         if let Some(parent) = log_path.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| RuntimeError::InvalidConfig(format!(
-                    "console.log parent {}: {e}",
-                    parent.display(),
-                )))?;
+            std::fs::create_dir_all(parent).map_err(|e| {
+                RuntimeError::InvalidConfig(
+                    format!("console.log parent {}: {e}", parent.display(),),
+                )
+            })?;
         }
         // Truncate-open: the file is per-session; previous content
         // (if any) is stale.
@@ -477,9 +479,11 @@ mod macos {
             .write(true)
             .truncate(true)
             .open(log_path)
-            .map_err(|e| RuntimeError::InvalidConfig(format!(
-                "console.log open {}: {e}", log_path.display(),
-            )))?;
+            .map_err(|e| {
+                RuntimeError::InvalidConfig(
+                    format!("console.log open {}: {e}", log_path.display(),),
+                )
+            })?;
 
         // Host-side marker so the file is never zero bytes — even
         // if the guest never produces a single byte (kernel boot
@@ -505,7 +509,7 @@ mod macos {
                 std::io::Error::last_os_error(),
             )));
         }
-        let read_fd  = fds[0];
+        let read_fd = fds[0];
         let write_fd = fds[1];
 
         // Wrap the write end in NSFileHandle and hand it to AVF.
@@ -526,42 +530,38 @@ mod macos {
             )
         };
         // SAFETY: VZFileHandleSerialPortAttachment <: VZSerialPortAttachment.
-        let attach_upcast: Retained<
-            objc2_virtualization::VZSerialPortAttachment,
-        > = unsafe {
-            Retained::cast_unchecked::<
-                objc2_virtualization::VZSerialPortAttachment,
-            >(attach)
+        let attach_upcast: Retained<objc2_virtualization::VZSerialPortAttachment> = unsafe {
+            Retained::cast_unchecked::<objc2_virtualization::VZSerialPortAttachment>(attach)
         };
-        let port_cfg = unsafe {
-            objc2_virtualization::VZVirtioConsoleDeviceSerialPortConfiguration::new()
-        };
+        let port_cfg =
+            unsafe { objc2_virtualization::VZVirtioConsoleDeviceSerialPortConfiguration::new() };
         // SAFETY: setAttachment is a strong setter; the configuration
         // retains the attachment for the configuration's lifetime.
-        unsafe { port_cfg.setAttachment(Some(&attach_upcast)); }
+        unsafe {
+            port_cfg.setAttachment(Some(&attach_upcast));
+        }
         // SAFETY: VZVirtioConsoleDeviceSerialPortConfiguration <: VZSerialPortConfiguration.
-        let port_upcast: Retained<
-            objc2_virtualization::VZSerialPortConfiguration,
-        > = unsafe {
-            Retained::cast_unchecked::<
-                objc2_virtualization::VZSerialPortConfiguration,
-            >(port_cfg)
+        let port_upcast: Retained<objc2_virtualization::VZSerialPortConfiguration> = unsafe {
+            Retained::cast_unchecked::<objc2_virtualization::VZSerialPortConfiguration>(port_cfg)
         };
-        let serial_array =
-            NSArray::from_retained_slice(std::slice::from_ref(&port_upcast));
+        let serial_array = NSArray::from_retained_slice(std::slice::from_ref(&port_upcast));
         // SAFETY: setSerialPorts copies the array (per the Apple
         // docs / objc2 binding) so the configuration owns its own
         // references after this call.
-        unsafe { conf.setSerialPorts(&serial_array); }
+        unsafe {
+            conf.setSerialPorts(&serial_array);
+        }
 
         // Background thread: read the pipe's read end, append to
         // the file. Uses blocking `read(2)` — when AVF closes the
         // write end at VM teardown the read returns 0 and the
         // thread exits.
-        let path_for_log  = log_path.display().to_string();
+        let path_for_log = log_path.display().to_string();
         let pump = std::thread::Builder::new()
-            .name(format!("raxis-avf-console-{}",
-                log_path.file_name()
+            .name(format!(
+                "raxis-avf-console-{}",
+                log_path
+                    .file_name()
                     .and_then(|s| s.to_str())
                     .unwrap_or("guest"),
             ))
@@ -571,13 +571,7 @@ mod macos {
                     // SAFETY: read(2) into a stack buffer of known
                     // size; rc < 0 ⇒ error, == 0 ⇒ EOF, > 0 ⇒
                     // bytes available.
-                    let rc = unsafe {
-                        libc::read(
-                            read_fd,
-                            buf.as_mut_ptr() as *mut _,
-                            buf.len(),
-                        )
-                    };
+                    let rc = unsafe { libc::read(read_fd, buf.as_mut_ptr() as *mut _, buf.len()) };
                     if rc < 0 {
                         let e = std::io::Error::last_os_error();
                         if e.raw_os_error() == Some(libc::EINTR) {
@@ -586,7 +580,8 @@ mod macos {
                         eprintln!(
                             "{{\"level\":\"warn\",\"event\":\"avf_console_pump_read_err\",\
                               \"path\":{:?},\"err\":{:?}}}",
-                            path_for_log, e.to_string(),
+                            path_for_log,
+                            e.to_string(),
                         );
                         break;
                     }
@@ -602,7 +597,8 @@ mod macos {
                         eprintln!(
                             "{{\"level\":\"warn\",\"event\":\"avf_console_pump_write_err\",\
                               \"path\":{:?},\"err\":{:?}}}",
-                            path_for_log, e.to_string(),
+                            path_for_log,
+                            e.to_string(),
                         );
                         break;
                     }
@@ -617,9 +613,7 @@ mod macos {
                     libc::close(read_fd);
                 }
             })
-            .map_err(|e| RuntimeError::InvalidConfig(format!(
-                "console pump thread spawn: {e}",
-            )))?;
+            .map_err(|e| RuntimeError::InvalidConfig(format!("console pump thread spawn: {e}",)))?;
 
         Ok(pump)
     }
@@ -633,12 +627,12 @@ mod macos {
             Self {
                 cfg,
                 queue,
-                config_obj:        None,
-                vm:                None,
-                started:           false,
-                last_error:        None,
-                console_pump:      None,
-                vsock_conn:        None,
+                config_obj: None,
+                vm: None,
+                started: false,
+                last_error: None,
+                console_pump: None,
+                vsock_conn: None,
                 loopback_listeners: Vec::new(),
             }
         }
@@ -671,10 +665,7 @@ mod macos {
             // ---- Boot loader -------------------------------------
             let kernel_url = path_to_nsurl(&self.cfg.boot_loader.kernel_url)?;
             let boot_loader = unsafe {
-                VZLinuxBootLoader::initWithKernelURL(
-                    VZLinuxBootLoader::alloc(),
-                    &kernel_url,
-                )
+                VZLinuxBootLoader::initWithKernelURL(VZLinuxBootLoader::alloc(), &kernel_url)
             };
             let cmdline_ns = NSString::from_str(&self.cfg.boot_loader.command_line);
             unsafe {
@@ -730,9 +721,8 @@ mod macos {
                 // VZStorageDeviceConfiguration. The cast is sound
                 // because the parent class is the AVF-required type
                 // for the array setter.
-                let upcast: Retained<VZStorageDeviceConfiguration> = unsafe {
-                    Retained::cast_unchecked::<VZStorageDeviceConfiguration>(device)
-                };
+                let upcast: Retained<VZStorageDeviceConfiguration> =
+                    unsafe { Retained::cast_unchecked::<VZStorageDeviceConfiguration>(device) };
                 storage_objs.push(upcast);
             }
             let storage_array = NSArray::from_retained_slice(&storage_objs);
@@ -749,9 +739,9 @@ mod macos {
                 // Pre-validate the tag so the error is clearly
                 // attributable to this share rather than buried in
                 // `validateWithError:` aggregate output.
-                if let Err(e) = unsafe {
-                    VZVirtioFileSystemDeviceConfiguration::validateTag_error(&tag_ns)
-                } {
+                if let Err(e) =
+                    unsafe { VZVirtioFileSystemDeviceConfiguration::validateTag_error(&tag_ns) }
+                {
                     return Err(RuntimeError::InvalidConfig(format!(
                         "virtiofs tag {:?}: {}",
                         share.tag,
@@ -780,18 +770,15 @@ mod macos {
                     )
                 };
                 // SAFETY: VZSingleDirectoryShare <: VZDirectoryShare.
-                let single_upcast: Retained<VZDirectoryShare> = unsafe {
-                    Retained::cast_unchecked::<VZDirectoryShare>(single)
-                };
+                let single_upcast: Retained<VZDirectoryShare> =
+                    unsafe { Retained::cast_unchecked::<VZDirectoryShare>(single) };
                 unsafe {
                     dev.setShare(Some(&single_upcast));
                 }
                 // SAFETY: VZVirtioFileSystemDeviceConfiguration <:
                 // VZDirectorySharingDeviceConfiguration. The setter
                 // takes the parent class, so we upcast once.
-                let upcast: Retained<
-                    objc2_virtualization::VZDirectorySharingDeviceConfiguration,
-                > = unsafe {
+                let upcast: Retained<objc2_virtualization::VZDirectorySharingDeviceConfiguration> = unsafe {
                     Retained::cast_unchecked::<
                         objc2_virtualization::VZDirectorySharingDeviceConfiguration,
                     >(dev)
@@ -822,11 +809,9 @@ mod macos {
             let vsock_dev = unsafe { VZVirtioSocketDeviceConfiguration::new() };
             // SAFETY: VZVirtioSocketDeviceConfiguration <:
             // VZSocketDeviceConfiguration.
-            let vsock_upcast: Retained<VZSocketDeviceConfiguration> = unsafe {
-                Retained::cast_unchecked::<VZSocketDeviceConfiguration>(vsock_dev)
-            };
-            let socket_array =
-                NSArray::from_retained_slice(std::slice::from_ref(&vsock_upcast));
+            let vsock_upcast: Retained<VZSocketDeviceConfiguration> =
+                unsafe { Retained::cast_unchecked::<VZSocketDeviceConfiguration>(vsock_dev) };
+            let socket_array = NSArray::from_retained_slice(std::slice::from_ref(&vsock_upcast));
             unsafe {
                 conf.setSocketDevices(&socket_array);
             }
@@ -890,7 +875,8 @@ mod macos {
                     Err(e) => eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"avf_console_log_open_failed\",\
                           \"path\":{:?},\"err\":{:?}}}",
-                        path.display().to_string(), e.to_string(),
+                        path.display().to_string(),
+                        e.to_string(),
                     ),
                 }
             }
@@ -960,9 +946,7 @@ mod macos {
                 // SAFETY: queue-confined; we are inside the dispatch
                 // block, which AVF requires for this call.
                 unsafe {
-                    vm_for_dispatch
-                        .raw()
-                        .startWithCompletionHandler(&block);
+                    vm_for_dispatch.raw().startWithCompletionHandler(&block);
                 }
             });
 
@@ -972,8 +956,7 @@ mod macos {
                     eprintln!(
                         "{{\"level\":\"info\",\"event\":\"avf_vm_started\",\
                           \"vcpu\":{},\"mem_mib\":{}}}",
-                        self.cfg.vcpu_count,
-                        self.cfg.mem_mib,
+                        self.cfg.vcpu_count, self.cfg.mem_mib,
                     );
                     Ok(())
                 }
@@ -1010,8 +993,8 @@ mod macos {
                     self.started = false;
                     return Ok(AvfExit {
                         final_state: VmStateSnapshot::Stopped,
-                        graceful:    true,
-                        reason:      None,
+                        graceful: true,
+                        reason: None,
                     });
                 }
             };
@@ -1049,21 +1032,21 @@ mod macos {
             let result = match rx.recv_timeout(grace) {
                 Ok(Ok(())) => Ok(AvfExit {
                     final_state: VmStateSnapshot::Stopped,
-                    graceful:    true,
-                    reason:      None,
+                    graceful: true,
+                    reason: None,
                 }),
                 Ok(Err(e)) => {
                     self.last_error = Some(e.to_string());
                     Ok(AvfExit {
                         final_state: VmStateSnapshot::Errored,
-                        graceful:    false,
-                        reason:      Some(e.to_string()),
+                        graceful: false,
+                        reason: Some(e.to_string()),
                     })
                 }
                 Err(_) => Ok(AvfExit {
                     final_state: VmStateSnapshot::Stopping,
-                    graceful:    false,
-                    reason:      Some(format!("stop timed out after {grace:?}")),
+                    graceful: false,
+                    reason: Some(format!("stop timed out after {grace:?}")),
                 }),
             };
 
@@ -1130,7 +1113,7 @@ mod macos {
         /// substrate, not transient guest-boot races.
         pub fn connect_vsock(&mut self, port: u32) -> Result<c_int, RuntimeError> {
             let started_at = std::time::Instant::now();
-            let deadline   = started_at + VSOCK_CONNECT_DEADLINE;
+            let deadline = started_at + VSOCK_CONNECT_DEADLINE;
             // Track the most-recent transient reason so the
             // deadline-exhausted error message names what the guest
             // was actually surfacing rather than a generic timeout.
@@ -1191,10 +1174,7 @@ mod macos {
         ///
         /// Returns `(dup_fd, retained_conn)` on success; see
         /// [`Self::connect_vsock`] for the lifetime contract.
-        fn connect_vsock_once(
-            &self,
-            port: u32,
-        ) -> Result<(c_int, VsockConnHandle), RuntimeError> {
+        fn connect_vsock_once(&self, port: u32) -> Result<(c_int, VsockConnHandle), RuntimeError> {
             let vm = self.vm.as_ref().ok_or_else(|| RuntimeError::VsockConnect {
                 port,
                 reason: "VM not started — start() must succeed before connecting vsock".to_owned(),
@@ -1214,8 +1194,7 @@ mod macos {
             // never call methods" until Drop, which is the exact
             // contract `unsafe impl Send for VsockConnHandle`
             // certifies.
-            type ConnectOutcome =
-                Result<(c_int, VsockConnHandle), RuntimeError>;
+            type ConnectOutcome = Result<(c_int, VsockConnHandle), RuntimeError>;
             let (tx, rx) = mpsc::sync_channel::<ConnectOutcome>(1);
             let vm_for_dispatch = vm.clone_handle();
             let tx_for_dispatch = tx.clone();
@@ -1237,9 +1216,8 @@ mod macos {
                 // the substrate's socket device class. Any other
                 // class would be a programming error in
                 // build_configuration.
-                let virtio_dev: Retained<VZVirtioSocketDevice> = unsafe {
-                    Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn)
-                };
+                let virtio_dev: Retained<VZVirtioSocketDevice> =
+                    unsafe { Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn) };
 
                 let tx_inner = tx_for_dispatch.clone();
                 let block = RcBlock::new(
@@ -1251,10 +1229,9 @@ mod macos {
                         } else if conn.is_null() {
                             Err(RuntimeError::VsockConnect {
                                 port,
-                                reason:
-                                    "AVF returned nil connection without an error; \
+                                reason: "AVF returned nil connection without an error; \
                                      guest may not be listening on the planner port"
-                                        .to_owned(),
+                                    .to_owned(),
                             })
                         } else {
                             // 1. Read the fd while `conn` is still
@@ -1271,8 +1248,7 @@ mod macos {
                             if fd < 0 {
                                 Err(RuntimeError::VsockConnect {
                                     port,
-                                    reason:
-                                        "AVF connection returned negative fd".to_owned(),
+                                    reason: "AVF connection returned negative fd".to_owned(),
                                 })
                             } else {
                                 // 2. Dup the fd so the host side
@@ -1294,9 +1270,7 @@ mod macos {
                                     let e = std::io::Error::last_os_error();
                                     Err(RuntimeError::VsockConnect {
                                         port,
-                                        reason: format!(
-                                            "dup(2) on AVF vsock fd failed: {e}"
-                                        ),
+                                        reason: format!("dup(2) on AVF vsock fd failed: {e}"),
                                     })
                                 } else {
                                     // 3. Retain the connection so its
@@ -1378,13 +1352,14 @@ mod macos {
         /// `LoopbackPlan::from_env_string`.
         pub fn register_loopback_listener(
             &mut self,
-            vsock_port:         u32,
+            vsock_port: u32,
             host_loopback_port: u16,
         ) -> Result<(), crate::vsock_loopback_bridge::LoopbackBridgeError> {
             let vm = self.vm.as_ref().ok_or_else(|| {
                 crate::vsock_loopback_bridge::LoopbackBridgeError::InactiveVm(
                     "VM not started — start() must succeed before \
-                     register_loopback_listener".to_owned(),
+                     register_loopback_listener"
+                        .to_owned(),
                 )
             })?;
 
@@ -1408,7 +1383,8 @@ mod macos {
                     let _ = tx_for_dispatch.send(Err(
                         crate::vsock_loopback_bridge::LoopbackBridgeError::InactiveVm(
                             "VZVirtualMachine has no VZVirtioSocketDevice; \
-                             check VmSpec::vsock_cid wiring".to_owned(),
+                             check VmSpec::vsock_cid wiring"
+                                .to_owned(),
                         ),
                     ));
                     return;
@@ -1416,23 +1392,16 @@ mod macos {
                 let device_dyn: Retained<VZSocketDevice> = devices.objectAtIndex(0);
                 // SAFETY: V2 only ever wires VZVirtioSocketDevice as
                 // the substrate's socket device class.
-                let virtio_dev: Retained<VZVirtioSocketDevice> = unsafe {
-                    Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn)
-                };
+                let virtio_dev: Retained<VZVirtioSocketDevice> =
+                    unsafe { Retained::cast_unchecked::<VZVirtioSocketDevice>(device_dyn) };
                 let _ = tx_for_dispatch.send(Ok(
-                    crate::vsock_loopback_bridge::macos::DeviceHandle::from_retained(
-                        virtio_dev,
-                    ),
+                    crate::vsock_loopback_bridge::macos::DeviceHandle::from_retained(virtio_dev),
                 ));
             });
             let dispatch_grace = Duration::from_secs(5);
-            let device_handle = rx
-                .recv_timeout(dispatch_grace)
-                .map_err(|_| {
-                    crate::vsock_loopback_bridge::LoopbackBridgeError::DispatchTimeout(
-                        dispatch_grace,
-                    )
-                })??;
+            let device_handle = rx.recv_timeout(dispatch_grace).map_err(|_| {
+                crate::vsock_loopback_bridge::LoopbackBridgeError::DispatchTimeout(dispatch_grace)
+            })??;
 
             let inner = crate::vsock_loopback_bridge::macos::register_listener(
                 &self.queue,
@@ -1441,9 +1410,8 @@ mod macos {
                 host_loopback_port,
                 dispatch_grace,
             )?;
-            self.loopback_listeners.push(
-                crate::vsock_loopback_bridge::LoopbackListenerHandle { inner },
-            );
+            self.loopback_listeners
+                .push(crate::vsock_loopback_bridge::LoopbackListenerHandle { inner });
             Ok(())
         }
 
@@ -1468,7 +1436,8 @@ mod macos {
                 let s = unsafe { vm_for_dispatch.raw().state() };
                 let _ = tx.send(s);
             });
-            let raw = rx.recv_timeout(Duration::from_millis(500))
+            let raw = rx
+                .recv_timeout(Duration::from_millis(500))
                 .unwrap_or(VZVirtualMachineState::Stopped);
             map_vz_state(raw)
         }
@@ -1587,39 +1556,39 @@ mod tests {
         // the path here is the per-role rootfs (after the V2
         // substrate fix).
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "raxis-test-avf-1".to_owned(),
+            image_id: "raxis-test-avf-1".to_owned(),
         }
     }
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:        1,
-            mem_mib:           128,
-            egress_tier:       EgressTier::None,
-            cgroup_quota:     None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken("avf-test-token".to_owned()),
-            vsock_cid:         Some(7),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 128,
+            egress_tier: EgressTier::None,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken("avf-test-token".to_owned()),
+            vsock_cid: Some(7),
+            virtio_fs_mounts: Vec::new(),
             // Per-test fixture: AVF runtime tests run against
             // placeholder bytes; the real-canonical kernel path is
             // threaded by the kernel-side image resolver in the full
             // E2E lifecycle test.
             linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
-            env:               Default::default(),
+            env: Default::default(),
             guest_console_log: None,
         }
     }
 
     fn fixture_mount() -> WorkspaceMount {
         WorkspaceMount {
-            host_path:    PathBuf::from("/tmp/raxis-fixture-workspace"),
-            guest_path:   "/workspace".to_owned(),
-            mode:         MountMode::ReadOnly,
+            host_path: PathBuf::from("/tmp/raxis-fixture-workspace"),
+            guest_path: "/workspace".to_owned(),
+            mode: MountMode::ReadOnly,
             content_hash: Some(ContentHash([0u8; 32])),
         }
     }
@@ -1648,9 +1617,18 @@ mod tests {
     fn runtime_returns_unsupported_on_non_macos_targets() {
         let cfg = translate(&fixture_image(), &[], &fixture_spec()).unwrap();
         let mut r = AvfRuntime::new(cfg);
-        assert!(matches!(r.start(Duration::from_millis(50)), Err(RuntimeError::Unsupported)));
-        assert!(matches!(r.stop(Duration::from_millis(50)), Err(RuntimeError::Unsupported)));
-        assert!(matches!(r.connect_vsock(1024), Err(RuntimeError::Unsupported)));
+        assert!(matches!(
+            r.start(Duration::from_millis(50)),
+            Err(RuntimeError::Unsupported)
+        ));
+        assert!(matches!(
+            r.stop(Duration::from_millis(50)),
+            Err(RuntimeError::Unsupported)
+        ));
+        assert!(matches!(
+            r.connect_vsock(1024),
+            Err(RuntimeError::Unsupported)
+        ));
     }
 
     /// macOS runtime real-binding test: build the

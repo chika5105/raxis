@@ -24,12 +24,12 @@ use crate::Table;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WitnessRow {
     pub verifier_run_id: String,
-    pub task_id:         String,
-    pub gate_type:       String,
-    pub result_class:    String,
-    pub evaluation_sha:  String,
-    pub blob_sha256:     String,
-    pub recorded_at:     u64,
+    pub task_id: String,
+    pub gate_type: String,
+    pub result_class: String,
+    pub evaluation_sha: String,
+    pub blob_sha256: String,
+    pub recorded_at: u64,
 }
 
 #[derive(Debug, Error)]
@@ -56,12 +56,12 @@ pub fn for_task(conn: &RoConn, task_id: &str) -> Result<Vec<WitnessRow>, Witness
         .query_map(rusqlite::params![task_id], |r| {
             Ok(WitnessRow {
                 verifier_run_id: r.get(0)?,
-                task_id:         r.get(1)?,
-                gate_type:       r.get(2)?,
-                result_class:    r.get(3)?,
-                evaluation_sha:  r.get(4)?,
-                blob_sha256:     r.get(5)?,
-                recorded_at:     r.get::<_, i64>(6)?.max(0) as u64,
+                task_id: r.get(1)?,
+                gate_type: r.get(2)?,
+                result_class: r.get(3)?,
+                evaluation_sha: r.get(4)?,
+                blob_sha256: r.get(5)?,
+                recorded_at: r.get::<_, i64>(6)?.max(0) as u64,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -78,10 +78,10 @@ mod tests {
     /// and one Inconclusive result, plus a sibling task with one
     /// witness so we can confirm the WHERE filter.
     fn fresh_store_with_seed_witnesses() -> TempDir {
-        const INITIATIVES:        &str = Table::Initiatives.as_str();
-        const TASKS:              &str = Table::Tasks.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
-        const WITNESS_RECORDS:    &str = Table::WitnessRecords.as_str();
+        const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
         let tmp = TempDir::new().unwrap();
         let db = tmp.path().join("kernel.db");
         let store = Store::open(&db).unwrap();
@@ -111,10 +111,10 @@ mod tests {
         }
         // Verifier tokens (witness_records FKs to verifier_run_tokens).
         for (run_id, task_id, gate, sha) in [
-            ("run-a", "t-1", "tests",    "sha-aa"),
-            ("run-b", "t-1", "tests",    "sha-bb"),
+            ("run-a", "t-1", "tests", "sha-aa"),
+            ("run-b", "t-1", "tests", "sha-bb"),
             ("run-c", "t-1", "coverage", "sha-cc"),
-            ("run-d", "t-2", "tests",    "sha-dd"),
+            ("run-d", "t-2", "tests", "sha-dd"),
         ] {
             guard
                 .execute(
@@ -131,10 +131,10 @@ mod tests {
         // Witnesses with intentionally interleaved recorded_at so
         // the order test catches any default ordering.
         for (run_id, task_id, gate, sha, result, recorded) in [
-            ("run-a", "t-1", "tests",    "sha-aa", "Pass",         100i64),
-            ("run-b", "t-1", "tests",    "sha-bb", "Fail",         300),
+            ("run-a", "t-1", "tests", "sha-aa", "Pass", 100i64),
+            ("run-b", "t-1", "tests", "sha-bb", "Fail", 300),
             ("run-c", "t-1", "coverage", "sha-cc", "Inconclusive", 200),
-            ("run-d", "t-2", "tests",    "sha-dd", "Pass",         500),
+            ("run-d", "t-2", "tests", "sha-dd", "Pass", 500),
         ] {
             guard
                 .execute(

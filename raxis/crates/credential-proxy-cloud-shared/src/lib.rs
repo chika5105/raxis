@@ -50,11 +50,11 @@ pub mod http;
 pub mod sigv4;
 pub mod time;
 
-pub use allowlist::{AllowlistError, CloudUpstreamHost, validate_upstream_url};
+pub use allowlist::{validate_upstream_url, AllowlistError, CloudUpstreamHost};
 pub use audit::{
-    CloudExchangeKind, CloudForwardingDenialReason, CloudProvider,
     emit_cloud_credential_cache_hit, emit_cloud_credential_cache_refreshed,
-    emit_cloud_credential_forwarded, emit_cloud_credential_forwarding_denied,
+    emit_cloud_credential_forwarded, emit_cloud_credential_forwarding_denied, CloudExchangeKind,
+    CloudForwardingDenialReason, CloudProvider,
 };
 pub use cache::{CacheKey, CachedToken, TokenCache};
 pub use error::{UpstreamError, UpstreamErrorEnvelope};

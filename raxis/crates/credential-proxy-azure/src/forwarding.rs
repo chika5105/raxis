@@ -40,13 +40,13 @@ use std::time::{Duration, Instant};
 use bytes::Bytes;
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{
-    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost,
-    TokenCache, UpstreamError,
     audit::{
         emit_cloud_credential_cache_hit, emit_cloud_credential_cache_refreshed,
         emit_cloud_credential_forwarded, emit_cloud_credential_forwarding_denied,
     },
     time::unix_now_seconds,
+    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost, TokenCache,
+    UpstreamError,
 };
 use serde::{Deserialize, Serialize};
 
@@ -55,7 +55,7 @@ use serde::{Deserialize, Serialize};
 pub struct ForwardingConfig {
     /// Upstream AAD endpoint (`login.microsoftonline.com`).
     /// Construction-allowlisted via [`CloudUpstreamHost::azure_login`].
-    pub upstream:            CloudUpstreamHost,
+    pub upstream: CloudUpstreamHost,
     /// Token cache safety-window.
     pub cache_safety_window: Duration,
 }
@@ -68,9 +68,9 @@ pub const AZURE_JSON_CONTENT_TYPE: &str = "application/json";
 #[derive(Debug, Clone)]
 pub struct ServicePrincipal {
     /// Azure AD tenant ID (GUID). Routed into the URL path.
-    pub tenant_id:     String,
+    pub tenant_id: String,
     /// Service-principal application (client) id.
-    pub client_id:     String,
+    pub client_id: String,
     /// Service-principal client secret. NEVER logged.
     pub client_secret: String,
 }
@@ -80,31 +80,31 @@ pub struct ServicePrincipal {
 #[derive(Debug, Serialize, Clone)]
 pub struct ImdsTokenResponse {
     /// Short-lived bearer access token.
-    pub access_token:   String,
+    pub access_token: String,
     /// Service-principal client id (echoed).
-    pub client_id:      String,
+    pub client_id: String,
     /// Seconds until expiry (string-encoded per IMDS wire).
-    pub expires_in:     String,
+    pub expires_in: String,
     /// Absolute unix-seconds expiry timestamp (string).
-    pub expires_on:     String,
+    pub expires_on: String,
     /// AAD's `ext_expires_in` field (string).
     pub ext_expires_in: String,
     /// Unix-seconds `not_before` (string).
-    pub not_before:     String,
+    pub not_before: String,
     /// Resource the token was scoped to.
-    pub resource:       String,
+    pub resource: String,
     /// Always `"Bearer"`.
-    pub token_type:     String,
+    pub token_type: String,
 }
 
 /// Upstream AAD OAuth2 response.
 #[derive(Debug, Deserialize)]
 struct UpstreamTokenResponse {
-    access_token:   String,
-    expires_in:     u64,
+    access_token: String,
+    expires_in: u64,
     #[serde(default)]
     ext_expires_in: Option<u64>,
-    token_type:     String,
+    token_type: String,
 }
 
 /// Cache value: the rendered in-VM JSON body.
@@ -125,7 +125,7 @@ pub enum ForwardOutcome {
         /// HTTP status mirrored from upstream (or 503 synthetic).
         status: u16,
         /// JSON body written verbatim.
-        body:   Vec<u8>,
+        body: Vec<u8>,
     },
 }
 
@@ -138,56 +138,69 @@ pub fn parse_service_principal(body: &str) -> Result<ServicePrincipal, UpstreamE
             UpstreamError::MissingCredential(format!("service-principal JSON parse: {e}"))
         })?;
         let obj = v.as_object().ok_or_else(|| {
-            UpstreamError::MissingCredential(
-                "service-principal JSON is not an object".to_owned(),
-            )
+            UpstreamError::MissingCredential("service-principal JSON is not an object".to_owned())
         })?;
         let tenant_id = pick_str(obj, &["tenant_id", "AZURE_TENANT_ID", "tenantId"])
-            .ok_or_else(|| UpstreamError::MissingCredential(
-                "missing tenant_id / AZURE_TENANT_ID".to_owned(),
-            ))?.to_owned();
+            .ok_or_else(|| {
+                UpstreamError::MissingCredential("missing tenant_id / AZURE_TENANT_ID".to_owned())
+            })?
+            .to_owned();
         let client_id = pick_str(obj, &["client_id", "AZURE_CLIENT_ID", "appId"])
-            .ok_or_else(|| UpstreamError::MissingCredential(
-                "missing client_id / AZURE_CLIENT_ID".to_owned(),
-            ))?.to_owned();
+            .ok_or_else(|| {
+                UpstreamError::MissingCredential("missing client_id / AZURE_CLIENT_ID".to_owned())
+            })?
+            .to_owned();
         let client_secret = pick_str(obj, &["client_secret", "AZURE_CLIENT_SECRET", "password"])
-            .ok_or_else(|| UpstreamError::MissingCredential(
-                "missing client_secret / AZURE_CLIENT_SECRET".to_owned(),
-            ))?.to_owned();
-        Ok(ServicePrincipal { tenant_id, client_id, client_secret })
+            .ok_or_else(|| {
+                UpstreamError::MissingCredential(
+                    "missing client_secret / AZURE_CLIENT_SECRET".to_owned(),
+                )
+            })?
+            .to_owned();
+        Ok(ServicePrincipal {
+            tenant_id,
+            client_id,
+            client_secret,
+        })
     } else {
-        let mut tenant_id     = None;
-        let mut client_id     = None;
+        let mut tenant_id = None;
+        let mut client_id = None;
         let mut client_secret = None;
         for line in body.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
                 let v = v.trim().trim_matches(['"', '\''].as_ref()).to_owned();
                 match k {
-                    "AZURE_TENANT_ID"     => tenant_id     = Some(v),
-                    "AZURE_CLIENT_ID"     => client_id     = Some(v),
+                    "AZURE_TENANT_ID" => tenant_id = Some(v),
+                    "AZURE_CLIENT_ID" => client_id = Some(v),
                     "AZURE_CLIENT_SECRET" => client_secret = Some(v),
                     _ => {}
                 }
             }
         }
-        let tenant_id = tenant_id.ok_or_else(|| UpstreamError::MissingCredential(
-            "missing AZURE_TENANT_ID".to_owned(),
-        ))?;
-        let client_id = client_id.ok_or_else(|| UpstreamError::MissingCredential(
-            "missing AZURE_CLIENT_ID".to_owned(),
-        ))?;
-        let client_secret = client_secret.ok_or_else(|| UpstreamError::MissingCredential(
-            "missing AZURE_CLIENT_SECRET".to_owned(),
-        ))?;
-        Ok(ServicePrincipal { tenant_id, client_id, client_secret })
+        let tenant_id = tenant_id.ok_or_else(|| {
+            UpstreamError::MissingCredential("missing AZURE_TENANT_ID".to_owned())
+        })?;
+        let client_id = client_id.ok_or_else(|| {
+            UpstreamError::MissingCredential("missing AZURE_CLIENT_ID".to_owned())
+        })?;
+        let client_secret = client_secret.ok_or_else(|| {
+            UpstreamError::MissingCredential("missing AZURE_CLIENT_SECRET".to_owned())
+        })?;
+        Ok(ServicePrincipal {
+            tenant_id,
+            client_id,
+            client_secret,
+        })
     }
 }
 
 fn pick_str<'a>(
-    obj:  &'a serde_json::Map<String, serde_json::Value>,
+    obj: &'a serde_json::Map<String, serde_json::Value>,
     keys: &[&str],
 ) -> Option<&'a str> {
     for k in keys {
@@ -216,9 +229,7 @@ pub fn resource_to_scope(resource: &str) -> String {
 fn urlencode(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for b in s.bytes() {
-        if b.is_ascii_alphanumeric()
-            || b == b'-' || b == b'_' || b == b'.' || b == b'~'
-        {
+        if b.is_ascii_alphanumeric() || b == b'-' || b == b'_' || b == b'.' || b == b'~' {
             out.push(b as char);
         } else {
             out.push_str(&format!("%{:02X}", b));
@@ -234,10 +245,11 @@ fn build_grant_body(sp: &ServicePrincipal, scope: &str) -> Vec<u8> {
          client_id={cid}&\
          client_secret={secret}&\
          scope={scope}",
-        cid    = urlencode(&sp.client_id),
+        cid = urlencode(&sp.client_id),
         secret = urlencode(&sp.client_secret),
-        scope  = urlencode(scope),
-    ).into_bytes()
+        scope = urlencode(scope),
+    )
+    .into_bytes()
 }
 
 /// Build the upstream URL: `https://login.microsoftonline.com/{tenant}/oauth2/v2.0/token`.
@@ -262,14 +274,14 @@ pub fn build_cache_key(tenant_id: &str, client_id: &str, scope: &str) -> CacheKe
 
 /// Drive one upstream `client_credentials`-grant exchange.
 pub async fn drive_client_credentials_exchange(
-    fwd:      &ForwardingConfig,
-    http:     &CloudHttpClient,
-    sp:       &ServicePrincipal,
+    fwd: &ForwardingConfig,
+    http: &CloudHttpClient,
+    sp: &ServicePrincipal,
     resource: &str,
 ) -> Result<(ImdsTokenResponse, Vec<u8>), (UpstreamError, Option<Vec<u8>>)> {
     let scope = resource_to_scope(resource);
-    let body  = build_grant_body(sp, &scope);
-    let url   = build_token_url(&fwd.upstream, &sp.tenant_id);
+    let body = build_grant_body(sp, &scope);
+    let url = build_token_url(&fwd.upstream, &sp.tenant_id);
     let (status, body_bytes) = http
         .post_form_urlencoded(&url, Bytes::from(body), &[])
         .await
@@ -277,48 +289,55 @@ pub async fn drive_client_credentials_exchange(
 
     if (200..300).contains(&status) {
         let parsed: UpstreamTokenResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
-            (UpstreamError::UpstreamMalformed(format!("AAD JSON parse: {e}")), None)
+            (
+                UpstreamError::UpstreamMalformed(format!("AAD JSON parse: {e}")),
+                None,
+            )
         })?;
         let now = unix_now_seconds();
-        let expires_on  = now + parsed.expires_in;
+        let expires_on = now + parsed.expires_in;
         let imds = ImdsTokenResponse {
-            access_token:   parsed.access_token,
-            client_id:      sp.client_id.clone(),
-            expires_in:     parsed.expires_in.to_string(),
-            expires_on:     expires_on.to_string(),
-            ext_expires_in: parsed.ext_expires_in
-                .unwrap_or(parsed.expires_in).to_string(),
-            not_before:     now.to_string(),
-            resource:       resource.to_owned(),
-            token_type:     parsed.token_type,
+            access_token: parsed.access_token,
+            client_id: sp.client_id.clone(),
+            expires_in: parsed.expires_in.to_string(),
+            expires_on: expires_on.to_string(),
+            ext_expires_in: parsed
+                .ext_expires_in
+                .unwrap_or(parsed.expires_in)
+                .to_string(),
+            not_before: now.to_string(),
+            resource: resource.to_owned(),
+            token_type: parsed.token_type,
         };
         let rendered = serde_json::to_vec(&imds).map_err(|e| {
-            (UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")), None)
+            (
+                UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")),
+                None,
+            )
         })?;
         Ok((imds, rendered))
     } else if (400..500).contains(&status) {
-        Err((UpstreamError::Upstream4xx(status), Some(body_bytes.to_vec())))
+        Err((
+            UpstreamError::Upstream4xx(status),
+            Some(body_bytes.to_vec()),
+        ))
     } else if (500..600).contains(&status) {
         Err((UpstreamError::Upstream5xx(status), None))
     } else {
-        Err((UpstreamError::UpstreamMalformed(format!(
-            "unexpected upstream status {status}",
-        )), None))
+        Err((
+            UpstreamError::UpstreamMalformed(format!("unexpected upstream status {status}",)),
+            None,
+        ))
     }
 }
 
 /// Synthesise an AAD-flavored OAuth2 RFC 6749 error envelope.
 pub fn synthesise_aad_error_envelope(error: &str, description: &str) -> Vec<u8> {
-    format!(
-        "{{\"error\":\"{error}\",\"error_description\":\"{description}\"}}",
-    ).into_bytes()
+    format!("{{\"error\":\"{error}\",\"error_description\":\"{description}\"}}",).into_bytes()
 }
 
 /// Translate an `UpstreamError` to the wire envelope.
-fn upstream_error_to_envelope(
-    e:           UpstreamError,
-    body_4xx:    Option<Vec<u8>>,
-) -> ForwardOutcome {
+fn upstream_error_to_envelope(e: UpstreamError, body_4xx: Option<Vec<u8>>) -> ForwardOutcome {
     match e {
         UpstreamError::Upstream4xx(status) => ForwardOutcome::UpstreamEnvelope {
             status,
@@ -381,79 +400,102 @@ fn upstream_error_to_envelope(
 /// End-to-end forwarder.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_or_serve_from_cache(
-    fwd:             &ForwardingConfig,
-    http:            &Arc<CloudHttpClient>,
-    cache:           &Arc<TokenCache<AzureCacheValue>>,
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    fwd: &ForwardingConfig,
+    http: &Arc<CloudHttpClient>,
+    cache: &Arc<TokenCache<AzureCacheValue>>,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
-    sp:              &ServicePrincipal,
-    resource:        &str,
+    sp: &ServicePrincipal,
+    resource: &str,
 ) -> ForwardOutcome {
-    let scope         = resource_to_scope(resource);
-    let key           = build_cache_key(&sp.tenant_id, &sp.client_id, &scope);
+    let scope = resource_to_scope(resource);
+    let key = build_cache_key(&sp.tenant_id, &sp.client_id, &scope);
     let safety_window = fwd.cache_safety_window;
 
     if let Some(entry) = cache.get(&key).await {
         let age_ms = entry.age().as_millis() as u32;
         let ttl_ms = entry.ttl_remaining().as_millis() as u32;
         emit_cloud_credential_cache_hit(
-            audit, session_id, credential_name,
-            CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
-            age_ms, ttl_ms,
-        ).ok();
+            audit,
+            session_id,
+            credential_name,
+            CloudProvider::Azure,
+            CloudExchangeKind::ClientCredentials,
+            age_ms,
+            ttl_ms,
+        )
+        .ok();
         let body = entry.payload.rendered_in_vm_body.clone();
         if entry.is_stale(safety_window) {
             if let Some(guard) = cache.take_refresh_lock(&key).await {
-                let fwd2      = fwd.clone();
-                let http2     = Arc::clone(http);
-                let cache2    = Arc::clone(cache);
-                let audit2    = Arc::clone(audit);
-                let session2  = session_id.to_owned();
-                let cred2     = credential_name.to_owned();
-                let sp2       = sp.clone();
-                let res2      = resource.to_owned();
+                let fwd2 = fwd.clone();
+                let http2 = Arc::clone(http);
+                let cache2 = Arc::clone(cache);
+                let audit2 = Arc::clone(audit);
+                let session2 = session_id.to_owned();
+                let cred2 = credential_name.to_owned();
+                let sp2 = sp.clone();
+                let res2 = resource.to_owned();
                 let prior_age = age_ms;
                 tokio::spawn(async move {
                     let _g = guard;
                     let started = Instant::now();
-                    let res = drive_client_credentials_exchange(
-                        &fwd2, &http2, &sp2, &res2,
-                    ).await;
+                    let res = drive_client_credentials_exchange(&fwd2, &http2, &sp2, &res2).await;
                     let elapsed_ms = started.elapsed().as_millis() as u32;
                     let scope2 = resource_to_scope(&res2);
                     let key2 = build_cache_key(&sp2.tenant_id, &sp2.client_id, &scope2);
                     match res {
                         Ok((imds, rendered)) => {
                             let expires_in: u64 = imds.expires_in.parse().unwrap_or(3600);
-                            let new_ttl    = Duration::from_secs(expires_in);
+                            let new_ttl = Duration::from_secs(expires_in);
                             let new_ttl_ms = new_ttl.as_millis() as u32;
-                            cache2.insert(
-                                key2,
-                                AzureCacheValue { rendered_in_vm_body: rendered.clone() },
-                                new_ttl,
-                            ).await;
+                            cache2
+                                .insert(
+                                    key2,
+                                    AzureCacheValue {
+                                        rendered_in_vm_body: rendered.clone(),
+                                    },
+                                    new_ttl,
+                                )
+                                .await;
                             emit_cloud_credential_cache_refreshed(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
-                                prior_age, new_ttl_ms,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Azure,
+                                CloudExchangeKind::ClientCredentials,
+                                prior_age,
+                                new_ttl_ms,
+                            )
+                            .ok();
                             emit_cloud_credential_forwarded(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
-                                &fwd2.upstream, elapsed_ms, 200,
-                                rendered.len() as u32, true,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Azure,
+                                CloudExchangeKind::ClientCredentials,
+                                &fwd2.upstream,
+                                elapsed_ms,
+                                200,
+                                rendered.len() as u32,
+                                true,
+                            )
+                            .ok();
                         }
                         Err((e, _)) => {
                             emit_cloud_credential_forwarding_denied(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Azure,
+                                CloudExchangeKind::ClientCredentials,
                                 fwd2.upstream.host(),
                                 e.denial_reason(),
                                 e.status_code().unwrap_or(0),
                                 elapsed_ms,
-                            ).ok();
+                            )
+                            .ok();
                         }
                     }
                 });
@@ -469,28 +511,43 @@ pub async fn forward_or_serve_from_cache(
         Ok((imds, rendered)) => {
             let expires_in: u64 = imds.expires_in.parse().unwrap_or(3600);
             let ttl = Duration::from_secs(expires_in);
-            cache.insert(
-                key,
-                AzureCacheValue { rendered_in_vm_body: rendered.clone() },
-                ttl,
-            ).await;
+            cache
+                .insert(
+                    key,
+                    AzureCacheValue {
+                        rendered_in_vm_body: rendered.clone(),
+                    },
+                    ttl,
+                )
+                .await;
             emit_cloud_credential_forwarded(
-                audit, session_id, credential_name,
-                CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
-                &fwd.upstream, elapsed_ms, 200,
-                rendered.len() as u32, true,
-            ).ok();
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Azure,
+                CloudExchangeKind::ClientCredentials,
+                &fwd.upstream,
+                elapsed_ms,
+                200,
+                rendered.len() as u32,
+                true,
+            )
+            .ok();
             ForwardOutcome::Ok(rendered)
         }
         Err((e, maybe_body)) => {
             emit_cloud_credential_forwarding_denied(
-                audit, session_id, credential_name,
-                CloudProvider::Azure, CloudExchangeKind::ClientCredentials,
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Azure,
+                CloudExchangeKind::ClientCredentials,
                 fwd.upstream.host(),
                 e.denial_reason(),
                 e.status_code().unwrap_or(0),
                 elapsed_ms,
-            ).ok();
+            )
+            .ok();
             upstream_error_to_envelope(e, maybe_body)
         }
     }
@@ -507,8 +564,8 @@ mod tests {
             AZURE_CLIENT_ID=cccc-cccc\n\
             AZURE_CLIENT_SECRET=secret-bytes\n";
         let sp = parse_service_principal(body).unwrap();
-        assert_eq!(sp.tenant_id,     "tttt-tttt");
-        assert_eq!(sp.client_id,     "cccc-cccc");
+        assert_eq!(sp.tenant_id, "tttt-tttt");
+        assert_eq!(sp.client_id, "cccc-cccc");
         assert_eq!(sp.client_secret, "secret-bytes");
     }
 
@@ -533,8 +590,8 @@ mod tests {
             "tenantId": "tttt-tttt"
         }"#;
         let sp = parse_service_principal(body).unwrap();
-        assert_eq!(sp.tenant_id,     "tttt-tttt");
-        assert_eq!(sp.client_id,     "cccc-cccc");
+        assert_eq!(sp.tenant_id, "tttt-tttt");
+        assert_eq!(sp.client_id, "cccc-cccc");
         assert_eq!(sp.client_secret, "secret-bytes");
     }
 
@@ -562,8 +619,8 @@ mod tests {
     #[test]
     fn grant_body_pins_client_credentials_grant_type() {
         let sp = ServicePrincipal {
-            tenant_id:     "tttt-tttt".to_owned(),
-            client_id:     "cccc-cccc".to_owned(),
+            tenant_id: "tttt-tttt".to_owned(),
+            client_id: "cccc-cccc".to_owned(),
             client_secret: "shhh".to_owned(),
         };
         let b = build_grant_body(&sp, "https://management.azure.com/.default");
@@ -577,7 +634,7 @@ mod tests {
     #[test]
     fn token_url_includes_tenant_path() {
         let host = CloudUpstreamHost::azure_login();
-        let url  = build_token_url(&host, "tttt-tttt");
+        let url = build_token_url(&host, "tttt-tttt");
         assert_eq!(
             url,
             "https://login.microsoftonline.com/tttt-tttt/oauth2/v2.0/token",
@@ -605,7 +662,7 @@ mod tests {
     fn synthesised_envelope_is_well_formed_oauth2_json() {
         let v = synthesise_aad_error_envelope("invalid_grant", "no");
         let parsed: serde_json::Value = serde_json::from_slice(&v).unwrap();
-        assert_eq!(parsed["error"],             "invalid_grant");
+        assert_eq!(parsed["error"], "invalid_grant");
         assert_eq!(parsed["error_description"], "no");
     }
 }

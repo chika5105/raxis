@@ -46,8 +46,8 @@ use std::sync::Arc;
 use raxis_audit_tools::AuditEventKind;
 use raxis_store::Table;
 use raxis_types::{
-    unix_now_secs, EscalationId, EscalationRejectionReason, EscalationRequest,
-    EscalationResponse, EscalationStatus,
+    unix_now_secs, EscalationId, EscalationRejectionReason, EscalationRequest, EscalationResponse,
+    EscalationStatus,
 };
 
 use crate::authority;
@@ -66,11 +66,11 @@ const JUSTIFICATION_MAX_BYTES: usize = 4096;
 // status strings — sourced from the typed enum's `.as_sql_str()` so
 // any future rename in `raxis-types` propagates by compile error rather
 // than silent SQL drift.
-const ESCALATIONS:          &str = Table::Escalations.as_str();
-const TASKS:                &str = Table::Tasks.as_str();
-const SESSIONS:             &str = Table::Sessions.as_str();
-const LINEAGE_RATE_LIMITS:  &str = Table::LineageRateLimits.as_str();
-const INITIATIVES:          &str = Table::Initiatives.as_str();
+const ESCALATIONS: &str = Table::Escalations.as_str();
+const TASKS: &str = Table::Tasks.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
+const LINEAGE_RATE_LIMITS: &str = Table::LineageRateLimits.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
 
 /// Dispatch one EscalationRequest and return the EscalationResponse.
 ///
@@ -120,9 +120,7 @@ async fn handle_inner(
     }
 
     // ── Step 2: validate wire payload ─────────────────────────────────
-    if req.justification.trim().is_empty()
-        || req.justification.len() > JUSTIFICATION_MAX_BYTES
-    {
+    if req.justification.trim().is_empty() || req.justification.len() > JUSTIFICATION_MAX_BYTES {
         return Err(EscalationRejectionReason::RateLimitExceeded);
     }
     if req.requested_scope.class() != req.class {
@@ -146,12 +144,7 @@ async fn handle_inner(
         response,
         audit_after,
     } = tokio::task::spawn_blocking(move || {
-        submit_escalation_blocking(
-            &ctx_outer,
-            &session_id_str,
-            &lineage_id_str,
-            req_owned,
-        )
+        submit_escalation_blocking(&ctx_outer, &session_id_str, &lineage_id_str, req_owned)
     })
     .await
     .map_err(|_| EscalationRejectionReason::RateLimitExceeded)??;
@@ -189,10 +182,10 @@ struct SubmitOutcome {
 }
 
 fn submit_escalation_blocking(
-    ctx:            &HandlerContext,
+    ctx: &HandlerContext,
     session_id_str: &str,
     lineage_id_str: &str,
-    req:            EscalationRequest,
+    req: EscalationRequest,
 ) -> Result<SubmitOutcome, EscalationRejectionReason> {
     use rusqlite::params;
 
@@ -252,10 +245,10 @@ fn submit_escalation_blocking(
         // Read-only transaction — drop without committing so no
         // lineage_rate_limits row is created/touched.
         drop(tx);
-        let escalation_id = EscalationId::parse(&eid)
-            .map_err(|_| EscalationRejectionReason::RateLimitExceeded)?;
+        let escalation_id =
+            EscalationId::parse(&eid).map_err(|_| EscalationRejectionReason::RateLimitExceeded)?;
         return Ok(SubmitOutcome {
-            response:    EscalationResponse::AlreadyPending { escalation_id },
+            response: EscalationResponse::AlreadyPending { escalation_id },
             audit_after: Vec::new(),
         });
     }
@@ -267,7 +260,7 @@ fn submit_escalation_blocking(
     let policy_snapshot = ctx.policy.load_full();
     let now_secs = unix_now_secs() as i64;
     let max_per_window = policy_snapshot.escalation_max_per_window() as i64;
-    let window_secs    = policy_snapshot.escalation_window().as_secs() as i64;
+    let window_secs = policy_snapshot.escalation_window().as_secs() as i64;
     let quarantine_threshold = policy_snapshot.escalation_quarantine_threshold() as i64;
 
     // Existing lineage_rate_limits row, if any.
@@ -292,7 +285,7 @@ fn submit_escalation_blocking(
         // no fresh audit (the LineageQuarantined event was already
         // emitted on the trigger transition).
         return Ok(SubmitOutcome {
-            response:    EscalationResponse::Rejected {
+            response: EscalationResponse::Rejected {
                 reason: EscalationRejectionReason::LineageQuarantined,
             },
             audit_after: Vec::new(),
@@ -301,7 +294,7 @@ fn submit_escalation_blocking(
 
     // Window roll-over.
     if window_secs > 0 && now_secs >= window_start.saturating_add(window_secs) {
-        window_start     = now_secs;
+        window_start = now_secs;
         escalation_count = 0;
     }
 
@@ -322,7 +315,11 @@ fn submit_escalation_blocking(
             escalation_count, // unchanged — the rejected attempt does NOT consume a slot
             new_quarantined_flag,
             trigger_count,
-            if now_quarantined { Some(now_secs) } else { None },
+            if now_quarantined {
+                Some(now_secs)
+            } else {
+                None
+            },
         )?;
 
         tx.commit()
@@ -331,7 +328,7 @@ fn submit_escalation_blocking(
         if now_quarantined {
             audit_after.push((
                 AuditEventKind::LineageQuarantined {
-                    lineage_id:    lineage_id_str.to_owned(),
+                    lineage_id: lineage_id_str.to_owned(),
                     trigger_count: trigger_count as u64,
                 },
                 Some(session_id_str.to_owned()),
@@ -346,7 +343,7 @@ fn submit_escalation_blocking(
         }
         audit_after.push((
             AuditEventKind::EscalationRateLimitExceeded {
-                lineage_id:      lineage_id_str.to_owned(),
+                lineage_id: lineage_id_str.to_owned(),
                 attempted_count: attempted as u64,
                 window_start,
             },
@@ -363,9 +360,7 @@ fn submit_escalation_blocking(
 
     // ── Step 6: INSERT escalations row + UPDATE counter ────────────────
     let escalation_id_str = uuid::Uuid::new_v4().to_string();
-    let timeout_at = now_secs.saturating_add(
-        policy_snapshot.escalation_timeout().as_secs() as i64,
-    );
+    let timeout_at = now_secs.saturating_add(policy_snapshot.escalation_timeout().as_secs() as i64);
     let scope_json = serde_json::to_string(&req.requested_scope)
         .expect("RequestedEscalationScope is always JSON-serialisable");
 
@@ -411,9 +406,9 @@ fn submit_escalation_blocking(
     audit_after.push((
         AuditEventKind::EscalationSubmitted {
             escalation_id: escalation_id_str.clone(),
-            task_id:       req.task_id.as_str().to_owned(),
-            class:         req.class.as_sql_str().to_owned(),
-            lineage_id:    lineage_id_str.to_owned(),
+            task_id: req.task_id.as_str().to_owned(),
+            class: req.class.as_sql_str().to_owned(),
+            lineage_id: lineage_id_str.to_owned(),
         },
         Some(session_id_str.to_owned()),
         Some(initiative_id_str),
@@ -436,13 +431,13 @@ fn submit_escalation_blocking(
 /// `ON CONFLICT (lineage_id) DO UPDATE` clause which keeps the
 /// statement single-shot and atomic with the surrounding transaction.
 fn upsert_lineage_rate_limits(
-    tx:                &rusqlite::Transaction,
-    lineage_id:        &str,
-    window_start:      i64,
-    escalation_count:  i64,
-    quarantined:       i64,
-    trigger_count:     i64,
-    quarantined_at:    Option<i64>,
+    tx: &rusqlite::Transaction,
+    lineage_id: &str,
+    window_start: i64,
+    escalation_count: i64,
+    quarantined: i64,
+    trigger_count: i64,
+    quarantined_at: Option<i64>,
 ) -> Result<(), EscalationRejectionReason> {
     use rusqlite::params;
     tx.execute(
@@ -503,9 +498,9 @@ mod tests {
     use std::path::PathBuf;
     use std::sync::Arc;
 
-    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{EscalationPolicyForTests, OperatorEntry, PolicyBundle};
     use raxis_store::Store;
+    use raxis_test_support::FakeAuditSink;
     use raxis_types::{
         EscalationClass, EscalationRequest, EscalationResponse, InitiativeState,
         RequestedEscalationScope, Role, TaskState,
@@ -520,10 +515,10 @@ mod tests {
     // ── fixtures ──────────────────────────────────────────────────────
 
     const SESSION_TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
-    const SESSION_ID:    &str = "00000000-0000-0000-0000-000000000001";
-    const LINEAGE_ID:    &str = "lin-prime";
+    const SESSION_ID: &str = "00000000-0000-0000-0000-000000000001";
+    const LINEAGE_ID: &str = "lin-prime";
     const INITIATIVE_ID: &str = "00000000-0000-0000-0000-0000000000aa";
-    const TASK_ID:       &str = "00000000-0000-0000-0000-0000000000bb";
+    const TASK_ID: &str = "00000000-0000-0000-0000-0000000000bb";
     // INV-STORE-03: tests share the production const aliases for table
     // names (visible because `mod tests` is `use super::*`).
 
@@ -535,7 +530,7 @@ mod tests {
     fn build_ctx(
         escalation_policy: EscalationPolicyForTests,
     ) -> (Arc<HandlerContext>, Arc<FakeAuditSink>) {
-        let store  = Store::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         // Stub cert: this fixture exercises the escalation handler's
         // rate-limit / quarantine branches and never goes through the
         // cert-validation gate. See `notifications::sink::tests::bundle`
@@ -545,9 +540,9 @@ mod tests {
         let policy = PolicyBundle::for_tests_with_operators_and_escalation_policy(
             vec![OperatorEntry {
                 pubkey_fingerprint: "op-prime".into(),
-                display_name:       "op-prime".into(),
+                display_name: "op-prime".into(),
                 pubkey_hex,
-                permitted_ops:      vec![],
+                permitted_ops: vec![],
                 cert,
                 force_misconfig_bypass: false,
             }],
@@ -555,14 +550,12 @@ mod tests {
         );
         let sink = Arc::new(FakeAuditSink::new());
         let data_dir = PathBuf::from("/tmp/raxis-escalation-test");
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            &data_dir,
-            sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(&data_dir, sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
-        let ctx  = Arc::new(HandlerContext::new(
+        let ctx = Arc::new(HandlerContext::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
             Arc::new(KeyRegistry::stub_for_tests()),
             Arc::new(store),
@@ -590,7 +583,7 @@ mod tests {
     async fn seed_session_and_task(ctx: Arc<HandlerContext>) {
         tokio::task::spawn_blocking(move || {
             let conn = ctx.store.lock_sync();
-            let now  = unix_now_secs();
+            let now = unix_now_secs();
             // Role/actor strings ("planner", "kernel") are free-form
             // value columns (not finite enums), so they remain inline.
             // Initiative/task FSM state strings come from the typed
@@ -609,9 +602,13 @@ mod tests {
                 rusqlite::params![
                     SESSION_ID,
                     Role::Planner.as_sql_str(),
-                    SESSION_TOKEN, LINEAGE_ID, now, now + 3600,
+                    SESSION_TOKEN,
+                    LINEAGE_ID,
+                    now,
+                    now + 3600,
                 ],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {INITIATIVES}
@@ -619,10 +616,9 @@ mod tests {
                          plan_artifact_sha256, created_at)
                      VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
                 ),
-                rusqlite::params![
-                    INITIATIVE_ID, InitiativeState::Executing.as_sql_str(), now,
-                ],
-            ).unwrap();
+                rusqlite::params![INITIATIVE_ID, InitiativeState::Executing.as_sql_str(), now,],
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {TASKS}
@@ -633,12 +629,17 @@ mod tests {
                              1, ?4, ?4, ?5, 0)"
                 ),
                 rusqlite::params![
-                    TASK_ID, INITIATIVE_ID,
+                    TASK_ID,
+                    INITIATIVE_ID,
                     TaskState::Running.as_sql_str(),
-                    now, SESSION_ID,
+                    now,
+                    SESSION_ID,
                 ],
-            ).unwrap();
-        }).await.unwrap();
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
     }
 
     /// Run a closure against the store from a tokio test context.
@@ -651,14 +652,16 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
             f(&conn)
-        }).await.unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     fn make_request(idempotency_key: uuid::Uuid) -> EscalationRequest {
         EscalationRequest {
             session_token: SESSION_TOKEN.into(),
-            task_id:       raxis_types::TaskId::parse(TASK_ID).unwrap(),
-            class:         EscalationClass::CapabilityUpgrade,
+            task_id: raxis_types::TaskId::parse(TASK_ID).unwrap(),
+            class: EscalationClass::CapabilityUpgrade,
             requested_scope: RequestedEscalationScope::CapabilityUpgrade {
                 capability: raxis_types::CapabilityClass::WriteSecrets,
             },
@@ -667,32 +670,38 @@ mod tests {
         }
     }
 
-
     // ── happy path ────────────────────────────────────────────────────
 
     #[tokio::test]
     async fn submitted_happy_path_returns_typed_response_and_emits_audit() {
         let (ctx, sink) = build_ctx(EscalationPolicyForTests {
-            timeout:              Duration::from_secs(1800),
-            window:               Duration::from_secs(60),
-            max_per_window:       10,
+            timeout: Duration::from_secs(1800),
+            window: Duration::from_secs(60),
+            max_per_window: 10,
             quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
-        let req  = make_request(uuid::Uuid::new_v4());
+        let req = make_request(uuid::Uuid::new_v4());
         let resp = handle(req.clone(), &ctx).await;
 
         match resp {
-            EscalationResponse::Submitted { escalation_id, timeout_at } => {
+            EscalationResponse::Submitted {
+                escalation_id,
+                timeout_at,
+            } => {
                 assert!(uuid::Uuid::parse_str(escalation_id.as_str()).is_ok());
-                assert!(timeout_at.0 > unix_now_secs(),
-                    "timeout_at must be in the future");
+                assert!(
+                    timeout_at.0 > unix_now_secs(),
+                    "timeout_at must be in the future"
+                );
             }
             other => panic!("expected Submitted, got {other:?}"),
         }
-        assert!(sink.event_kinds().contains(&"EscalationSubmitted"),
-            "happy path MUST emit EscalationSubmitted audit");
+        assert!(
+            sink.event_kinds().contains(&"EscalationSubmitted"),
+            "happy path MUST emit EscalationSubmitted audit"
+        );
     }
 
     // ── validation rejections (no audit, no DB write) ─────────────────
@@ -700,7 +709,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_empty_justification() {
         let (ctx, sink) = build_ctx(EscalationPolicyForTests {
-            max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
+            max_per_window: 1,
+            window: Duration::from_secs(60),
+            ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -709,14 +720,18 @@ mod tests {
 
         let resp = handle(req, &ctx).await;
         assert!(matches!(resp, EscalationResponse::Rejected { .. }));
-        assert!(sink.event_kinds().is_empty(),
-            "validation rejection MUST NOT emit audit");
+        assert!(
+            sink.event_kinds().is_empty(),
+            "validation rejection MUST NOT emit audit"
+        );
     }
 
     #[tokio::test]
     async fn rejects_oversize_justification() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
+            max_per_window: 1,
+            window: Duration::from_secs(60),
+            ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -730,21 +745,27 @@ mod tests {
     #[tokio::test]
     async fn accepts_justification_at_exactly_max_bytes() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         let mut req = make_request(uuid::Uuid::new_v4());
         req.justification = "x".repeat(JUSTIFICATION_MAX_BYTES);
         let resp = handle(req, &ctx).await;
-        assert!(matches!(resp, EscalationResponse::Submitted { .. }),
-            "justification at the cap is admissible");
+        assert!(
+            matches!(resp, EscalationResponse::Submitted { .. }),
+            "justification at the cap is admissible"
+        );
     }
 
     #[tokio::test]
     async fn rejects_class_mismatched_with_scope() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
+            max_per_window: 1,
+            window: Duration::from_secs(60),
+            ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -759,7 +780,9 @@ mod tests {
     #[tokio::test]
     async fn rejects_nil_idempotency_key() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            max_per_window: 1, window: Duration::from_secs(60), ..Default::default()
+            max_per_window: 1,
+            window: Duration::from_secs(60),
+            ..Default::default()
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         let req = make_request(uuid::Uuid::nil());
@@ -782,16 +805,20 @@ mod tests {
     #[tokio::test]
     async fn rejects_revoked_session() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         with_store_blocking(&ctx, |conn| {
             conn.execute(
                 &format!("UPDATE {SESSIONS} SET revoked_at = ?1 WHERE session_id = ?2"),
                 rusqlite::params![unix_now_secs(), SESSION_ID],
-            ).unwrap();
-        }).await;
+            )
+            .unwrap();
+        })
+        .await;
         let resp = handle(make_request(uuid::Uuid::new_v4()), &ctx).await;
         assert!(matches!(resp, EscalationResponse::Rejected { .. }));
     }
@@ -799,16 +826,20 @@ mod tests {
     #[tokio::test]
     async fn rejects_expired_session() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         with_store_blocking(&ctx, |conn| {
             conn.execute(
                 &format!("UPDATE {SESSIONS} SET expires_at = ?1 WHERE session_id = ?2"),
                 rusqlite::params![unix_now_secs() - 1, SESSION_ID],
-            ).unwrap();
-        }).await;
+            )
+            .unwrap();
+        })
+        .await;
         let resp = handle(make_request(uuid::Uuid::new_v4()), &ctx).await;
         assert!(matches!(resp, EscalationResponse::Rejected { .. }));
     }
@@ -818,14 +849,14 @@ mod tests {
     #[tokio::test]
     async fn rejects_unknown_task() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         let mut req = make_request(uuid::Uuid::new_v4());
-        req.task_id = raxis_types::TaskId::parse(
-            "00000000-0000-0000-0000-0000000000ff",
-        ).unwrap();
+        req.task_id = raxis_types::TaskId::parse("00000000-0000-0000-0000-0000000000ff").unwrap();
         let resp = handle(req, &ctx).await;
         assert!(matches!(resp, EscalationResponse::Rejected { .. }));
     }
@@ -833,13 +864,15 @@ mod tests {
     #[tokio::test]
     async fn rejects_cross_lineage_task() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         // Add a SECOND session in a different lineage that owns a different task.
         let other_session_id = "00000000-0000-0000-0000-000000000002";
-        let other_task_id    = "00000000-0000-0000-0000-0000000000cc";
+        let other_task_id = "00000000-0000-0000-0000-0000000000cc";
         with_store_blocking(&ctx, move |conn| {
             let now = unix_now_secs();
             conn.execute(
@@ -853,10 +886,13 @@ mod tests {
                                0, 0, ?3, ?4, 0, NULL)"
                 ),
                 rusqlite::params![
-                    other_session_id, Role::Planner.as_sql_str(),
-                    now, now + 3600,
+                    other_session_id,
+                    Role::Planner.as_sql_str(),
+                    now,
+                    now + 3600,
                 ],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {TASKS}
@@ -867,12 +903,16 @@ mod tests {
                              1, ?4, ?4, ?5, 0)"
                 ),
                 rusqlite::params![
-                    other_task_id, INITIATIVE_ID,
+                    other_task_id,
+                    INITIATIVE_ID,
                     TaskState::Running.as_sql_str(),
-                    now, other_session_id,
+                    now,
+                    other_session_id,
                 ],
-            ).unwrap();
-        }).await;
+            )
+            .unwrap();
+        })
+        .await;
 
         // Submit using SESSION_TOKEN (lineage = LINEAGE_ID) but
         // pointing at the other task (owned by lin-other) — must be
@@ -880,8 +920,10 @@ mod tests {
         let mut req = make_request(uuid::Uuid::new_v4());
         req.task_id = raxis_types::TaskId::parse(other_task_id).unwrap();
         let resp = handle(req, &ctx).await;
-        assert!(matches!(resp, EscalationResponse::Rejected { .. }),
-            "cross-lineage escalation MUST be rejected");
+        assert!(
+            matches!(resp, EscalationResponse::Rejected { .. }),
+            "cross-lineage escalation MUST be rejected"
+        );
     }
 
     // ── idempotency ───────────────────────────────────────────────────
@@ -889,8 +931,10 @@ mod tests {
     #[tokio::test]
     async fn duplicate_idempotency_key_returns_already_pending_without_consuming_slot() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
         let key = uuid::Uuid::new_v4();
@@ -902,19 +946,29 @@ mod tests {
         let second = handle(make_request(key), &ctx).await;
         match second {
             EscalationResponse::AlreadyPending { escalation_id } => {
-                assert_eq!(escalation_id.as_str(), first_id.as_str(),
-                    "AlreadyPending MUST surface the original escalation_id");
+                assert_eq!(
+                    escalation_id.as_str(),
+                    first_id.as_str(),
+                    "AlreadyPending MUST surface the original escalation_id"
+                );
             }
             other => panic!("expected AlreadyPending, got {other:?}"),
         }
         let count: i64 = with_store_blocking(&ctx, |conn| {
             conn.query_row(
-                &format!("SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"),
+                &format!(
+                    "SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"
+                ),
                 rusqlite::params![LINEAGE_ID],
                 |r| r.get(0),
-            ).unwrap()
-        }).await;
-        assert_eq!(count, 1, "idempotent retry MUST NOT consume a rate-limit slot");
+            )
+            .unwrap()
+        })
+        .await;
+        assert_eq!(
+            count, 1,
+            "idempotent retry MUST NOT consume a rate-limit slot"
+        );
     }
 
     // ── rate limit ────────────────────────────────────────────────────
@@ -922,8 +976,10 @@ mod tests {
     #[tokio::test]
     async fn rejects_with_rate_limit_exceeded_when_max_per_window_hit() {
         let (ctx, sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(3600),
-            max_per_window: 2, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(3600),
+            max_per_window: 2,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -937,24 +993,32 @@ mod tests {
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
-        assert!(sink.event_kinds().contains(&"EscalationRateLimitExceeded"),
-            "rate-limit overflow MUST emit EscalationRateLimitExceeded audit");
+        assert!(
+            sink.event_kinds().contains(&"EscalationRateLimitExceeded"),
+            "rate-limit overflow MUST emit EscalationRateLimitExceeded audit"
+        );
 
         let count: i64 = with_store_blocking(&ctx, |conn| {
             conn.query_row(
-                &format!("SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"),
+                &format!(
+                    "SELECT escalation_count FROM {LINEAGE_RATE_LIMITS} WHERE lineage_id = ?1"
+                ),
                 rusqlite::params![LINEAGE_ID],
                 |r| r.get(0),
-            ).unwrap()
-        }).await;
+            )
+            .unwrap()
+        })
+        .await;
         assert_eq!(count, 2, "rejected attempt MUST NOT consume a slot");
     }
 
     #[tokio::test]
     async fn quarantine_triggers_after_threshold_overflows() {
         let (ctx, sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(3600),
-            max_per_window: 1, quarantine_threshold: 2,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(3600),
+            max_per_window: 1,
+            quarantine_threshold: 2,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -970,19 +1034,27 @@ mod tests {
             }
             other => panic!("expected LineageQuarantined, got {other:?}"),
         }
-        assert!(sink.event_kinds().contains(&"LineageQuarantined"),
-            "crossing the threshold MUST emit LineageQuarantined audit");
+        assert!(
+            sink.event_kinds().contains(&"LineageQuarantined"),
+            "crossing the threshold MUST emit LineageQuarantined audit"
+        );
 
         // Sticky: a fourth attempt also gets LineageQuarantined and
         // does NOT emit a fresh audit (already quarantined branch).
         let prior_kinds = sink.event_kinds();
         let fourth = handle(make_request(uuid::Uuid::new_v4()), &ctx).await;
-        assert!(matches!(fourth, EscalationResponse::Rejected {
-            reason: EscalationRejectionReason::LineageQuarantined,
-        }));
+        assert!(matches!(
+            fourth,
+            EscalationResponse::Rejected {
+                reason: EscalationRejectionReason::LineageQuarantined,
+            }
+        ));
         let new_kinds = sink.event_kinds();
-        assert_eq!(new_kinds.len(), prior_kinds.len(),
-            "sticky-quarantine path MUST NOT emit additional audit events");
+        assert_eq!(
+            new_kinds.len(),
+            prior_kinds.len(),
+            "sticky-quarantine path MUST NOT emit additional audit events"
+        );
     }
 
     // ── window roll-over ──────────────────────────────────────────────
@@ -990,8 +1062,10 @@ mod tests {
     #[tokio::test]
     async fn window_rolls_over_after_window_secs_elapses() {
         let (ctx, _sink) = build_ctx(EscalationPolicyForTests {
-            timeout: Duration::from_secs(60), window: Duration::from_secs(60),
-            max_per_window: 1, quarantine_threshold: 100,
+            timeout: Duration::from_secs(60),
+            window: Duration::from_secs(60),
+            max_per_window: 1,
+            quarantine_threshold: 100,
         });
         seed_session_and_task(Arc::clone(&ctx)).await;
 
@@ -1002,13 +1076,18 @@ mod tests {
         // expired window and resets the counter.
         with_store_blocking(&ctx, |conn| {
             conn.execute(
-                &format!("UPDATE {LINEAGE_RATE_LIMITS} SET window_start = ?1 WHERE lineage_id = ?2"),
+                &format!(
+                    "UPDATE {LINEAGE_RATE_LIMITS} SET window_start = ?1 WHERE lineage_id = ?2"
+                ),
                 rusqlite::params![unix_now_secs() - 600, LINEAGE_ID],
-            ).unwrap();
-        }).await;
+            )
+            .unwrap();
+        })
+        .await;
         let second = handle(make_request(uuid::Uuid::new_v4()), &ctx).await;
-        assert!(matches!(second, EscalationResponse::Submitted { .. }),
-            "fresh window MUST allow another submission");
+        assert!(
+            matches!(second, EscalationResponse::Submitted { .. }),
+            "fresh window MUST allow another submission"
+        );
     }
 }
-

@@ -46,13 +46,13 @@ use crate::tools::{Tool, ToolContext, ToolError, ToolOutput, ToolRegistry};
 #[derive(Debug, Clone, Deserialize)]
 pub struct CustomToolDecl {
     /// Tool name (registered into the planner registry under this key).
-    pub name:         String,
+    pub name: String,
     /// Human-readable description shown to the model.
-    pub description:  String,
+    pub description: String,
     /// argv. argv[0] is the path to the executable; subsequent
     /// entries are static prefix arguments. The model's input
     /// arrives on stdin, NOT in argv.
-    pub command:      Vec<String>,
+    pub command: Vec<String>,
     /// JSON Schema for the input. Forwarded verbatim to the
     /// Anthropic API as the tool's `input_schema`.
     pub input_schema: serde_json::Value,
@@ -78,7 +78,7 @@ pub enum CustomToolError {
         /// Offending custom-tool name.
         tool: String,
         /// Operator-supplied timeout (seconds) that exceeded the cap.
-        got:  u32,
+        got: u32,
     },
     /// Name collision with an already-registered tool. The loader
     /// fails closed; operators must rename the custom tool or
@@ -94,7 +94,10 @@ pub enum CustomToolError {
 pub fn validate_custom_tool(decl: &CustomToolDecl) -> Result<(), CustomToolError> {
     let name_ok = !decl.name.is_empty()
         && decl.name.len() <= 64
-        && decl.name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_');
+        && decl
+            .name
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_');
     if !name_ok {
         return Err(CustomToolError::InvalidName(decl.name.clone()));
     }
@@ -107,7 +110,7 @@ pub fn validate_custom_tool(decl: &CustomToolDecl) -> Result<(), CustomToolError
     if decl.timeout_secs > 300 {
         return Err(CustomToolError::TimeoutTooLong {
             tool: decl.name.clone(),
-            got:  decl.timeout_secs,
+            got: decl.timeout_secs,
         });
     }
     Ok(())
@@ -122,7 +125,7 @@ pub fn validate_custom_tool(decl: &CustomToolDecl) -> Result<(), CustomToolError
 /// leaves the registry in a half-populated state.
 pub fn load_custom_tools(
     registry: &mut ToolRegistry,
-    decls:    &[CustomToolDecl],
+    decls: &[CustomToolDecl],
 ) -> Result<(), CustomToolError> {
     // Pass 1 — validate everything (and check name collisions
     // against the registry's current contents).
@@ -137,11 +140,11 @@ pub fn load_custom_tools(
     // Pass 2 — register everything.
     for decl in decls {
         registry.register(Arc::new(SubprocessTool {
-            name:         leak_static(decl.name.clone()),
-            description:  leak_static(decl.description.clone()),
-            command:      decl.command.clone(),
+            name: leak_static(decl.name.clone()),
+            description: leak_static(decl.description.clone()),
+            command: decl.command.clone(),
             input_schema: decl.input_schema.clone(),
-            timeout:      Duration::from_secs(decl.timeout_secs as u64),
+            timeout: Duration::from_secs(decl.timeout_secs as u64),
         }));
     }
     Ok(())
@@ -150,52 +153,65 @@ pub fn load_custom_tools(
 /// Concrete [`Tool`] impl that shells out to a configured argv with
 /// the model's input on stdin.
 pub struct SubprocessTool {
-    name:         &'static str,
-    description:  &'static str,
-    command:      Vec<String>,
+    name: &'static str,
+    description: &'static str,
+    command: Vec<String>,
     input_schema: serde_json::Value,
-    timeout:      Duration,
+    timeout: Duration,
 }
 
 #[async_trait::async_trait]
 impl Tool for SubprocessTool {
-    fn name(&self)         -> &'static str { self.name }
-    fn description(&self)  -> &'static str { self.description }
-    fn input_schema(&self) -> serde_json::Value { self.input_schema.clone() }
+    fn name(&self) -> &'static str {
+        self.name
+    }
+    fn description(&self) -> &'static str {
+        self.description
+    }
+    fn input_schema(&self) -> serde_json::Value {
+        self.input_schema.clone()
+    }
 
     async fn execute(
         &self,
         input: &serde_json::Value,
-        ctx:   &ToolContext,
+        ctx: &ToolContext,
     ) -> Result<ToolOutput, ToolError> {
         let argv0 = self.command.first().ok_or_else(|| ToolError::Internal {
-            tool:   self.name.to_owned(),
+            tool: self.name.to_owned(),
             reason: "command argv was empty at execute time \
-                     (registration-time guard regressed)".to_owned(),
+                     (registration-time guard regressed)"
+                .to_owned(),
         })?;
         let argv_rest: &[String] = &self.command[1..];
 
         let mut cmd = Command::new(argv0);
         cmd.args(argv_rest)
-           .current_dir(&ctx.workspace_root)
-           .stdin(Stdio::piped())
-           .stdout(Stdio::piped())
-           .stderr(Stdio::piped());
+            .current_dir(&ctx.workspace_root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
 
         let mut child = match cmd.spawn() {
-            Ok(c)  => c,
-            Err(e) => return Ok(ToolOutput::err(format!(
-                "{}: spawn {argv0:?} failed: {e}", self.name,
-            ))),
+            Ok(c) => c,
+            Err(e) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: spawn {argv0:?} failed: {e}",
+                    self.name,
+                )))
+            }
         };
         // Pipe the model's input to stdin, drop the writer, then
         // wait for output.
         if let Some(mut stdin) = child.stdin.take() {
             let body = match serde_json::to_vec(input) {
                 Ok(b) => b,
-                Err(e) => return Ok(ToolOutput::err(format!(
-                    "{}: stdin JSON encode failed: {e}", self.name,
-                ))),
+                Err(e) => {
+                    return Ok(ToolOutput::err(format!(
+                        "{}: stdin JSON encode failed: {e}",
+                        self.name,
+                    )))
+                }
             };
             match stdin.write_all(&body).await {
                 Ok(()) => {}
@@ -207,7 +223,8 @@ impl Tool for SubprocessTool {
                 Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
                 Err(e) => {
                     return Ok(ToolOutput::err(format!(
-                        "{}: stdin write failed: {e}", self.name,
+                        "{}: stdin write failed: {e}",
+                        self.name,
                     )));
                 }
             }
@@ -216,13 +233,19 @@ impl Tool for SubprocessTool {
         }
         let timeout = ctx.deadline.unwrap_or(self.timeout);
         let out = match tokio::time::timeout(timeout, child.wait_with_output()).await {
-            Ok(Ok(o))  => o,
-            Ok(Err(e)) => return Ok(ToolOutput::err(format!(
-                "{}: wait_with_output failed: {e}", self.name,
-            ))),
-            Err(_) => return Ok(ToolOutput::err(format!(
-                "{}: subprocess timed out after {timeout:?}", self.name,
-            ))),
+            Ok(Ok(o)) => o,
+            Ok(Err(e)) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: wait_with_output failed: {e}",
+                    self.name,
+                )))
+            }
+            Err(_) => {
+                return Ok(ToolOutput::err(format!(
+                    "{}: subprocess timed out after {timeout:?}",
+                    self.name,
+                )))
+            }
         };
         if !out.status.success() {
             let exit_info = match out.status.code() {
@@ -233,7 +256,7 @@ impl Tool for SubprocessTool {
                         use std::os::unix::process::ExitStatusExt;
                         match out.status.signal() {
                             Some(sig) => format!("killed by signal {sig}"),
-                            None      => "unknown exit status".to_owned(),
+                            None => "unknown exit status".to_owned(),
                         }
                     }
                     #[cfg(not(unix))]
@@ -244,7 +267,7 @@ impl Tool for SubprocessTool {
             };
             return Ok(ToolOutput::err(format!(
                 "{name}: {exit_info}\nstderr:\n{stderr}",
-                name   = self.name,
+                name = self.name,
                 stderr = String::from_utf8_lossy(&out.stderr),
             )));
         }
@@ -254,7 +277,9 @@ impl Tool for SubprocessTool {
         if let Ok(parsed) = serde_json::from_slice::<ToolOutput>(&out.stdout) {
             Ok(parsed)
         } else {
-            Ok(ToolOutput::ok(String::from_utf8_lossy(&out.stdout).into_owned()))
+            Ok(ToolOutput::ok(
+                String::from_utf8_lossy(&out.stdout).into_owned(),
+            ))
         }
     }
 }
@@ -284,9 +309,9 @@ mod tests {
     #[test]
     fn validate_rejects_invalid_name() {
         let bad = CustomToolDecl {
-            name:         "has-dash".to_owned(),
-            description:  "x".to_owned(),
-            command:      vec!["/bin/true".to_owned()],
+            name: "has-dash".to_owned(),
+            description: "x".to_owned(),
+            command: vec!["/bin/true".to_owned()],
             input_schema: serde_json::json!({}),
             timeout_secs: 10,
         };
@@ -299,9 +324,9 @@ mod tests {
     #[test]
     fn validate_rejects_empty_command() {
         let bad = CustomToolDecl {
-            name:         "x".to_owned(),
-            description:  "y".to_owned(),
-            command:      vec![],
+            name: "x".to_owned(),
+            description: "y".to_owned(),
+            command: vec![],
             input_schema: serde_json::json!({}),
             timeout_secs: 10,
         };
@@ -314,9 +339,9 @@ mod tests {
     #[test]
     fn validate_rejects_timeout_above_300s() {
         let bad = CustomToolDecl {
-            name:         "x".to_owned(),
-            description:  "y".to_owned(),
-            command:      vec!["/bin/true".to_owned()],
+            name: "x".to_owned(),
+            description: "y".to_owned(),
+            command: vec!["/bin/true".to_owned()],
             input_schema: serde_json::json!({}),
             timeout_secs: 600,
         };
@@ -331,9 +356,9 @@ mod tests {
     #[test]
     fn validate_rejects_description_too_long() {
         let bad = CustomToolDecl {
-            name:         "x".to_owned(),
-            description:  "y".repeat(1025),
-            command:      vec!["/bin/true".to_owned()],
+            name: "x".to_owned(),
+            description: "y".repeat(1025),
+            command: vec!["/bin/true".to_owned()],
             input_schema: serde_json::json!({}),
             timeout_secs: 10,
         };
@@ -348,9 +373,9 @@ mod tests {
         // `read_file` is registered by `build_executor_registry`.
         let mut registry = crate::tools::build_executor_registry();
         let decls = vec![CustomToolDecl {
-            name:         "read_file".to_owned(),
-            description:  "operator collision".to_owned(),
-            command:      vec!["/bin/echo".to_owned()],
+            name: "read_file".to_owned(),
+            description: "operator collision".to_owned(),
+            command: vec!["/bin/echo".to_owned()],
             input_schema: serde_json::json!({}),
             timeout_secs: 10,
         }];
@@ -367,44 +392,46 @@ mod tests {
         let mut registry = ToolRegistry::new();
         let decls = vec![
             CustomToolDecl {
-                name:         "valid_a".to_owned(),
-                description:  "ok".to_owned(),
-                command:      vec!["/bin/true".to_owned()],
+                name: "valid_a".to_owned(),
+                description: "ok".to_owned(),
+                command: vec!["/bin/true".to_owned()],
                 input_schema: serde_json::json!({}),
                 timeout_secs: 10,
             },
             CustomToolDecl {
-                name:         "has-dash".to_owned(), // invalid
-                description:  "ok".to_owned(),
-                command:      vec!["/bin/true".to_owned()],
+                name: "has-dash".to_owned(), // invalid
+                description: "ok".to_owned(),
+                command: vec!["/bin/true".to_owned()],
                 input_schema: serde_json::json!({}),
                 timeout_secs: 10,
             },
         ];
         let _ = load_custom_tools(&mut registry, &decls).unwrap_err();
-        assert!(registry.get("valid_a").is_none(),
+        assert!(
+            registry.get("valid_a").is_none(),
             "atomicity: a partial failure must not register the first \
-             decl, otherwise the operator's debug surface is half-applied");
+             decl, otherwise the operator's debug surface is half-applied"
+        );
     }
 
     #[tokio::test]
     async fn subprocess_tool_returns_stdout_as_ok_when_not_json() {
         let mut registry = ToolRegistry::new();
         let decl = CustomToolDecl {
-            name:         "echo_tool".to_owned(),
-            description:  "echo stdin to stdout".to_owned(),
-            command:      vec!["/bin/cat".to_owned()],
+            name: "echo_tool".to_owned(),
+            description: "echo stdin to stdout".to_owned(),
+            command: vec!["/bin/cat".to_owned()],
             input_schema: serde_json::json!({}),
             timeout_secs: 5,
         };
         load_custom_tools(&mut registry, &[decl]).unwrap();
         let tool = registry.get("echo_tool").unwrap().clone();
-        let ws   = fixture_workspace();
-        let ctx  = ToolContext::for_workspace(ws.path());
-        let out  = tool.execute(
-            &serde_json::json!({"hello": "raxis"}),
-            &ctx,
-        ).await.unwrap();
+        let ws = fixture_workspace();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let out = tool
+            .execute(&serde_json::json!({"hello": "raxis"}), &ctx)
+            .await
+            .unwrap();
         assert_eq!(out.is_error, None);
         // /bin/cat echoes the JSON-encoded input verbatim.
         assert!(out.content.contains("\"hello\""));
@@ -416,9 +443,9 @@ mod tests {
         // Tool that emits a structured JSON ToolOutput on stdout.
         let mut registry = ToolRegistry::new();
         let decl = CustomToolDecl {
-            name:         "json_emitter".to_owned(),
-            description:  "emit a JSON ToolOutput envelope".to_owned(),
-            command:      vec![
+            name: "json_emitter".to_owned(),
+            description: "emit a JSON ToolOutput envelope".to_owned(),
+            command: vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
                 r#"echo '{"content":"hello-from-tool","is_error":false}'"#.to_owned(),
@@ -428,9 +455,9 @@ mod tests {
         };
         load_custom_tools(&mut registry, &[decl]).unwrap();
         let tool = registry.get("json_emitter").unwrap().clone();
-        let ws   = fixture_workspace();
-        let ctx  = ToolContext::for_workspace(ws.path());
-        let out  = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
+        let ws = fixture_workspace();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let out = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
         // is_error: false in the JSON should round-trip as Some(false),
         // NOT None — the envelope is preserved verbatim.
         assert_eq!(out.is_error, Some(false));
@@ -441,9 +468,9 @@ mod tests {
     async fn subprocess_tool_non_zero_exit_surfaces_structured_error() {
         let mut registry = ToolRegistry::new();
         let decl = CustomToolDecl {
-            name:         "fail_tool".to_owned(),
-            description:  "always fails".to_owned(),
-            command:      vec![
+            name: "fail_tool".to_owned(),
+            description: "always fails".to_owned(),
+            command: vec![
                 "/bin/sh".to_owned(),
                 "-c".to_owned(),
                 "echo 'oh no' >&2; exit 7".to_owned(),
@@ -453,12 +480,15 @@ mod tests {
         };
         load_custom_tools(&mut registry, &[decl]).unwrap();
         let tool = registry.get("fail_tool").unwrap().clone();
-        let ws   = fixture_workspace();
-        let ctx  = ToolContext::for_workspace(ws.path());
-        let out  = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
+        let ws = fixture_workspace();
+        let ctx = ToolContext::for_workspace(ws.path());
+        let out = tool.execute(&serde_json::json!({}), &ctx).await.unwrap();
         assert_eq!(out.is_error, Some(true));
-        assert!(out.content.contains("exit code 7"),
-            "expected 'exit code 7' in output, got: {}", out.content);
+        assert!(
+            out.content.contains("exit code 7"),
+            "expected 'exit code 7' in output, got: {}",
+            out.content
+        );
         assert!(out.content.contains("oh no"));
     }
 }

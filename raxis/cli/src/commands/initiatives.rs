@@ -37,9 +37,7 @@
 use std::io::Write;
 
 use raxis_store::open_ro;
-use raxis_store::views::initiatives::{
-    list_filtered, InitiativeListFilter, InitiativeListRow,
-};
+use raxis_store::views::initiatives::{list_filtered, InitiativeListFilter, InitiativeListRow};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -82,16 +80,16 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy)]
 struct InitiativeListOpts {
     filter: InitiativeListFilter,
-    limit:  usize,
-    json:   bool,
+    limit: usize,
+    json: bool,
 }
 
 impl Default for InitiativeListOpts {
     fn default() -> Self {
         Self {
             filter: InitiativeListFilter::Active,
-            limit:  DEFAULT_LIMIT,
-            json:   false,
+            limit: DEFAULT_LIMIT,
+            json: false,
         }
     }
 }
@@ -113,16 +111,14 @@ fn parse_args(args: &[String]) -> Result<InitiativeListOpts, CliError> {
             }
             "--limit" => {
                 i += 1;
-                let raw = args.get(i).ok_or_else(|| {
-                    CliError::Usage("--limit requires a value".to_owned())
-                })?;
+                let raw = args
+                    .get(i)
+                    .ok_or_else(|| CliError::Usage("--limit requires a value".to_owned()))?;
                 opts.limit = raw.parse::<usize>().map_err(|_| {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if opts.limit == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
             }
             "-h" | "--help" => {
@@ -146,10 +142,10 @@ fn parse_state(raw: &str) -> Result<InitiativeListFilter, CliError> {
     // keeping `Quarantined` capitalised is also accepted to match
     // the canonical FSM-state spelling in `kernel-store.md`.
     match raw.to_ascii_lowercase().as_str() {
-        "active"      => Ok(InitiativeListFilter::Active),
-        "completed"   => Ok(InitiativeListFilter::Completed),
+        "active" => Ok(InitiativeListFilter::Active),
+        "completed" => Ok(InitiativeListFilter::Completed),
         "quarantined" => Ok(InitiativeListFilter::Quarantined),
-        "all"         => Ok(InitiativeListFilter::All),
+        "all" => Ok(InitiativeListFilter::All),
         other => Err(CliError::Usage(format!(
             "unknown --state value {other:?} \
              (expected active|completed|quarantined|all)"
@@ -185,16 +181,12 @@ fn print_help() {
 // Rendering — human
 // ────────────────────────────────────────────────────────────────────
 
-fn render_human<W: Write>(
-    out:    &mut W,
-    filter: InitiativeListFilter,
-    rows:   &[InitiativeListRow],
-) {
+fn render_human<W: Write>(out: &mut W, filter: InitiativeListFilter, rows: &[InitiativeListRow]) {
     let _ = writeln!(
         out,
         "Initiatives (state={state}, {n} row{plural}):",
-        state  = filter_label(filter),
-        n      = rows.len(),
+        state = filter_label(filter),
+        n = rows.len(),
         plural = if rows.len() == 1 { "" } else { "s" },
     );
     if rows.is_empty() {
@@ -205,11 +197,11 @@ fn render_human<W: Write>(
     let _ = writeln!(
         out,
         "  {iid:<26} {state:<14} {flag:<3} {created:>12} {plan:<12}",
-        iid     = "initiative_id",
-        state   = "state",
-        flag    = " Q ",
+        iid = "initiative_id",
+        state = "state",
+        flag = " Q ",
         created = "created (rel)",
-        plan    = "plan_sha256",
+        plan = "plan_sha256",
     );
     let now = unix_now_secs();
     for r in rows {
@@ -217,11 +209,11 @@ fn render_human<W: Write>(
         let _ = writeln!(
             out,
             "  {iid:<26} {state:<14} {flag:<3} {created:>12} {plan:<12}",
-            iid     = truncate(&r.initiative.initiative_id,        26),
-            state   = truncate(&r.initiative.state,                14),
-            flag    = if r.quarantined { "[Q]" } else { "   " },
+            iid = truncate(&r.initiative.initiative_id, 26),
+            state = truncate(&r.initiative.state, 14),
+            flag = if r.quarantined { "[Q]" } else { "   " },
             created = format_secs_relative(age),
-            plan    = truncate(&r.initiative.plan_artifact_sha256, 12),
+            plan = truncate(&r.initiative.plan_artifact_sha256, 12),
         );
     }
     if rows.iter().any(|r| r.quarantined) {
@@ -237,11 +229,7 @@ fn render_human<W: Write>(
 // Rendering — JSON
 // ────────────────────────────────────────────────────────────────────
 
-fn render_json<W: Write>(
-    out:    &mut W,
-    filter: InitiativeListFilter,
-    rows:   &[InitiativeListRow],
-) {
+fn render_json<W: Write>(out: &mut W, filter: InitiativeListFilter, rows: &[InitiativeListRow]) {
     let v = serde_json::json!({
         "filter": filter_label(filter),
         "count":  rows.len(),
@@ -265,9 +253,9 @@ fn render_json<W: Write>(
 
 fn filter_label(f: InitiativeListFilter) -> &'static str {
     match f {
-        InitiativeListFilter::All         => "all",
-        InitiativeListFilter::Active      => "active",
-        InitiativeListFilter::Completed   => "completed",
+        InitiativeListFilter::All => "all",
+        InitiativeListFilter::Active => "active",
+        InitiativeListFilter::Completed => "completed",
         InitiativeListFilter::Quarantined => "quarantined",
     }
 }
@@ -293,10 +281,18 @@ fn unix_now_secs() -> u64 {
 /// (`12s`, `5m`, `3h`, `2d`). Mirrors `commands::sessions::
 /// format_secs_relative` so cross-command output reads the same.
 fn format_secs_relative(secs: u64) -> String {
-    if secs == 0                 { return "0s".to_owned(); }
-    if secs < 60                 { return format!("{secs}s"); }
-    if secs < 60 * 60            { return format!("{}m", secs / 60); }
-    if secs < 24 * 60 * 60       { return format!("{}h", secs / 3600); }
+    if secs == 0 {
+        return "0s".to_owned();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 60 * 60 {
+        return format!("{}m", secs / 60);
+    }
+    if secs < 24 * 60 * 60 {
+        return format!("{}h", secs / 3600);
+    }
     format!("{}d", secs / 86_400)
 }
 
@@ -312,12 +308,12 @@ mod tests {
     fn sample_row(id: &str, state: &str, quarantined: bool) -> InitiativeListRow {
         InitiativeListRow {
             initiative: InitiativeRow {
-                initiative_id:        id.to_owned(),
-                state:                state.to_owned(),
+                initiative_id: id.to_owned(),
+                state: state.to_owned(),
                 plan_artifact_sha256: "deadbeefcafe".to_owned(),
-                created_at:           unix_now_secs().saturating_sub(45),
-                approved_at:          None,
-                completed_at:         None,
+                created_at: unix_now_secs().saturating_sub(45),
+                approved_at: None,
+                completed_at: None,
             },
             quarantined,
         }
@@ -336,13 +332,13 @@ mod tests {
     #[test]
     fn parse_args_accepts_each_state_value_case_insensitively() {
         for (raw, want) in [
-            ("active",      InitiativeListFilter::Active),
-            ("Active",      InitiativeListFilter::Active),
-            ("ACTIVE",      InitiativeListFilter::Active),
-            ("completed",   InitiativeListFilter::Completed),
+            ("active", InitiativeListFilter::Active),
+            ("Active", InitiativeListFilter::Active),
+            ("ACTIVE", InitiativeListFilter::Active),
+            ("completed", InitiativeListFilter::Completed),
             ("quarantined", InitiativeListFilter::Quarantined),
             ("Quarantined", InitiativeListFilter::Quarantined),
-            ("all",         InitiativeListFilter::All),
+            ("all", InitiativeListFilter::All),
         ] {
             let o = parse_args(&["--state".to_owned(), raw.to_owned()]).unwrap();
             assert_eq!(o.filter, want, "raw={raw:?}");
@@ -351,10 +347,7 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_unknown_state() {
-        let err = parse_args(&[
-            "--state".to_owned(),
-            "bogus".to_owned(),
-        ]).unwrap_err();
+        let err = parse_args(&["--state".to_owned(), "bogus".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         if let CliError::Usage(m) = err {
             assert!(m.contains("active|completed|quarantined|all"), "got: {m}");
@@ -384,11 +377,7 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_limit_and_json() {
-        let o = parse_args(&[
-            "--limit".to_owned(),
-            "10".to_owned(),
-            "--json".to_owned(),
-        ]).unwrap();
+        let o = parse_args(&["--limit".to_owned(), "10".to_owned(), "--json".to_owned()]).unwrap();
         assert_eq!(o.limit, 10);
         assert!(o.json);
     }
@@ -401,7 +390,7 @@ mod tests {
         render_human(&mut buf, InitiativeListFilter::Active, &[]);
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("(no initiatives)"), "got: {s}");
-        assert!(s.contains("state=active"),     "got: {s}");
+        assert!(s.contains("state=active"), "got: {s}");
     }
 
     #[test]
@@ -412,15 +401,15 @@ mod tests {
             InitiativeListFilter::All,
             &[
                 sample_row("init-1", "Executing", false),
-                sample_row("init-2", "Blocked",   true),
+                sample_row("init-2", "Blocked", true),
             ],
         );
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("init-1"),    "got: {s}");
+        assert!(s.contains("init-1"), "got: {s}");
         assert!(s.contains("Executing"), "got: {s}");
-        assert!(s.contains("init-2"),    "got: {s}");
-        assert!(s.contains("Blocked"),   "got: {s}");
-        assert!(s.contains("[Q]"),       "quarantine marker MUST surface: {s}");
+        assert!(s.contains("init-2"), "got: {s}");
+        assert!(s.contains("Blocked"), "got: {s}");
+        assert!(s.contains("[Q]"), "quarantine marker MUST surface: {s}");
         assert!(
             s.contains("[Q] = quarantined"),
             "footer legend MUST surface when at least one row is quarantined: {s}",
@@ -462,11 +451,14 @@ mod tests {
             InitiativeListFilter::Active,
             &[
                 sample_row("init-1", "Executing", false),
-                sample_row("init-2", "Blocked",   false),
+                sample_row("init-2", "Blocked", false),
             ],
         );
         let many_s = String::from_utf8(many_buf).unwrap();
-        assert!(many_s.contains("2 rows)"), "plural `rows` for n==2: {many_s}");
+        assert!(
+            many_s.contains("2 rows)"),
+            "plural `rows` for n==2: {many_s}"
+        );
     }
 
     // ── JSON render ──────────────────────────────────────────────
@@ -481,17 +473,21 @@ mod tests {
         );
         let v: serde_json::Value = serde_json::from_slice(&buf).unwrap();
         assert_eq!(v["filter"], "quarantined");
-        assert_eq!(v["count"],  1);
+        assert_eq!(v["count"], 1);
         let rows = v["rows"].as_array().unwrap();
         assert_eq!(rows.len(), 1);
         assert_eq!(rows[0]["initiative_id"], "init-x");
-        assert_eq!(rows[0]["state"],         "Executing");
-        assert_eq!(rows[0]["quarantined"],   true);
+        assert_eq!(rows[0]["state"], "Executing");
+        assert_eq!(rows[0]["quarantined"], true);
         // Ensure every documented field is surfaced (the §5.5.6b spec
         // pins the JSON shape).
         for k in [
-            "initiative_id", "state", "plan_artifact_sha256",
-            "created_at",    "approved_at", "completed_at",
+            "initiative_id",
+            "state",
+            "plan_artifact_sha256",
+            "created_at",
+            "approved_at",
+            "completed_at",
             "quarantined",
         ] {
             assert!(rows[0].get(k).is_some(), "missing JSON key {k}");
@@ -534,7 +530,11 @@ mod tests {
             InitiativeListFilter::Quarantined,
         ] {
             let l = filter_label(v);
-            assert_eq!(l, l.to_ascii_lowercase(), "filter_label MUST be lowercase: {l:?}");
+            assert_eq!(
+                l,
+                l.to_ascii_lowercase(),
+                "filter_label MUST be lowercase: {l:?}"
+            );
         }
     }
 }

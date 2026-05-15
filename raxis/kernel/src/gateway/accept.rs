@@ -67,25 +67,49 @@ pub(crate) mod gateway_dispatch_log {
     }
 
     pub(crate) fn build_handshake_eof_line(ts_unix: i64) -> String {
-        finalize_line(level::WARN, MODULE, "gateway_handshake_eof", Map::new(), ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "gateway_handshake_eof",
+            Map::new(),
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_handshake_read_error_line(error: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("error".into(), json!(error));
-        finalize_line(level::WARN, MODULE, "gateway_handshake_read_error", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "gateway_handshake_read_error",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_handshake_timeout_line(timeout_secs: u64, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("timeout_secs".into(), json!(timeout_secs));
-        finalize_line(level::WARN, MODULE, "gateway_handshake_timeout", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "gateway_handshake_timeout",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_handshake_wrong_variant_line(variant: &str, ts_unix: i64) -> String {
         let mut body = Map::new();
         body.insert("variant".into(), json!(variant));
-        finalize_line(level::WARN, MODULE, "gateway_handshake_wrong_variant", body, ts_unix)
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "gateway_handshake_wrong_variant",
+            body,
+            ts_unix,
+        )
     }
 
     pub(crate) fn build_handshake_before_supervisor_mint_line(
@@ -104,7 +128,8 @@ pub(crate) mod gateway_dispatch_log {
         // Ensure the field exists even if the body builder above
         // changes; Map::insert is idempotent so this is a no-op when
         // the key was already inserted.
-        body.entry("presented_token_fp".to_owned()).or_insert(json!(""));
+        body.entry("presented_token_fp".to_owned())
+            .or_insert(json!(""));
         finalize_line(
             level::WARN,
             MODULE,
@@ -125,31 +150,45 @@ pub(crate) mod gateway_dispatch_log {
         // either token's bytes. Pinned by
         // `handshake_token_mismatch_line_does_not_contain_either_raw_token`.
         let mut body = body_from_fields(&[
-            ("presented_token_fp", credential_fingerprint(presented_token)),
-            ("expected_token_fp",  credential_fingerprint(expected_token)),
+            (
+                "presented_token_fp",
+                credential_fingerprint(presented_token),
+            ),
+            ("expected_token_fp", credential_fingerprint(expected_token)),
         ]);
-        body.entry("presented_token_fp".to_owned()).or_insert(json!(""));
-        finalize_line(level::WARN, MODULE, "gateway_handshake_token_mismatch", body, ts_unix)
+        body.entry("presented_token_fp".to_owned())
+            .or_insert(json!(""));
+        finalize_line(
+            level::WARN,
+            MODULE,
+            "gateway_handshake_token_mismatch",
+            body,
+            ts_unix,
+        )
     }
 
-    pub(crate) fn build_handshake_accepted_line(
-        accepted_token: &str,
-        ts_unix: i64,
-    ) -> String {
+    pub(crate) fn build_handshake_accepted_line(accepted_token: &str, ts_unix: i64) -> String {
         // Pre-fix this line emitted `token_prefix` = first 8 raw
         // bytes of the token. Now we emit the SHA-256 fingerprint
         // instead — same correlation utility, zero credential leak.
-        let body = body_from_fields(&[(
-            "accepted_token_fp",
-            credential_fingerprint(accepted_token),
-        )]);
-        finalize_line(level::INFO, MODULE, "gateway_handshake_accepted", body, ts_unix)
+        let body =
+            body_from_fields(&[("accepted_token_fp", credential_fingerprint(accepted_token))]);
+        finalize_line(
+            level::INFO,
+            MODULE,
+            "gateway_handshake_accepted",
+            body,
+            ts_unix,
+        )
     }
 
     // ── Emit-side wrappers ──
 
     pub(super) fn accept_error(error: &str) {
-        eprintln!("{}", build_accept_error_line(error, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_accept_error_line(error, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn handshake_eof() {
@@ -157,15 +196,24 @@ pub(crate) mod gateway_dispatch_log {
     }
 
     pub(super) fn handshake_read_error(error: &str) {
-        eprintln!("{}", build_handshake_read_error_line(error, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_handshake_read_error_line(error, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn handshake_timeout(timeout_secs: u64) {
-        eprintln!("{}", build_handshake_timeout_line(timeout_secs, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_handshake_timeout_line(timeout_secs, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn handshake_wrong_variant(variant: &str) {
-        eprintln!("{}", build_handshake_wrong_variant_line(variant, raxis_types::unix_now_secs()));
+        eprintln!(
+            "{}",
+            build_handshake_wrong_variant_line(variant, raxis_types::unix_now_secs())
+        );
     }
 
     pub(super) fn handshake_before_supervisor_mint(presented_token: &str) {
@@ -212,14 +260,14 @@ pub(crate) mod gateway_dispatch_log {
 /// connection failure we log + drop the stream and keep listening.
 pub async fn accept_gateway_loop(
     listener: UnixListener,
-    client:   Arc<GatewayClient>,
-    audit:    Arc<dyn AuditSink>,
+    client: Arc<GatewayClient>,
+    audit: Arc<dyn AuditSink>,
 ) {
     loop {
         match listener.accept().await {
             Ok((stream, _addr)) => {
                 let client = Arc::clone(&client);
-                let audit  = Arc::clone(&audit);
+                let audit = Arc::clone(&audit);
                 tokio::spawn(async move {
                     handle_handshake(stream, client, audit).await;
                 });
@@ -247,8 +295,8 @@ pub async fn accept_gateway_loop(
 /// this is a connection-level reject). Future work may revisit.
 async fn handle_handshake(
     mut stream: UnixStream,
-    client:     Arc<GatewayClient>,
-    _audit:     Arc<dyn AuditSink>,
+    client: Arc<GatewayClient>,
+    _audit: Arc<dyn AuditSink>,
 ) {
     let result = tokio::time::timeout(
         Duration::from_secs(HANDSHAKE_TIMEOUT_SECS),
@@ -322,9 +370,9 @@ async fn handle_handshake(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_test_support::FakeAuditSink;
     use raxis_ipc::message::GatewayMessage;
     use raxis_ipc::write_frame;
+    use raxis_test_support::FakeAuditSink;
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::net::UnixStream;
@@ -359,7 +407,9 @@ mod tests {
         client.set_expected_token("good-token".into()).await;
 
         let accept = tokio::spawn(accept_gateway_loop(
-            listener, Arc::clone(&client), fake_audit(),
+            listener,
+            Arc::clone(&client),
+            fake_audit(),
         ));
         let _stream = connect_and_send_ready(path, "good-token").await;
 
@@ -370,8 +420,10 @@ mod tests {
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(client.is_connected().await,
-            "valid handshake must install the connection");
+        assert!(
+            client.is_connected().await,
+            "valid handshake must install the connection"
+        );
 
         accept.abort();
     }
@@ -383,14 +435,18 @@ mod tests {
         client.set_expected_token("good".into()).await;
 
         let accept = tokio::spawn(accept_gateway_loop(
-            listener, Arc::clone(&client), fake_audit(),
+            listener,
+            Arc::clone(&client),
+            fake_audit(),
         ));
         let _stream = connect_and_send_ready(path, "evil").await;
 
         // Wait long enough to be confident no install_connection happened.
         tokio::time::sleep(Duration::from_millis(200)).await;
-        assert!(!client.is_connected().await,
-            "mismatched-token handshake MUST NOT install the connection");
+        assert!(
+            !client.is_connected().await,
+            "mismatched-token handshake MUST NOT install the connection"
+        );
 
         accept.abort();
     }
@@ -406,7 +462,9 @@ mod tests {
         // expected_token deliberately NOT set.
 
         let accept = tokio::spawn(accept_gateway_loop(
-            listener, Arc::clone(&client), fake_audit(),
+            listener,
+            Arc::clone(&client),
+            fake_audit(),
         ));
         let _stream = connect_and_send_ready(path, "anything").await;
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -424,7 +482,9 @@ mod tests {
         client.set_expected_token("good".into()).await;
 
         let accept = tokio::spawn(accept_gateway_loop(
-            listener, Arc::clone(&client), fake_audit(),
+            listener,
+            Arc::clone(&client),
+            fake_audit(),
         ));
         let mut stream = UnixStream::connect(&path).await.unwrap();
         let bogus = GatewayMessage::EpochAdvanced { new_epoch_id: 42 };
@@ -447,7 +507,9 @@ mod tests {
         client.set_expected_token("good".into()).await;
 
         let accept = tokio::spawn(accept_gateway_loop(
-            listener, Arc::clone(&client), fake_audit(),
+            listener,
+            Arc::clone(&client),
+            fake_audit(),
         ));
         let _silent = UnixStream::connect(&path).await.unwrap();
 
@@ -496,9 +558,7 @@ mod gateway_dispatch_log_tests {
     /// prefix of the raw token.
     #[test]
     fn handshake_accepted_line_does_not_contain_raw_token_or_its_prefix() {
-        let line = gateway_dispatch_log::build_handshake_accepted_line(
-            SECRET_GATEWAY_TOKEN, 0,
-        );
+        let line = gateway_dispatch_log::build_handshake_accepted_line(SECRET_GATEWAY_TOKEN, 0);
         assert!(
             !line.contains(SECRET_GATEWAY_TOKEN),
             "raw gateway_token MUST NOT appear in handshake_accepted line; got: {line}",
@@ -508,7 +568,9 @@ mod gateway_dispatch_log_tests {
             "no prefix of the raw token may appear; got: {line}",
         );
         let v = parse(&line);
-        let fp = v["accepted_token_fp"].as_str().expect("accepted_token_fp must be present");
+        let fp = v["accepted_token_fp"]
+            .as_str()
+            .expect("accepted_token_fp must be present");
         assert_eq!(fp.len(), 8, "fingerprint must be 8 hex chars");
         assert!(
             !SECRET_GATEWAY_TOKEN.starts_with(fp),
@@ -520,12 +582,13 @@ mod gateway_dispatch_log_tests {
     #[test]
     fn handshake_accepted_line_carries_correct_module_event_and_level() {
         let line = gateway_dispatch_log::build_handshake_accepted_line(
-            SECRET_GATEWAY_TOKEN, 1_700_000_000,
+            SECRET_GATEWAY_TOKEN,
+            1_700_000_000,
         );
         let v = parse(&line);
         assert_eq!(v["module"], "ipc.gateway");
-        assert_eq!(v["event"],  "gateway_handshake_accepted");
-        assert_eq!(v["level"],  "info");
+        assert_eq!(v["event"], "gateway_handshake_accepted");
+        assert_eq!(v["level"], "info");
     }
 
     // ── token-mismatch log: NEITHER raw token may appear ──────────────
@@ -533,23 +596,38 @@ mod gateway_dispatch_log_tests {
     #[test]
     fn handshake_token_mismatch_line_does_not_contain_either_raw_token() {
         let presented = "SECRET_PRESENTED_4444444444444444444444444444444444444444";
-        let expected  = "SECRET_EXPECTED__5555555555555555555555555555555555555555";
-        let line = gateway_dispatch_log::build_handshake_token_mismatch_line(
-            presented, expected, 0,
+        let expected = "SECRET_EXPECTED__5555555555555555555555555555555555555555";
+        let line =
+            gateway_dispatch_log::build_handshake_token_mismatch_line(presented, expected, 0);
+        assert!(
+            !line.contains(presented),
+            "presented raw token leaked: {line}"
         );
-        assert!(!line.contains(presented), "presented raw token leaked: {line}");
-        assert!(!line.contains(expected),  "expected raw token leaked: {line}");
-        assert!(!line.contains("SECRET_"), "no prefix of either token may appear: {line}");
+        assert!(
+            !line.contains(expected),
+            "expected raw token leaked: {line}"
+        );
+        assert!(
+            !line.contains("SECRET_"),
+            "no prefix of either token may appear: {line}"
+        );
 
         let v = parse(&line);
         assert_eq!(v["module"], "ipc.gateway");
-        assert_eq!(v["event"],  "gateway_handshake_token_mismatch");
-        assert_eq!(v["level"],  "warn");
-        let fp_p = v["presented_token_fp"].as_str().expect("presented_token_fp must be present");
-        let fp_e = v["expected_token_fp"].as_str().expect("expected_token_fp must be present");
+        assert_eq!(v["event"], "gateway_handshake_token_mismatch");
+        assert_eq!(v["level"], "warn");
+        let fp_p = v["presented_token_fp"]
+            .as_str()
+            .expect("presented_token_fp must be present");
+        let fp_e = v["expected_token_fp"]
+            .as_str()
+            .expect("expected_token_fp must be present");
         assert_eq!(fp_p.len(), 8);
         assert_eq!(fp_e.len(), 8);
-        assert_ne!(fp_p, fp_e, "different tokens must have different fingerprints");
+        assert_ne!(
+            fp_p, fp_e,
+            "different tokens must have different fingerprints"
+        );
     }
 
     // ── pre-supervisor-mint log: presented token must be redacted ─────
@@ -557,7 +635,8 @@ mod gateway_dispatch_log_tests {
     #[test]
     fn handshake_before_supervisor_mint_line_does_not_contain_raw_presented_token() {
         let line = gateway_dispatch_log::build_handshake_before_supervisor_mint_line(
-            SECRET_GATEWAY_TOKEN, 0,
+            SECRET_GATEWAY_TOKEN,
+            0,
         );
         assert!(!line.contains(SECRET_GATEWAY_TOKEN));
         assert!(!line.contains("SECRET_"));
@@ -589,17 +668,18 @@ mod gateway_dispatch_log_tests {
     fn handshake_timeout_carries_seconds_count() {
         let line = gateway_dispatch_log::build_handshake_timeout_line(5, 0);
         let v = parse(&line);
-        assert_eq!(v["event"],        "gateway_handshake_timeout");
+        assert_eq!(v["event"], "gateway_handshake_timeout");
         assert_eq!(v["timeout_secs"], 5);
     }
 
     #[test]
     fn handshake_wrong_variant_carries_variant_string_only() {
         let line = gateway_dispatch_log::build_handshake_wrong_variant_line(
-            "GatewayMessage::FetchRequest", 0,
+            "GatewayMessage::FetchRequest",
+            0,
         );
         let v = parse(&line);
-        assert_eq!(v["event"],   "gateway_handshake_wrong_variant");
+        assert_eq!(v["event"], "gateway_handshake_wrong_variant");
         assert_eq!(v["variant"], "GatewayMessage::FetchRequest");
     }
 
@@ -608,9 +688,8 @@ mod gateway_dispatch_log_tests {
     /// `finalize_line` MUST escape them.
     #[test]
     fn read_error_with_embedded_quotes_round_trips_through_json() {
-        let line = gateway_dispatch_log::build_handshake_read_error_line(
-            r#"frame: "bad varint""#, 0,
-        );
+        let line =
+            gateway_dispatch_log::build_handshake_read_error_line(r#"frame: "bad varint""#, 0);
         let v = parse(&line);
         assert_eq!(v["error"], r#"frame: "bad varint""#);
     }

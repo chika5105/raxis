@@ -63,10 +63,7 @@ impl HealthSnapshot {
 /// Returns a [`tokio::sync::watch::Sender`] the main loop uses to
 /// publish snapshots. The listener task is cancelled when the
 /// returned [`tokio::task::JoinHandle`] is dropped.
-pub async fn spawn(
-    port:    u16,
-    initial: HealthSnapshot,
-) -> std::io::Result<HealthHandle> {
+pub async fn spawn(port: u16, initial: HealthSnapshot) -> std::io::Result<HealthHandle> {
     let (tx, rx) = watch::channel(initial);
     let listener = TcpListener::bind(("127.0.0.1", port)).await?;
     let bound_port = listener.local_addr()?.port();
@@ -89,9 +86,9 @@ pub async fn spawn(
         }
     });
     Ok(HealthHandle {
-        snapshot:   tx,
-        port:       bound_port,
-        _listener:  Arc::new(handle),
+        snapshot: tx,
+        port: bound_port,
+        _listener: Arc::new(handle),
     })
 }
 
@@ -103,11 +100,11 @@ pub struct HealthHandle {
     pub snapshot: watch::Sender<HealthSnapshot>,
     /// Bound port (useful when the operator passed `port = 0` for
     /// auto-allocation in tests).
-    pub port:     u16,
+    pub port: u16,
     /// Listener task handle; cloning the handle keeps the task
     /// alive for as long as any clone exists. Underscored to
     /// make the "kept-alive ref-count" semantics explicit.
-    _listener:    Arc<tokio::task::JoinHandle<()>>,
+    _listener: Arc<tokio::task::JoinHandle<()>>,
 }
 
 impl HealthHandle {
@@ -120,7 +117,7 @@ impl HealthHandle {
 
 async fn handle_connection(
     stream: &mut tokio::net::TcpStream,
-    snap:   HealthSnapshot,
+    snap: HealthSnapshot,
 ) -> std::io::Result<()> {
     let mut buf = [0u8; 1024];
     let mut request = Vec::with_capacity(256);
@@ -128,7 +125,9 @@ async fn handle_connection(
     // We don't care about the body; the request line is enough.
     loop {
         let n = stream.read(&mut buf).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         request.extend_from_slice(&buf[..n]);
         total += n;
         if request.windows(4).any(|w| w == b"\r\n\r\n") || total >= 16 * 1024 {
@@ -175,11 +174,14 @@ mod tests {
         let port = h.port;
         let body = tokio::task::spawn_blocking(move || {
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            s.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            s.write_all(b"GET /healthz HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let mut buf = String::new();
             s.read_to_string(&mut buf).unwrap();
             buf
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(body.contains("HTTP/1.1 200 OK"));
         assert!(body.contains("\"status\":\"ok\""));
         assert!(body.contains("\"spans_exported_total\":42"));
@@ -191,11 +193,14 @@ mod tests {
         let port = h.port;
         let body = tokio::task::spawn_blocking(move || {
             let mut s = TcpStream::connect(("127.0.0.1", port)).unwrap();
-            s.write_all(b"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n").unwrap();
+            s.write_all(b"GET /nope HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                .unwrap();
             let mut buf = String::new();
             s.read_to_string(&mut buf).unwrap();
             buf
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
         assert!(body.contains("HTTP/1.1 404"));
     }
 }

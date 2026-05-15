@@ -347,7 +347,11 @@ fn audit_event_payload_records_consumer_kind_and_id_and_backend_kind() {
         .iter()
         .find_map(|e| match &e.kind {
             AuditEventKind::CredentialAccessed {
-                name, consumer_kind, consumer_id, backend_kind, success,
+                name,
+                consumer_kind,
+                consumer_id,
+                backend_kind,
+                success,
             } => Some((
                 name.clone(),
                 consumer_kind.clone(),

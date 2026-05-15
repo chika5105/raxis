@@ -103,7 +103,7 @@ pub struct Message {
     /// future role values (e.g. `"system"` is currently disallowed
     /// as a message role; system goes in the top-level `system`
     /// field) don't require a planner rebuild.
-    pub role:    String,
+    pub role: String,
     /// Conversation block list. Mixed text + tool_use + tool_result
     /// blocks; see [`ContentBlock`].
     pub content: Vec<ContentBlock>,
@@ -141,13 +141,13 @@ pub enum ContentBlock {
         /// Anthropic-minted tool-use ID. The planner echoes this
         /// verbatim into the matching `tool_result` so the model's
         /// next turn correlates the result with the request.
-        id:    String,
+        id: String,
         /// Tool name, looked up in the planner's registry. Unknown
         /// names surface as a tool error, NOT a hard failure (the
         /// model occasionally emits hallucinated tool names; the
         /// dispatch loop returns an error string and lets the model
         /// recover).
-        name:  String,
+        name: String,
         /// Tool input, schema-validated by the registry before the
         /// tool runs.
         input: serde_json::Value,
@@ -164,14 +164,14 @@ pub enum ContentBlock {
         /// Tool output. UTF-8 string for text-shaped tool results;
         /// future binary-result tools (image diff, etc.) will need
         /// the Anthropic-side `content: [...]` shape, not yet wired.
-        content:     String,
+        content: String,
         /// `Some(true)` ⇔ the tool reported a structured error and
         /// the model should treat the content as an error message.
         /// Anthropic-side default is `false`; we surface it as
         /// `Option<bool>` so we can omit the field on success
         /// (matching the Anthropic example payloads).
         #[serde(skip_serializing_if = "Option::is_none")]
-        is_error:    Option<bool>,
+        is_error: Option<bool>,
     },
 
     /// Catch-all for block kinds the planner does not understand.
@@ -194,11 +194,11 @@ pub enum ContentBlock {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolSpec {
     /// ASCII identifier, must match the registry entry.
-    pub name:         String,
+    pub name: String,
     /// Human-readable description shown to the model. The Anthropic
     /// API truncates to ~1024 chars; we surface long descriptions
     /// verbatim so the truncation is observable end-to-end.
-    pub description:  String,
+    pub description: String,
     /// JSON Schema for the tool's input parameters. The dispatch
     /// loop also validates against this schema before invoking the
     /// tool to fail-closed on a model that hallucinates input shape.
@@ -278,13 +278,17 @@ impl CacheControl {
     /// common case so call sites read as `CacheControl::short()`
     /// rather than `CacheControl::Ephemeral { ttl: None }`.
     pub fn short() -> Self {
-        CacheControl::Ephemeral { ttl: Some(CacheTtl::Short) }
+        CacheControl::Ephemeral {
+            ttl: Some(CacheTtl::Short),
+        }
     }
 
     /// 1-hour ephemeral cache. Convenience constructor matching
     /// Anthropic's `cache_control: { type: "ephemeral", ttl: "1h" }`.
     pub fn long() -> Self {
-        CacheControl::Ephemeral { ttl: Some(CacheTtl::Long) }
+        CacheControl::Ephemeral {
+            ttl: Some(CacheTtl::Long),
+        }
     }
 }
 
@@ -307,30 +311,30 @@ pub struct MessageRequest {
     /// Anthropic model identifier (e.g. `"claude-sonnet-4-5-20250929"`).
     /// Per provider-model-selection.md the planner reads the value
     /// from the kernel-stamped `RAXIS_MODEL_ID` env var.
-    pub model:       String,
+    pub model: String,
 
     /// Maximum tokens the model may emit. Hard-capped on the
     /// kernel side via the per-provider `max_tokens_per_request`
     /// in `policy.toml`; the planner-side default is 4096 and the
     /// kernel rejects requests above the policy ceiling at the
     /// gateway.
-    pub max_tokens:  u32,
+    pub max_tokens: u32,
 
     /// Top-level system prompt. The dispatch loop renders the KSB
     /// + role-specific NNSP into this field once per session;
     /// individual turn-level system blocks are not used.
     #[serde(default)]
-    pub system:      Option<String>,
+    pub system: Option<String>,
 
     /// Conversation history. The dispatch loop appends one `user`
     /// + one `assistant` message per turn.
-    pub messages:    Vec<Message>,
+    pub messages: Vec<Message>,
 
     /// Tools the model may call this turn. Empty ⇒ pure-text
     /// dialogue (used by reviewer post-hoc summary, not by the
     /// dispatch loop).
     #[serde(default)]
-    pub tools:       Vec<ToolSpec>,
+    pub tools: Vec<ToolSpec>,
 
     /// Per-turn temperature. Anthropic's default is 1.0; the V2
     /// planner pins 0.7 for executor / 0.3 for reviewer — tighter
@@ -348,7 +352,7 @@ pub struct MessageRequest {
     /// returns a single buffered JSON envelope and consumers go
     /// through [`ModelClient::create_message`].
     #[serde(default)]
-    pub stream:      bool,
+    pub stream: bool,
 
     /// **Prompt caching opt-in: cache the system prompt.**
     ///
@@ -427,17 +431,17 @@ impl Default for MessageRequest {
     /// new optional field lands.
     fn default() -> Self {
         Self {
-            model:          String::new(),
-            max_tokens:     4096,
-            system:         None,
-            messages:       Vec::new(),
-            tools:          Vec::new(),
-            temperature:    None,
-            stream:         false,
-            cache_system:   false,
-            cache_tools:    false,
+            model: String::new(),
+            max_tokens: 4096,
+            system: None,
+            messages: Vec::new(),
+            tools: Vec::new(),
+            temperature: None,
+            stream: false,
+            cache_system: false,
+            cache_tools: false,
             cache_messages: false,
-            cache_ttl:      None,
+            cache_ttl: None,
         }
     }
 }
@@ -467,25 +471,32 @@ impl serde::Serialize for MessageRequest {
     /// This impl is the production wire-shape contract; any
     /// serde-output regression must be caught by the
     /// `request_serialises_*` golden tests in this module.
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
 
-        let cache_control_payload =
-            self.cache_ttl.unwrap_or(CacheTtl::Short);
+        let cache_control_payload = self.cache_ttl.unwrap_or(CacheTtl::Short);
 
         // Pre-compute optional-field presence so we can pick the
         // exact map size up-front and avoid serde's "unknown size"
         // path which can confuse some downstream consumers.
         let mut len = 2; // model, max_tokens
-        if self.system.is_some()        { len += 1; }
-        let _messages_always = ();      len += 1;
-        if !self.tools.is_empty()       { len += 1; }
-        if self.temperature.is_some()   { len += 1; }
-        if self.stream                  { len += 1; }
-        if self.cache_messages          { len += 1; }
+        if self.system.is_some() {
+            len += 1;
+        }
+        let _messages_always = ();
+        len += 1;
+        if !self.tools.is_empty() {
+            len += 1;
+        }
+        if self.temperature.is_some() {
+            len += 1;
+        }
+        if self.stream {
+            len += 1;
+        }
+        if self.cache_messages {
+            len += 1;
+        }
         let _ = _messages_always;
 
         let mut map = serializer.serialize_map(Some(len))?;
@@ -541,7 +552,9 @@ impl serde::Serialize for MessageRequest {
         if self.cache_messages {
             map.serialize_entry(
                 "cache_control",
-                &CacheControl::Ephemeral { ttl: Some(cache_control_payload) },
+                &CacheControl::Ephemeral {
+                    ttl: Some(cache_control_payload),
+                },
             )?;
         }
         map.end()
@@ -566,15 +579,12 @@ struct SystemTextBlock<'a> {
 /// to emit `cache_control` on the LAST tool when caching is
 /// enabled, without mutating the canonical `ToolSpec` type.
 struct ToolSpecCachedView<'a> {
-    spec:          &'a ToolSpec,
+    spec: &'a ToolSpec,
     cache_control: Option<CacheControl>,
 }
 
 impl<'a> serde::Serialize for ToolSpecCachedView<'a> {
-    fn serialize<S: serde::Serializer>(
-        &self,
-        serializer: S,
-    ) -> Result<S::Ok, S::Error> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeMap;
         let len = 3 + usize::from(self.cache_control.is_some());
         let mut m = serializer.serialize_map(Some(len))?;
@@ -598,29 +608,29 @@ pub struct MessageResponse {
     /// Anthropic-minted message id. Round-tripped into
     /// `gateway.audit.fetch_completed.upstream_message_id` so the
     /// audit chain links back to the upstream provider's logs.
-    pub id:            String,
+    pub id: String,
     /// Always `"message"`.
     #[serde(rename = "type")]
-    pub kind:          String,
+    pub kind: String,
     /// Always `"assistant"` for V2 — the planner does not currently
     /// use the (Anthropic-internal) `"user"` synthesis path.
-    pub role:          String,
+    pub role: String,
     /// The assistant's content blocks for this turn — mixed
     /// `text` + `tool_use`. The dispatch loop dispatches every
     /// `tool_use` block in declaration order.
-    pub content:       Vec<ContentBlock>,
+    pub content: Vec<ContentBlock>,
     /// Why the model stopped emitting. Values:
     /// `"end_turn"` (normal), `"max_tokens"` (truncated),
     /// `"stop_sequence"`, `"tool_use"` (assistant emitted ≥1
     /// `tool_use` block; dispatch loop drives the next turn).
-    pub stop_reason:   Option<String>,
+    pub stop_reason: Option<String>,
     /// Token usage for telemetry. Surfaced into the per-task
     /// `tokens_used` budget snapshot via the dispatch loop.
-    pub usage:         Usage,
+    pub usage: Usage,
     /// Echo of the model id from the request. Useful for routing
     /// audit / cost-estimation paths when a provider does silent
     /// upgrades (e.g. `claude-sonnet-4-5-20250929` → newer).
-    pub model:         String,
+    pub model: String,
 }
 
 /// Token-usage counters from one Anthropic response. Wire shape
@@ -640,10 +650,10 @@ pub struct MessageResponse {
 pub struct Usage {
     /// Input tokens consumed (system + user history).
     #[serde(default)]
-    pub input_tokens:               u32,
+    pub input_tokens: u32,
     /// Output tokens emitted (assistant content this turn).
     #[serde(default)]
-    pub output_tokens:              u32,
+    pub output_tokens: u32,
     /// **Cache-creation input tokens.** Tokens written to the
     /// prompt cache during this turn (i.e., a cache MISS that
     /// minted a new cache entry). Billed at 1.25× base input
@@ -665,7 +675,7 @@ pub struct Usage {
     /// * OpenAI — `usage.prompt_tokens_details.cached_tokens`
     /// * Gemini — `usageMetadata.cachedContentTokenCount`
     #[serde(default)]
-    pub cache_read_input_tokens:    u32,
+    pub cache_read_input_tokens: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -694,7 +704,7 @@ pub enum ModelError {
         status: u16,
         /// Up to 4 KiB of response body (truncated to keep the
         /// audit-event size in check).
-        body:   String,
+        body: String,
     },
     /// JSON encode/decode failure. The Anthropic API occasionally
     /// returns content blocks the planner does not understand; that
@@ -727,10 +737,7 @@ impl From<reqwest::Error> for ModelError {
 pub trait ModelClient: Send + Sync {
     /// Send one Messages API request and read the full response
     /// (buffered). The dispatch loop calls this once per turn.
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError>;
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError>;
 
     /// V2_GAPS §C9 — start a streaming Messages API request and
     /// return a [`tokio::sync::mpsc::Receiver`] that yields
@@ -760,10 +767,7 @@ pub trait ModelClient: Send + Sync {
     async fn create_message_stream(
         &self,
         req: &MessageRequest,
-    ) -> Result<
-        tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
-        ModelError,
-    > {
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>, ModelError> {
         // Default forwarder: buffered call, then synthesize a
         // four-event stream so the consumer can use the same
         // event-loop shape regardless of whether the impl
@@ -772,7 +776,7 @@ pub trait ModelClient: Send + Sync {
         let (tx, rx) = tokio::sync::mpsc::channel(crate::streaming::DEFAULT_STREAM_CHANNEL_CAP);
         let _ = tx
             .send(crate::streaming::StreamEvent::MessageStart {
-                id:    resp.id.clone(),
+                id: resp.id.clone(),
                 model: resp.model.clone(),
             })
             .await;
@@ -784,9 +788,7 @@ pub trait ModelClient: Send + Sync {
                 stop_reason: resp.stop_reason.clone(),
             })
             .await;
-        let _ = tx
-            .send(crate::streaming::StreamEvent::Complete(resp))
-            .await;
+        let _ = tx.send(crate::streaming::StreamEvent::Complete(resp)).await;
         Ok(rx)
     }
 }
@@ -814,11 +816,11 @@ pub trait ModelClient: Send + Sync {
 /// `create_message` in a synthetic four-event stream — semantics
 /// preserved per `INV-PROVIDER-04`.
 pub struct AnthropicClient {
-    http_fetch:        std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
+    http_fetch: std::sync::Arc<dyn crate::http_fetch::HttpFetch>,
     /// Embedded `reqwest::Client` retained for the streaming path.
     /// Cheap to clone; uses the canonical pool settings.
-    streaming_http:    reqwest::Client,
-    base_url:          String,
+    streaming_http: reqwest::Client,
+    base_url: String,
     /// Anthropic-required `anthropic-version` header. Stamped at
     /// build time from a constant; future API versions land as a
     /// new field plumbed through `AnthropicClient::new_with_version`.
@@ -828,7 +830,7 @@ pub struct AnthropicClient {
     /// `provider-model-selection.md §6.4`); the client-level value
     /// here is a hard-coded fallback (5 min) for the case where the
     /// caller forgets to wrap in `tokio::time::timeout`.
-    request_timeout:   Duration,
+    request_timeout: Duration,
 }
 
 impl AnthropicClient {
@@ -890,28 +892,29 @@ impl AnthropicClient {
 
 #[async_trait::async_trait]
 impl ModelClient for AnthropicClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         let url = format!("{}/v1/messages", self.base_url);
         let body = serde_json::to_vec(req).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let fetch_req = crate::http_fetch::HttpFetchRequest {
-            url:     &url,
-            method:  "POST",
+            url: &url,
+            method: "POST",
             headers: vec![
-                ("content-type",      "application/json".to_owned()),
+                ("content-type", "application/json".to_owned()),
                 ("anthropic-version", self.anthropic_version.to_owned()),
             ],
             body,
             timeout: self.request_timeout,
         };
 
-        let resp = self.http_fetch.fetch(fetch_req).await.map_err(|e| match e {
-            crate::http_fetch::HttpFetchError::Timeout(d)   => ModelError::Timeout(d),
-            crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
-        })?;
+        let resp = self
+            .http_fetch
+            .fetch(fetch_req)
+            .await
+            .map_err(|e| match e {
+                crate::http_fetch::HttpFetchError::Timeout(d) => ModelError::Timeout(d),
+                crate::http_fetch::HttpFetchError::Transport(s) => ModelError::Transport(s),
+            })?;
 
         if !(200..300).contains(&resp.status) {
             // Cap the body at 4 KiB so a misbehaving upstream cannot
@@ -927,12 +930,12 @@ impl ModelClient for AnthropicClient {
             };
             return Err(ModelError::Upstream {
                 status: resp.status,
-                body:   snippet,
+                body: snippet,
             });
         }
 
-        let parsed: MessageResponse = serde_json::from_slice(&resp.body)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let parsed: MessageResponse =
+            serde_json::from_slice(&resp.body).map_err(|e| ModelError::Json(e.to_string()))?;
         Ok(parsed)
     }
 
@@ -967,18 +970,15 @@ impl ModelClient for AnthropicClient {
     async fn create_message_stream(
         &self,
         req: &MessageRequest,
-    ) -> Result<
-        tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>,
-        ModelError,
-    > {
+    ) -> Result<tokio::sync::mpsc::Receiver<crate::streaming::StreamEvent>, ModelError> {
         // Force the stream flag on the outbound request — Anthropic
         // returns SSE only when `stream: true` is explicitly set.
         let mut streaming_req = req.clone();
         streaming_req.stream = true;
 
         let url = format!("{}/v1/messages", self.base_url);
-        let body = serde_json::to_vec(&streaming_req)
-            .map_err(|e| ModelError::Json(e.to_string()))?;
+        let body =
+            serde_json::to_vec(&streaming_req).map_err(|e| ModelError::Json(e.to_string()))?;
 
         let mut resp = self
             .streaming_http
@@ -1012,18 +1012,16 @@ impl ModelClient for AnthropicClient {
             };
             return Err(ModelError::Upstream {
                 status: status.as_u16(),
-                body:   snippet,
+                body: snippet,
             });
         }
 
-        let (tx, rx) = tokio::sync::mpsc::channel(
-            crate::streaming::DEFAULT_STREAM_CHANNEL_CAP,
-        );
+        let (tx, rx) = tokio::sync::mpsc::channel(crate::streaming::DEFAULT_STREAM_CHANNEL_CAP);
         let idle = crate::streaming::DEFAULT_STREAM_IDLE_TIMEOUT;
 
         tokio::spawn(async move {
-            let mut parser   = crate::streaming::SseParser::new();
-            let mut agg      = crate::streaming::AnthropicStreamAggregator::new();
+            let mut parser = crate::streaming::SseParser::new();
+            let mut agg = crate::streaming::AnthropicStreamAggregator::new();
             let mut saw_stop = false;
 
             loop {
@@ -1046,9 +1044,7 @@ impl ModelClient for AnthropicClient {
                     Ok(Err(e)) => {
                         let _ = tx
                             .send(crate::streaming::StreamEvent::Stop {
-                                stop_reason: Some(format!(
-                                    "stream_transport_error: {e}"
-                                )),
+                                stop_reason: Some(format!("stream_transport_error: {e}")),
                             })
                             .await;
                         return;
@@ -1059,10 +1055,8 @@ impl ModelClient for AnthropicClient {
                             match agg.ingest(&frame) {
                                 Ok(events) => {
                                     for ev in events {
-                                        if matches!(
-                                            ev,
-                                            crate::streaming::StreamEvent::Stop { .. }
-                                        ) {
+                                        if matches!(ev, crate::streaming::StreamEvent::Stop { .. })
+                                        {
                                             saw_stop = true;
                                         }
                                         if tx.send(ev).await.is_err() {
@@ -1105,9 +1099,7 @@ impl ModelClient for AnthropicClient {
             }
             if agg.is_complete() {
                 if let Ok(resp) = agg.into_response() {
-                    let _ = tx
-                        .send(crate::streaming::StreamEvent::Complete(resp))
-                        .await;
+                    let _ = tx.send(crate::streaming::StreamEvent::Complete(resp)).await;
                 }
             }
         });
@@ -1151,7 +1143,7 @@ impl MockModelClient {
     pub fn new(responses: Vec<MessageResponse>) -> Self {
         Self {
             pending: Arc::new(tokio::sync::Mutex::new(responses)),
-            seen:    Arc::new(tokio::sync::Mutex::new(Vec::new())),
+            seen: Arc::new(tokio::sync::Mutex::new(Vec::new())),
         }
     }
 }
@@ -1159,10 +1151,7 @@ impl MockModelClient {
 #[cfg(any(debug_assertions, test))]
 #[async_trait::async_trait]
 impl ModelClient for MockModelClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         self.seen.lock().await.push(req.clone());
         let mut q = self.pending.lock().await;
         if q.is_empty() {
@@ -1184,18 +1173,18 @@ mod tests {
 
     fn fixture_text_response() -> MessageResponse {
         MessageResponse {
-            id:    "msg_01".to_owned(),
-            kind:  "message".to_owned(),
-            role:  "assistant".to_owned(),
+            id: "msg_01".to_owned(),
+            kind: "message".to_owned(),
+            role: "assistant".to_owned(),
             content: vec![ContentBlock::Text {
                 text: "hello world".to_owned(),
             }],
             stop_reason: Some("end_turn".to_owned()),
             usage: Usage {
-                input_tokens:                12,
-                output_tokens:               5,
+                input_tokens: 12,
+                output_tokens: 5,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens:     0,
+                cache_read_input_tokens: 0,
             },
             model: "claude-sonnet-4-5-20250929".to_owned(),
         }
@@ -1204,16 +1193,16 @@ mod tests {
     #[test]
     fn message_request_serialises_to_anthropic_wire_shape() {
         let req = MessageRequest {
-            model:       "claude-sonnet-4-5-20250929".to_owned(),
-            max_tokens:  1024,
-            system:      Some("You are a helpful assistant.".to_owned()),
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 1024,
+            system: Some("You are a helpful assistant.".to_owned()),
             messages: vec![Message {
-                role:    "user".to_owned(),
+                role: "user".to_owned(),
                 content: vec![ContentBlock::Text {
                     text: "say hi".to_owned(),
                 }],
             }],
-            tools:       vec![],
+            tools: vec![],
             temperature: Some(0.7),
             ..Default::default()
         };
@@ -1221,21 +1210,25 @@ mod tests {
         // Pin the on-the-wire shape against the Anthropic API
         // contract — a future serde refactor that drops a
         // `#[serde(rename_all=...)]` etc. would break this.
-        assert_eq!(json["model"],      "claude-sonnet-4-5-20250929");
+        assert_eq!(json["model"], "claude-sonnet-4-5-20250929");
         assert_eq!(json["max_tokens"], 1024);
-        assert_eq!(json["system"],     "You are a helpful assistant.");
+        assert_eq!(json["system"], "You are a helpful assistant.");
         assert_eq!(json["messages"][0]["role"], "user");
         assert_eq!(json["messages"][0]["content"][0]["type"], "text");
         assert_eq!(json["messages"][0]["content"][0]["text"], "say hi");
         // `tools: []` is skipped on serialisation per the
         // `skip_serializing_if = "Vec::is_empty"` attribute.
-        assert!(json.get("tools").is_none(),
-            "empty tools array MUST be omitted (matches Anthropic schema)");
+        assert!(
+            json.get("tools").is_none(),
+            "empty tools array MUST be omitted (matches Anthropic schema)"
+        );
         // `stream: false` is the default and MUST be skipped from
         // the wire so existing call sites that opted-out of
         // streaming see no on-the-wire diff (V2_GAPS §C9).
-        assert!(json.get("stream").is_none(),
-            "stream=false (default) MUST be omitted from the wire");
+        assert!(
+            json.get("stream").is_none(),
+            "stream=false (default) MUST be omitted from the wire"
+        );
     }
 
     /// Pin the streaming-on wire shape: when callers opt in by
@@ -1269,7 +1262,8 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&req).unwrap();
-        let arr = json["system"].as_array()
+        let arr = json["system"]
+            .as_array()
             .expect("cache_system=true MUST project system to a JSON array");
         assert_eq!(arr.len(), 1);
         assert_eq!(arr[0]["type"], "text");
@@ -1278,8 +1272,10 @@ mod tests {
         // Default TTL (Short = 5min) MUST be omitted from the wire
         // (matches Anthropic's default; see `prompt-caching.md
         // §"TTL hint"`).
-        assert!(arr[0]["cache_control"].get("ttl").is_none(),
-            "default 5-min TTL MUST be omitted from the wire");
+        assert!(
+            arr[0]["cache_control"].get("ttl").is_none(),
+            "default 5-min TTL MUST be omitted from the wire"
+        );
     }
 
     /// **Prompt-caching wire shape — long TTL.**
@@ -1327,8 +1323,10 @@ mod tests {
         let json = serde_json::to_value(&req).unwrap();
         let tools = json["tools"].as_array().unwrap();
         assert_eq!(tools.len(), 2);
-        assert!(tools[0].get("cache_control").is_none(),
-            "first tool MUST NOT carry cache_control (only the LAST one does)");
+        assert!(
+            tools[0].get("cache_control").is_none(),
+            "first tool MUST NOT carry cache_control (only the LAST one does)"
+        );
         assert_eq!(tools[1]["cache_control"]["type"], "ephemeral");
     }
 
@@ -1372,8 +1370,10 @@ mod tests {
             ..Default::default()
         };
         let json = serde_json::to_value(&req).unwrap();
-        assert!(json["system"].is_string(),
-            "cache_system=false MUST keep the bare-string system shape");
+        assert!(
+            json["system"].is_string(),
+            "cache_system=false MUST keep the bare-string system shape"
+        );
         assert!(json["tools"][0].get("cache_control").is_none());
         assert!(json.get("cache_control").is_none());
     }
@@ -1434,8 +1434,8 @@ mod tests {
     async fn mock_model_client_returns_queued_response_then_errors() {
         let client = MockModelClient::new(vec![fixture_text_response()]);
         let req = MessageRequest {
-            model:       "claude-sonnet-4-5-20250929".to_owned(),
-            max_tokens:  256,
+            model: "claude-sonnet-4-5-20250929".to_owned(),
+            max_tokens: 256,
             ..Default::default()
         };
         let resp = client.create_message(&req).await.unwrap();
@@ -1446,10 +1446,13 @@ mod tests {
             other => panic!("expected exhausted-queue error, got {other:?}"),
         }
         let seen = client.seen.lock().await;
-        assert_eq!(seen.len(), 2,
+        assert_eq!(
+            seen.len(),
+            2,
             "MockModelClient must record EVERY inbound request, even \
              those that error (so the dispatch loop's per-turn \
-             message construction is observable in tests)");
+             message construction is observable in tests)"
+        );
     }
 
     /// Pin AnthropicClient construction against the documented
@@ -1489,15 +1492,15 @@ mod tests {
         // refactor of either side flags as a P0.
         let server = tokio::spawn(async move {
             let (mut sock, _) = listener.accept().await.unwrap();
-            let mut buf   = vec![0u8; 16384];
+            let mut buf = vec![0u8; 16384];
             let mut total = 0;
             loop {
                 let n = sock.read(&mut buf[total..]).await.unwrap();
-                if n == 0 { break; }
+                if n == 0 {
+                    break;
+                }
                 total += n;
-                if total > 64
-                    && buf[..total].windows(4).any(|w| w == b"\r\n\r\n")
-                {
+                if total > 64 && buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
                     break;
                 }
             }
@@ -1554,11 +1557,11 @@ data: {\"type\":\"message_stop\"}\n\
         let mut rx = client.create_message_stream(&req).await.unwrap();
 
         let mut saw_message_start = false;
-        let mut saw_block_start   = false;
-        let mut deltas            = Vec::new();
-        let mut saw_block_stop    = false;
-        let mut saw_stop          = false;
-        let mut final_resp:        Option<MessageResponse> = None;
+        let mut saw_block_start = false;
+        let mut deltas = Vec::new();
+        let mut saw_block_stop = false;
+        let mut saw_stop = false;
+        let mut final_resp: Option<MessageResponse> = None;
 
         while let Some(ev) = rx.recv().await {
             match ev {
@@ -1593,10 +1596,10 @@ data: {\"type\":\"message_stop\"}\n\
         }
 
         assert!(saw_message_start, "MessageStart must arrive");
-        assert!(saw_block_start,   "ContentBlockStart must arrive");
+        assert!(saw_block_start, "ContentBlockStart must arrive");
         assert_eq!(deltas, vec!["hi ".to_owned(), "there".to_owned()]);
-        assert!(saw_block_stop,    "ContentBlockStop must arrive");
-        assert!(saw_stop,          "Stop must arrive");
+        assert!(saw_block_stop, "ContentBlockStop must arrive");
+        assert!(saw_stop, "Stop must arrive");
 
         let resp = final_resp.expect("Complete must arrive on a successful stream");
         assert_eq!(resp.id, "msg_test_01");

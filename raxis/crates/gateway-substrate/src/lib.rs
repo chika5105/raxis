@@ -66,11 +66,11 @@ use thiserror::Error;
 /// credentials of two providers.
 #[derive(Debug, Clone)]
 pub struct ProviderEntryView {
-    pub provider_id:           String,
-    pub kind:                  String,
-    pub inference_timeout_ms:  u32,
+    pub provider_id: String,
+    pub kind: String,
+    pub inference_timeout_ms: u32,
     pub data_fetch_timeout_ms: u32,
-    pub max_response_bytes:    u64,
+    pub max_response_bytes: u64,
     /// V2_GAPS §C9 — per-provider streaming idle timeout (ms).
     /// `None` means the gateway falls back to its hard-coded
     /// 30-second `STREAM_IDLE_TIMEOUT` default. Operators using
@@ -78,7 +78,7 @@ pub struct ProviderEntryView {
     /// for those providers; standard generation-tier providers
     /// (Claude, GPT-4) leave it `None`.
     pub stream_idle_timeout_ms: Option<u32>,
-    pub credentials:           ProviderCredentials,
+    pub credentials: ProviderCredentials,
 }
 
 /// Parsed `<data_dir>/providers/<credentials_file>`. Format is
@@ -105,8 +105,12 @@ pub struct ProviderCredentials {
     pub auth_prefix: String,
 }
 
-fn default_auth_header() -> String { "Authorization".to_owned() }
-fn default_auth_prefix() -> String { "Bearer ".to_owned() }
+fn default_auth_header() -> String {
+    "Authorization".to_owned()
+}
+fn default_auth_prefix() -> String {
+    "Bearer ".to_owned()
+}
 
 // ---------------------------------------------------------------------------
 // Backend trait + its request / response / error shapes.
@@ -134,12 +138,12 @@ pub enum BackendError {
 
 /// One outbound call through the backend.
 pub struct BackendRequest<'a> {
-    pub provider:  &'a ProviderEntryView,
-    pub url:       &'a str,
-    pub method:    &'a str,
-    pub headers:   &'a [(String, String)],
-    pub body:      &'a [u8],
-    pub timeout:   Duration,
+    pub provider: &'a ProviderEntryView,
+    pub url: &'a str,
+    pub method: &'a str,
+    pub headers: &'a [(String, String)],
+    pub body: &'a [u8],
+    pub timeout: Duration,
     /// V2_GAPS §C9 — per-chunk idle timeout for streaming responses.
     ///
     /// When `Some(d)`, the gateway's chunk-read loop wraps each
@@ -161,9 +165,9 @@ pub struct BackendRequest<'a> {
 #[derive(Debug, Clone)]
 pub struct BackendResponse {
     pub status_code: u16,
-    pub headers:     Vec<(String, String)>,
-    pub body:        Vec<u8>,
-    pub latency_ms:  u64,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+    pub latency_ms: u64,
 }
 
 /// One outbound HTTP call. v2 ships exactly one production impl
@@ -184,7 +188,9 @@ pub trait Backend: Send + Sync {
     fn call<'a>(
         &'a self,
         req: BackendRequest<'a>,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>>;
+    ) -> std::pin::Pin<
+        Box<dyn std::future::Future<Output = Result<BackendResponse, BackendError>> + Send + 'a>,
+    >;
 }
 
 // ---------------------------------------------------------------------------

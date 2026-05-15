@@ -57,16 +57,13 @@ impl Restrictions {
     /// posture: pin the From address, scope recipients to one
     /// domain, cap recipients per message, cap message bytes,
     /// rate-limit at 60 messages/minute.
-    pub fn transactional(
-        from:       impl Into<String>,
-        rcpt_domain: impl Into<String>,
-    ) -> Self {
+    pub fn transactional(from: impl Into<String>, rcpt_domain: impl Into<String>) -> Self {
         Self {
-            allowed_sender_address:    Some(from.into()),
+            allowed_sender_address: Some(from.into()),
             allowed_recipient_domains: vec![rcpt_domain.into()],
             max_recipients_per_message: Some(50),
-            max_message_bytes:          Some(10 * 1024 * 1024),
-            max_messages_per_minute:    Some(60),
+            max_message_bytes: Some(10 * 1024 * 1024),
+            max_messages_per_minute: Some(60),
         }
     }
 
@@ -81,7 +78,7 @@ impl Restrictions {
         } else {
             Err(EnvelopeRejection::SenderNotAllowed {
                 expected: expected.clone(),
-                got:      addr.to_owned(),
+                got: addr.to_owned(),
             })
         }
     }
@@ -98,17 +95,21 @@ impl Restrictions {
         }
         let dom = match split_domain(addr) {
             Some(d) => d.to_ascii_lowercase(),
-            None    => return RecipientCheck::Blocked {
-                reason: format!("recipient {addr:?} has no @domain part"),
-            },
+            None => {
+                return RecipientCheck::Blocked {
+                    reason: format!("recipient {addr:?} has no @domain part"),
+                }
+            }
         };
-        if self.allowed_recipient_domains.iter().any(|d| d.eq_ignore_ascii_case(&dom)) {
+        if self
+            .allowed_recipient_domains
+            .iter()
+            .any(|d| d.eq_ignore_ascii_case(&dom))
+        {
             RecipientCheck::Allowed
         } else {
             RecipientCheck::Blocked {
-                reason: format!(
-                    "recipient domain {dom:?} is not in allowed_recipient_domains",
-                ),
+                reason: format!("recipient domain {dom:?} is not in allowed_recipient_domains",),
             }
         }
     }
@@ -125,7 +126,7 @@ impl Restrictions {
         } else {
             Err(EnvelopeRejection::TooManyRecipients {
                 limit: cap,
-                got:   recipient_count,
+                got: recipient_count,
             })
         }
     }
@@ -141,7 +142,7 @@ impl Restrictions {
         } else {
             Err(EnvelopeRejection::MessageTooLarge {
                 limit: cap,
-                got:   byte_count,
+                got: byte_count,
             })
         }
     }
@@ -156,7 +157,7 @@ pub enum EnvelopeRejection {
         /// What the policy required.
         expected: String,
         /// What the agent submitted.
-        got:      String,
+        got: String,
     },
     /// One or more `RCPT TO` addresses fell outside
     /// `allowed_recipient_domains`. The first blocking recipient's
@@ -170,14 +171,14 @@ pub enum EnvelopeRejection {
         /// Configured ceiling.
         limit: u32,
         /// What the agent submitted.
-        got:   u32,
+        got: u32,
     },
     /// Message body exceeded `max_message_bytes`.
     MessageTooLarge {
         /// Configured ceiling, in bytes.
         limit: u64,
         /// What the agent submitted, in bytes.
-        got:   u64,
+        got: u64,
     },
     /// Per-minute rate limit exceeded. The proxy delays the rejection
     /// to the next `MAIL FROM` so the bucket re-fills naturally.
@@ -194,21 +195,21 @@ impl EnvelopeRejection {
     /// keyed off the prefix.
     pub fn audit_summary(&self) -> String {
         match self {
-            Self::SenderNotAllowed { expected, got } => format!(
-                "sender_not_allowed expected={expected} got={got}",
-            ),
-            Self::RecipientNotAllowed { reason } => format!(
-                "recipient_not_allowed reason={reason}",
-            ),
-            Self::TooManyRecipients { limit, got } => format!(
-                "too_many_recipients limit={limit} got={got}",
-            ),
-            Self::MessageTooLarge { limit, got } => format!(
-                "message_too_large limit={limit} got={got}",
-            ),
-            Self::RateLimitExceeded { limit } => format!(
-                "rate_limit_exceeded limit_per_minute={limit}",
-            ),
+            Self::SenderNotAllowed { expected, got } => {
+                format!("sender_not_allowed expected={expected} got={got}",)
+            }
+            Self::RecipientNotAllowed { reason } => {
+                format!("recipient_not_allowed reason={reason}",)
+            }
+            Self::TooManyRecipients { limit, got } => {
+                format!("too_many_recipients limit={limit} got={got}",)
+            }
+            Self::MessageTooLarge { limit, got } => {
+                format!("message_too_large limit={limit} got={got}",)
+            }
+            Self::RateLimitExceeded { limit } => {
+                format!("rate_limit_exceeded limit_per_minute={limit}",)
+            }
         }
     }
 }
@@ -256,8 +257,14 @@ fn strip_angle_brackets(addr: &str) -> &str {
 fn envelope_eq_ci_domain(a: &str, b: &str) -> bool {
     let a = strip_angle_brackets(a);
     let b = strip_angle_brackets(b);
-    let (ai, ad) = match a.rsplit_once('@') { Some(t) => t, None => return false };
-    let (bi, bd) = match b.rsplit_once('@') { Some(t) => t, None => return false };
+    let (ai, ad) = match a.rsplit_once('@') {
+        Some(t) => t,
+        None => return false,
+    };
+    let (bi, bd) = match b.rsplit_once('@') {
+        Some(t) => t,
+        None => return false,
+    };
     ai == bi && ad.eq_ignore_ascii_case(bd)
 }
 
@@ -305,11 +312,11 @@ mod tests {
     #[test]
     fn sender_check_is_case_insensitive_on_domain_only() {
         let r = Restrictions {
-            allowed_sender_address:     Some("Noreply@Example.COM".to_owned()),
-            allowed_recipient_domains:  vec![],
+            allowed_sender_address: Some("Noreply@Example.COM".to_owned()),
+            allowed_recipient_domains: vec![],
             max_recipients_per_message: None,
-            max_message_bytes:          None,
-            max_messages_per_minute:    None,
+            max_message_bytes: None,
+            max_messages_per_minute: None,
         };
         // Same casing on local part, different casing on domain → OK.
         assert!(r.check_sender("Noreply@example.com").is_ok());
@@ -321,13 +328,16 @@ mod tests {
     #[test]
     fn recipient_check_handles_angle_brackets_and_no_at() {
         let r = Restrictions {
-            allowed_sender_address:     None,
-            allowed_recipient_domains:  vec!["example.org".to_owned()],
+            allowed_sender_address: None,
+            allowed_recipient_domains: vec!["example.org".to_owned()],
             max_recipients_per_message: None,
-            max_message_bytes:          None,
-            max_messages_per_minute:    None,
+            max_message_bytes: None,
+            max_messages_per_minute: None,
         };
-        assert_eq!(r.check_recipient("<alice@example.org>"), RecipientCheck::Allowed);
+        assert_eq!(
+            r.check_recipient("<alice@example.org>"),
+            RecipientCheck::Allowed
+        );
         match r.check_recipient("malformed-no-at-sign") {
             RecipientCheck::Blocked { reason } => {
                 assert!(reason.contains("no @domain"), "reason was {reason:?}");
@@ -341,8 +351,9 @@ mod tests {
         assert_eq!(
             EnvelopeRejection::SenderNotAllowed {
                 expected: "noreply@example.com".into(),
-                got:      "attacker@elsewhere.example".into(),
-            }.audit_summary(),
+                got: "attacker@elsewhere.example".into(),
+            }
+            .audit_summary(),
             "sender_not_allowed expected=noreply@example.com got=attacker@elsewhere.example",
         );
         assert_eq!(
@@ -350,7 +361,11 @@ mod tests {
             "too_many_recipients limit=50 got=51",
         );
         assert_eq!(
-            EnvelopeRejection::MessageTooLarge { limit: 1_000, got: 5_000 }.audit_summary(),
+            EnvelopeRejection::MessageTooLarge {
+                limit: 1_000,
+                got: 5_000
+            }
+            .audit_summary(),
             "message_too_large limit=1000 got=5000",
         );
         assert_eq!(
@@ -374,6 +389,9 @@ mod tests {
         // RFC 5321 §3.5 allows a quoted-local with `@` inside; we
         // split on the LAST `@` so `"alice@home"@example.com` still
         // resolves to example.com.
-        assert_eq!(split_domain("\"alice@home\"@example.com"), Some("example.com"));
+        assert_eq!(
+            split_domain("\"alice@home\"@example.com"),
+            Some("example.com")
+        );
     }
 }

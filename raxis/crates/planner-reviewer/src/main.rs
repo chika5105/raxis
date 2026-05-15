@@ -65,8 +65,8 @@ fn main() -> ! {
 
 async fn async_main() -> u8 {
     match run().await {
-        Ok(())  => 0,
-        Err(e)  => {
+        Ok(()) => 0,
+        Err(e) => {
             eprintln!(
                 "{{\"level\":\"error\",\"step\":\"planner-boot-error\",\
                   \"role\":\"reviewer\",\"message\":{:?}}}",
@@ -95,7 +95,10 @@ fn log_hydration_outcome(outcome: &HydrationOutcome) {
               \"reason\":{:?}}}",
             reason,
         ),
-        HydrationOutcome::Hydrated { applied, skipped_already_set } => eprintln!(
+        HydrationOutcome::Hydrated {
+            applied,
+            skipped_already_set,
+        } => eprintln!(
             "{{\"level\":\"info\",\"step\":\"planner-cmdline-env\",\
               \"role\":\"reviewer\",\"outcome\":\"hydrated\",\
               \"applied\":{applied},\"skipped_already_set\":{skipped_already_set}}}"
@@ -175,7 +178,7 @@ fn log_workspace_mount_outcome(outcome: &WorkspaceMountOutcome) {
         WorkspaceMountOutcome::Mounted { attempts } => {
             for attempt in attempts {
                 let (status_str, reason): (&str, Option<&str>) = match &attempt.status {
-                    MountStatus::Ok      => ("ok", None),
+                    MountStatus::Ok => ("ok", None),
                     MountStatus::Already => ("already", None),
                     MountStatus::Failed { reason } => ("failed", Some(reason.as_str())),
                 };

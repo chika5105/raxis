@@ -42,11 +42,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 
 pub mod restriction;
 
@@ -63,13 +63,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -155,7 +158,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error from `tokio::net::TcpListener::bind`.
         source: std::io::Error,
     },
@@ -172,9 +175,9 @@ pub struct ProxyStats {
     /// Number of requests forwarded to upstream.
     pub requests_forwarded: AtomicU32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   AtomicU32,
+    pub requests_blocked: AtomicU32,
     /// Total bytes returned to clients (response bodies only).
-    pub bytes_out:          AtomicU64,
+    pub bytes_out: AtomicU64,
 }
 
 impl ProxyStats {
@@ -183,8 +186,8 @@ impl ProxyStats {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
             requests_forwarded: self.requests_forwarded.load(Ordering::Relaxed),
-            requests_blocked:   self.requests_blocked  .load(Ordering::Relaxed),
-            bytes_out:          self.bytes_out         .load(Ordering::Relaxed),
+            requests_blocked: self.requests_blocked.load(Ordering::Relaxed),
+            bytes_out: self.bytes_out.load(Ordering::Relaxed),
         }
     }
 }
@@ -197,9 +200,9 @@ pub struct ProxyStatsSnapshot {
     /// Number of requests forwarded to upstream.
     pub requests_forwarded: u32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   u32,
+    pub requests_blocked: u32,
     /// Total bytes returned to clients (response bodies only).
-    pub bytes_out:          u64,
+    pub bytes_out: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -208,13 +211,13 @@ pub struct ProxyStatsSnapshot {
 
 /// Generic HTTP credential proxy.
 pub struct HttpProxy {
-    listener:  tokio::net::TcpListener,
-    backend:   Arc<dyn CredentialBackend>,
-    config:    ProxyConfig,
-    upstream:  url::Url,
-    stats:     Arc<ProxyStats>,
-    http:      reqwest::Client,
-    audit:     Arc<dyn AuditChannel>,
+    listener: tokio::net::TcpListener,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    upstream: url::Url,
+    stats: Arc<ProxyStats>,
+    http: reqwest::Client,
+    audit: Arc<dyn AuditChannel>,
 }
 
 impl HttpProxy {
@@ -233,7 +236,7 @@ impl HttpProxy {
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
         config: ProxyConfig,
-        audit:  Arc<dyn AuditChannel>,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
         let upstream = url::Url::parse(&config.upstream_url)
             .map_err(|_| ProxyError::BadUpstream(config.upstream_url.clone()))?;
@@ -284,15 +287,19 @@ impl HttpProxy {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend  = self.backend.clone();
-                    let config   = self.config.clone();
-                    let stats    = self.stats.clone();
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
+                    let backend = self.backend.clone();
+                    let config = self.config.clone();
+                    let stats = self.stats.clone();
                     let upstream = self.upstream.clone();
-                    let http     = self.http.clone();
-                    let audit    = Arc::clone(&self.audit);
+                    let http = self.http.clone();
+                    let audit = Arc::clone(&self.audit);
                     tokio::spawn(async move {
-                        if let Err(e) = serve_one(stream, backend, config, upstream, http, stats, audit).await {
+                        if let Err(e) =
+                            serve_one(stream, backend, config, upstream, http, stats, audit).await
+                        {
                             tracing::warn!(error = %e, "http proxy connection ended with error");
                         }
                     });
@@ -329,19 +336,23 @@ async fn serve_one(
     // Step 1: read until end-of-headers.
     let header_end = loop {
         let n = client_stream.read(&mut tmp).await?;
-        if n == 0 { return Ok(()); }
+        if n == 0 {
+            return Ok(());
+        }
         buf.extend_from_slice(&tmp[..n]);
         if buf.len() > MAX_REQUEST_BYTES {
-            return write_error(&mut client_stream, 431,
-                "Request Header Fields Too Large").await;
+            return write_error(&mut client_stream, 431, "Request Header Fields Too Large").await;
         }
-        if let Some(end) = find_header_end(&buf) { break end; }
+        if let Some(end) = find_header_end(&buf) {
+            break end;
+        }
     };
 
     // Step 2: parse the request line + headers.
     let mut headers_buf = [httparse::EMPTY_HEADER; 64];
     let mut req = httparse::Request::new(&mut headers_buf);
-    let parse_status = req.parse(&buf[..header_end])
+    let parse_status = req
+        .parse(&buf[..header_end])
         .unwrap_or(httparse::Status::Partial);
     let _ = parse_status;
 
@@ -351,22 +362,30 @@ async fn serve_one(
     // Step 3: restriction checks.
     if !config.restrictions.allows_method(&method) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        audit.emit(audit_request_executed(&config, &method, &raw_path, 405, true));
+        audit.emit(audit_request_executed(
+            &config, &method, &raw_path, 405, true,
+        ));
         return write_error(&mut client_stream, 405, "Method Not Allowed").await;
     }
     if !config.restrictions.allows_path(&raw_path) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        audit.emit(audit_request_executed(&config, &method, &raw_path, 403, true));
+        audit.emit(audit_request_executed(
+            &config, &method, &raw_path, 403, true,
+        ));
         return write_error(&mut client_stream, 403, "Forbidden by RAXIS policy").await;
     }
     if request_attempts_websocket_upgrade(&req) {
         stats.requests_blocked.fetch_add(1, Ordering::Relaxed);
-        audit.emit(audit_request_executed(&config, &method, &raw_path, 400, true));
+        audit.emit(audit_request_executed(
+            &config, &method, &raw_path, 400, true,
+        ));
         return write_error(&mut client_stream, 400, "Upgrade not supported").await;
     }
 
     // Step 4: capture content-length so we know how much body to read.
-    let content_length: usize = req.headers.iter()
+    let content_length: usize = req
+        .headers
+        .iter()
         .find(|h| h.name.eq_ignore_ascii_case("content-length"))
         .and_then(|h| std::str::from_utf8(h.value).ok())
         .and_then(|s| s.trim().parse().ok())
@@ -382,7 +401,9 @@ async fn serve_one(
     body.extend_from_slice(&buf[header_end..header_end + body_already]);
     while body.len() < content_length {
         let n = client_stream.read(&mut tmp).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         body.extend_from_slice(&tmp[..n]);
     }
     body.truncate(content_length);
@@ -398,21 +419,19 @@ async fn serve_one(
     };
     let cred_str = match cred.as_utf8() {
         Some(s) => s,
-        None    => return write_error(&mut client_stream, 502,
-            "credential is not valid UTF-8").await,
+        None => return write_error(&mut client_stream, 502, "credential is not valid UTF-8").await,
     };
 
     let target = compose_target(&upstream, &raw_path);
     let mut request_builder = match method.as_str() {
-        "GET"     => http.get(&target),
-        "HEAD"    => http.head(&target),
-        "POST"    => http.post(&target),
-        "PUT"     => http.put(&target),
-        "PATCH"   => http.patch(&target),
-        "DELETE"  => http.delete(&target),
-        other     => http.request(
-            reqwest::Method::from_bytes(other.as_bytes())
-                .unwrap_or(reqwest::Method::GET),
+        "GET" => http.get(&target),
+        "HEAD" => http.head(&target),
+        "POST" => http.post(&target),
+        "PUT" => http.put(&target),
+        "PATCH" => http.patch(&target),
+        "DELETE" => http.delete(&target),
+        other => http.request(
+            reqwest::Method::from_bytes(other.as_bytes()).unwrap_or(reqwest::Method::GET),
             &target,
         ),
     };
@@ -433,7 +452,7 @@ async fn serve_one(
     }
     // Inject auth.
     let auth_value = match &config.auth_mode {
-        AuthMode::Bearer        => format!("Bearer {cred_str}"),
+        AuthMode::Bearer => format!("Bearer {cred_str}"),
         AuthMode::Basic { user } => {
             let raw = format!("{user}:{cred_str}");
             format!("Basic {}", base64_encode(raw.as_bytes()))
@@ -457,18 +476,30 @@ async fn serve_one(
     let status = resp.status();
     let headers = resp.headers().clone();
     let body_bytes = match resp.bytes().await {
-        Ok(b)  => b.to_vec(),
+        Ok(b) => b.to_vec(),
         Err(_) => Vec::new(),
     };
     stats.requests_forwarded.fetch_add(1, Ordering::Relaxed);
-    stats.bytes_out.fetch_add(body_bytes.len() as u64, Ordering::Relaxed);
-    audit.emit(audit_request_executed(&config, &method, &raw_path,
-        status.as_u16(), false));
+    stats
+        .bytes_out
+        .fetch_add(body_bytes.len() as u64, Ordering::Relaxed);
+    audit.emit(audit_request_executed(
+        &config,
+        &method,
+        &raw_path,
+        status.as_u16(),
+        false,
+    ));
 
     let mut out = Vec::with_capacity(64 + body_bytes.len());
-    out.extend_from_slice(format!("HTTP/1.1 {} {}\r\n",
-        status.as_u16(),
-        status.canonical_reason().unwrap_or("OK")).as_bytes());
+    out.extend_from_slice(
+        format!(
+            "HTTP/1.1 {} {}\r\n",
+            status.as_u16(),
+            status.canonical_reason().unwrap_or("OK")
+        )
+        .as_bytes(),
+    );
     for (name, value) in headers.iter() {
         let n = name.as_str();
         if n.eq_ignore_ascii_case("transfer-encoding")
@@ -481,8 +512,13 @@ async fn serve_one(
             out.extend_from_slice(format!("{n}: {v}\r\n").as_bytes());
         }
     }
-    out.extend_from_slice(format!("Content-Length: {}\r\nConnection: close\r\n\r\n",
-        body_bytes.len()).as_bytes());
+    out.extend_from_slice(
+        format!(
+            "Content-Length: {}\r\nConnection: close\r\n\r\n",
+            body_bytes.len()
+        )
+        .as_bytes(),
+    );
     out.extend_from_slice(&body_bytes);
 
     client_stream.write_all(&out).await?;
@@ -562,11 +598,13 @@ fn audit_request_executed(
     let sha = hex::encode(h.finalize());
     AuditEvent::HttpProxyRequestExecuted {
         timestamp_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        method:      method.to_owned(),
-        path:        path.to_owned(),
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        method: method.to_owned(),
+        path: path.to_owned(),
         path_sha256: sha,
         status_code: status,
         blocked,
@@ -604,15 +642,14 @@ pub enum AuditEvent {
 // ---------------------------------------------------------------------------
 
 fn base64_encode(input: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
     let chunks = input.chunks(3);
     for c in chunks {
         let (a, b, d) = match c.len() {
             3 => (c[0], c[1], c[2]),
             2 => (c[0], c[1], 0),
-            1 => (c[0], 0,    0),
+            1 => (c[0], 0, 0),
             _ => unreachable!(),
         };
         let n = ((a as u32) << 16) | ((b as u32) << 8) | (d as u32);

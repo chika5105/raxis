@@ -116,9 +116,7 @@ use std::path::PathBuf;
 use std::time::{Duration, Instant};
 
 use raxis_ipc::{read_frame, write_frame, IpcMessage};
-use raxis_types::{
-    IntentKind, IntentOutcome, IntentRequest, TaskId, TaskState,
-};
+use raxis_types::{IntentKind, IntentOutcome, IntentRequest, TaskId, TaskState};
 use rusqlite::Connection;
 use tokio::net::UnixStream;
 use uuid::Uuid;
@@ -143,9 +141,9 @@ const HARD_WALL: Duration = Duration::from_secs(60);
 /// Generous per-stage deadlines — kernel boot + cargo-built binary
 /// startup on a busy CI host occasionally takes 5+ seconds; we keep
 /// each step at ~10s so the failure mode "step N hung" is legible.
-const READY_DEADLINE:      Duration = Duration::from_secs(15);
+const READY_DEADLINE: Duration = Duration::from_secs(15);
 const ROUND_TRIP_DEADLINE: Duration = Duration::from_secs(10);
-const SHUTDOWN_DEADLINE:   Duration = Duration::from_secs(15);
+const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(15);
 
 /// Window the test waits for the orchestrator-respawn EarlyResponse
 /// log line to surface on stderr after the IntentResponse returns.
@@ -164,12 +162,12 @@ const POST_RESPONSE_LOG_DEADLINE: Duration = Duration::from_secs(5);
 
 const SIBLING_INITIATIVE: &str = "it-sibling";
 const PRIMARY_INITIATIVE: &str = "it-primary";
-const SIBLING_TASK:       &str = "task-sibling";
-const PRIMARY_TASK:       &str = "task-primary";
+const SIBLING_TASK: &str = "task-sibling";
+const PRIMARY_TASK: &str = "task-primary";
 const SIBLING_ACTIVATION: &str = "act-sibling";
 const PRIMARY_ACTIVATION: &str = "act-primary";
-const SIBLING_SESSION:    &str = "11111111-1111-1111-1111-111111111111";
-const SIBLING_LINEAGE:    &str = "lineage-sibling";
+const SIBLING_SESSION: &str = "11111111-1111-1111-1111-111111111111";
+const SIBLING_LINEAGE: &str = "lineage-sibling";
 
 /// Seeded `crash_retry_count` value — one short of the kernel
 /// default `DEFAULT_MAX_CRASH_RETRIES = 3`
@@ -203,10 +201,8 @@ const EXPECTED_CRASH_RETRY_COUNT_POST_REPORT: i64 = 3;
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn post_ceiling_deadlock_respawn() {
     let started = Instant::now();
-    let outcome = tokio::time::timeout(HARD_WALL, async move {
-        run_post_ceiling_scenario().await
-    })
-    .await;
+    let outcome =
+        tokio::time::timeout(HARD_WALL, async move { run_post_ceiling_scenario().await }).await;
 
     match outcome {
         Ok(()) => {
@@ -273,9 +269,7 @@ async fn run_post_ceiling_scenario() {
 
     let req = planner.build_report_failure(SIBLING_TASK);
     let req_seq = req.sequence_number;
-    let resp = planner
-        .round_trip(&IpcMessage::IntentRequest(req))
-        .await;
+    let resp = planner.round_trip(&IpcMessage::IntentRequest(req)).await;
 
     // ── Phase 4: assertions on the typed IntentResponse.
     match resp {
@@ -317,8 +311,8 @@ async fn run_post_ceiling_scenario() {
     //   * subtask_activations.terminated_at IS NOT NULL   (cascade)
     //   * subtask_activations.crash_retry_count = 3       (bump)
     {
-        let conn = Connection::open(data_dir.join("kernel.db"))
-            .expect("open kernel.db for read-back");
+        let conn =
+            Connection::open(data_dir.join("kernel.db")).expect("open kernel.db for read-back");
 
         let task_state: String = conn
             .query_row(
@@ -516,9 +510,9 @@ impl MockExecutor {
             .expect("write_frame to planner.sock");
         match tokio::time::timeout(ROUND_TRIP_DEADLINE, read_frame(&mut self.stream)).await {
             Ok(Ok(reply)) => reply,
-            Ok(Err(e)) => panic!(
-                "kernel did not return a frame on the post-ceiling round-trip: {e}",
-            ),
+            Ok(Err(e)) => {
+                panic!("kernel did not return a frame on the post-ceiling round-trip: {e}",)
+            }
             Err(_) => panic!(
                 "kernel did not reply within {ROUND_TRIP_DEADLINE:?} — \
                  likely the post-ceiling deadlock the INV-LOCK-07 watcher \
@@ -550,8 +544,8 @@ fn mint_session_token() -> String {
 /// a half-applied state.
 fn seed_post_ceiling_state(data_dir: &PathBuf, session_token: &str) {
     let db_path = data_dir.join("kernel.db");
-    let mut conn = Connection::open(&db_path)
-        .unwrap_or_else(|e| panic!("open kernel.db at {db_path:?}: {e}"));
+    let mut conn =
+        Connection::open(&db_path).unwrap_or_else(|e| panic!("open kernel.db at {db_path:?}: {e}"));
     let tx = conn.transaction().expect("begin seed tx");
 
     let now: i64 = raxis_types::clock::unix_now_secs();
@@ -697,12 +691,7 @@ fn seed_post_ceiling_state(data_dir: &PathBuf, session_token: &str) {
             crash_retry_count, review_reject_count,
             created_at, activated_at, terminated_at
          ) VALUES (?1, ?2, ?3, 'PendingActivation', NULL, NULL, 0, 0, ?4, NULL, NULL)",
-        rusqlite::params![
-            PRIMARY_ACTIVATION,
-            PRIMARY_TASK,
-            PRIMARY_INITIATIVE,
-            now,
-        ],
+        rusqlite::params![PRIMARY_ACTIVATION, PRIMARY_TASK, PRIMARY_INITIATIVE, now,],
     )
     .expect("insert primary subtask_activations row");
 
@@ -713,11 +702,7 @@ fn seed_post_ceiling_state(data_dir: &PathBuf, session_token: &str) {
 // Stderr-grep helper
 // ---------------------------------------------------------------------------
 
-fn wait_for_stderr_substring(
-    kernel: &KernelInstance,
-    needle: &str,
-    deadline: Duration,
-) {
+fn wait_for_stderr_substring(kernel: &KernelInstance, needle: &str, deadline: Duration) {
     let start = Instant::now();
     loop {
         let body = kernel.captured_stderr();
@@ -734,11 +719,7 @@ fn wait_for_stderr_substring(
     }
 }
 
-fn wait_for_stderr_substring_any(
-    kernel: &KernelInstance,
-    needles: &[&str],
-    deadline: Duration,
-) {
+fn wait_for_stderr_substring_any(kernel: &KernelInstance, needles: &[&str], deadline: Duration) {
     let start = Instant::now();
     loop {
         let body = kernel.captured_stderr();
@@ -780,22 +761,21 @@ fn wait_for_stderr_substring_any(
 /// with a legible variant name rather than fail to compile.
 fn describe(msg: &IpcMessage) -> &'static str {
     match msg {
-        IpcMessage::IntentRequest(_)              => "IntentRequest",
-        IpcMessage::EscalationRequest(_)          => "EscalationRequest",
-        IpcMessage::PlannerFetchRequest(_)        => "PlannerFetchRequest",
-        IpcMessage::PlannerExitNotice { .. }      => "PlannerExitNotice",
-        IpcMessage::KernelIntentResponse(_)       => "KernelIntentResponse",
-        IpcMessage::KernelEscalationResponse(_)   => "KernelEscalationResponse",
+        IpcMessage::IntentRequest(_) => "IntentRequest",
+        IpcMessage::EscalationRequest(_) => "EscalationRequest",
+        IpcMessage::PlannerFetchRequest(_) => "PlannerFetchRequest",
+        IpcMessage::PlannerExitNotice { .. } => "PlannerExitNotice",
+        IpcMessage::KernelIntentResponse(_) => "KernelIntentResponse",
+        IpcMessage::KernelEscalationResponse(_) => "KernelEscalationResponse",
         IpcMessage::KernelPlannerFetchResponse(_) => "KernelPlannerFetchResponse",
-        IpcMessage::KernelPlannerExitNoticeAck    => "KernelPlannerExitNoticeAck",
-        IpcMessage::TproxyAdmissionRequest(_)        => "TproxyAdmissionRequest",
+        IpcMessage::KernelPlannerExitNoticeAck => "KernelPlannerExitNoticeAck",
+        IpcMessage::TproxyAdmissionRequest(_) => "TproxyAdmissionRequest",
         IpcMessage::KernelTproxyAdmissionResponse(_) => "KernelTproxyAdmissionResponse",
-        IpcMessage::DnsResolveRequest(_)             => "DnsResolveRequest",
-        IpcMessage::KernelDnsResolveResponse(_)      => "KernelDnsResolveResponse",
-        IpcMessage::WitnessSubmission(_)          => "WitnessSubmission",
-        IpcMessage::WitnessAck { .. }             => "WitnessAck",
-        IpcMessage::OperatorRequest(_)            => "OperatorRequest",
-        IpcMessage::OperatorResponse(_)           => "OperatorResponse",
+        IpcMessage::DnsResolveRequest(_) => "DnsResolveRequest",
+        IpcMessage::KernelDnsResolveResponse(_) => "KernelDnsResolveResponse",
+        IpcMessage::WitnessSubmission(_) => "WitnessSubmission",
+        IpcMessage::WitnessAck { .. } => "WitnessAck",
+        IpcMessage::OperatorRequest(_) => "OperatorRequest",
+        IpcMessage::OperatorResponse(_) => "OperatorResponse",
     }
 }
-

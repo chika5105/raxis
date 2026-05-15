@@ -65,12 +65,13 @@ impl FromStr for OciDigest {
     type Err = OciDigestParseError;
 
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        let rest = s.strip_prefix("sha256:")
+        let rest = s
+            .strip_prefix("sha256:")
             .ok_or(OciDigestParseError::WrongAlgorithm)?;
         if rest.len() != SHA256_LEN_HEX {
             return Err(OciDigestParseError::WrongLength {
                 expected_hex_chars: SHA256_LEN_HEX,
-                got_hex_chars:      rest.len(),
+                got_hex_chars: rest.len(),
             });
         }
         // Reject uppercase. The OCI distribution spec is silent on
@@ -80,8 +81,7 @@ impl FromStr for OciDigest {
         if rest.bytes().any(|b| matches!(b, b'A'..=b'F')) {
             return Err(OciDigestParseError::NonLowercaseHex);
         }
-        let raw = hex::decode(rest)
-            .map_err(|_| OciDigestParseError::NonHexCharacter)?;
+        let raw = hex::decode(rest).map_err(|_| OciDigestParseError::NonHexCharacter)?;
         let mut bytes = [0u8; SHA256_LEN_BYTES];
         bytes.copy_from_slice(&raw);
         Ok(Self { bytes })
@@ -90,11 +90,15 @@ impl FromStr for OciDigest {
 
 impl TryFrom<String> for OciDigest {
     type Error = OciDigestParseError;
-    fn try_from(s: String) -> Result<Self, Self::Error> { Self::from_str(&s) }
+    fn try_from(s: String) -> Result<Self, Self::Error> {
+        Self::from_str(&s)
+    }
 }
 
 impl From<OciDigest> for String {
-    fn from(d: OciDigest) -> Self { d.to_canonical_string() }
+    fn from(d: OciDigest) -> Self {
+        d.to_canonical_string()
+    }
 }
 
 /// Parse failures for [`OciDigest::from_str`]. Surfaced through
@@ -113,7 +117,7 @@ pub enum OciDigestParseError {
         /// What we expect (constant 64).
         expected_hex_chars: usize,
         /// What the caller supplied.
-        got_hex_chars:      usize,
+        got_hex_chars: usize,
     },
     /// Hex section contains an uppercase A-F char. Rejected
     /// deliberately (see `from_str`).
@@ -134,7 +138,8 @@ mod tests {
 
     #[test]
     fn parse_accepts_canonical_form() {
-        let d = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let d = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap();
         assert_eq!(d.as_bytes()[0], 0xab);
         assert_eq!(d.as_bytes()[31], 0x34);
         assert_eq!(
@@ -145,7 +150,8 @@ mod tests {
 
     #[test]
     fn parse_rejects_missing_algorithm_prefix() {
-        let err = parse("abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap_err();
+        let err =
+            parse("abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap_err();
         assert_eq!(err, OciDigestParseError::WrongAlgorithm);
     }
 
@@ -160,7 +166,10 @@ mod tests {
         let err = parse("sha256:abcd").unwrap_err();
         assert!(matches!(
             err,
-            OciDigestParseError::WrongLength { expected_hex_chars: 64, got_hex_chars: 4 },
+            OciDigestParseError::WrongLength {
+                expected_hex_chars: 64,
+                got_hex_chars: 4
+            },
         ));
     }
 
@@ -170,43 +179,56 @@ mod tests {
         let err = parse(&s).unwrap_err();
         assert!(matches!(
             err,
-            OciDigestParseError::WrongLength { expected_hex_chars: 64, got_hex_chars: 65 },
+            OciDigestParseError::WrongLength {
+                expected_hex_chars: 64,
+                got_hex_chars: 65
+            },
         ));
     }
 
     #[test]
     fn parse_rejects_uppercase_hex() {
-        let err = parse("sha256:ABCD1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap_err();
+        let err = parse("sha256:ABCD1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap_err();
         assert_eq!(err, OciDigestParseError::NonLowercaseHex);
     }
 
     #[test]
     fn parse_rejects_non_hex_character() {
-        let err = parse("sha256:gggg1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap_err();
+        let err = parse("sha256:gggg1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap_err();
         assert_eq!(err, OciDigestParseError::NonHexCharacter);
     }
 
     #[test]
     fn shard_prefix_is_first_two_hex_chars() {
-        let d = parse("sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").unwrap();
+        let d = parse("sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .unwrap();
         assert_eq!(d.shard_prefix(), "00");
-        let d = parse("sha256:ab112233445566778899aabbccddeeff00112233445566778899aabbccddeeff").unwrap();
+        let d = parse("sha256:ab112233445566778899aabbccddeeff00112233445566778899aabbccddeeff")
+            .unwrap();
         assert_eq!(d.shard_prefix(), "ab");
     }
 
     #[test]
     fn round_trip_via_serde_json() {
-        let d = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let d = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap();
         let s = serde_json::to_string(&d).unwrap();
-        assert_eq!(s, "\"sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\"");
+        assert_eq!(
+            s,
+            "\"sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234\""
+        );
         let d2: OciDigest = serde_json::from_str(&s).unwrap();
         assert_eq!(d, d2);
     }
 
     #[test]
     fn equal_digests_hash_equal() {
-        let a = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
-        let b = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234").unwrap();
+        let a = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap();
+        let b = parse("sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234")
+            .unwrap();
         assert_eq!(a, b);
         let mut set = std::collections::HashSet::new();
         set.insert(a);

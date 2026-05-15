@@ -73,14 +73,12 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, ConsumerIdentity,
-};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
+use crate::wire::{MsgHeader, HEADER_LEN, MAX_MESSAGE_LEN, OP_MSG};
 use crate::OwnedConsumer;
-use crate::wire::{HEADER_LEN, MAX_MESSAGE_LEN, MsgHeader, OP_MSG};
 
 /// Default upstream connect timeout. Mirrors the Postgres + MySQL
 /// proxies' 8s default.
@@ -224,11 +222,17 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 { 1 }
-    else if lead < 0xc0 { 1 }
-    else if lead < 0xe0 { 2 }
-    else if lead < 0xf0 { 3 }
-    else { 4 }
+    if lead < 0x80 {
+        1
+    } else if lead < 0xc0 {
+        1
+    } else if lead < 0xe0 {
+        2
+    } else if lead < 0xf0 {
+        3
+    } else {
+        4
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,7 +278,8 @@ impl ParsedUpstreamUrl {
         } else if raw.starts_with("mongodb+srv://") {
             return Err(UpstreamError::InvalidUrl(
                 "mongodb+srv:// not supported — use plaintext mongodb:// scheme \
-                 (mongodb+srv requires DNS SRV/TXT record discovery; out of scope)".into(),
+                 (mongodb+srv requires DNS SRV/TXT record discovery; out of scope)"
+                    .into(),
             ));
         } else {
             return Err(UpstreamError::InvalidUrl(
@@ -309,9 +314,9 @@ impl ParsedUpstreamUrl {
         let (host, port) = match authority.rfind(':') {
             Some(colon) => {
                 let h = &authority[..colon];
-                let p = authority[colon + 1..].parse::<u16>().map_err(|_| {
-                    UpstreamError::InvalidUrl("port is not a valid u16".into())
-                })?;
+                let p = authority[colon + 1..]
+                    .parse::<u16>()
+                    .map_err(|_| UpstreamError::InvalidUrl("port is not a valid u16".into()))?;
                 (h.to_owned(), p)
             }
             None => (authority.to_owned(), 27017u16),
@@ -440,14 +445,14 @@ pub struct ForwardOutcome {
 /// One live upstream session, held across the lifetime of the
 /// agent's connection.
 pub struct UpstreamSession {
-    stream:        TcpStream,
+    stream: TcpStream,
     /// Hostname the audit envelope reports.
-    pub host:      String,
+    pub host: String,
     /// Port the audit envelope reports.
-    pub port:      u16,
+    pub port: u16,
     /// True if the URL requested TLS — V2.1 surfaces this in the
     /// audit envelope but the implementation only supports plaintext.
-    pub tls:       bool,
+    pub tls: bool,
     /// Wall-clock for the connect step.
     pub handshake_ms: u32,
 }
@@ -476,13 +481,15 @@ impl UpstreamSession {
         if url.require_tls {
             return Err(UpstreamError::Handshake(
                 "tls=true is not supported on the upstream socket yet — \
-                 plaintext mongodb:// only".into(),
+                 plaintext mongodb:// only"
+                    .into(),
             ));
         }
         let started = Instant::now();
         let connect_fut = async {
             let addr = format!("{}:{}", url.host, url.port);
-            let stream = TcpStream::connect(&addr).await
+            let stream = TcpStream::connect(&addr)
+                .await
                 .map_err(|e| UpstreamError::TcpConnect(redact_for_audit(&e.to_string())))?;
             Ok::<_, UpstreamError>(stream)
         };
@@ -498,9 +505,8 @@ impl UpstreamSession {
         // the same connect_timeout the TCP connect used, so a
         // malicious / slow upstream cannot wedge the proxy.
         if let (Some(user), Some(pass)) = (url.username.as_deref(), url.password.as_deref()) {
-            let sasl_fut = scram_sha256_authenticate(
-                &mut stream, &url.auth_source, user, pass.as_bytes(),
-            );
+            let sasl_fut =
+                scram_sha256_authenticate(&mut stream, &url.auth_source, user, pass.as_bytes());
             match tokio::time::timeout(connect_timeout, sasl_fut).await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => return Err(e),
@@ -532,24 +538,30 @@ impl UpstreamSession {
     ) -> Result<ForwardOutcome, UpstreamError> {
         let started = Instant::now();
         // Write agent's frame verbatim to upstream.
-        self.stream.write_all(agent_frame).await
+        self.stream
+            .write_all(agent_frame)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(redact_for_audit(&e.to_string())))?;
         self.stream.flush().await.ok();
         // Read upstream's reply: 16-byte header + body.
         let mut header = [0u8; HEADER_LEN];
-        self.stream.read_exact(&mut header).await
+        self.stream
+            .read_exact(&mut header)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read upstream header: {e}")))?;
         let parsed = MsgHeader::parse(header);
         let total = parsed.message_length as usize;
         if total < HEADER_LEN || total > MAX_MESSAGE_LEN {
             return Err(UpstreamError::PayloadTooLarge {
                 bytes: total,
-                max:   MAX_MESSAGE_LEN,
+                max: MAX_MESSAGE_LEN,
             });
         }
         let body_len = total - HEADER_LEN;
         let mut body = vec![0u8; body_len];
-        self.stream.read_exact(&mut body).await
+        self.stream
+            .read_exact(&mut body)
+            .await
             .map_err(|e| UpstreamError::RelayFailed(format!("read upstream body: {e}")))?;
         let mut frame = Vec::with_capacity(total);
         frame.extend_from_slice(&header);
@@ -588,11 +600,14 @@ fn scan_op_msg_ok_zero(body: &[u8]) -> bool {
             // Body section: BSON doc starts at i.
             return scan_bson_for_ok_zero(&body[i..]);
         } else if kind == 1 {
-            if i + 4 > body.len() { return false; }
-            let section_size = i32::from_le_bytes([
-                body[i], body[i + 1], body[i + 2], body[i + 3],
-            ]) as usize;
-            if section_size < 4 || i + section_size > body.len() { return false; }
+            if i + 4 > body.len() {
+                return false;
+            }
+            let section_size =
+                i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
+            if section_size < 4 || i + section_size > body.len() {
+                return false;
+            }
             i += section_size;
         } else {
             return false;
@@ -633,11 +648,19 @@ fn scan_bson_for_ok_zero(doc: &[u8]) -> bool {
         match type_byte {
             // double
             0x01 => {
-                if i + 8 > body.len() { return false; }
+                if i + 8 > body.len() {
+                    return false;
+                }
                 if is_ok {
                     let v = f64::from_le_bytes([
-                        body[i], body[i + 1], body[i + 2], body[i + 3],
-                        body[i + 4], body[i + 5], body[i + 6], body[i + 7],
+                        body[i],
+                        body[i + 1],
+                        body[i + 2],
+                        body[i + 3],
+                        body[i + 4],
+                        body[i + 5],
+                        body[i + 6],
+                        body[i + 7],
                     ]);
                     return v == 0.0;
                 }
@@ -645,26 +668,29 @@ fn scan_bson_for_ok_zero(doc: &[u8]) -> bool {
             }
             // string
             0x02 => {
-                if i + 4 > body.len() { return false; }
-                let strlen = i32::from_le_bytes([
-                    body[i], body[i + 1], body[i + 2], body[i + 3],
-                ]) as usize;
+                if i + 4 > body.len() {
+                    return false;
+                }
+                let strlen =
+                    i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
                 i += 4 + strlen;
             }
             // embedded doc / array
             0x03 | 0x04 => {
-                if i + 4 > body.len() { return false; }
-                let inner = i32::from_le_bytes([
-                    body[i], body[i + 1], body[i + 2], body[i + 3],
-                ]) as usize;
+                if i + 4 > body.len() {
+                    return false;
+                }
+                let inner =
+                    i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
                 i += inner;
             }
             // binary
             0x05 => {
-                if i + 4 > body.len() { return false; }
-                let blen = i32::from_le_bytes([
-                    body[i], body[i + 1], body[i + 2], body[i + 3],
-                ]) as usize;
+                if i + 4 > body.len() {
+                    return false;
+                }
+                let blen =
+                    i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
                 i += 4 + 1 + blen;
             }
             // ObjectId
@@ -678,21 +704,23 @@ fn scan_bson_for_ok_zero(doc: &[u8]) -> bool {
             // regex: cstring + cstring
             0x0b => {
                 let nul1 = match body[i..].iter().position(|&b| b == 0) {
-                    Some(n) => n, None => return false,
+                    Some(n) => n,
+                    None => return false,
                 };
                 i += nul1 + 1;
                 let nul2 = match body[i..].iter().position(|&b| b == 0) {
-                    Some(n) => n, None => return false,
+                    Some(n) => n,
+                    None => return false,
                 };
                 i += nul2 + 1;
             }
             // int32
             0x10 => {
-                if i + 4 > body.len() { return false; }
+                if i + 4 > body.len() {
+                    return false;
+                }
                 if is_ok {
-                    let v = i32::from_le_bytes([
-                        body[i], body[i + 1], body[i + 2], body[i + 3],
-                    ]);
+                    let v = i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]);
                     return v == 0;
                 }
                 i += 4;
@@ -701,11 +729,19 @@ fn scan_bson_for_ok_zero(doc: &[u8]) -> bool {
             0x11 => i += 8,
             // int64
             0x12 => {
-                if i + 8 > body.len() { return false; }
+                if i + 8 > body.len() {
+                    return false;
+                }
                 if is_ok {
                     let v = i64::from_le_bytes([
-                        body[i], body[i + 1], body[i + 2], body[i + 3],
-                        body[i + 4], body[i + 5], body[i + 6], body[i + 7],
+                        body[i],
+                        body[i + 1],
+                        body[i + 2],
+                        body[i + 3],
+                        body[i + 4],
+                        body[i + 5],
+                        body[i + 6],
+                        body[i + 7],
                     ]);
                     return v == 0;
                 }
@@ -758,35 +794,39 @@ async fn scram_sha256_authenticate(
             "failed to mint SCRAM client nonce: {e}",
         )));
     }
-    let client_nonce = base64::engine::general_purpose::STANDARD
-        .encode(cnonce_bytes);
+    let client_nonce = base64::engine::general_purpose::STANDARD.encode(cnonce_bytes);
     let client_first_bare = format!("n={saslprep_user},r={client_nonce}");
     let gs2_header = "n,,";
     let client_first_message = format!("{gs2_header}{client_first_bare}");
 
     // 1) saslStart
     let start_doc = build_sasl_start_doc(
-        auth_source, "SCRAM-SHA-256", client_first_message.as_bytes(),
+        auth_source,
+        "SCRAM-SHA-256",
+        client_first_message.as_bytes(),
     );
-    let start_reply = exchange_op_msg(stream, &start_doc).await
+    let start_reply = exchange_op_msg(stream, &start_doc)
+        .await
         .map_err(|e| UpstreamError::Handshake(format!("saslStart: {e}")))?;
-    let SaslReply { ok, conv_id, payload, done } = parse_sasl_reply(&start_reply)
-        .ok_or_else(|| UpstreamError::Handshake(
-            "saslStart reply: malformed BSON or missing payload".into(),
-        ))?;
+    let SaslReply {
+        ok,
+        conv_id,
+        payload,
+        done,
+    } = parse_sasl_reply(&start_reply).ok_or_else(|| {
+        UpstreamError::Handshake("saslStart reply: malformed BSON or missing payload".into())
+    })?;
     if !ok {
         return Err(UpstreamError::AuthRejected(format!(
             "saslStart rejected: {}",
             sasl_reply_errmsg(&start_reply).unwrap_or_else(|| "unknown".into()),
         )));
     }
-    let server_first = std::str::from_utf8(&payload).map_err(|_| {
-        UpstreamError::Handshake("server first message is not UTF-8".into())
-    })?.to_owned();
+    let server_first = std::str::from_utf8(&payload)
+        .map_err(|_| UpstreamError::Handshake("server first message is not UTF-8".into()))?
+        .to_owned();
     let parsed_first = parse_server_first_message(&server_first)
-        .map_err(|e| UpstreamError::AuthRejected(format!(
-            "server first message: {e}"
-        )))?;
+        .map_err(|e| UpstreamError::AuthRejected(format!("server first message: {e}")))?;
     if !parsed_first.combined_nonce.starts_with(&client_nonce) {
         return Err(UpstreamError::AuthRejected(
             "scram server nonce did not extend client nonce (RFC 5802 §5)".into(),
@@ -800,28 +840,20 @@ async fn scram_sha256_authenticate(
     }
 
     // 2) Compute proof + send saslContinue
-    let salted_password = pbkdf2_hmac_sha256(
-        password, &parsed_first.salt, parsed_first.iterations,
-    );
+    let salted_password = pbkdf2_hmac_sha256(password, &parsed_first.salt, parsed_first.iterations);
     let client_key = hmac_sha256(&salted_password, b"Client Key");
     let stored_key = sha256_digest(&client_key);
     let server_key = hmac_sha256(&salted_password, b"Server Key");
 
-    let channel_binding = base64::engine::general_purpose::STANDARD
-        .encode(gs2_header.as_bytes());
-    let client_final_bare = format!(
-        "c={channel_binding},r={}", parsed_first.combined_nonce,
-    );
-    let auth_message = format!(
-        "{client_first_bare},{server_first},{client_final_bare}",
-    );
+    let channel_binding = base64::engine::general_purpose::STANDARD.encode(gs2_header.as_bytes());
+    let client_final_bare = format!("c={channel_binding},r={}", parsed_first.combined_nonce,);
+    let auth_message = format!("{client_first_bare},{server_first},{client_final_bare}",);
     let client_signature = hmac_sha256(&stored_key, auth_message.as_bytes());
     let mut client_proof = client_key;
     for (a, b) in client_proof.iter_mut().zip(client_signature.iter()) {
         *a ^= *b;
     }
-    let client_proof_b64 = base64::engine::general_purpose::STANDARD
-        .encode(client_proof);
+    let client_proof_b64 = base64::engine::general_purpose::STANDARD.encode(client_proof);
     let client_final_message = format!("{client_final_bare},p={client_proof_b64}");
 
     // Some MongoDB versions return `done: true` on the saslStart
@@ -829,28 +861,28 @@ async fn scram_sha256_authenticate(
     // final step regardless — RFC 5802 requires it, and the server's
     // final-server-signature is the only proof we have that the
     // upstream actually knows the password.
-    let cont_doc = build_sasl_continue_doc(
-        auth_source, conv_id, client_final_message.as_bytes(),
-    );
-    let cont_reply = exchange_op_msg(stream, &cont_doc).await
+    let cont_doc = build_sasl_continue_doc(auth_source, conv_id, client_final_message.as_bytes());
+    let cont_reply = exchange_op_msg(stream, &cont_doc)
+        .await
         .map_err(|e| UpstreamError::Handshake(format!("saslContinue: {e}")))?;
-    let SaslReply { ok: ok2, conv_id: _, payload: payload2, done: done2 } =
-        parse_sasl_reply(&cont_reply).ok_or_else(|| UpstreamError::Handshake(
-            "saslContinue reply: malformed BSON or missing payload".into(),
-        ))?;
+    let SaslReply {
+        ok: ok2,
+        conv_id: _,
+        payload: payload2,
+        done: done2,
+    } = parse_sasl_reply(&cont_reply).ok_or_else(|| {
+        UpstreamError::Handshake("saslContinue reply: malformed BSON or missing payload".into())
+    })?;
     if !ok2 {
         return Err(UpstreamError::AuthRejected(format!(
             "saslContinue rejected: {}",
             sasl_reply_errmsg(&cont_reply).unwrap_or_else(|| "unknown".into()),
         )));
     }
-    let server_final = std::str::from_utf8(&payload2).map_err(|_| {
-        UpstreamError::Handshake("server final message is not UTF-8".into())
-    })?;
+    let server_final = std::str::from_utf8(&payload2)
+        .map_err(|_| UpstreamError::Handshake("server final message is not UTF-8".into()))?;
     let server_signature = parse_server_final_message(server_final)
-        .map_err(|e| UpstreamError::AuthRejected(format!(
-            "server final message: {e}"
-        )))?;
+        .map_err(|e| UpstreamError::AuthRejected(format!("server final message: {e}")))?;
     let expected_sig = hmac_sha256(&server_key, auth_message.as_bytes());
     if !constant_time_eq(&server_signature, &expected_sig) {
         return Err(UpstreamError::AuthRejected(
@@ -864,12 +896,16 @@ async fn scram_sha256_authenticate(
     // harnesses delay it. Honor the delay.
     if !done && !done2 {
         let final_doc = build_sasl_continue_doc(auth_source, conv_id, b"");
-        let final_reply = exchange_op_msg(stream, &final_doc).await
+        let final_reply = exchange_op_msg(stream, &final_doc)
+            .await
             .map_err(|e| UpstreamError::Handshake(format!("saslContinue (empty): {e}")))?;
-        let SaslReply { ok: ok3, done: done3, .. } = parse_sasl_reply(&final_reply)
-            .ok_or_else(|| UpstreamError::Handshake(
-                "trailing saslContinue reply: malformed BSON".into(),
-            ))?;
+        let SaslReply {
+            ok: ok3,
+            done: done3,
+            ..
+        } = parse_sasl_reply(&final_reply).ok_or_else(|| {
+            UpstreamError::Handshake("trailing saslContinue reply: malformed BSON".into())
+        })?;
         if !ok3 || !done3 {
             return Err(UpstreamError::AuthRejected(
                 "scram conversation did not terminate with done: true".into(),
@@ -898,23 +934,24 @@ fn parse_server_first_message(s: &str) -> Result<ServerFirstMessage, String> {
     for attr in s.split(',') {
         let mut it = attr.splitn(2, '=');
         let k = it.next().ok_or_else(|| "empty attribute".to_owned())?;
-        let v = it.next().ok_or_else(|| format!("attribute `{k}` has no value"))?;
+        let v = it
+            .next()
+            .ok_or_else(|| format!("attribute `{k}` has no value"))?;
         match k {
             "r" => combined = Some(v.to_owned()),
             "s" => {
-                salt = Some(base64::engine::general_purpose::STANDARD
-                    .decode(v)
-                    .map_err(|e| format!("salt base64 decode: {e}"))?);
+                salt = Some(
+                    base64::engine::general_purpose::STANDARD
+                        .decode(v)
+                        .map_err(|e| format!("salt base64 decode: {e}"))?,
+                );
             }
             "i" => {
-                iter = Some(v.parse::<u32>()
-                    .map_err(|e| format!("iter parse: {e}"))?);
+                iter = Some(v.parse::<u32>().map_err(|e| format!("iter parse: {e}"))?);
             }
             // RFC 5802 §5.1: server may include `m=<mandatory-extension>`.
             // If it does, we must abort because we don't understand it.
-            "m" => return Err(format!(
-                "server requires unknown extension: {v}",
-            )),
+            "m" => return Err(format!("server requires unknown extension: {v}",)),
             _ => {}
         }
     }
@@ -934,9 +971,11 @@ fn parse_server_final_message(s: &str) -> Result<Vec<u8>, String> {
         let k = it.next().unwrap_or_default();
         let v = it.next().unwrap_or_default();
         match k {
-            "v" => return base64::engine::general_purpose::STANDARD
-                .decode(v)
-                .map_err(|e| format!("v= base64 decode: {e}")),
+            "v" => {
+                return base64::engine::general_purpose::STANDARD
+                    .decode(v)
+                    .map_err(|e| format!("v= base64 decode: {e}"))
+            }
             "e" => return Err(format!("server reported scram error: {v}")),
             _ => continue,
         }
@@ -979,9 +1018,8 @@ fn parse_sasl_reply(reply_frame: &[u8]) -> Option<SaslReply> {
         return None;
     }
     let doc = body.get(5..)?;
-    let total = i32::from_le_bytes([
-        *doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?,
-    ]) as usize;
+    let total =
+        i32::from_le_bytes([*doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?]) as usize;
     if total < 5 || total > doc.len() {
         return None;
     }
@@ -1002,40 +1040,53 @@ fn parse_sasl_reply(reply_frame: &[u8]) -> Option<SaslReply> {
         i += nul + 1;
         match (type_byte, name) {
             (0x01, "ok") => {
-                if i + 8 > inner.len() { return None; }
+                if i + 8 > inner.len() {
+                    return None;
+                }
                 let v = f64::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                    inner[i + 4], inner[i + 5], inner[i + 6], inner[i + 7],
+                    inner[i],
+                    inner[i + 1],
+                    inner[i + 2],
+                    inner[i + 3],
+                    inner[i + 4],
+                    inner[i + 5],
+                    inner[i + 6],
+                    inner[i + 7],
                 ]);
                 ok = v != 0.0;
                 i += 8;
             }
             (0x10, "ok") => {
-                if i + 4 > inner.len() { return None; }
-                ok = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) != 0;
+                if i + 4 > inner.len() {
+                    return None;
+                }
+                ok = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]) != 0;
                 i += 4;
             }
             (0x10, "conversationId") => {
-                if i + 4 > inner.len() { return None; }
-                conv_id = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]);
+                if i + 4 > inner.len() {
+                    return None;
+                }
+                conv_id = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]);
                 i += 4;
             }
             (0x05, "payload") => {
-                if i + 5 > inner.len() { return None; }
-                let blen = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                if i + 5 > inner.len() {
+                    return None;
+                }
+                let blen = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 let _subtype = inner[i + 4];
-                if i + 5 + blen > inner.len() { return None; }
+                if i + 5 + blen > inner.len() {
+                    return None;
+                }
                 payload = inner[i + 5..i + 5 + blen].to_vec();
                 i += 5 + blen;
             }
             (0x08, "done") => {
-                if i >= inner.len() { return None; }
+                if i >= inner.len() {
+                    return None;
+                }
                 done = inner[i] != 0;
                 i += 1;
             }
@@ -1047,22 +1098,33 @@ fn parse_sasl_reply(reply_frame: &[u8]) -> Option<SaslReply> {
                 let skip = match other_type {
                     0x01 | 0x09 | 0x11 | 0x12 => 8,
                     0x02 => {
-                        if i + 4 > inner.len() { return None; }
+                        if i + 4 > inner.len() {
+                            return None;
+                        }
                         let l = i32::from_le_bytes([
-                            inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+                            inner[i],
+                            inner[i + 1],
+                            inner[i + 2],
+                            inner[i + 3],
                         ]) as usize;
                         4 + l
                     }
                     0x03 | 0x04 => {
-                        if i + 4 > inner.len() { return None; }
-                        i32::from_le_bytes([
-                            inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                        ]) as usize
+                        if i + 4 > inner.len() {
+                            return None;
+                        }
+                        i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                            as usize
                     }
                     0x05 => {
-                        if i + 4 > inner.len() { return None; }
+                        if i + 4 > inner.len() {
+                            return None;
+                        }
                         let l = i32::from_le_bytes([
-                            inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
+                            inner[i],
+                            inner[i + 1],
+                            inner[i + 2],
+                            inner[i + 3],
                         ]) as usize;
                         4 + 1 + l
                     }
@@ -1077,7 +1139,12 @@ fn parse_sasl_reply(reply_frame: &[u8]) -> Option<SaslReply> {
             }
         }
     }
-    Some(SaslReply { ok, conv_id, payload, done })
+    Some(SaslReply {
+        ok,
+        conv_id,
+        payload,
+        done,
+    })
 }
 
 /// Best-effort: extract `errmsg` from a SASL reply for the audit
@@ -1093,9 +1160,8 @@ fn sasl_reply_errmsg(reply_frame: &[u8]) -> Option<String> {
         return None;
     }
     let doc = body.get(5..)?;
-    let total = i32::from_le_bytes([
-        *doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?,
-    ]) as usize;
+    let total =
+        i32::from_le_bytes([*doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?]) as usize;
     if total < 5 || total > doc.len() {
         return None;
     }
@@ -1104,16 +1170,21 @@ fn sasl_reply_errmsg(reply_frame: &[u8]) -> Option<String> {
     while i < inner.len() {
         let type_byte = inner[i];
         i += 1;
-        if type_byte == 0 { break; }
+        if type_byte == 0 {
+            break;
+        }
         let nul = inner[i..].iter().position(|&b| b == 0)?;
         let name = std::str::from_utf8(&inner[i..i + nul]).ok()?;
         i += nul + 1;
         if type_byte == 0x02 && name == "errmsg" {
-            if i + 4 > inner.len() { return None; }
-            let l = i32::from_le_bytes([
-                inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-            ]) as usize;
-            if l == 0 || i + 4 + l > inner.len() { return None; }
+            if i + 4 > inner.len() {
+                return None;
+            }
+            let l =
+                i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]) as usize;
+            if l == 0 || i + 4 + l > inner.len() {
+                return None;
+            }
             let s = std::str::from_utf8(&inner[i + 4..i + 4 + l - 1]).ok()?;
             return Some(s.to_owned());
         }
@@ -1121,23 +1192,25 @@ fn sasl_reply_errmsg(reply_frame: &[u8]) -> Option<String> {
         let skip = match type_byte {
             0x01 | 0x09 | 0x11 | 0x12 => 8,
             0x02 => {
-                if i + 4 > inner.len() { return None; }
-                let l = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                if i + 4 > inner.len() {
+                    return None;
+                }
+                let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 4 + l
             }
             0x03 | 0x04 => {
-                if i + 4 > inner.len() { return None; }
-                i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize
+                if i + 4 > inner.len() {
+                    return None;
+                }
+                i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]) as usize
             }
             0x05 => {
-                if i + 4 > inner.len() { return None; }
-                let l = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                if i + 4 > inner.len() {
+                    return None;
+                }
+                let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 4 + 1 + l
             }
             0x07 => 12,
@@ -1187,10 +1260,7 @@ fn build_sasl_continue_doc(auth_source: &str, conv_id: i32, payload: &[u8]) -> V
 /// Wrap a serialized BSON command body into a full OP_MSG frame and
 /// exchange it with the upstream, returning the frame bytes
 /// (header + body) of the upstream's reply.
-async fn exchange_op_msg(
-    stream: &mut TcpStream,
-    bson_doc: &[u8],
-) -> std::io::Result<Vec<u8>> {
+async fn exchange_op_msg(stream: &mut TcpStream, bson_doc: &[u8]) -> std::io::Result<Vec<u8>> {
     let body_len = 4 /* flag_bits */ + 1 /* kind */ + bson_doc.len();
     let total = HEADER_LEN_GUARD + body_len;
     if total > MAX_MESSAGE_LEN {
@@ -1235,8 +1305,8 @@ fn pbkdf2_hmac_sha256(password: &[u8], salt: &[u8], rounds: u32) -> [u8; 32] {
 
 fn hmac_sha256(key: &[u8], data: &[u8]) -> [u8; 32] {
     use hmac::{Hmac, Mac};
-    let mut mac = <Hmac<sha2::Sha256> as Mac>::new_from_slice(key)
-        .expect("HMAC accepts any key length");
+    let mut mac =
+        <Hmac<sha2::Sha256> as Mac>::new_from_slice(key).expect("HMAC accepts any key length");
     mac.update(data);
     let bytes = mac.finalize().into_bytes();
     let mut out = [0u8; 32];
@@ -1252,7 +1322,9 @@ fn sha256_digest(data: &[u8]) -> [u8; 32] {
 }
 
 fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() { return false; }
+    if a.len() != b.len() {
+        return false;
+    }
     let mut diff = 0u8;
     for (x, y) in a.iter().zip(b.iter()) {
         diff |= x ^ y;
@@ -1296,17 +1368,14 @@ mod tests {
 
     #[test]
     fn parse_url_authsource_query_overrides_path_db() {
-        let p = ParsedUpstreamUrl::parse(
-            "mongodb://demo:hunter2@db/test?authSource=admin",
-        ).unwrap();
+        let p =
+            ParsedUpstreamUrl::parse("mongodb://demo:hunter2@db/test?authSource=admin").unwrap();
         assert_eq!(p.auth_source, "admin");
     }
 
     #[test]
     fn parse_url_percent_decodes_user_password() {
-        let p = ParsedUpstreamUrl::parse(
-            "mongodb://us%40er:p%40ss%2Cword@db/admin",
-        ).unwrap();
+        let p = ParsedUpstreamUrl::parse("mongodb://us%40er:p%40ss%2Cword@db/admin").unwrap();
         assert_eq!(p.username.as_deref(), Some("us@er"));
         assert_eq!(p.password.as_deref(), Some("p@ss,word"));
     }
@@ -1354,9 +1423,18 @@ mod tests {
 
     #[test]
     fn audit_reason_mapping() {
-        assert_eq!(UpstreamError::TcpConnect("x".into()).audit_reason(), "TcpConnectFailed");
-        assert_eq!(UpstreamError::Handshake("x".into()).audit_reason(), "ProtocolHandshakeFailed");
-        assert_eq!(UpstreamError::Timeout { timeout_ms: 100 }.audit_reason(), "Timeout");
+        assert_eq!(
+            UpstreamError::TcpConnect("x".into()).audit_reason(),
+            "TcpConnectFailed"
+        );
+        assert_eq!(
+            UpstreamError::Handshake("x".into()).audit_reason(),
+            "ProtocolHandshakeFailed"
+        );
+        assert_eq!(
+            UpstreamError::Timeout { timeout_ms: 100 }.audit_reason(),
+            "Timeout"
+        );
     }
 
     #[test]
@@ -1501,9 +1579,8 @@ mod tests {
     fn pbkdf2_hmac_sha256_matches_reference_vector() {
         // Test vector from RFC 7914 §11 / generated via a known-good
         // implementation: pbkdf2_hmac_sha256("password", "salt", 1, 32)
-        let expected = hex_decode(
-            "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b",
-        );
+        let expected =
+            hex_decode("120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b");
         let got = pbkdf2_hmac_sha256(b"password", b"salt", 1);
         assert_eq!(got.to_vec(), expected, "PBKDF2-HMAC-SHA256 vector mismatch");
     }
@@ -1511,20 +1588,18 @@ mod tests {
     /// HMAC-SHA256 RFC 4231 test vector: key=20*0x0b, data="Hi There".
     #[test]
     fn hmac_sha256_matches_rfc4231_vector_1() {
-        let key  = vec![0x0b; 20];
+        let key = vec![0x0b; 20];
         let data = b"Hi There";
-        let expected = hex_decode(
-            "b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7",
-        );
+        let expected =
+            hex_decode("b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7");
         assert_eq!(hmac_sha256(&key, data).to_vec(), expected);
     }
 
     /// SHA-256 of empty input pinned for digest sanity.
     #[test]
     fn sha256_digest_of_empty_is_zero_hash() {
-        let expected = hex_decode(
-            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
-        );
+        let expected =
+            hex_decode("e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855");
         assert_eq!(sha256_digest(b"").to_vec(), expected);
     }
 
@@ -1532,9 +1607,7 @@ mod tests {
     /// `mechanism: SCRAM-SHA-256` string + a BinData payload.
     #[test]
     fn build_sasl_start_doc_includes_mechanism_and_payload() {
-        let doc = build_sasl_start_doc(
-            "admin", "SCRAM-SHA-256", b"n,,n=demo,r=AAA",
-        );
+        let doc = build_sasl_start_doc("admin", "SCRAM-SHA-256", b"n,,n=demo,r=AAA");
         let needle_mech = b"SCRAM-SHA-256";
         assert!(
             doc.windows(needle_mech.len()).any(|w| w == needle_mech),
@@ -1542,7 +1615,8 @@ mod tests {
         );
         let needle_payload = b"n,,n=demo,r=AAA";
         assert!(
-            doc.windows(needle_payload.len()).any(|w| w == needle_payload),
+            doc.windows(needle_payload.len())
+                .any(|w| w == needle_payload),
             "BinData payload must appear verbatim in BSON",
         );
     }
@@ -1558,9 +1632,12 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let _ = mock_scram_server(&mut sock, "demo", b"hunter2", true).await;
         });
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         scram_sha256_authenticate(&mut s, "admin", "demo", b"hunter2")
-            .await.expect("scram should succeed");
+            .await
+            .expect("scram should succeed");
         server.await.unwrap();
     }
 
@@ -1576,13 +1653,18 @@ mod tests {
             let (mut sock, _) = listener.accept().await.unwrap();
             let _ = mock_scram_server(&mut sock, "demo", b"correct", false).await;
         });
-        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port)).await.unwrap();
+        let mut s = tokio::net::TcpStream::connect(("127.0.0.1", port))
+            .await
+            .unwrap();
         let err = scram_sha256_authenticate(&mut s, "admin", "demo", b"wrong")
-            .await.expect_err("wrong password should be rejected");
+            .await
+            .expect_err("wrong password should be rejected");
         match err {
             UpstreamError::AuthRejected(msg) => {
-                assert!(!msg.contains("wrong"),
-                    "AuthRejected detail must not echo password bytes: {msg}");
+                assert!(
+                    !msg.contains("wrong"),
+                    "AuthRejected detail must not echo password bytes: {msg}"
+                );
             }
             other => panic!("expected AuthRejected, got {other:?}"),
         }
@@ -1613,8 +1695,7 @@ mod tests {
 
         // ---- read saslStart ----
         let frame = mock_read_op_msg(s).await?;
-        let payload = mock_extract_payload(&frame)
-            .expect("saslStart payload");
+        let payload = mock_extract_payload(&frame).expect("saslStart payload");
         let cf = std::str::from_utf8(&payload).unwrap();
         // gs2_header `n,,` then bare `n=user,r=cnonce`
         assert!(cf.starts_with("n,,n="));
@@ -1633,23 +1714,24 @@ mod tests {
         let salt_b64 = base64::engine::general_purpose::STANDARD.encode(salt);
         let server_first = format!("r={combined},s={salt_b64},i={iter}");
 
-        let reply = mock_build_sasl_reply(
-            true, 1, server_first.as_bytes(), false, None,
-        );
+        let reply = mock_build_sasl_reply(true, 1, server_first.as_bytes(), false, None);
         s.write_all(&reply).await?;
         s.flush().await?;
 
         // ---- read saslContinue ----
         let frame = mock_read_op_msg(s).await?;
-        let payload = mock_extract_payload(&frame)
-            .expect("saslContinue payload");
+        let payload = mock_extract_payload(&frame).expect("saslContinue payload");
         let cf2 = std::str::from_utf8(&payload).unwrap();
         // c=biws,r=<combined>,p=<base64-proof>
         let mut got_combined = "";
         let mut proof_b64 = "";
         for attr in cf2.split(',') {
-            if let Some(v) = attr.strip_prefix("r=") { got_combined = v; }
-            if let Some(v) = attr.strip_prefix("p=") { proof_b64 = v; }
+            if let Some(v) = attr.strip_prefix("r=") {
+                got_combined = v;
+            }
+            if let Some(v) = attr.strip_prefix("p=") {
+                proof_b64 = v;
+            }
         }
         assert_eq!(got_combined, combined);
 
@@ -1660,19 +1742,16 @@ mod tests {
         let stored_key = sha256_digest(&client_key);
         let server_key = hmac_sha256(&salted, b"Server Key");
         let cf_bare = format!("n={user},r={cnonce}");
-        let cl_final_bare = format!(
-            "c=biws,r={combined}",
-        );
-        let auth_msg = format!(
-            "{cf_bare},{server_first},{cl_final_bare}",
-        );
+        let cl_final_bare = format!("c=biws,r={combined}",);
+        let auth_msg = format!("{cf_bare},{server_first},{cl_final_bare}",);
         let cli_sig = hmac_sha256(&stored_key, auth_msg.as_bytes());
         let mut expected_proof = client_key;
         for (a, b) in expected_proof.iter_mut().zip(cli_sig.iter()) {
             *a ^= *b;
         }
         let got_proof = base64::engine::general_purpose::STANDARD
-            .decode(proof_b64).unwrap();
+            .decode(proof_b64)
+            .unwrap();
         let proof_matches = expect_proof_valid && got_proof == expected_proof;
 
         let server_final = if proof_matches {
@@ -1683,18 +1762,22 @@ mod tests {
             "e=invalid-proof".into()
         };
         let reply = mock_build_sasl_reply(
-            proof_matches, 1, server_final.as_bytes(),
+            proof_matches,
+            1,
+            server_final.as_bytes(),
             true, // done
-            if proof_matches { None } else { Some("Authentication failed") },
+            if proof_matches {
+                None
+            } else {
+                Some("Authentication failed")
+            },
         );
         s.write_all(&reply).await?;
         s.flush().await?;
         Ok(())
     }
 
-    async fn mock_read_op_msg(
-        s: &mut tokio::net::TcpStream,
-    ) -> std::io::Result<Vec<u8>> {
+    async fn mock_read_op_msg(s: &mut tokio::net::TcpStream) -> std::io::Result<Vec<u8>> {
         use tokio::io::AsyncReadExt;
         let mut header = [0u8; 16];
         s.read_exact(&mut header).await?;
@@ -1713,24 +1796,26 @@ mod tests {
     fn mock_extract_payload(frame: &[u8]) -> Option<Vec<u8>> {
         let body = &frame[16..];
         let kind = *body.get(4)?;
-        if kind != 0 { return None; }
+        if kind != 0 {
+            return None;
+        }
         let doc = body.get(5..)?;
-        let total = i32::from_le_bytes([
-            *doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?,
-        ]) as usize;
+        let total =
+            i32::from_le_bytes([*doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?]) as usize;
         let inner = &doc[4..total - 1];
         let mut i = 0;
         while i < inner.len() {
             let t = inner[i];
             i += 1;
-            if t == 0 { break; }
+            if t == 0 {
+                break;
+            }
             let nul = inner[i..].iter().position(|&b| b == 0)?;
             let name = std::str::from_utf8(&inner[i..i + nul]).ok()?;
             i += nul + 1;
             if t == 0x05 && name == "payload" {
-                let blen = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                let blen = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 let _subtype = inner[i + 4];
                 return Some(inner[i + 5..i + 5 + blen].to_vec());
             }
@@ -1739,18 +1824,17 @@ mod tests {
             let skip = match t {
                 0x01 | 0x09 | 0x11 | 0x12 => 8,
                 0x02 => {
-                    let l = i32::from_le_bytes([
-                        inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                    ]) as usize;
+                    let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                        as usize;
                     4 + l
                 }
-                0x03 | 0x04 => i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize,
+                0x03 | 0x04 => {
+                    i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                        as usize
+                }
                 0x05 => {
-                    let l = i32::from_le_bytes([
-                        inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                    ]) as usize;
+                    let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                        as usize;
                     4 + 1 + l
                 }
                 0x07 => 12,

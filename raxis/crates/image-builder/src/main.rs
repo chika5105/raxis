@@ -18,14 +18,16 @@
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ed25519_dalek::{SigningKey, VerifyingKey};
-use raxis_image_builder::{
-    build_and_sign, compute_artefact_digest_hex, read_inputs, BuildInputs,
-};
+use raxis_image_builder::{build_and_sign, compute_artefact_digest_hex, read_inputs, BuildInputs};
 use raxis_image_manifest::{verify, ImageManifest, Role};
 use std::path::{Path, PathBuf};
 
 #[derive(Parser, Debug)]
-#[command(name = "raxis-image-builder", version, about = "Reproducible canonical-image builder for RAXIS")]
+#[command(
+    name = "raxis-image-builder",
+    version,
+    about = "Reproducible canonical-image builder for RAXIS"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -79,8 +81,8 @@ enum RoleArg {
 impl From<RoleArg> for Role {
     fn from(r: RoleArg) -> Self {
         match r {
-            RoleArg::Reviewer        => Role::Reviewer,
-            RoleArg::Orchestrator    => Role::Orchestrator,
+            RoleArg::Reviewer => Role::Reviewer,
+            RoleArg::Orchestrator => Role::Orchestrator,
             RoleArg::ExecutorStarter => Role::ExecutorStarter,
         }
     }
@@ -89,11 +91,15 @@ impl From<RoleArg> for Role {
 fn main() -> Result<()> {
     let cli = Cli::parse();
     match cli.cmd {
-        Cmd::Build { role, source_dir, out, image_artefact, unsigned } => {
+        Cmd::Build {
+            role,
+            source_dir,
+            out,
+            image_artefact,
+            unsigned,
+        } => {
             let r: Role = role.into();
-            let source = source_dir.unwrap_or_else(|| {
-                Path::new("images").join(r.as_dir_name())
-            });
+            let source = source_dir.unwrap_or_else(|| Path::new("images").join(r.as_dir_name()));
             let inputs_path = source.join(raxis_image_builder::INPUT_MANIFEST_NAME);
             let inputs: BuildInputs = read_inputs(&inputs_path)
                 .with_context(|| format!("reading {}", inputs_path.display()))?;
@@ -121,13 +127,9 @@ fn main() -> Result<()> {
                 ),
             };
 
-            let manifest = build_and_sign(
-                &inputs,
-                &rootfs,
-                image_artefact_sha256_hex,
-                &signing_key,
-            )
-            .with_context(|| format!("building {}", inputs_path.display()))?;
+            let manifest =
+                build_and_sign(&inputs, &rootfs, image_artefact_sha256_hex, &signing_key)
+                    .with_context(|| format!("building {}", inputs_path.display()))?;
             let out_path = out.unwrap_or_else(|| {
                 PathBuf::from("out").join(format!("{}.manifest.toml", r.as_dir_name()))
             });
@@ -145,7 +147,10 @@ fn main() -> Result<()> {
             );
             Ok(())
         }
-        Cmd::Verify { manifest, public_key } => {
+        Cmd::Verify {
+            manifest,
+            public_key,
+        } => {
             let s = std::fs::read_to_string(&manifest)
                 .with_context(|| format!("reading {}", manifest.display()))?;
             let m: ImageManifest = ImageManifest::from_toml(&s)
@@ -167,27 +172,31 @@ fn load_signing_key() -> Result<SigningKey> {
     use std::os::unix::fs::PermissionsExt;
     let path: PathBuf = std::env::var_os("RAXIS_IMAGE_SIGNING_KEY")
         .map(PathBuf::from)
-        .ok_or_else(|| anyhow::anyhow!(
-            "RAXIS_IMAGE_SIGNING_KEY env var is not set. Set it to the \
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "RAXIS_IMAGE_SIGNING_KEY env var is not set. Set it to the \
              path of the 32-byte hex-encoded Ed25519 signing key file."
-        ))?;
+            )
+        })?;
     let meta = std::fs::metadata(&path)
         .with_context(|| format!("stat({}) for signing key", path.display()))?;
     let mode = meta.permissions().mode() & 0o7777;
     if mode != 0o600 {
         anyhow::bail!(
             "signing key at {} has mode 0o{:o}; refusing to load (must be 0o600)",
-            path.display(), mode,
+            path.display(),
+            mode,
         );
     }
-    let raw = std::fs::read_to_string(&path)
-        .with_context(|| format!("read({})", path.display()))?;
+    let raw =
+        std::fs::read_to_string(&path).with_context(|| format!("read({})", path.display()))?;
     let bytes = hex::decode(raw.trim())
         .with_context(|| format!("decoding hex signing key at {}", path.display()))?;
     if bytes.len() != 32 {
         anyhow::bail!(
             "signing key at {} is {} bytes; expected 32",
-            path.display(), bytes.len(),
+            path.display(),
+            bytes.len(),
         );
     }
     let mut seed = [0u8; 32];
@@ -201,18 +210,18 @@ fn load_verifying_key(path: Option<&Path>) -> Result<VerifyingKey> {
     } else {
         std::env::var_os("RAXIS_IMAGE_VERIFY_KEY")
             .map(PathBuf::from)
-            .ok_or_else(|| anyhow::anyhow!(
-                "no public key supplied (--public-key or RAXIS_IMAGE_VERIFY_KEY)"
-            ))?
+            .ok_or_else(|| {
+                anyhow::anyhow!("no public key supplied (--public-key or RAXIS_IMAGE_VERIFY_KEY)")
+            })?
     };
-    let raw = std::fs::read_to_string(&p)
-        .with_context(|| format!("read({})", p.display()))?;
+    let raw = std::fs::read_to_string(&p).with_context(|| format!("read({})", p.display()))?;
     let bytes = hex::decode(raw.trim())
         .with_context(|| format!("decoding hex public key at {}", p.display()))?;
     if bytes.len() != 32 {
         anyhow::bail!(
             "public key at {} is {} bytes; expected 32",
-            p.display(), bytes.len(),
+            p.display(),
+            bytes.len(),
         );
     }
     let mut k = [0u8; 32];

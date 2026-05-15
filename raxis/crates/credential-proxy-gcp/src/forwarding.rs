@@ -38,20 +38,25 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64URL;
+use base64::Engine as _;
 use bytes::Bytes;
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{
-    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost,
-    TokenCache, UpstreamError,
     audit::{
         emit_cloud_credential_cache_hit, emit_cloud_credential_cache_refreshed,
         emit_cloud_credential_forwarded, emit_cloud_credential_forwarding_denied,
     },
     time::unix_now_seconds,
+    CacheKey, CloudExchangeKind, CloudHttpClient, CloudProvider, CloudUpstreamHost, TokenCache,
+    UpstreamError,
 };
-use rsa::{RsaPrivateKey, pkcs8::DecodePrivateKey, signature::{RandomizedSigner, SignatureEncoding}, pkcs1v15::SigningKey};
+use rsa::{
+    pkcs1v15::SigningKey,
+    pkcs8::DecodePrivateKey,
+    signature::{RandomizedSigner, SignatureEncoding},
+    RsaPrivateKey,
+};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 
@@ -60,14 +65,14 @@ use sha2::Sha256;
 pub struct ForwardingConfig {
     /// Upstream OAuth2 endpoint (`oauth2.googleapis.com`).
     /// Construction-allowlisted via [`CloudUpstreamHost::gcp_oauth2`].
-    pub upstream:            CloudUpstreamHost,
+    pub upstream: CloudUpstreamHost,
     /// OAuth scopes to request — space-joined into the JWT's
     /// `scope` claim. Comes from
     /// `Restrictions::allowed_scopes`. MUST be non-empty in
     /// V3.
-    pub scopes:              Vec<String>,
+    pub scopes: Vec<String>,
     /// JWT lifetime. Spec-clamped to 60 s..3600 s.
-    pub jwt_lifetime:        Duration,
+    pub jwt_lifetime: Duration,
     /// Token cache safety-window.
     pub cache_safety_window: Duration,
 }
@@ -80,18 +85,18 @@ pub const GCP_JSON_CONTENT_TYPE: &str = "application/json";
 #[derive(Debug, Clone, Deserialize)]
 pub struct ServiceAccountKey {
     /// Service-account email (the `iss` claim in the JWT).
-    pub client_email:    String,
+    pub client_email: String,
     /// PEM-encoded PKCS#8 RSA private key.
-    pub private_key:     String,
+    pub private_key: String,
     /// Optional fingerprint of the private key; goes into the
     /// JWT's `kid` header so the upstream can rotate.
     #[serde(default)]
-    pub private_key_id:  Option<String>,
+    pub private_key_id: Option<String>,
     /// Service-account token URI. Ignored — the upstream is
     /// allowlist-pinned. Parsed only so the JSON shape
     /// matches the GCP-canonical service-account.json layout.
     #[serde(default)]
-    pub token_uri:       Option<String>,
+    pub token_uri: Option<String>,
 }
 
 /// In-VM metadata-server JSON body for the `/token` endpoint.
@@ -100,22 +105,22 @@ pub struct InVmTokenResponse {
     /// Short-lived access token (the upstream-issued value).
     pub access_token: String,
     /// Seconds until expiry (mirrored from upstream).
-    pub expires_in:   u64,
+    pub expires_in: u64,
     /// Always `"Bearer"`.
-    pub token_type:   String,
+    pub token_type: String,
     /// Space-joined scope set the upstream actually granted.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub scope:        Option<String>,
+    pub scope: Option<String>,
 }
 
 /// Upstream OAuth2 success response.
 #[derive(Debug, Deserialize)]
 struct UpstreamTokenResponse {
     access_token: String,
-    expires_in:   u64,
-    token_type:   String,
+    expires_in: u64,
+    token_type: String,
     #[serde(default)]
-    scope:        Option<String>,
+    scope: Option<String>,
 }
 
 /// Cache value: the rendered in-VM JSON body.
@@ -137,7 +142,7 @@ pub enum ForwardOutcome {
         /// HTTP status mirrored from upstream (or 503 synthetic).
         status: u16,
         /// JSON body written verbatim.
-        body:   Vec<u8>,
+        body: Vec<u8>,
     },
 }
 
@@ -165,33 +170,26 @@ pub fn parse_service_account_key(body: &str) -> Result<ServiceAccountKey, Upstre
 fn jwt_header(kid: Option<&str>) -> String {
     let json = match kid {
         Some(k) => format!(r#"{{"alg":"RS256","typ":"JWT","kid":"{}"}}"#, k),
-        None    =>                  r#"{"alg":"RS256","typ":"JWT"}"#.to_owned(),
+        None => r#"{"alg":"RS256","typ":"JWT"}"#.to_owned(),
     };
     B64URL.encode(json.as_bytes())
 }
 
 /// JWT claims rendered into base64url-encoded bytes.
-fn jwt_claims(
-    iss:    &str,
-    scope:  &str,
-    aud:    &str,
-    iat:    u64,
-    exp:    u64,
-) -> String {
-    let json = format!(
-        r#"{{"iss":"{iss}","scope":"{scope}","aud":"{aud}","exp":{exp},"iat":{iat}}}"#,
-    );
+fn jwt_claims(iss: &str, scope: &str, aud: &str, iat: u64, exp: u64) -> String {
+    let json =
+        format!(r#"{{"iss":"{iss}","scope":"{scope}","aud":"{aud}","exp":{exp},"iat":{iat}}}"#,);
     B64URL.encode(json.as_bytes())
 }
 
 /// Build and RS256-sign the JWT. Returns the full `header.claims.signature`
 /// JWS-compact string.
 pub fn build_signed_jwt(
-    key:        &ServiceAccountKey,
-    scopes:     &[String],
-    audience:   &str,
-    now_unix:   u64,
-    lifetime:   Duration,
+    key: &ServiceAccountKey,
+    scopes: &[String],
+    audience: &str,
+    now_unix: u64,
+    lifetime: Duration,
 ) -> Result<String, UpstreamError> {
     let header_b64 = jwt_header(key.private_key_id.as_deref());
     let scope_joined = scopes.join(" ");
@@ -232,22 +230,23 @@ pub fn build_cache_key(client_email: &str, scopes: &[String]) -> CacheKey {
 fn build_grant_body(assertion: &str) -> Vec<u8> {
     format!(
         "grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Ajwt-bearer&assertion={assertion}",
-    ).into_bytes()
+    )
+    .into_bytes()
 }
 
 /// Drive one upstream JWT-bearer-grant exchange. Returns the
 /// rendered in-VM JSON body bytes on success.
 pub async fn drive_jwt_bearer_exchange(
-    fwd:    &ForwardingConfig,
-    http:   &CloudHttpClient,
-    sa:     &ServiceAccountKey,
+    fwd: &ForwardingConfig,
+    http: &CloudHttpClient,
+    sa: &ServiceAccountKey,
 ) -> Result<(InVmTokenResponse, Vec<u8>), (UpstreamError, Option<Vec<u8>>)> {
     let now = unix_now_seconds();
     let audience = format!("{}/token", fwd.upstream.https_base());
     let jwt = build_signed_jwt(sa, &fwd.scopes, &audience, now, fwd.jwt_lifetime)
         .map_err(|e| (e, None))?;
     let body = build_grant_body(&jwt);
-    let url  = format!("{}/token", fwd.upstream.https_base());
+    let url = format!("{}/token", fwd.upstream.https_base());
     let (status, body_bytes) = http
         .post_form_urlencoded(&url, Bytes::from(body), &[])
         .await
@@ -255,93 +254,98 @@ pub async fn drive_jwt_bearer_exchange(
 
     if (200..300).contains(&status) {
         let parsed: UpstreamTokenResponse = serde_json::from_slice(&body_bytes).map_err(|e| {
-            (UpstreamError::UpstreamMalformed(format!("OAuth2 JSON parse: {e}")), None)
+            (
+                UpstreamError::UpstreamMalformed(format!("OAuth2 JSON parse: {e}")),
+                None,
+            )
         })?;
         let in_vm = InVmTokenResponse {
             access_token: parsed.access_token,
-            expires_in:   parsed.expires_in,
-            token_type:   parsed.token_type,
-            scope:        parsed.scope,
+            expires_in: parsed.expires_in,
+            token_type: parsed.token_type,
+            scope: parsed.scope,
         };
         let rendered = serde_json::to_vec(&in_vm).map_err(|e| {
-            (UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")), None)
+            (
+                UpstreamError::UpstreamMalformed(format!("JSON serialise: {e}")),
+                None,
+            )
         })?;
         Ok((in_vm, rendered))
     } else if (400..500).contains(&status) {
-        Err((UpstreamError::Upstream4xx(status), Some(body_bytes.to_vec())))
+        Err((
+            UpstreamError::Upstream4xx(status),
+            Some(body_bytes.to_vec()),
+        ))
     } else if (500..600).contains(&status) {
         Err((UpstreamError::Upstream5xx(status), None))
     } else {
-        Err((UpstreamError::UpstreamMalformed(format!(
-            "unexpected upstream status {status}",
-        )), None))
+        Err((
+            UpstreamError::UpstreamMalformed(format!("unexpected upstream status {status}",)),
+            None,
+        ))
     }
 }
 
 /// Synthesise an OAuth2 RFC 6749 error envelope.
 pub fn synthesise_oauth2_error_envelope(error: &str, description: &str) -> Vec<u8> {
-    format!(
-        "{{\"error\":\"{error}\",\"error_description\":\"{description}\"}}",
-    ).into_bytes()
+    format!("{{\"error\":\"{error}\",\"error_description\":\"{description}\"}}",).into_bytes()
 }
 
 /// Translate an `UpstreamError` to the wire envelope.
-fn upstream_error_to_envelope(
-    e:           UpstreamError,
-    body_4xx:    Option<Vec<u8>>,
-) -> ForwardOutcome {
+fn upstream_error_to_envelope(e: UpstreamError, body_4xx: Option<Vec<u8>>) -> ForwardOutcome {
     match e {
         UpstreamError::Upstream4xx(status) => ForwardOutcome::UpstreamEnvelope {
             status,
-            body: body_4xx.unwrap_or_else(||
+            body: body_4xx.unwrap_or_else(|| {
                 synthesise_oauth2_error_envelope("invalid_grant", "upstream returned 4xx")
-            ),
+            }),
         },
         UpstreamError::Upstream5xx(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "temporarily_unavailable",
                 "Upstream OAuth2 endpoint returned an unrecoverable error",
             ),
         },
         UpstreamError::Network(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "temporarily_unavailable",
                 "Network error talking to upstream OAuth2 endpoint",
             ),
         },
         UpstreamError::Timeout => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "temporarily_unavailable",
                 "Upstream OAuth2 endpoint did not respond within the deadline",
             ),
         },
         UpstreamError::UpstreamMalformed(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "server_error",
                 "Upstream OAuth2 endpoint returned a body that did not parse",
             ),
         },
         UpstreamError::EgressAllowlist(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "server_error",
                 "Upstream URL fell off the cloud-forwarding allowlist",
             ),
         },
         UpstreamError::MissingCredential(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "invalid_client",
                 "Operator service-account key required for forwarding was missing or malformed",
             ),
         },
         UpstreamError::Misconfigured(_) => ForwardOutcome::UpstreamEnvelope {
             status: 503,
-            body:   synthesise_oauth2_error_envelope(
+            body: synthesise_oauth2_error_envelope(
                 "server_error",
                 "V3 cloud forwarding misconfigured at proxy construction",
             ),
@@ -355,35 +359,40 @@ fn upstream_error_to_envelope(
 /// emitted at the right boundaries.
 #[allow(clippy::too_many_arguments)]
 pub async fn forward_or_serve_from_cache(
-    fwd:             &ForwardingConfig,
-    http:            &Arc<CloudHttpClient>,
-    cache:           &Arc<TokenCache<GcpCacheValue>>,
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    fwd: &ForwardingConfig,
+    http: &Arc<CloudHttpClient>,
+    cache: &Arc<TokenCache<GcpCacheValue>>,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
     service_account: &ServiceAccountKey,
 ) -> ForwardOutcome {
-    let key           = build_cache_key(&service_account.client_email, &fwd.scopes);
+    let key = build_cache_key(&service_account.client_email, &fwd.scopes);
     let safety_window = fwd.cache_safety_window;
 
     if let Some(entry) = cache.get(&key).await {
         let age_ms = entry.age().as_millis() as u32;
         let ttl_ms = entry.ttl_remaining().as_millis() as u32;
         emit_cloud_credential_cache_hit(
-            audit, session_id, credential_name,
-            CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
-            age_ms, ttl_ms,
-        ).ok();
+            audit,
+            session_id,
+            credential_name,
+            CloudProvider::Gcp,
+            CloudExchangeKind::JwtBearer,
+            age_ms,
+            ttl_ms,
+        )
+        .ok();
         let body = entry.payload.rendered_in_vm_body.clone();
         if entry.is_stale(safety_window) {
             if let Some(guard) = cache.take_refresh_lock(&key).await {
-                let fwd2      = fwd.clone();
-                let http2     = Arc::clone(http);
-                let cache2    = Arc::clone(cache);
-                let audit2    = Arc::clone(audit);
-                let session2  = session_id.to_owned();
-                let cred2     = credential_name.to_owned();
-                let sa2       = service_account.clone();
+                let fwd2 = fwd.clone();
+                let http2 = Arc::clone(http);
+                let cache2 = Arc::clone(cache);
+                let audit2 = Arc::clone(audit);
+                let session2 = session_id.to_owned();
+                let cred2 = credential_name.to_owned();
+                let sa2 = service_account.clone();
                 let prior_age = age_ms;
                 tokio::spawn(async move {
                     let _g = guard;
@@ -395,32 +404,52 @@ pub async fn forward_or_serve_from_cache(
                         Ok((parsed, rendered)) => {
                             let new_ttl = Duration::from_secs(parsed.expires_in);
                             let new_ttl_ms = new_ttl.as_millis() as u32;
-                            cache2.insert(
-                                key2,
-                                GcpCacheValue { rendered_in_vm_body: rendered.clone() },
-                                new_ttl,
-                            ).await;
+                            cache2
+                                .insert(
+                                    key2,
+                                    GcpCacheValue {
+                                        rendered_in_vm_body: rendered.clone(),
+                                    },
+                                    new_ttl,
+                                )
+                                .await;
                             emit_cloud_credential_cache_refreshed(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
-                                prior_age, new_ttl_ms,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Gcp,
+                                CloudExchangeKind::JwtBearer,
+                                prior_age,
+                                new_ttl_ms,
+                            )
+                            .ok();
                             emit_cloud_credential_forwarded(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
-                                &fwd2.upstream, elapsed_ms, 200,
-                                rendered.len() as u32, true,
-                            ).ok();
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Gcp,
+                                CloudExchangeKind::JwtBearer,
+                                &fwd2.upstream,
+                                elapsed_ms,
+                                200,
+                                rendered.len() as u32,
+                                true,
+                            )
+                            .ok();
                         }
                         Err((e, _)) => {
                             emit_cloud_credential_forwarding_denied(
-                                &audit2, &session2, &cred2,
-                                CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
+                                &audit2,
+                                &session2,
+                                &cred2,
+                                CloudProvider::Gcp,
+                                CloudExchangeKind::JwtBearer,
                                 fwd2.upstream.host(),
                                 e.denial_reason(),
                                 e.status_code().unwrap_or(0),
                                 elapsed_ms,
-                            ).ok();
+                            )
+                            .ok();
                         }
                     }
                 });
@@ -435,28 +464,43 @@ pub async fn forward_or_serve_from_cache(
     match result {
         Ok((parsed, rendered)) => {
             let ttl = Duration::from_secs(parsed.expires_in);
-            cache.insert(
-                key,
-                GcpCacheValue { rendered_in_vm_body: rendered.clone() },
-                ttl,
-            ).await;
+            cache
+                .insert(
+                    key,
+                    GcpCacheValue {
+                        rendered_in_vm_body: rendered.clone(),
+                    },
+                    ttl,
+                )
+                .await;
             emit_cloud_credential_forwarded(
-                audit, session_id, credential_name,
-                CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
-                &fwd.upstream, elapsed_ms, 200,
-                rendered.len() as u32, true,
-            ).ok();
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Gcp,
+                CloudExchangeKind::JwtBearer,
+                &fwd.upstream,
+                elapsed_ms,
+                200,
+                rendered.len() as u32,
+                true,
+            )
+            .ok();
             ForwardOutcome::Ok(rendered)
         }
         Err((e, maybe_body)) => {
             emit_cloud_credential_forwarding_denied(
-                audit, session_id, credential_name,
-                CloudProvider::Gcp, CloudExchangeKind::JwtBearer,
+                audit,
+                session_id,
+                credential_name,
+                CloudProvider::Gcp,
+                CloudExchangeKind::JwtBearer,
                 fwd.upstream.host(),
                 e.denial_reason(),
                 e.status_code().unwrap_or(0),
                 elapsed_ms,
-            ).ok();
+            )
+            .ok();
             upstream_error_to_envelope(e, maybe_body)
         }
     }
@@ -488,7 +532,8 @@ mod tests {
 
     #[test]
     fn parse_service_account_rejects_missing_client_email() {
-        let body = r#"{"private_key": "-----BEGIN PRIVATE KEY-----\nfoo\n-----END PRIVATE KEY-----\n"}"#;
+        let body =
+            r#"{"private_key": "-----BEGIN PRIVATE KEY-----\nfoo\n-----END PRIVATE KEY-----\n"}"#;
         let err = parse_service_account_key(body).unwrap_err();
         assert!(matches!(err, UpstreamError::MissingCredential(_)));
     }
@@ -556,7 +601,7 @@ mod tests {
     fn synthesised_envelope_is_well_formed_oauth2_json() {
         let v = synthesise_oauth2_error_envelope("invalid_grant", "no");
         let parsed: serde_json::Value = serde_json::from_slice(&v).unwrap();
-        assert_eq!(parsed["error"],             "invalid_grant");
+        assert_eq!(parsed["error"], "invalid_grant");
         assert_eq!(parsed["error_description"], "no");
     }
 }

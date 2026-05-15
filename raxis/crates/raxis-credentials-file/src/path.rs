@@ -29,7 +29,9 @@ pub struct ResolvedPath {
 
 impl ResolvedPath {
     /// Borrow the resolved on-disk path.
-    pub fn as_path(&self) -> &Path { &self.path }
+    pub fn as_path(&self) -> &Path {
+        &self.path
+    }
 }
 
 /// Compute the on-disk path for a credential name. Does NOT touch
@@ -41,7 +43,9 @@ impl ResolvedPath {
 pub fn credential_file_path(data_dir: &Path, name: &CredentialName) -> PathBuf {
     let raw = name.as_str();
     if let Some(provider_id) = raw.strip_prefix("providers.") {
-        data_dir.join("providers").join(format!("{provider_id}.toml"))
+        data_dir
+            .join("providers")
+            .join(format!("{provider_id}.toml"))
     } else {
         data_dir.join("credentials").join(format!("{raw}.env"))
     }

@@ -61,17 +61,17 @@ impl TransitionActor {
 #[derive(Debug, Clone)]
 pub struct TaskTransitionRecord {
     /// Task whose FSM moved.
-    pub task_id:         String,
+    pub task_id: String,
     /// Initiative the task belongs to (loaded inside the same
     /// SELECT that read `from_state` so the audit attribution
     /// reflects the row at transition time).
-    pub initiative_id:   String,
+    pub initiative_id: String,
     /// Pre-transition state observed by `transition_task_in_tx`.
-    pub from_state:      TaskState,
+    pub from_state: TaskState,
     /// Post-transition state written by `transition_task_in_tx`.
-    pub to_state:        TaskState,
+    pub to_state: TaskState,
     /// Actor that triggered the transition (kernel / operator).
-    pub actor:           TransitionActor,
+    pub actor: TransitionActor,
     /// Wall-clock at which the row was UPDATEd, in unix seconds —
     /// matches `tasks.transitioned_at`.
     pub transitioned_at: i64,
@@ -79,7 +79,7 @@ pub struct TaskTransitionRecord {
     /// Carried on the audit event so `raxis log -f --kind
     /// TaskStateChanged` can be filtered per-epoch without joining
     /// back to the tasks table.
-    pub policy_epoch:    u64,
+    pub policy_epoch: u64,
 }
 
 /// Emit the `AuditEventKind::TaskStateChanged` paired-write for a
@@ -96,15 +96,15 @@ pub struct TaskTransitionRecord {
 /// emit before commit would create an "audit ghost" if the tx
 /// later rolled back.
 pub fn emit_task_state_changed_audit(
-    audit:      &dyn AuditSink,
-    record:     &TaskTransitionRecord,
+    audit: &dyn AuditSink,
+    record: &TaskTransitionRecord,
     session_id: Option<&str>,
 ) {
     let kind = AuditEventKind::TaskStateChanged {
-        task_id:      record.task_id.clone(),
-        from_state:   record.from_state.as_sql_str().to_owned(),
-        to_state:     record.to_state.as_sql_str().to_owned(),
-        actor:        record.actor.as_audit_string(),
+        task_id: record.task_id.clone(),
+        from_state: record.from_state.as_sql_str().to_owned(),
+        to_state: record.to_state.as_sql_str().to_owned(),
+        actor: record.actor.as_audit_string(),
         policy_epoch: record.policy_epoch,
     };
     if let Err(e) = audit.emit(
@@ -147,11 +147,11 @@ pub fn emit_task_state_changed_audit(
 /// this bare variant exists for tests and for the few legacy
 /// callers that do their own audit emit out-of-band.
 pub fn transition_task(
-    task_id:      &str,
-    new_state:    TaskState,
+    task_id: &str,
+    new_state: TaskState,
     block_reason: Option<&str>,
-    actor:        TransitionActor,
-    store:        &Store,
+    actor: TransitionActor,
+    store: &Store,
 ) -> Result<TaskTransitionRecord, LifecycleError> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction()?;
@@ -174,13 +174,13 @@ pub fn transition_task(
 /// task FSM transition that comes through this path is dashboard-
 /// observable in real time.
 pub fn transition_task_with_audit(
-    task_id:      &str,
-    new_state:    TaskState,
+    task_id: &str,
+    new_state: TaskState,
     block_reason: Option<&str>,
-    actor:        TransitionActor,
-    store:        &Store,
-    audit:        &dyn AuditSink,
-    session_id:   Option<&str>,
+    actor: TransitionActor,
+    store: &Store,
+    audit: &dyn AuditSink,
+    session_id: Option<&str>,
 ) -> Result<TaskTransitionRecord, LifecycleError> {
     let record = transition_task(task_id, new_state, block_reason, actor, store)?;
     emit_task_state_changed_audit(audit, &record, session_id);
@@ -199,11 +199,11 @@ pub fn transition_task_with_audit(
 /// The `block_reason` string is stored in `tasks.block_reason` when
 /// transitioning to `GatesPending`, `Failed`, or `BlockedRecoveryPending`.
 pub fn transition_task_in_tx(
-    conn:         &rusqlite::Connection,
-    task_id:      &str,
-    new_state:    TaskState,
+    conn: &rusqlite::Connection,
+    task_id: &str,
+    new_state: TaskState,
     block_reason: Option<&str>,
-    actor:        TransitionActor,
+    actor: TransitionActor,
 ) -> Result<TaskTransitionRecord, LifecycleError> {
     // `INV-FAILURE-REASON-MANDATORY-01` defense-in-depth: every
     // transition into a terminal-failure or operator-blocked
@@ -225,9 +225,7 @@ pub fn transition_task_in_tx(
         !matches!(
             new_state,
             TaskState::Failed | TaskState::BlockedRecoveryPending,
-        ) || block_reason
-            .map(|r| !r.trim().is_empty())
-            .unwrap_or(false),
+        ) || block_reason.map(|r| !r.trim().is_empty()).unwrap_or(false),
         "INV-FAILURE-REASON-MANDATORY-01 violated in \
          transition_task_in_tx: task_id={task_id}, new_state={new_state:?} \
          was driven into a terminal-failure / blocked state with \
@@ -245,25 +243,27 @@ pub fn transition_task_in_tx(
     // guarantees the audit attribution reflects the row at the
     // moment of the transition (not whatever a follow-up SELECT
     // would race into observing).
-    let (current_state_str, initiative_id, policy_epoch): (String, String, i64) =
-        conn.query_row(
+    let (current_state_str, initiative_id, policy_epoch): (String, String, i64) = conn
+        .query_row(
             &format!(
                 "SELECT state, initiative_id, policy_epoch \
                  FROM {TASKS} WHERE task_id=?1"
             ),
             rusqlite::params![task_id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-        ).map_err(|e| match e {
+        )
+        .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
                 task_id: task_id.to_owned(),
             },
             other => LifecycleError::Sql(other),
         })?;
 
-    let current_state = TaskState::from_sql_str(&current_state_str)
-        .ok_or_else(|| LifecycleError::TaskNotAbortable {
+    let current_state = TaskState::from_sql_str(&current_state_str).ok_or_else(|| {
+        LifecycleError::TaskNotAbortable {
             current_state: current_state_str.clone(),
-        })?;
+        }
+    })?;
 
     if !is_legal_transition(&current_state, &new_state) {
         return Err(LifecycleError::TaskNotAbortable {
@@ -340,14 +340,13 @@ pub fn transition_task_in_tx(
     // CHECK constraint forbids stamping them as terminal directly.
     if matches!(
         new_state,
-        TaskState::Completed | TaskState::Failed
-            | TaskState::Aborted | TaskState::Cancelled
+        TaskState::Completed | TaskState::Failed | TaskState::Aborted | TaskState::Cancelled
     ) {
         let activation_state_terminal = match new_state {
             TaskState::Completed => "Completed",
             // Failed | Aborted | Cancelled all map to the activation
             // FSM's `Failed` (see doc comment above).
-            _                    => "Failed",
+            _ => "Failed",
         };
         conn.execute(
             &format!(
@@ -376,22 +375,21 @@ pub fn transition_task_in_tx(
     // `lookup_initiative_id_for_task_in_tx`. Behaviourally
     // equivalent — the row hasn't moved within this transaction —
     // and saves one round-trip per transition.
-    crate::orch_respawn_ceiling::reset_no_progress_count_in_tx(
-        conn, &initiative_id,
-    ).map_err(LifecycleError::Sql)?;
+    crate::orch_respawn_ceiling::reset_no_progress_count_in_tx(conn, &initiative_id)
+        .map_err(LifecycleError::Sql)?;
 
     Ok(TaskTransitionRecord {
-        task_id:         task_id.to_owned(),
+        task_id: task_id.to_owned(),
         initiative_id,
-        from_state:      current_state,
-        to_state:        new_state,
+        from_state: current_state,
+        to_state: new_state,
         actor,
         transitioned_at: now,
         // policy_epoch lives on the tasks row as INTEGER; SQLite
         // stores it as i64 — coerce to u64 for the audit event
         // shape (negative values are nonsensical here, so a
         // saturating cast preserves the invariant).
-        policy_epoch:    policy_epoch.max(0) as u64,
+        policy_epoch: policy_epoch.max(0) as u64,
     })
 }
 
@@ -402,26 +400,26 @@ pub fn transition_task_in_tx(
 fn is_legal_transition(from: &TaskState, to: &TaskState) -> bool {
     match (from, to) {
         // Admitted: start running, wait for gates, or operator cancel
-        (TaskState::Admitted, TaskState::Running)          => true,
-        (TaskState::Admitted, TaskState::GatesPending)     => true,
-        (TaskState::Admitted, TaskState::Aborted)          => true,
-        (TaskState::Admitted, TaskState::Cancelled)        => true,
+        (TaskState::Admitted, TaskState::Running) => true,
+        (TaskState::Admitted, TaskState::GatesPending) => true,
+        (TaskState::Admitted, TaskState::Aborted) => true,
+        (TaskState::Admitted, TaskState::Cancelled) => true,
         // Running: complete, fail, enter gate cycle, re-admit (continuation), abort
-        (TaskState::Running,  TaskState::Completed)        => true,
-        (TaskState::Running,  TaskState::Failed)           => true,
-        (TaskState::Running,  TaskState::GatesPending)     => true,
-        (TaskState::Running,  TaskState::Admitted)         => true,
-        (TaskState::Running,  TaskState::Aborted)          => true,
-        (TaskState::Running,  TaskState::Cancelled)        => true,
+        (TaskState::Running, TaskState::Completed) => true,
+        (TaskState::Running, TaskState::Failed) => true,
+        (TaskState::Running, TaskState::GatesPending) => true,
+        (TaskState::Running, TaskState::Admitted) => true,
+        (TaskState::Running, TaskState::Aborted) => true,
+        (TaskState::Running, TaskState::Cancelled) => true,
         // GatesPending: gates cleared → Admitted; or aborted / cancelled
-        (TaskState::GatesPending, TaskState::Admitted)     => true,
-        (TaskState::GatesPending, TaskState::Aborted)      => true,
-        (TaskState::GatesPending, TaskState::Cancelled)    => true,
+        (TaskState::GatesPending, TaskState::Admitted) => true,
+        (TaskState::GatesPending, TaskState::Aborted) => true,
+        (TaskState::GatesPending, TaskState::Cancelled) => true,
         // BlockedRecoveryPending: operator resume → Admitted; or abort
         (TaskState::BlockedRecoveryPending, TaskState::Admitted) => true,
-        (TaskState::BlockedRecoveryPending, TaskState::Aborted)  => true,
+        (TaskState::BlockedRecoveryPending, TaskState::Aborted) => true,
         // Failed → Admitted is the retry path (retry_task operator command)
-        (TaskState::Failed, TaskState::Admitted)           => true,
+        (TaskState::Failed, TaskState::Admitted) => true,
         // All other transitions are illegal (terminal states have no outbound edges)
         _ => false,
     }
@@ -437,44 +435,78 @@ mod tests {
 
     #[test]
     fn admitted_to_running_is_legal() {
-        assert!(is_legal_transition(&TaskState::Admitted, &TaskState::Running));
+        assert!(is_legal_transition(
+            &TaskState::Admitted,
+            &TaskState::Running
+        ));
     }
 
     #[test]
     fn completed_to_anything_is_illegal() {
-        assert!(!is_legal_transition(&TaskState::Completed, &TaskState::Running));
-        assert!(!is_legal_transition(&TaskState::Completed, &TaskState::Admitted));
-        assert!(!is_legal_transition(&TaskState::Completed, &TaskState::Failed));
+        assert!(!is_legal_transition(
+            &TaskState::Completed,
+            &TaskState::Running
+        ));
+        assert!(!is_legal_transition(
+            &TaskState::Completed,
+            &TaskState::Admitted
+        ));
+        assert!(!is_legal_transition(
+            &TaskState::Completed,
+            &TaskState::Failed
+        ));
     }
 
     #[test]
     fn failed_to_admitted_retry_is_legal() {
-        assert!(is_legal_transition(&TaskState::Failed, &TaskState::Admitted));
-        assert!(!is_legal_transition(&TaskState::Failed, &TaskState::Running));
+        assert!(is_legal_transition(
+            &TaskState::Failed,
+            &TaskState::Admitted
+        ));
+        assert!(!is_legal_transition(
+            &TaskState::Failed,
+            &TaskState::Running
+        ));
     }
 
     #[test]
     fn gates_pending_to_admitted_is_legal() {
-        assert!(is_legal_transition(&TaskState::GatesPending, &TaskState::Admitted));
+        assert!(is_legal_transition(
+            &TaskState::GatesPending,
+            &TaskState::Admitted
+        ));
     }
 
     #[test]
     fn blocked_recovery_to_admitted_is_legal() {
-        assert!(is_legal_transition(&TaskState::BlockedRecoveryPending, &TaskState::Admitted));
+        assert!(is_legal_transition(
+            &TaskState::BlockedRecoveryPending,
+            &TaskState::Admitted
+        ));
     }
 
     #[test]
     fn terminal_states_have_no_outbound_edges() {
-        for terminal in &[TaskState::Aborted, TaskState::Cancelled, TaskState::Completed] {
+        for terminal in &[
+            TaskState::Aborted,
+            TaskState::Cancelled,
+            TaskState::Completed,
+        ] {
             for any in &[
-                TaskState::Admitted, TaskState::Running, TaskState::GatesPending,
-                TaskState::Completed, TaskState::Failed, TaskState::Aborted,
-                TaskState::Cancelled, TaskState::BlockedRecoveryPending,
+                TaskState::Admitted,
+                TaskState::Running,
+                TaskState::GatesPending,
+                TaskState::Completed,
+                TaskState::Failed,
+                TaskState::Aborted,
+                TaskState::Cancelled,
+                TaskState::BlockedRecoveryPending,
             ] {
                 assert!(
                     !is_legal_transition(terminal, any),
                     "{:?} → {:?} should be illegal",
-                    terminal, any
+                    terminal,
+                    any
                 );
             }
         }
@@ -483,9 +515,14 @@ mod tests {
     #[test]
     fn as_sql_str_round_trips() {
         for state in &[
-            TaskState::Admitted, TaskState::Running, TaskState::GatesPending,
-            TaskState::Completed, TaskState::Failed, TaskState::Aborted,
-            TaskState::Cancelled, TaskState::BlockedRecoveryPending,
+            TaskState::Admitted,
+            TaskState::Running,
+            TaskState::GatesPending,
+            TaskState::Completed,
+            TaskState::Failed,
+            TaskState::Aborted,
+            TaskState::Cancelled,
+            TaskState::BlockedRecoveryPending,
         ] {
             let s = state.as_sql_str();
             assert_eq!(
@@ -528,7 +565,8 @@ mod tests {
                          1, ?3, ?3, 0)"
             ),
             rusqlite::params![task_id, TaskState::Running.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         // Seed a session row so the activation's CHECK constraint
         // (`Active ⇒ session_id IS NOT NULL`) holds.
         conn.execute(
@@ -552,7 +590,8 @@ mod tests {
                 now + 86400,
                 "Executor",
             ],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             &format!(
                 "INSERT INTO {SUBTASK_ACTIVATIONS} (
@@ -565,12 +604,11 @@ mod tests {
                            0, 0, ?3, ?3, NULL)"
             ),
             rusqlite::params![activation_id, task_id, now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
-    fn read_activation(store: &Store, activation_id: &str)
-        -> (String, Option<i64>)
-    {
+    fn read_activation(store: &Store, activation_id: &str) -> (String, Option<i64>) {
         let conn = store.lock_sync();
         conn.query_row(
             &format!(
@@ -579,7 +617,8 @@ mod tests {
             ),
             rusqlite::params![activation_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Regression: Running → Failed must close the matching active
@@ -599,13 +638,18 @@ mod tests {
             Some("executor surrendered"),
             TransitionActor::Kernel,
             &store,
-        ).unwrap();
+        )
+        .unwrap();
 
         let (state, terminated_at) = read_activation(&store, "act-fail");
-        assert_eq!(state, "Failed",
-            "activation row must transition Active → Failed when task fails");
-        assert!(terminated_at.is_some(),
-            "Migration 5 CHECK requires terminated_at IS NOT NULL on terminal activations");
+        assert_eq!(
+            state, "Failed",
+            "activation row must transition Active → Failed when task fails"
+        );
+        assert!(
+            terminated_at.is_some(),
+            "Migration 5 CHECK requires terminated_at IS NOT NULL on terminal activations"
+        );
     }
 
     /// Mirror: Running → Completed closes the active activation row to
@@ -623,7 +667,8 @@ mod tests {
             None,
             TransitionActor::Kernel,
             &store,
-        ).unwrap();
+        )
+        .unwrap();
 
         let (state, terminated_at) = read_activation(&store, "act-done");
         assert_eq!(state, "Completed");
@@ -644,13 +689,18 @@ mod tests {
             "t-abort",
             TaskState::Aborted,
             None,
-            TransitionActor::Operator { fingerprint: "op-fp".to_owned() },
+            TransitionActor::Operator {
+                fingerprint: "op-fp".to_owned(),
+            },
             &store,
-        ).unwrap();
+        )
+        .unwrap();
 
         let (state, terminated_at) = read_activation(&store, "act-abort");
-        assert_eq!(state, "Failed",
-            "activation FSM has no Aborted variant; collapse to Failed");
+        assert_eq!(
+            state, "Failed",
+            "activation FSM has no Aborted variant; collapse to Failed"
+        );
         assert!(terminated_at.is_some());
     }
 
@@ -669,7 +719,8 @@ mod tests {
             Some("first-fail"),
             TransitionActor::Kernel,
             &store,
-        ).unwrap();
+        )
+        .unwrap();
 
         let (_, first_term) = read_activation(&store, "act-once");
         // The task FSM rejects Failed→Failed (terminal-states-have-no-
@@ -683,13 +734,17 @@ mod tests {
             TransitionActor::Kernel,
             &store,
         );
-        assert!(result.is_err(),
-            "task FSM must reject Failed → Failed (terminal invariant)");
+        assert!(
+            result.is_err(),
+            "task FSM must reject Failed → Failed (terminal invariant)"
+        );
 
         let (state, term) = read_activation(&store, "act-once");
         assert_eq!(state, "Failed");
-        assert_eq!(term, first_term,
-            "terminated_at must be untouched by the failed retry");
+        assert_eq!(
+            term, first_term,
+            "terminated_at must be untouched by the failed retry"
+        );
     }
 
     // ── INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01 ──────────────────────────
@@ -721,11 +776,10 @@ mod tests {
         {
             let conn = store.lock_sync();
             conn.execute(
-                &format!(
-                    "UPDATE {TASKS} SET state='Admitted' WHERE task_id=?1"
-                ),
+                &format!("UPDATE {TASKS} SET state='Admitted' WHERE task_id=?1"),
                 rusqlite::params![task_id],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let sink = FakeAuditSink::new();
@@ -737,27 +791,35 @@ mod tests {
             &store,
             &sink,
             Some("session-vis"),
-        ).expect("transition must succeed for Admitted → Running");
+        )
+        .expect("transition must succeed for Admitted → Running");
 
         // Record carries the canonical (from, to, actor, initiative)
         // tuple a downstream emit needs.
         assert_eq!(record.from_state, TaskState::Admitted);
-        assert_eq!(record.to_state,   TaskState::Running);
+        assert_eq!(record.to_state, TaskState::Running);
         assert_eq!(record.initiative_id, "init-fsm");
         assert_eq!(record.policy_epoch, 1);
 
         let events = sink.events();
-        assert_eq!(events.len(), 1,
+        assert_eq!(
+            events.len(),
+            1,
             "INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01: exactly one \
-             TaskStateChanged audit must fire per legal transition");
+             TaskStateChanged audit must fire per legal transition"
+        );
         match &events[0].kind {
             AuditEventKind::TaskStateChanged {
-                task_id: t, from_state, to_state, actor, ..
+                task_id: t,
+                from_state,
+                to_state,
+                actor,
+                ..
             } => {
                 assert_eq!(t, task_id);
                 assert_eq!(from_state, "Admitted");
-                assert_eq!(to_state,   "Running");
-                assert_eq!(actor,      "kernel");
+                assert_eq!(to_state, "Running");
+                assert_eq!(actor, "kernel");
             }
             other => panic!(
                 "INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01: expected \
@@ -772,13 +834,12 @@ mod tests {
         // `"kernel"` or `"operator:<fingerprint>"`; pinning the
         // wire form prevents a future refactor from silently
         // breaking the operator-vs-kernel distinction.
+        assert_eq!(TransitionActor::Kernel.as_audit_string(), "kernel",);
         assert_eq!(
-            TransitionActor::Kernel.as_audit_string(),
-            "kernel",
-        );
-        assert_eq!(
-            TransitionActor::Operator { fingerprint: "abc123".into() }
-                .as_audit_string(),
+            TransitionActor::Operator {
+                fingerprint: "abc123".into()
+            }
+            .as_audit_string(),
             "operator:abc123",
         );
     }
@@ -801,7 +862,8 @@ mod tests {
             None,
             TransitionActor::Kernel,
             &store,
-        ).unwrap();
+        )
+        .unwrap();
 
         let sink = FakeAuditSink::new();
         let result = transition_task_with_audit(
@@ -813,9 +875,13 @@ mod tests {
             &sink,
             None,
         );
-        assert!(result.is_err(),
-            "Cancelled → Running is an illegal terminal edge");
-        assert!(sink.events().is_empty(),
-            "no audit row may be emitted for an illegal transition");
+        assert!(
+            result.is_err(),
+            "Cancelled → Running is an illegal terminal edge"
+        );
+        assert!(
+            sink.events().is_empty(),
+            "no audit row may be emitted for an illegal transition"
+        );
     }
 }

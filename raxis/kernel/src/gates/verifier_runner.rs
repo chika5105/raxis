@@ -25,20 +25,20 @@ use raxis_store::Store;
 #[cfg(test)]
 use raxis_store::Table;
 
-use crate::authority::verifier_token;
 use super::GateError;
+use crate::authority::verifier_token;
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
 // `Table` enum; FSM state strings (production paths via the typed enums,
 // test fixtures via the same constants below).
 #[cfg(test)]
-const INITIATIVES:        &str = Table::Initiatives.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
 #[cfg(test)]
-const TASKS:              &str = Table::Tasks.as_str();
+const TASKS: &str = Table::Tasks.as_str();
 #[cfg(test)]
-const VERIFIER_RUN_TOKENS:&str = Table::VerifierRunTokens.as_str();
+const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
 #[cfg(test)]
-const WITNESS_RECORDS:    &str = Table::WitnessRecords.as_str();
+const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
 
 // ---------------------------------------------------------------------------
 // Global verifier cap counter
@@ -103,7 +103,7 @@ impl VerifierConfig {
         let gate = policy.gates().iter().find(|g| g.gate_type == gate_type)?;
         Some(Self {
             verifier_binary_path: PathBuf::from(&gate.verifier_command),
-            verifier_token_ttl_secs: 300,  // 5 min default
+            verifier_token_ttl_secs: 300, // 5 min default
             verifier_cpu_secs: gate.max_wall_seconds as u64,
             verifier_memory_bytes: gate.max_memory_bytes,
             verifier_max_wall_secs: gate.max_wall_seconds as u64 + 10,
@@ -128,12 +128,12 @@ impl VerifierConfig {
 ///
 /// Returns `Err(GateError::VerifierCapExceeded)` if the global cap is reached.
 pub async fn spawn_verifier(
-    task_id:       &str,
-    gate_type:     &str,
+    task_id: &str,
+    gate_type: &str,
     evaluation_sha: &str,
     worktree_root: &Path,
-    config:        &VerifierConfig,
-    store:         &Store,
+    config: &VerifierConfig,
+    store: &Store,
 ) -> Result<String, GateError> {
     // Step 1: Check global concurrent verifier count.
     let current = ACTIVE_VERIFIERS.load(Ordering::Relaxed);
@@ -178,9 +178,11 @@ pub async fn spawn_verifier(
             )
         })
         .await
-        .map_err(|e| GateError::AuthorityError(format!(
-            "issue_verifier_token spawn_blocking join failed: {e}"
-        )))?
+        .map_err(|e| {
+            GateError::AuthorityError(format!(
+                "issue_verifier_token spawn_blocking join failed: {e}"
+            ))
+        })?
         .map_err(|e| GateError::AuthorityError(e.to_string()))?
     };
 
@@ -393,7 +395,8 @@ mod integration {
                  VALUES (?1, ?2, '{{}}', 'sha-stub', 0)"
             ),
             rusqlite::params![&initiative_id, InitiativeState::ApprovedPlan.as_sql_str()],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS}
@@ -402,7 +405,8 @@ mod integration {
                  VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0)"
             ),
             rusqlite::params![task_id, &initiative_id, TaskState::Running.as_sql_str()],
-        ).expect("seed task");
+        )
+        .expect("seed task");
     }
 
     // ── PRIORITY 1 — counter, cap, token row ─────────────────────────────────
@@ -425,12 +429,14 @@ mod integration {
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
         let baseline = active_verifier_count();
-        let run_id = spawn_verifier(
-            &task_id, "test-gate", "abcd1234",
-            tmp.path(), &cfg, &store,
-        ).await.expect("spawn must succeed against /usr/bin/true");
+        let run_id = spawn_verifier(&task_id, "test-gate", "abcd1234", tmp.path(), &cfg, &store)
+            .await
+            .expect("spawn must succeed against /usr/bin/true");
 
-        assert!(!run_id.is_empty(), "spawn_verifier must return a non-empty run_id");
+        assert!(
+            !run_id.is_empty(),
+            "spawn_verifier must return a non-empty run_id"
+        );
 
         // /usr/bin/true exits within a few ms; the watcher decrements
         // ACTIVE_VERIFIERS as soon as `child.wait()` resolves. Allow up
@@ -438,10 +444,14 @@ mod integration {
         let dropped = await_until(
             || active_verifier_count() <= baseline,
             Duration::from_secs(1),
-        ).await;
-        assert!(dropped,
+        )
+        .await;
+        assert!(
+            dropped,
             "ACTIVE_VERIFIERS did not drop back to baseline ({baseline}) within 1s; \
-             current = {}", active_verifier_count());
+             current = {}",
+            active_verifier_count()
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -457,10 +467,8 @@ mod integration {
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
         let baseline = active_verifier_count();
-        let result = spawn_verifier(
-            &task_id, "test-gate", "abcd1234",
-            tmp.path(), &cfg, &store,
-        ).await;
+        let result =
+            spawn_verifier(&task_id, "test-gate", "abcd1234", tmp.path(), &cfg, &store).await;
 
         match result {
             Err(GateError::SpawnFailed { .. }) => {}
@@ -472,8 +480,10 @@ mod integration {
         // simultaneously, but the count must never EXCEED baseline as a
         // result of THIS call.
         let counter = active_verifier_count();
-        assert!(counter <= baseline + 0,
-            "spawn-failure leaked the counter: baseline={baseline}, current={counter}");
+        assert!(
+            counter <= baseline + 0,
+            "spawn-failure leaked the counter: baseline={baseline}, current={counter}"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -489,13 +499,14 @@ mod integration {
 
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
-        let result = spawn_verifier(
-            &task_id, "test-gate", "abcd1234",
-            tmp.path(), &cfg, &store,
-        ).await;
+        let result =
+            spawn_verifier(&task_id, "test-gate", "abcd1234", tmp.path(), &cfg, &store).await;
 
         match result {
-            Err(GateError::VerifierCapExceeded { task_id: t, gate_type: g }) => {
+            Err(GateError::VerifierCapExceeded {
+                task_id: t,
+                gate_type: g,
+            }) => {
                 assert_eq!(t, task_id);
                 assert_eq!(g, "test-gate");
             }
@@ -507,13 +518,14 @@ mod integration {
         // burn a row in verifier_run_tokens, and on a busy kernel the
         // table would fill with orphan rows that never get consumed.
         let conn = store.lock().await;
-        let row_count: i64 = conn.query_row(
-            &format!("SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS} WHERE task_id = ?1"),
-            rusqlite::params![&task_id],
-            |r| r.get(0),
-        ).unwrap();
-        assert_eq!(row_count, 0,
-            "cap-exceeded path must NOT issue a token row");
+        let row_count: i64 = conn
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {VERIFIER_RUN_TOKENS} WHERE task_id = ?1"),
+                rusqlite::params![&task_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(row_count, 0, "cap-exceeded path must NOT issue a token row");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -529,13 +541,19 @@ mod integration {
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
         let run_id = spawn_verifier(
-            &task_id, "TestCoverage", "f00dbabef00dbabef00dbabef00dbabe",
-            tmp.path(), &cfg, &store,
-        ).await.expect("spawn");
+            &task_id,
+            "TestCoverage",
+            "f00dbabef00dbabef00dbabef00dbabe",
+            tmp.path(),
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn");
 
         let conn = store.lock().await;
-        let (db_task_id, db_gate, db_eval, consumed): (String, String, String, i64) =
-            conn.query_row(
+        let (db_task_id, db_gate, db_eval, consumed): (String, String, String, i64) = conn
+            .query_row(
                 &format!(
                     "SELECT task_id, gate_type, evaluation_sha, consumed
                        FROM {VERIFIER_RUN_TOKENS}
@@ -543,7 +561,8 @@ mod integration {
                 ),
                 rusqlite::params![&run_id],
                 |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-            ).expect("verifier_run_tokens row must exist for successful spawn");
+            )
+            .expect("verifier_run_tokens row must exist for successful spawn");
 
         assert_eq!(db_task_id, task_id);
         assert_eq!(db_gate, "TestCoverage");
@@ -571,26 +590,23 @@ mod integration {
         // take args in its current API — the binary path is invoked
         // bare. Use a wrapper script so we can encode the sleep duration.
         let script = tmp.path().join("sleep.sh");
-        std::fs::write(
-            &script,
-            "#!/bin/sh\nexec /bin/sleep 60\n",
-        ).unwrap();
+        std::fs::write(&script, "#!/bin/sh\nexec /bin/sleep 60\n").unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
         cfg.verifier_binary_path = script.clone();
 
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
         let baseline = active_verifier_count();
-        let _run_id = spawn_verifier(
-            &task_id, "test-gate", "deadbeef",
-            tmp.path(), &cfg, &store,
-        ).await.expect("spawn");
+        let _run_id = spawn_verifier(&task_id, "test-gate", "deadbeef", tmp.path(), &cfg, &store)
+            .await
+            .expect("spawn");
 
         // Counter MUST go up by exactly 1 right after spawn.
         let bumped = await_until(
             || active_verifier_count() > baseline,
             Duration::from_secs(1),
-        ).await;
+        )
+        .await;
         assert!(bumped, "counter did not increment after successful spawn");
 
         // Wait wall_secs (1) + generous grace (4) for kill + watcher
@@ -598,10 +614,14 @@ mod integration {
         let dropped = await_until(
             || active_verifier_count() <= baseline,
             Duration::from_secs(5),
-        ).await;
-        assert!(dropped,
+        )
+        .await;
+        assert!(
+            dropped,
             "wall-clock kill did not decrement counter within wall_secs+grace; \
-             counter currently {}", active_verifier_count());
+             counter currently {}",
+            active_verifier_count()
+        );
     }
 
     // ── PRIORITY 3 — env scrub + current_dir ─────────────────────────────────
@@ -651,27 +671,34 @@ mod integration {
         let bleed_var = format!("RAXIS_TEST_BLEEDOVER_{}", uuid::Uuid::new_v4().simple());
         // SAFETY: serialized through GLOBAL_LOCK; no other test in this
         // module touches process env concurrently.
-        unsafe { std::env::set_var(&bleed_var, "should-not-leak"); }
+        unsafe {
+            std::env::set_var(&bleed_var, "should-not-leak");
+        }
 
         let cfg = config_for(&script);
         let task_id = unique_id("task");
         seed_task_for(&store, &task_id).await;
         let _run_id = spawn_verifier(
-            &task_id, "TestCoverage", "abcd1234",
-            &worktree, &cfg, &store,
-        ).await.expect("spawn");
+            &task_id,
+            "TestCoverage",
+            "abcd1234",
+            &worktree,
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn");
 
         // Wait up to 2s for the child to atomically rename `.tmp` to
         // `captured.txt`. Existence of `captured.txt` is the
         // synchronisation token — see the RACE NOTE on the script body.
-        let written = await_until(
-            || captured.exists(),
-            Duration::from_secs(2),
-        ).await;
+        let written = await_until(|| captured.exists(), Duration::from_secs(2)).await;
         assert!(written, "child did not produce the capture file within 2s");
 
         // Cleanup the env var promptly.
-        unsafe { std::env::remove_var(&bleed_var); }
+        unsafe {
+            std::env::remove_var(&bleed_var);
+        }
 
         let captured_text = std::fs::read_to_string(&captured).unwrap();
         let mut lines = captured_text.lines();
@@ -681,8 +708,7 @@ mod integration {
         let observed_cwd = lines.next().expect("script must emit a pwd line");
         let want = std::fs::canonicalize(&worktree).unwrap();
         let got = std::fs::canonicalize(observed_cwd).unwrap();
-        assert_eq!(got, want,
-            "child cwd mismatch: want {want:?}, got {got:?}");
+        assert_eq!(got, want, "child cwd mismatch: want {want:?}, got {got:?}");
 
         // The remaining lines are env entries `KEY=value`. Build a
         // {KEY} set we can assert against.
@@ -692,11 +718,15 @@ mod integration {
             .collect();
 
         // Negative assertions — env_clear() must have stripped these.
-        assert!(!env_keys.contains(bleed_var.as_str()),
-            "env_clear leaked parent var {bleed_var:?}");
+        assert!(
+            !env_keys.contains(bleed_var.as_str()),
+            "env_clear leaked parent var {bleed_var:?}"
+        );
         for forbidden in &["PATH", "HOME", "USER", "SHELL", "TERM"] {
-            assert!(!env_keys.contains(forbidden),
-                "env_clear leaked parent var {forbidden:?}; child env keys = {env_keys:?}");
+            assert!(
+                !env_keys.contains(forbidden),
+                "env_clear leaked parent var {forbidden:?}; child env keys = {env_keys:?}"
+            );
         }
 
         // Positive assertions — every var the production envelope is
@@ -710,8 +740,10 @@ mod integration {
             "RAXIS_KERNEL_SOCKET",
             "RAXIS_WORKTREE_ROOT",
         ] {
-            assert!(env_keys.contains(required),
-                "spawn envelope missing required var {required:?}; got {env_keys:?}");
+            assert!(
+                env_keys.contains(required),
+                "spawn envelope missing required var {required:?}; got {env_keys:?}"
+            );
         }
     }
 }
@@ -771,8 +803,8 @@ mod integration {
 mod stub_round_trip {
     use super::*;
     use crate::handlers::witness as witness_handler;
-    use crate::ipc::context::HandlerContext;
     use crate::initiatives::PlanRegistry;
+    use crate::ipc::context::HandlerContext;
     use raxis_audit_tools::AuditSink;
     use raxis_ipc::{read_frame, write_frame, IpcMessage};
     use raxis_test_support::{mem_store, FakeAuditSink};
@@ -829,11 +861,19 @@ mod stub_round_trip {
         // toolchain overrides.
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
         let status = std::process::Command::new(&cargo)
-            .args(["build", "-p", "raxis-verifier-stub", "--bin", "raxis-verifier-stub"])
+            .args([
+                "build",
+                "-p",
+                "raxis-verifier-stub",
+                "--bin",
+                "raxis-verifier-stub",
+            ])
             .status()
             .expect("spawn `cargo build -p raxis-verifier-stub`");
-        assert!(status.success(),
-            "cargo build of raxis-verifier-stub failed; cannot run round-trip test");
+        assert!(
+            status.success(),
+            "cargo build of raxis-verifier-stub failed; cannot run round-trip test"
+        );
 
         // Step 2: locate the built binary. The current test binary lives
         // at `target/<profile>/deps/<test-binary>`; the stub binary is
@@ -841,11 +881,16 @@ mod stub_round_trip {
         // up from `deps/`.
         let exe = std::env::current_exe().expect("current_exe");
         let target_profile_dir = exe
-            .parent().expect("test binary has parent")
-            .parent().expect("deps/ has parent");
+            .parent()
+            .expect("test binary has parent")
+            .parent()
+            .expect("deps/ has parent");
         let stub = target_profile_dir.join("raxis-verifier-stub");
-        assert!(stub.exists(),
-            "stub binary not found at expected path: {}", stub.display());
+        assert!(
+            stub.exists(),
+            "stub binary not found at expected path: {}",
+            stub.display()
+        );
         stub
     }
 
@@ -871,9 +916,9 @@ mod stub_round_trip {
         // `validate_operator_certs` step accepts the artifact even though
         // the witness handler never consults it. Use a deterministic seed
         // for byte-stable test output.
-        let key  = raxis_test_support::ephemeral_signing_key([0x22u8; 32]);
-        let pk   = raxis_test_support::pubkey_hex(&key);
-        let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+        let key = raxis_test_support::ephemeral_signing_key([0x22u8; 32]);
+        let pk = raxis_test_support::pubkey_hex(&key);
+        let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
         let cert = raxis_test_support::ephemeral_cert_with_key(
             &key,
             raxis_test_support::CertOpts {
@@ -891,11 +936,11 @@ mod stub_round_trip {
                     "0000000000000000000000000000000000000000000000000000000000000000",
                 quality_pubkey_hex:
                     "1111111111111111111111111111111111111111111111111111111111111111",
-                operator_pubkey_hex:    &pk,
-                operator_fingerprint:   &fp,
-                signed_at_unix_secs:    1_700_000_000,
+                operator_pubkey_hex: &pk,
+                operator_fingerprint: &fp,
+                signed_at_unix_secs: 1_700_000_000,
                 allowed_worktree_roots: &[worktree_root_str.as_str()],
-                operator_cert:          &cert,
+                operator_cert: &cert,
             },
         );
         let tmp_policy = tempfile::NamedTempFile::new().expect("tempfile");
@@ -907,29 +952,33 @@ mod stub_round_trip {
         let audit: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
         let plan_registry = Arc::new(PlanRegistry::new());
 
-        let data_dir_path = witness_dir.parent().unwrap_or(Path::new("/tmp")).to_path_buf();
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            &data_dir_path,
-            Arc::clone(&audit),
-        );
+        let data_dir_path = witness_dir
+            .parent()
+            .unwrap_or(Path::new("/tmp"))
+            .to_path_buf();
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(&data_dir_path, Arc::clone(&audit));
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir_path);
-        Arc::new(HandlerContext::new(
-            Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
-            registry,
-            store,
-            audit,
-            data_dir_path,
-            plan_registry,
-            Arc::new(crate::gateway::client::GatewayClient::new()),
-            Arc::new(crate::prompt::EpochBinding::new()),
-            credentials,
-            isolation,
-            orchestrator_spawn,
-            crate::ipc::context::build_test_executor_spawn(),
-            domain,
-        ).with_witness_dir(witness_dir))
+        Arc::new(
+            HandlerContext::new(
+                Arc::new(arc_swap::ArcSwap::from_pointee(policy)),
+                registry,
+                store,
+                audit,
+                data_dir_path,
+                plan_registry,
+                Arc::new(crate::gateway::client::GatewayClient::new()),
+                Arc::new(crate::prompt::EpochBinding::new()),
+                credentials,
+                isolation,
+                orchestrator_spawn,
+                crate::ipc::context::build_test_executor_spawn(),
+                domain,
+            )
+            .with_witness_dir(witness_dir),
+        )
     }
 
     // ── State seeding ─────────────────────────────────────────────────────────
@@ -956,7 +1005,8 @@ mod stub_round_trip {
                  VALUES (?1, ?2, '{{}}', 'sha-stub', 0)"
             ),
             rusqlite::params![&initiative_id, InitiativeState::ApprovedPlan.as_sql_str()],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS}
@@ -966,11 +1016,13 @@ mod stub_round_trip {
                  VALUES (?1, ?2, 'default', ?3, 'planner', 1, 0, 0, ?4, ?4)"
             ),
             rusqlite::params![
-                task_id, &initiative_id,
+                task_id,
+                &initiative_id,
                 TaskState::GatesPending.as_sql_str(),
                 evaluation_sha,
             ],
-        ).expect("seed task in GatesPending");
+        )
+        .expect("seed task in GatesPending");
     }
 
     // ── Server-side: one-shot accept loop ─────────────────────────────────────
@@ -989,7 +1041,9 @@ mod stub_round_trip {
         let (mut stream, _) = listener.accept().await.expect("accept stub connection");
 
         // Read the WitnessSubmission the stub sent.
-        let inbound: IpcMessage = read_frame(&mut stream).await.expect("read submission frame");
+        let inbound: IpcMessage = read_frame(&mut stream)
+            .await
+            .expect("read submission frame");
         let submission = match inbound {
             IpcMessage::WitnessSubmission(s) => s,
             other => panic!("expected WitnessSubmission from stub, got {other:?}"),
@@ -1012,7 +1066,9 @@ mod stub_round_trip {
                 reason: None,
             },
             Ok(witness_handler::WitnessAck::AcceptedNonPass {
-                run_id, gate_type, result_class,
+                run_id,
+                gate_type,
+                result_class,
             }) => IpcMessage::WitnessAck {
                 verifier_run_id: uuid::Uuid::parse_str(run_id).unwrap_or_default(),
                 accepted: true,
@@ -1033,7 +1089,9 @@ mod stub_round_trip {
                 reason: Some(format!("handler error: {e}")),
             },
         };
-        write_frame(&mut stream, &ack_msg).await.expect("write ack frame");
+        write_frame(&mut stream, &ack_msg)
+            .await
+            .expect("write ack frame");
 
         handler_result
     }
@@ -1080,23 +1138,25 @@ mod stub_round_trip {
         // Linux) with a 12-char suffix. The socket file is unlinked
         // by the `TempDir` drop is NOT reachable here, so we register
         // an explicit cleanup at the end of the test (best-effort).
-        let socket_path = std::env::temp_dir()
-            .join(format!("rxstub-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let socket_path = std::env::temp_dir().join(format!(
+            "rxstub-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         // Pre-clean — a stale socket from a previously-killed test
         // run would make `bind` fail with EADDRINUSE.
         let _ = std::fs::remove_file(&socket_path);
         let cfg = VerifierConfig {
-            verifier_binary_path:     stub_bin.clone(),
-            verifier_token_ttl_secs:  60,
-            verifier_cpu_secs:        30,
-            verifier_memory_bytes:    1 << 30,
+            verifier_binary_path: stub_bin.clone(),
+            verifier_token_ttl_secs: 60,
+            verifier_cpu_secs: 30,
+            verifier_memory_bytes: 1 << 30,
             // We allow up to 5 s for the round trip — plenty for a local
             // UDS hop on any reasonable host. If this becomes flaky on a
             // very loaded CI box, raise to 15 s rather than hiding the
             // budget assertion.
-            verifier_max_wall_secs:   5,
+            verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
-            kernel_socket_path:       socket_path.display().to_string(),
+            kernel_socket_path: socket_path.display().to_string(),
         };
 
         // Step 5: stand up the one-shot server BEFORE spawning the stub.
@@ -1105,9 +1165,8 @@ mod stub_round_trip {
         // detached and join it after the stub exits.
         let ctx = handler_ctx(store.clone(), witness_dir.clone());
         let server_socket = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            run_one_witness_round_trip(server_socket, ctx).await
-        });
+        let server_handle =
+            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
 
         // Step 6: issue a real verifier_run_token via the same
         // production code path `spawn_verifier` would use, then exec
@@ -1129,16 +1188,22 @@ mod stub_round_trip {
         let returned_run_id = uuid::Uuid::new_v4().to_string();
         let raw_token = {
             let store_inner = store.clone();
-            let run_id     = returned_run_id.clone();
-            let task_id    = task_id.clone();
-            let eval_sha   = evaluation_sha.clone();
+            let run_id = returned_run_id.clone();
+            let task_id = task_id.clone();
+            let eval_sha = evaluation_sha.clone();
             tokio::task::spawn_blocking(move || {
                 crate::authority::verifier_token::issue_verifier_token(
-                    &run_id, &task_id, "test-gate", &eval_sha,
-                    cfg.verifier_token_ttl_secs, store_inner.as_ref(),
+                    &run_id,
+                    &task_id,
+                    "test-gate",
+                    &eval_sha,
+                    cfg.verifier_token_ttl_secs,
+                    store_inner.as_ref(),
                 )
-            }).await.expect("issue_verifier_token join")
-              .expect("issue_verifier_token must succeed against in-mem store")
+            })
+            .await
+            .expect("issue_verifier_token join")
+            .expect("issue_verifier_token must succeed against in-mem store")
         };
 
         // Step 7: spawn the stub directly with the full envelope +
@@ -1148,27 +1213,31 @@ mod stub_round_trip {
         // by `integration::env_clear_scrubs_parent_env_*`.
         let stub_exit = std::process::Command::new(&stub_bin)
             .env("RAXIS_VERIFIER_TOKEN", &raw_token)
-            .env("RAXIS_TASK_ID",        &task_id)
-            .env("RAXIS_GATE_TYPE",      "test-gate")
+            .env("RAXIS_TASK_ID", &task_id)
+            .env("RAXIS_GATE_TYPE", "test-gate")
             .env("RAXIS_EVALUATION_SHA", &evaluation_sha)
-            .env("RAXIS_KERNEL_SOCKET",  socket_path.display().to_string())
-            .env("RAXIS_WORKTREE_ROOT",  tmp.path().display().to_string())
+            .env("RAXIS_KERNEL_SOCKET", socket_path.display().to_string())
+            .env("RAXIS_WORKTREE_ROOT", tmp.path().display().to_string())
             .env("RAXIS_STUB_RESULT_CLASS", "Inconclusive")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped())
             .output()
             .expect("spawn raxis-verifier-stub");
-        assert!(stub_exit.status.success(),
+        assert!(
+            stub_exit.status.success(),
             "stub exited non-zero (code {}); stderr: {}",
-            stub_exit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
-            String::from_utf8_lossy(&stub_exit.stderr));
+            stub_exit
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signalled>".to_owned()),
+            String::from_utf8_lossy(&stub_exit.stderr)
+        );
 
         // Step 8: wait for the server's accept→handle→ack cycle to complete.
-        let handler_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            server_handle,
-        ).await
+        let handler_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
             .expect("server task did not finish within 5s — stub never connected?")
             .expect("server task panicked");
 
@@ -1176,19 +1245,31 @@ mod stub_round_trip {
         // right gate_type and result_class echoed back from the stub.
         let ack = handler_result.expect("witness handler returned Err — stub envelope wrong?");
         match ack {
-            witness_handler::WitnessAck::AcceptedNonPass { run_id, gate_type, result_class } => {
+            witness_handler::WitnessAck::AcceptedNonPass {
+                run_id,
+                gate_type,
+                result_class,
+            } => {
                 // run_id is the kernel-generated verifier_run_id (UUID); it
                 // must equal what spawn_verifier returned to us in step 7
                 // — the kernel issues exactly one token per spawn, and the
                 // stub echoes that token back in its submission, so the
                 // handler should resolve to the SAME run_id.
-                assert_eq!(run_id, returned_run_id,
+                assert_eq!(
+                    run_id, returned_run_id,
                     "handler-side run_id ({run_id}) must equal the run_id \
-                     spawn_verifier returned ({returned_run_id})");
-                assert_eq!(gate_type.as_str(), "test-gate",
-                    "handler must echo the gate_type from the spawn envelope");
-                assert_eq!(format!("{result_class:?}"), "Inconclusive",
-                    "handler must record Inconclusive (not Pass / Fail)");
+                     spawn_verifier returned ({returned_run_id})"
+                );
+                assert_eq!(
+                    gate_type.as_str(),
+                    "test-gate",
+                    "handler must echo the gate_type from the spawn envelope"
+                );
+                assert_eq!(
+                    format!("{result_class:?}"),
+                    "Inconclusive",
+                    "handler must record Inconclusive (not Pass / Fail)"
+                );
             }
             other => panic!("expected AcceptedNonPass, got {other:?}"),
         }
@@ -1203,10 +1284,13 @@ mod stub_round_trip {
                 &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
-            ).expect("count witness_records")
+            )
+            .expect("count witness_records")
         };
-        assert_eq!(count, 1,
-            "expected exactly one witness_records row for task_id {task_id}, got {count}");
+        assert_eq!(
+            count, 1,
+            "expected exactly one witness_records row for task_id {task_id}, got {count}"
+        );
 
         // Step 11: assert the verifier_run_token was consumed
         // (`consumed=1` AND `consumed_at` set) — the consume happens
@@ -1222,11 +1306,14 @@ mod stub_round_trip {
                 ),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
-            ).expect("count consumed tokens")
+            )
+            .expect("count consumed tokens")
         };
-        assert_eq!(consumed, 1,
+        assert_eq!(
+            consumed, 1,
             "verifier_run_token for task {task_id} was not marked consumed; \
-             handler write-then-consume order may have been broken");
+             handler write-then-consume order may have been broken"
+        );
 
         // Step 12: best-effort cleanup of the socket file. The
         // `TempDir` does not own this path (we hoisted it to /tmp for
@@ -1269,30 +1356,31 @@ mod stub_round_trip {
         // Seed the task with the EXPECTED SHA. The stub will echo a
         // DIFFERENT SHA from its envelope, triggering the mismatch
         // rejection branch in handlers::witness::handle step 2.
-        let task_id      = format!("task-{}", uuid::Uuid::new_v4().simple());
-        let stored_sha   = "1111111122222222333333334444444455555555".to_owned();
+        let task_id = format!("task-{}", uuid::Uuid::new_v4().simple());
+        let stored_sha = "1111111122222222333333334444444455555555".to_owned();
         let mismatched_sha = "ffffffffeeeeeeeeddddddddccccccccbbbbbbbb".to_owned();
         seed_task_in_gates_pending(&store, &task_id, &stored_sha).await;
 
-        let socket_path = std::env::temp_dir()
-            .join(format!("rxstubrej-{}.sock", &uuid::Uuid::new_v4().simple().to_string()[..12]));
+        let socket_path = std::env::temp_dir().join(format!(
+            "rxstubrej-{}.sock",
+            &uuid::Uuid::new_v4().simple().to_string()[..12]
+        ));
         let _ = std::fs::remove_file(&socket_path);
 
         let cfg = VerifierConfig {
-            verifier_binary_path:     stub_bin.clone(),
-            verifier_token_ttl_secs:  60,
-            verifier_cpu_secs:        30,
-            verifier_memory_bytes:    1 << 30,
-            verifier_max_wall_secs:   5,
+            verifier_binary_path: stub_bin.clone(),
+            verifier_token_ttl_secs: 60,
+            verifier_cpu_secs: 30,
+            verifier_memory_bytes: 1 << 30,
+            verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
-            kernel_socket_path:       socket_path.display().to_string(),
+            kernel_socket_path: socket_path.display().to_string(),
         };
 
         let ctx = handler_ctx(store.clone(), witness_dir.clone());
         let server_socket = socket_path.clone();
-        let server_handle = tokio::spawn(async move {
-            run_one_witness_round_trip(server_socket, ctx).await
-        });
+        let server_handle =
+            tokio::spawn(async move { run_one_witness_round_trip(server_socket, ctx).await });
 
         // Issue a token bound to the STORED SHA (this is what
         // production does: `spawn_verifier` is called with the SHA
@@ -1307,22 +1395,28 @@ mod stub_round_trip {
             let eval_sha = stored_sha.clone();
             tokio::task::spawn_blocking(move || {
                 crate::authority::verifier_token::issue_verifier_token(
-                    &run_id, &task_id, "test-gate", &eval_sha,
-                    cfg.verifier_token_ttl_secs, store_inner.as_ref(),
+                    &run_id,
+                    &task_id,
+                    "test-gate",
+                    &eval_sha,
+                    cfg.verifier_token_ttl_secs,
+                    store_inner.as_ref(),
                 )
-            }).await.expect("issue_verifier_token join")
-              .expect("issue_verifier_token must succeed against in-mem store")
+            })
+            .await
+            .expect("issue_verifier_token join")
+            .expect("issue_verifier_token must succeed against in-mem store")
         };
 
         // Stub puts MISMATCHED sha on the wire (RAXIS_EVALUATION_SHA
         // intentionally differs from the SHA the token was bound to).
         let stub_exit = std::process::Command::new(&stub_bin)
             .env("RAXIS_VERIFIER_TOKEN", &raw_token)
-            .env("RAXIS_TASK_ID",        &task_id)
-            .env("RAXIS_GATE_TYPE",      "test-gate")
+            .env("RAXIS_TASK_ID", &task_id)
+            .env("RAXIS_GATE_TYPE", "test-gate")
             .env("RAXIS_EVALUATION_SHA", &mismatched_sha)
-            .env("RAXIS_KERNEL_SOCKET",  socket_path.display().to_string())
-            .env("RAXIS_WORKTREE_ROOT",  tmp.path().display().to_string())
+            .env("RAXIS_KERNEL_SOCKET", socket_path.display().to_string())
+            .env("RAXIS_WORKTREE_ROOT", tmp.path().display().to_string())
             // Pass even though we expect rejection — the mismatch
             // happens at step 2 (binding check) which runs BEFORE
             // the result_class is consulted (step 3+).
@@ -1337,24 +1431,31 @@ mod stub_round_trip {
         // Any other code (especially 0 = AcceptedPass) means the
         // kernel mistakenly accepted a SHA-mismatched submission,
         // which would break the gate-binding contract.
-        assert_eq!(stub_exit.status.code(), Some(1),
+        assert_eq!(
+            stub_exit.status.code(),
+            Some(1),
             "stub MUST exit Rejected(1) on SHA mismatch, got {}; stderr: {}",
-            stub_exit.status.code().map(|c| c.to_string()).unwrap_or_else(|| "<signalled>".to_owned()),
-            String::from_utf8_lossy(&stub_exit.stderr));
+            stub_exit
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "<signalled>".to_owned()),
+            String::from_utf8_lossy(&stub_exit.stderr)
+        );
 
         // Server-side ack must be Rejected with the EvaluationShaMismatch reason.
-        let handler_result = tokio::time::timeout(
-            std::time::Duration::from_secs(5),
-            server_handle,
-        ).await
+        let handler_result = tokio::time::timeout(std::time::Duration::from_secs(5), server_handle)
+            .await
             .expect("server task did not finish within 5s")
             .expect("server task panicked");
         let ack = handler_result.expect("witness handler returned Err on mismatch");
         match ack {
             witness_handler::WitnessAck::Rejected { reason } => {
                 let r = format!("{reason:?}");
-                assert!(r.contains("EvaluationShaMismatch"),
-                    "expected EvaluationShaMismatch reason, got {r:?}");
+                assert!(
+                    r.contains("EvaluationShaMismatch"),
+                    "expected EvaluationShaMismatch reason, got {r:?}"
+                );
             }
             other => panic!("expected Rejected, got {other:?}"),
         }
@@ -1367,10 +1468,13 @@ mod stub_round_trip {
                 &format!("SELECT COUNT(*) FROM {WITNESS_RECORDS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
-            ).expect("count witness_records")
+            )
+            .expect("count witness_records")
         };
-        assert_eq!(count, 0,
-            "rejection path must NOT write a witness_records row; got {count}");
+        assert_eq!(
+            count, 0,
+            "rejection path must NOT write a witness_records row; got {count}"
+        );
 
         // Verify the verifier_run_token is STILL UNCONSUMED. This is
         // the critical invariant — a pre-fix where rejection consumed
@@ -1385,11 +1489,14 @@ mod stub_round_trip {
                 ),
                 rusqlite::params![&task_id],
                 |row| row.get(0),
-            ).expect("count unconsumed tokens")
+            )
+            .expect("count unconsumed tokens")
         };
-        assert_eq!(unconsumed, 1,
+        assert_eq!(
+            unconsumed, 1,
             "rejection path consumed the token (unconsumed count = {unconsumed}); \
-             this would foreclose verifier retry");
+             this would foreclose verifier retry"
+        );
 
         let _ = std::fs::remove_file(&socket_path);
     }

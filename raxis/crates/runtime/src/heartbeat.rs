@@ -176,23 +176,41 @@ impl Snapshot {
 /// codes branch on these.
 #[derive(Debug, thiserror::Error)]
 pub enum ReadError {
-    #[error("heartbeat file not found at {0} (kernel may not be running, or runtime/ not yet created)")]
+    #[error(
+        "heartbeat file not found at {0} (kernel may not be running, or runtime/ not yet created)"
+    )]
     Missing(PathBuf),
 
     #[error("failed to open heartbeat file at {path}: {source}")]
-    Open { path: PathBuf, #[source] source: std::io::Error },
+    Open {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("failed to read heartbeat file at {path}: {source}")]
-    Io { path: PathBuf, #[source] source: std::io::Error },
+    Io {
+        path: PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
 
     #[error("heartbeat file at {path} is malformed: {source}")]
-    Parse { path: PathBuf, #[source] source: serde_json::Error },
+    Parse {
+        path: PathBuf,
+        #[source]
+        source: serde_json::Error,
+    },
 
     #[error(
         "heartbeat schema version mismatch at {path}: \
          file reports v{found}, this binary supports v{expected}"
     )]
-    SchemaMismatch { path: PathBuf, expected: u32, found: u32 },
+    SchemaMismatch {
+        path: PathBuf,
+        expected: u32,
+        found: u32,
+    },
 }
 
 /// Atomically write `snapshot` to `dest_path` via tempfile + rename.
@@ -262,8 +280,10 @@ pub fn read(data_dir: &Path) -> Result<Snapshot, ReadError> {
         Err(e) => return Err(ReadError::Io { path, source: e }),
     };
 
-    let snap: Snapshot = serde_json::from_slice(&body)
-        .map_err(|e| ReadError::Parse { path: path.clone(), source: e })?;
+    let snap: Snapshot = serde_json::from_slice(&body).map_err(|e| ReadError::Parse {
+        path: path.clone(),
+        source: e,
+    })?;
 
     if snap.schema_version != HEARTBEAT_SCHEMA_VERSION {
         return Err(ReadError::SchemaMismatch {
@@ -332,10 +352,18 @@ mod tests {
 
         let obj = json.as_object().expect("snapshot must serialize as object");
         for required in [
-            "schema_version", "kernel_pid", "started_at", "last_heartbeat_at",
-            "state", "policy_epoch", "store_schema_version",
-            "active_verifiers", "max_concurrent_verifiers", "queued_spawns",
-            "active_planner_sessions", "active_gateway_sessions",
+            "schema_version",
+            "kernel_pid",
+            "started_at",
+            "last_heartbeat_at",
+            "state",
+            "policy_epoch",
+            "store_schema_version",
+            "active_verifiers",
+            "max_concurrent_verifiers",
+            "queued_spawns",
+            "active_planner_sessions",
+            "active_gateway_sessions",
             "active_verifier_sessions",
         ] {
             assert!(
@@ -423,16 +451,20 @@ mod tests {
         let tmp = TempDir::new().unwrap();
         std::fs::create_dir_all(tmp.path().join(RUNTIME_DIR)).unwrap();
         let err = read(tmp.path()).unwrap_err();
-        assert!(matches!(err, ReadError::Missing(_)),
-            "expected Missing, got {err:?}");
+        assert!(
+            matches!(err, ReadError::Missing(_)),
+            "expected Missing, got {err:?}"
+        );
     }
 
     #[test]
     fn read_returns_missing_when_runtime_dir_absent() {
         let tmp = TempDir::new().unwrap();
         let err = read(tmp.path()).unwrap_err();
-        assert!(matches!(err, ReadError::Missing(_)),
-            "expected Missing (runtime/ absent), got {err:?}");
+        assert!(
+            matches!(err, ReadError::Missing(_)),
+            "expected Missing (runtime/ absent), got {err:?}"
+        );
     }
 
     #[test]
@@ -442,8 +474,10 @@ mod tests {
         let dest = tmp.path().join(RUNTIME_DIR).join(HEARTBEAT_FILE);
         std::fs::write(&dest, b"{not-valid-json").unwrap();
         let err = read(tmp.path()).unwrap_err();
-        assert!(matches!(err, ReadError::Parse { .. }),
-            "expected Parse, got {err:?}");
+        assert!(
+            matches!(err, ReadError::Parse { .. }),
+            "expected Parse, got {err:?}"
+        );
     }
 
     #[test]
@@ -470,7 +504,9 @@ mod tests {
         std::fs::write(&dest, raw).unwrap();
         let err = read(tmp.path()).unwrap_err();
         match err {
-            ReadError::SchemaMismatch { expected, found, .. } => {
+            ReadError::SchemaMismatch {
+                expected, found, ..
+            } => {
                 assert_eq!(expected, HEARTBEAT_SCHEMA_VERSION);
                 assert_eq!(found, 999);
             }
@@ -493,11 +529,18 @@ mod tests {
     #[test]
     fn is_live_returns_true_within_window_and_false_after() {
         let snap = sample_snapshot(); // last_heartbeat_at = 1_700_000_005
-        assert!(snap.is_live(1_700_000_005), "exact same instant must be live");
-        assert!(snap.is_live(1_700_000_005 + HEARTBEAT_STALE_AFTER.as_secs()),
-            "edge of window must be live");
-        assert!(!snap.is_live(1_700_000_005 + HEARTBEAT_STALE_AFTER.as_secs() + 1),
-            "one second past window must be stale");
+        assert!(
+            snap.is_live(1_700_000_005),
+            "exact same instant must be live"
+        );
+        assert!(
+            snap.is_live(1_700_000_005 + HEARTBEAT_STALE_AFTER.as_secs()),
+            "edge of window must be live"
+        );
+        assert!(
+            !snap.is_live(1_700_000_005 + HEARTBEAT_STALE_AFTER.as_secs() + 1),
+            "one second past window must be stale"
+        );
     }
 
     #[test]
@@ -505,7 +548,9 @@ mod tests {
         // Clock skew can put the heartbeat one or two seconds ahead of
         // `now_secs`. We must NOT call that stale.
         let snap = sample_snapshot();
-        assert!(snap.is_live(snap.last_heartbeat_at - 2),
-            "heartbeat from 'future' must be live (clock skew tolerance)");
+        assert!(
+            snap.is_live(snap.last_heartbeat_at - 2),
+            "heartbeat from 'future' must be live (clock skew tolerance)"
+        );
     }
 }

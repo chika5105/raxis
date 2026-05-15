@@ -27,19 +27,17 @@ pub mod planner_env;
 pub mod planner_exit;
 pub mod planner_fetch;
 pub mod policy;
-pub mod tproxy;
 pub mod push;
 pub mod structured_output;
+pub mod tproxy;
 pub mod witness;
 
 // Convenient flat re-exports for the most-used types.
 pub use capability::{CapabilityClass, DelegationStatus};
 pub use clock::{unix_now_secs, Clock, RealClock};
 pub use error::{
-    EmptyReasonError, FailureReason, OperatorErrorCode, PlannerErrorCode,
-    MAX_FAILURE_REASON_LEN,
+    EmptyReasonError, FailureReason, OperatorErrorCode, PlannerErrorCode, MAX_FAILURE_REASON_LEN,
 };
-pub use host_preflight::{DiskVolumeReport, HostPreflightError};
 pub use escalation::{
     EscalationClass, EscalationRejectionReason, EscalationRequest, EscalationResponse,
     EscalationStatus, RequestedEscalationScope, MAX_LOGICAL_DEADLOCK_REASON_LEN,
@@ -47,18 +45,18 @@ pub use escalation::{
 };
 pub use fsm::{
     BlockReason, CircuitBreakerState, CloneStrategy, InitiativeState,
-    IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState,
-    PlanBundleNonceOutcome, ReviewVerdict, SessionAgentType,
-    SubtaskActivationState, TaskState, TerminalCriteria,
+    IntegrationMergeAttemptDiscardReason, IntegrationMergeAttemptState, PlanBundleNonceOutcome,
+    ReviewVerdict, SessionAgentType, SubtaskActivationState, TaskState, TerminalCriteria,
 };
+pub use host_preflight::{DiskVolumeReport, HostPreflightError};
 pub use id::{
-    CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError,
-    InitiativeId, LineageId, SessionId, TaskId, TaskIdError, VerifierRunId,
+    CommitSha, CommitShaError, DelegationId, EscalationId, GateType, GateTypeError, InitiativeId,
+    LineageId, SessionId, TaskId, TaskIdError, VerifierRunId,
 };
 pub use initiative_event::{ClosedReason, InitiativeEvent};
 pub use intent::{
-    BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse,
-    PlannerErrorTemplate, SubmittedClaim, TokensReport, MAX_CRITIQUE_BYTES,
+    BudgetSnapshot, IntentKind, IntentOutcome, IntentRequest, IntentResponse, PlannerErrorTemplate,
+    SubmittedClaim, TokensReport, MAX_CRITIQUE_BYTES,
 };
 pub use operator::{ApprovalScope, OperatorErrorDetail, OperatorRequest, OperatorResponse};
 pub use operator_cert::{CertKind, OperatorCert};
@@ -68,15 +66,14 @@ pub use plan_bundle::{
 pub use planner_exit::PlannerExitOutcome;
 pub use planner_fetch::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse};
 pub use policy::Role;
+pub use push::{KernelPush, KernelPushFrame};
+pub use structured_output::{
+    DiagnosticSeverity, StructuredOutputKind, STRUCTURED_OUTPUT_MAX_APPROACH_BYTES,
+    STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES, STRUCTURED_OUTPUT_MAX_PATH_BYTES,
+    STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN, STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT,
+};
 pub use tproxy::{
     DnsQueryType, DnsResolveRequest, DnsResolveResponse, TproxyAdmissionRequest,
     TproxyAdmissionResponse, TproxyProtocol,
 };
-pub use structured_output::{
-    DiagnosticSeverity, StructuredOutputKind,
-    STRUCTURED_OUTPUT_MAX_APPROACH_BYTES, STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES,
-    STRUCTURED_OUTPUT_MAX_PATH_BYTES, STRUCTURED_OUTPUT_MAX_PATH_LIST_LEN,
-    STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT,
-};
-pub use push::{KernelPush, KernelPushFrame};
 pub use witness::{WitnessResultClass, WitnessSubmission};

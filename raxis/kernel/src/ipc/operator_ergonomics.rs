@@ -77,32 +77,38 @@ use crate::ipc::context::HandlerContext;
 /// identical JSON.
 pub async fn handle_propose_defaults(
     initiative_id: Option<String>,
-    ctx:           &HandlerContext,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
     let policy = ctx.policy.load_full();
 
     // The set of providers that the operator declared. The CLI
     // surfaces these so a `plan prepare` flow can pick a provider
     // without re-parsing policy.toml.
-    let providers: Vec<serde_json::Value> = policy.providers().iter().map(|p| {
-        json!({
-            "provider_id":           p.provider_id,
-            "kind":                  p.kind,
-            "inference_timeout_ms":  p.inference_timeout_ms,
-            "data_fetch_timeout_ms": p.data_fetch_timeout_ms,
-            "max_response_bytes":    p.max_response_bytes,
+    let providers: Vec<serde_json::Value> = policy
+        .providers()
+        .iter()
+        .map(|p| {
+            json!({
+                "provider_id":           p.provider_id,
+                "kind":                  p.kind,
+                "inference_timeout_ms":  p.inference_timeout_ms,
+                "data_fetch_timeout_ms": p.data_fetch_timeout_ms,
+                "max_response_bytes":    p.max_response_bytes,
+            })
         })
-    }).collect();
+        .collect();
 
     let plan_signing = policy.plan_signing();
     let plan_bundle_limits = policy.plan_bundle_limits();
 
-    let gateway = policy.gateway().map(|g| json!({
-        "binary_path":              g.binary_path,
-        "spawn_timeout_secs":       g.spawn_timeout_secs,
-        "respawn_backoff_ms":       g.respawn_backoff_ms,
-        "max_consecutive_respawns": g.max_consecutive_respawns,
-    }));
+    let gateway = policy.gateway().map(|g| {
+        json!({
+            "binary_path":              g.binary_path,
+            "spawn_timeout_secs":       g.spawn_timeout_secs,
+            "respawn_backoff_ms":       g.respawn_backoff_ms,
+            "max_consecutive_respawns": g.max_consecutive_respawns,
+        })
+    });
 
     let host_capacity = policy.host_capacity();
     let defaults = json!({
@@ -144,11 +150,13 @@ pub async fn handle_propose_defaults(
     });
 
     let defaults_json = match serde_json::to_string(&defaults) {
-        Ok(s)  => s,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PROPOSE_DEFAULTS".into(),
-            detail: format!("serialize defaults: {e}"),
-        },
+        Ok(s) => s,
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PROPOSE_DEFAULTS".into(),
+                detail: format!("serialize defaults: {e}"),
+            }
+        }
     };
 
     OperatorResponse::ProposedDefaults { defaults_json }
@@ -194,19 +202,21 @@ pub async fn handle_propose_defaults(
 /// operator's local budget policy *before* deciding whether to
 /// `submit plan`.
 pub async fn handle_estimate_cost(
-    plan_toml:    String,
+    plan_toml: String,
     plan_sig_hex: String,
-    ctx:          &HandlerContext,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
     let _ = plan_sig_hex; // signature not verified for cost estimate
     let policy = ctx.policy.load_full();
 
     let parsed: toml::Value = match toml::from_str(&plan_toml) {
-        Ok(v)  => v,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
-            detail: format!("plan_toml parse: {e}"),
-        },
+        Ok(v) => v,
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
+                detail: format!("plan_toml parse: {e}"),
+            }
+        }
     };
 
     let tasks = parsed.get("tasks").and_then(|v| v.as_array());
@@ -221,7 +231,7 @@ pub async fn handle_estimate_cost(
     /// ratio across the planner-trace corpus used to pin
     /// `DEFAULT_TOKENS_PER_TASK`. Tweaking this constant shifts the
     /// upper bound by ≤10% under typical pricing.
-    const INPUT_FRACTION_PERCENT:  u64 = 60;
+    const INPUT_FRACTION_PERCENT: u64 = 60;
     const OUTPUT_FRACTION_PERCENT: u64 = 40;
 
     // Resolve the worst-case provider for the upper-bound computation
@@ -252,19 +262,26 @@ pub async fn handle_estimate_cost(
     let mut total_tokens: u64 = 0;
     if let Some(arr) = tasks {
         for (i, t) in arr.iter().enumerate() {
-            let task_id = t.get("task_id").and_then(|v| v.as_str()).unwrap_or("<unnamed>");
-            let est = t.get("token_policy")
+            let task_id = t
+                .get("task_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or("<unnamed>");
+            let est = t
+                .get("token_policy")
                 .and_then(|v| v.get("max_tokens_total"))
                 .and_then(|v| v.as_integer())
                 .filter(|n| *n > 0)
                 .map(|n| n as u64)
                 .unwrap_or(DEFAULT_TOKENS_PER_TASK);
 
-            let est_input  = est.saturating_mul(INPUT_FRACTION_PERCENT)  / 100;
+            let est_input = est.saturating_mul(INPUT_FRACTION_PERCENT) / 100;
             let est_output = est.saturating_mul(OUTPUT_FRACTION_PERCENT) / 100;
 
             let task_micro: u64 = match worst_provider {
-                Some(p) => p.pricing.as_ref().expect("checked above")
+                Some(p) => p
+                    .pricing
+                    .as_ref()
+                    .expect("checked above")
                     .cost_micro_dollars(est_input, est_output, 0, 0),
                 None => 0u64,
             };
@@ -284,15 +301,15 @@ pub async fn handle_estimate_cost(
     // Convert micro-dollars to cents (round half-up). 10_000 µ$ = 1 ¢.
     // Saturating cast guards against pathological multi-million-task
     // plans whose cents total overflows `i64::MAX`.
-    let mut total_cents: i64 = micro_dollars_to_cents(total_micro_dollars)
-        .min(u128::from(i64::MAX as u64)) as i64;
+    let mut total_cents: i64 =
+        micro_dollars_to_cents(total_micro_dollars).min(u128::from(i64::MAX as u64)) as i64;
 
     // Per-initiative kernel-side admission overhead. The kernel's
     // budget enforcer charges at least one `base_cost_per_intent_kind`
     // entry per task; this captures retry headroom under the
     // operator-grade policy ceiling.
-    let admission_overhead_cents = (policy.max_cost_per_task() as i64)
-        .saturating_mul(task_count as i64);
+    let admission_overhead_cents =
+        (policy.max_cost_per_task() as i64).saturating_mul(task_count as i64);
     total_cents = total_cents.saturating_add(admission_overhead_cents);
 
     let breakdown_value = json!({
@@ -311,11 +328,13 @@ pub async fn handle_estimate_cost(
     });
 
     let breakdown_json = match serde_json::to_string(&breakdown_value) {
-        Ok(s)  => s,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_ESTIMATE_COST".into(),
-            detail: format!("serialize breakdown: {e}"),
-        },
+        Ok(s) => s,
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_ESTIMATE_COST".into(),
+                detail: format!("serialize breakdown: {e}"),
+            }
+        }
     };
 
     OperatorResponse::CostEstimated {
@@ -363,60 +382,71 @@ fn micro_dollars_to_cents(micro: u128) -> u128 {
 /// Operators get fast structured feedback without paying for the
 /// admission lock.
 pub async fn handle_dry_run_admit(
-    plan_toml:    String,
+    plan_toml: String,
     _plan_sig_hex: String,
     submitted_by: String,
-    ctx:          &HandlerContext,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
     let policy = ctx.policy.load_full();
 
     let parsed: toml::Value = match toml::from_str(&plan_toml) {
-        Ok(v)  => v,
-        Err(e) => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
-            detail: format!("plan_toml parse: {e}"),
-        },
+        Ok(v) => v,
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
+                detail: format!("plan_toml parse: {e}"),
+            }
+        }
     };
 
     // Required sections.
     let workspace = match parsed.get("workspace").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
-            detail: "missing required [workspace] section".into(),
-        },
+        None => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
+                detail: "missing required [workspace] section".into(),
+            }
+        }
     };
     let tasks_arr = match parsed.get("tasks").and_then(|v| v.as_array()) {
         Some(a) => a,
-        None => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
-            detail: "missing required [[tasks]] section".into(),
-        },
+        None => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
+                detail: "missing required [[tasks]] section".into(),
+            }
+        }
     };
 
     // [workspace] lane_id required.
     let lane_id = match workspace.get("lane_id").and_then(|v| v.as_str()) {
         Some(s) if !s.is_empty() => s,
-        _ => return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
-            detail: "[workspace] lane_id is required and must be non-empty".into(),
-        },
+        _ => {
+            return OperatorResponse::Error {
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
+                detail: "[workspace] lane_id is required and must be non-empty".into(),
+            }
+        }
     };
 
     // DAG cohesion checks.
-    let mut seen: std::collections::HashMap<&str, usize> = std::collections::HashMap::with_capacity(tasks_arr.len());
+    let mut seen: std::collections::HashMap<&str, usize> =
+        std::collections::HashMap::with_capacity(tasks_arr.len());
     let mut task_ids: Vec<&str> = Vec::with_capacity(tasks_arr.len());
     for (i, entry) in tasks_arr.iter().enumerate() {
         let task_id = match entry.get("task_id").and_then(|v| v.as_str()) {
             Some(s) if !s.is_empty() => s,
-            _ => return OperatorResponse::Error {
-                code:   "FAIL_PLAN_PARSE_ERROR".into(),
-                detail: format!("tasks[{i}] missing task_id"),
-            },
+            _ => {
+                return OperatorResponse::Error {
+                    code: "FAIL_PLAN_PARSE_ERROR".into(),
+                    detail: format!("tasks[{i}] missing task_id"),
+                }
+            }
         };
         if let Some(prev) = seen.insert(task_id, i) {
             return OperatorResponse::Error {
-                code:   "FAIL_PLAN_PARSE_ERROR".into(),
+                code: "FAIL_PLAN_PARSE_ERROR".into(),
                 detail: format!(
                     "duplicate task_id `{task_id}` declared at tasks[{prev}] and tasks[{i}]"
                 ),
@@ -426,7 +456,10 @@ pub async fn handle_dry_run_admit(
     }
     let known: std::collections::HashSet<&str> = seen.keys().copied().collect();
     for entry in tasks_arr {
-        let task_id = entry.get("task_id").and_then(|v| v.as_str()).unwrap_or("<unnamed>");
+        let task_id = entry
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>");
         let preds: Vec<&str> = entry
             .get("predecessors")
             .and_then(|v| v.as_array())
@@ -435,7 +468,7 @@ pub async fn handle_dry_run_admit(
         for p in &preds {
             if *p == task_id {
                 return OperatorResponse::Error {
-                    code:   "FAIL_PLAN_PARSE_ERROR".into(),
+                    code: "FAIL_PLAN_PARSE_ERROR".into(),
                     detail: format!("task `{task_id}` lists itself in `predecessors`"),
                 };
             }
@@ -453,13 +486,14 @@ pub async fn handle_dry_run_admit(
     // Acyclic check via DFS.
     if let Err(cycle) = check_dag_acyclic(tasks_arr) {
         return OperatorResponse::Error {
-            code:   "FAIL_PLAN_PARSE_ERROR".into(),
+            code: "FAIL_PLAN_PARSE_ERROR".into(),
             detail: format!("plan DAG has a cycle: {cycle}"),
         };
     }
 
     // Resolve target_ref (V2_GAPS.md §12.8 / §12.9).
-    let plan_target_ref = parsed.get("workspace")
+    let plan_target_ref = parsed
+        .get("workspace")
         .and_then(|v| v.get("target_ref"))
         .and_then(|v| v.as_str())
         .map(str::to_owned);
@@ -468,7 +502,7 @@ pub async fn handle_dry_run_admit(
     let resolved_target_ref = match (plan_target_ref.as_deref(), policy_locked) {
         (Some(plan_ref), true) if plan_ref != policy_default_ref => {
             return OperatorResponse::Error {
-                code:   "FAIL_POLICY_LOCKED_FIELD".into(),
+                code: "FAIL_POLICY_LOCKED_FIELD".into(),
                 detail: format!(
                     "[git] target_ref_locked = true; plan attempted target_ref = '{plan_ref}' \
                      but policy pinned '{policy_default_ref}'"
@@ -485,9 +519,8 @@ pub async fn handle_dry_run_admit(
     let task_count = tasks_arr.len();
     let policy_max_cost_per_task = policy.max_cost_per_task();
     if task_count == 0 {
-        warnings.push(
-            "[[tasks]] is empty — submission will create an initiative with no work".into()
-        );
+        warnings
+            .push("[[tasks]] is empty — submission will create an initiative with no work".into());
     }
     let host_cap = policy.host_capacity().max_concurrent_vms as u64;
     if (task_count as u64) > host_cap {
@@ -497,8 +530,13 @@ pub async fn handle_dry_run_admit(
         ));
     }
     if let Some(token_policy) = parsed.get("token_policy").and_then(|v| v.as_table()) {
-        if let Some(total) = token_policy.get("max_tokens_total").and_then(|v| v.as_integer()) {
-            if (total as u64) > policy_max_cost_per_task * 200 /* heuristic */ {
+        if let Some(total) = token_policy
+            .get("max_tokens_total")
+            .and_then(|v| v.as_integer())
+        {
+            if (total as u64) > policy_max_cost_per_task * 200
+            /* heuristic */
+            {
                 warnings.push(format!(
                     "[token_policy] max_tokens_total = {total} may exceed the policy cost cap"
                 ));
@@ -518,13 +556,13 @@ pub async fn handle_dry_run_admit(
     // write side-effect of this handler.
     if let Err(e) = ctx.audit.emit(
         AuditEventKind::DryRunAdmitted {
-            submitted_by:        submitted_by.clone(),
-            policy_epoch:        policy.epoch(),
-            plan_sha256:         raxis_crypto::token::sha256_hex(plan_toml.as_bytes()),
-            target_ref:          resolved_target_ref.clone(),
-            warnings_count:      warnings.len() as u32,
-            lane_id:             lane_id.to_owned(),
-            task_count:          task_count as u32,
+            submitted_by: submitted_by.clone(),
+            policy_epoch: policy.epoch(),
+            plan_sha256: raxis_crypto::token::sha256_hex(plan_toml.as_bytes()),
+            target_ref: resolved_target_ref.clone(),
+            warnings_count: warnings.len() as u32,
+            lane_id: lane_id.to_owned(),
+            task_count: task_count as u32,
         },
         None,
         None,
@@ -545,7 +583,10 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
     // Build adjacency list keyed by task_id.
     let mut adj: std::collections::HashMap<&str, Vec<&str>> = std::collections::HashMap::new();
     for entry in tasks {
-        let task_id = entry.get("task_id").and_then(|v| v.as_str()).unwrap_or("<unnamed>");
+        let task_id = entry
+            .get("task_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or("<unnamed>");
         let preds: Vec<&str> = entry
             .get("predecessors")
             .and_then(|v| v.as_array())
@@ -556,10 +597,10 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
 
     /// Three-colour DFS: 0 = unvisited, 1 = on stack, 2 = done.
     fn dfs<'a>(
-        node:  &'a str,
-        adj:   &'a std::collections::HashMap<&'a str, Vec<&'a str>>,
+        node: &'a str,
+        adj: &'a std::collections::HashMap<&'a str, Vec<&'a str>>,
         state: &mut std::collections::HashMap<&'a str, u8>,
-        path:  &mut Vec<&'a str>,
+        path: &mut Vec<&'a str>,
     ) -> Result<(), String> {
         state.insert(node, 1);
         path.push(node);
@@ -567,8 +608,11 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
             for p in preds {
                 match state.get(p).copied().unwrap_or(0) {
                     1 => {
-                        let cycle: Vec<&str> = path.iter().copied()
-                            .skip_while(|n| n != p).chain(std::iter::once(*p))
+                        let cycle: Vec<&str> = path
+                            .iter()
+                            .copied()
+                            .skip_while(|n| n != p)
+                            .chain(std::iter::once(*p))
                             .collect();
                         return Err(cycle.join(" → "));
                     }
@@ -633,34 +677,40 @@ fn check_dag_acyclic(tasks: &[toml::Value]) -> Result<(), String> {
 /// the stream over to [`stream_subscribe_initiative`].
 pub async fn validate_subscribe_admission(
     initiative_id: String,
-    ctx:           &HandlerContext,
+    ctx: &HandlerContext,
 ) -> Result<OperatorResponse, OperatorResponse> {
     let data_dir = ctx.data_dir.clone();
     let id_for_blk = initiative_id.clone();
 
     let join = tokio::task::spawn_blocking(
         move || -> Result<Option<raxis_store::views::initiatives::InitiativeRow>, String> {
-            let ro = raxis_store::ro::open(&data_dir)
-                .map_err(|e| format!("ro open: {e}"))?;
+            let ro = raxis_store::ro::open(&data_dir).map_err(|e| format!("ro open: {e}"))?;
             raxis_store::views::initiatives::by_id(&ro, &id_for_blk)
                 .map_err(|e| format!("by_id: {e}"))
         },
-    ).await;
+    )
+    .await;
 
     let row = match join {
         Ok(Ok(Some(r))) => r,
-        Ok(Ok(None))    => return Err(OperatorResponse::Error {
-            code:   "FAIL_INITIATIVE_NOT_FOUND".into(),
-            detail: format!("initiative '{initiative_id}' does not exist"),
-        }),
-        Ok(Err(e)) => return Err(OperatorResponse::Error {
-            code:   "FAIL_SUBSCRIBE_INITIATIVE".into(),
-            detail: e,
-        }),
-        Err(e) => return Err(OperatorResponse::Error {
-            code:   "FAIL_SUBSCRIBE_INITIATIVE".into(),
-            detail: format!("subscribe spawn_blocking join failed: {e}"),
-        }),
+        Ok(Ok(None)) => {
+            return Err(OperatorResponse::Error {
+                code: "FAIL_INITIATIVE_NOT_FOUND".into(),
+                detail: format!("initiative '{initiative_id}' does not exist"),
+            })
+        }
+        Ok(Err(e)) => {
+            return Err(OperatorResponse::Error {
+                code: "FAIL_SUBSCRIBE_INITIATIVE".into(),
+                detail: e,
+            })
+        }
+        Err(e) => {
+            return Err(OperatorResponse::Error {
+                code: "FAIL_SUBSCRIBE_INITIATIVE".into(),
+                detail: format!("subscribe spawn_blocking join failed: {e}"),
+            })
+        }
     };
 
     // Reject up-front if the initiative is already terminal —
@@ -704,7 +754,7 @@ pub async fn validate_subscribe_admission(
 /// is recorded.
 pub async fn handle_describe_initiative_pause(
     initiative_id: String,
-    ctx:           &HandlerContext,
+    ctx: &HandlerContext,
 ) -> OperatorResponse {
     let data_dir = ctx.data_dir.clone();
     let initiative_for_blk = initiative_id.clone();
@@ -714,23 +764,26 @@ pub async fn handle_describe_initiative_pause(
         // contend with the kernel's writer mutex. INV-OPERATOR-ERG-01
         // (read-only) holds trivially because the connection is
         // opened with `SQLITE_OPEN_READ_ONLY`.
-        let ro = raxis_store::ro::open(&data_dir)
-            .map_err(|e| format!("ro open: {e}"))?;
+        let ro = raxis_store::ro::open(&data_dir).map_err(|e| format!("ro open: {e}"))?;
 
         let initiative_row = raxis_store::views::initiatives::by_id(&ro, &initiative_for_blk)
             .map_err(|e| format!("by_id: {e}"))?;
 
         let quarantine_row = raxis_store::views::initiative_quarantines::get_by_initiative_id(
-            &ro, &initiative_for_blk,
-        ).map_err(|e| format!("quarantine: {e}"))?;
+            &ro,
+            &initiative_for_blk,
+        )
+        .map_err(|e| format!("quarantine: {e}"))?;
 
         // Pending escalations bound to this initiative.
         let escalations = raxis_store::views::escalations::list(
             &ro,
             raxis_store::views::escalations::EscalationStatusFilter::Pending,
             1024,
-        ).map_err(|e| format!("escalations: {e}"))?;
-        let outstanding: Vec<String> = escalations.into_iter()
+        )
+        .map_err(|e| format!("escalations: {e}"))?;
+        let outstanding: Vec<String> = escalations
+            .into_iter()
             .filter(|e| e.initiative_id == initiative_for_blk)
             .map(|e| e.escalation_id)
             .collect();
@@ -740,41 +793,48 @@ pub async fn handle_describe_initiative_pause(
             quarantine_row,
             outstanding_escalations: outstanding,
         })
-    }).await;
+    })
+    .await;
 
     let outcome = match join {
-        Ok(Ok(v))  => v,
-        Ok(Err(e)) => return OperatorResponse::Error {
-            code:   "FAIL_DESCRIBE_INITIATIVE_PAUSE".into(),
-            detail: e,
-        },
-        Err(e)     => return OperatorResponse::Error {
-            code:   "FAIL_DESCRIBE_INITIATIVE_PAUSE".into(),
-            detail: format!("describe spawn_blocking join failed: {e}"),
-        },
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code: "FAIL_DESCRIBE_INITIATIVE_PAUSE".into(),
+                detail: e,
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_DESCRIBE_INITIATIVE_PAUSE".into(),
+                detail: format!("describe spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
-    let DescribeOutcome { initiative_row, quarantine_row, outstanding_escalations } = outcome;
+    let DescribeOutcome {
+        initiative_row,
+        quarantine_row,
+        outstanding_escalations,
+    } = outcome;
 
     let row = match initiative_row {
         Some(r) => r,
-        None => return OperatorResponse::Error {
-            code:   "FAIL_INITIATIVE_NOT_FOUND".into(),
-            detail: format!("initiative '{initiative_id}' does not exist"),
-        },
+        None => {
+            return OperatorResponse::Error {
+                code: "FAIL_INITIATIVE_NOT_FOUND".into(),
+                detail: format!("initiative '{initiative_id}' does not exist"),
+            }
+        }
     };
 
     let is_paused_by_quarantine = quarantine_row.is_some();
-    let is_paused_by_state = matches!(
-        row.state.as_str(),
-        "Blocked" | "Failed" | "Aborted",
-    );
+    let is_paused_by_state = matches!(row.state.as_str(), "Blocked" | "Failed" | "Aborted",);
     let is_paused_by_escalations = !outstanding_escalations.is_empty();
-    let is_paused = is_paused_by_quarantine
-        || is_paused_by_state
-        || is_paused_by_escalations;
+    let is_paused = is_paused_by_quarantine || is_paused_by_state || is_paused_by_escalations;
 
-    let paused_at: Option<i64> = quarantine_row.map(|q| q.quarantined_at)
+    let paused_at: Option<i64> = quarantine_row
+        .map(|q| q.quarantined_at)
         .or_else(|| row.completed_at.map(|v| v as i64));
 
     OperatorResponse::InitiativePauseDescribed {
@@ -786,8 +846,8 @@ pub async fn handle_describe_initiative_pause(
 }
 
 struct DescribeOutcome {
-    initiative_row:          Option<raxis_store::views::initiatives::InitiativeRow>,
-    quarantine_row:          Option<raxis_store::views::initiative_quarantines::InitiativeQuarantineRow>,
+    initiative_row: Option<raxis_store::views::initiatives::InitiativeRow>,
+    quarantine_row: Option<raxis_store::views::initiative_quarantines::InitiativeQuarantineRow>,
     outstanding_escalations: Vec<String>,
 }
 
@@ -806,10 +866,7 @@ struct DescribeOutcome {
 /// is reported as a successful `TaskOutputsListed { outputs: [] }`
 /// rather than as a failure — the caller's read intent is
 /// satisfied either way.
-pub async fn handle_list_task_outputs(
-    task_id: String,
-    ctx:     &HandlerContext,
-) -> OperatorResponse {
+pub async fn handle_list_task_outputs(task_id: String, ctx: &HandlerContext) -> OperatorResponse {
     let data_dir = ctx.data_dir.clone();
     let task_for_blk = task_id.clone();
 
@@ -818,37 +875,42 @@ pub async fn handle_list_task_outputs(
             // INV-OPERATOR-ERG-01: short-lived read-only connection
             // (`SQLITE_OPEN_READ_ONLY`) — write attempts are a type
             // error against `RoConn`.
-            let ro = raxis_store::ro::open(&data_dir)
-                .map_err(|e| format!("ro open: {e}"))?;
+            let ro = raxis_store::ro::open(&data_dir).map_err(|e| format!("ro open: {e}"))?;
             raxis_store::views::structured_outputs::list_for_task(&ro, &task_for_blk)
                 .map_err(|e| format!("list_for_task: {e}"))
         },
-    ).await;
+    )
+    .await;
 
     let rows = match join {
-        Ok(Ok(v))  => v,
-        Ok(Err(e)) => return OperatorResponse::Error {
-            code:   "FAIL_LIST_TASK_OUTPUTS".into(),
-            detail: e,
-        },
-        Err(e)     => return OperatorResponse::Error {
-            code:   "FAIL_LIST_TASK_OUTPUTS".into(),
-            detail: format!("list_task_outputs spawn_blocking join failed: {e}"),
-        },
+        Ok(Ok(v)) => v,
+        Ok(Err(e)) => {
+            return OperatorResponse::Error {
+                code: "FAIL_LIST_TASK_OUTPUTS".into(),
+                detail: e,
+            }
+        }
+        Err(e) => {
+            return OperatorResponse::Error {
+                code: "FAIL_LIST_TASK_OUTPUTS".into(),
+                detail: format!("list_task_outputs spawn_blocking join failed: {e}"),
+            }
+        }
     };
 
-    let outputs = rows.into_iter()
+    let outputs = rows
+        .into_iter()
         .map(|r| raxis_types::operator_wire::TaskOutputWire {
-            output_id:     r.output_id,
+            output_id: r.output_id,
             initiative_id: r.initiative_id,
             // V2 Migration 18 — `Option<String>`. Orchestrator-emitted
             // outputs land with `task_id IS NULL`; pass through as-is.
-            task_id:       r.task_id,
-            session_id:    r.session_id,
-            kind:          r.kind,
-            severity:      r.severity,
-            payload_json:  r.payload_json,
-            emitted_at:    r.emitted_at,
+            task_id: r.task_id,
+            session_id: r.session_id,
+            kind: r.kind,
+            severity: r.severity,
+            payload_json: r.payload_json,
+            emitted_at: r.emitted_at,
         })
         .collect();
 
@@ -884,9 +946,9 @@ pub async fn handle_list_task_outputs(
 /// do not loop back to read another request because the operator
 /// CLI keeps the watch open until interrupted.
 pub async fn stream_subscribe_initiative<S>(
-    stream:        &mut S,
+    stream: &mut S,
     initiative_id: String,
-    ctx:           &HandlerContext,
+    ctx: &HandlerContext,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>>
 where
     S: tokio::io::AsyncWrite + tokio::io::AsyncRead + std::marker::Unpin + Send,
@@ -992,8 +1054,8 @@ mod stream_tests {
         use raxis_test_support::FakeAuditSink;
 
         let tmp = tempfile::tempdir().expect("tempdir");
-        let store = Arc::new(raxis_store::Store::open(&tmp.path().join("kernel.db"))
-            .expect("Store::open"));
+        let store =
+            Arc::new(raxis_store::Store::open(&tmp.path().join("kernel.db")).expect("Store::open"));
         let sink = Arc::new(FakeAuditSink::new());
         let credentials = cx::build_default_test_credentials(tmp.path(), sink.clone());
         let isolation = cx::build_fail_closed_test_isolation();
@@ -1041,48 +1103,71 @@ mod stream_tests {
         assert_eq!(ack["payload"]["initiative_id"], "init-1");
 
         // 2. Publish two events the operator should see verbatim.
-        bus.publish("init-1", InitiativeEvent::TaskStateChanged {
-            task_id: "t-1".into(),
-            from_state: Some("Admitted".into()),
-            to_state: "Running".into(),
-            transitioned_at: 100,
-        });
-        bus.publish("init-1", InitiativeEvent::ReviewAggregationCompleted {
-            task_id: "t-1".into(),
-            all_passed: true,
-        });
+        bus.publish(
+            "init-1",
+            InitiativeEvent::TaskStateChanged {
+                task_id: "t-1".into(),
+                from_state: Some("Admitted".into()),
+                to_state: "Running".into(),
+                transitioned_at: 100,
+            },
+        );
+        bus.publish(
+            "init-1",
+            InitiativeEvent::ReviewAggregationCompleted {
+                task_id: "t-1".into(),
+                all_passed: true,
+            },
+        );
 
         let e1: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
-        assert_eq!(e1, InitiativeEvent::TaskStateChanged {
-            task_id: "t-1".into(),
-            from_state: Some("Admitted".into()),
-            to_state: "Running".into(),
-            transitioned_at: 100,
-        });
+        assert_eq!(
+            e1,
+            InitiativeEvent::TaskStateChanged {
+                task_id: "t-1".into(),
+                from_state: Some("Admitted".into()),
+                to_state: "Running".into(),
+                transitioned_at: 100,
+            }
+        );
 
         let e2: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
-        assert_eq!(e2, InitiativeEvent::ReviewAggregationCompleted {
-            task_id: "t-1".into(),
-            all_passed: true,
-        });
+        assert_eq!(
+            e2,
+            InitiativeEvent::ReviewAggregationCompleted {
+                task_id: "t-1".into(),
+                all_passed: true,
+            }
+        );
 
         // 3. Publish a terminal initiative transition. The runner
         //    must write the event THEN a Closed frame, then exit.
-        bus.publish("init-1", InitiativeEvent::InitiativeStateChanged {
-            from_state: Some("Executing".into()),
-            to_state: "Completed".into(),
-            transitioned_at: 200,
-        });
+        bus.publish(
+            "init-1",
+            InitiativeEvent::InitiativeStateChanged {
+                from_state: Some("Executing".into()),
+                to_state: "Completed".into(),
+                transitioned_at: 200,
+            },
+        );
 
         let e3: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
-        assert_eq!(e3, InitiativeEvent::InitiativeStateChanged {
-            from_state: Some("Executing".into()),
-            to_state: "Completed".into(),
-            transitioned_at: 200,
-        });
+        assert_eq!(
+            e3,
+            InitiativeEvent::InitiativeStateChanged {
+                from_state: Some("Executing".into()),
+                to_state: "Completed".into(),
+                transitioned_at: 200,
+            }
+        );
 
         let e4: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
-        assert_eq!(e4, InitiativeEvent::Closed { reason: ClosedReason::InitiativeTerminal });
+        assert_eq!(
+            e4,
+            InitiativeEvent::Closed {
+                reason: ClosedReason::InitiativeTerminal
+            }
+        );
 
         runner.await.unwrap().expect("runner exits cleanly");
     }
@@ -1113,17 +1198,23 @@ mod stream_tests {
         // owns it. Instead we publish a terminal event, which is
         // a cleaner exit path the production kernel always takes
         // before shutdown anyway.
-        ctx.initiative_bus.publish("init-1", InitiativeEvent::InitiativeStateChanged {
-            from_state: None,
-            to_state: "Aborted".into(),
-            transitioned_at: 0,
-        });
+        ctx.initiative_bus.publish(
+            "init-1",
+            InitiativeEvent::InitiativeStateChanged {
+                from_state: None,
+                to_state: "Aborted".into(),
+                transitioned_at: 0,
+            },
+        );
 
         let _evt: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
         let closed: InitiativeEvent = read_json_frame_async(&mut client).await.unwrap();
-        assert_eq!(closed, InitiativeEvent::Closed {
-            reason: ClosedReason::InitiativeTerminal,
-        });
+        assert_eq!(
+            closed,
+            InitiativeEvent::Closed {
+                reason: ClosedReason::InitiativeTerminal,
+            }
+        );
 
         runner.await.unwrap().expect("runner exits cleanly");
     }

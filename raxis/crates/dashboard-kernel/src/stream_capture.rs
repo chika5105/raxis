@@ -134,12 +134,11 @@ impl SessionStreamCapture {
     /// never produced output) — never an error.
     pub fn tail(&self, session_id: &str, n: usize) -> Vec<StreamEvent> {
         let path = self.session_path(session_id);
-        let Ok(file) = File::open(&path) else { return Vec::new() };
+        let Ok(file) = File::open(&path) else {
+            return Vec::new();
+        };
         let reader = BufReader::new(file);
-        let mut lines: Vec<String> = reader
-            .lines()
-            .map_while(Result::ok)
-            .collect();
+        let mut lines: Vec<String> = reader.lines().map_while(Result::ok).collect();
         if lines.len() > n {
             let cut = lines.len() - n;
             lines.drain(0..cut);
@@ -321,7 +320,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         // Tiny ring so compaction triggers after a handful of
         // appends.
-        let cfg = CaptureConfig { max_file_bytes: 256, broadcast_capacity: 16 };
+        let cfg = CaptureConfig {
+            max_file_bytes: 256,
+            broadcast_capacity: 16,
+        };
         let cap = SessionStreamCapture::new(tmp.path(), cfg).unwrap();
         for i in 0..50 {
             cap.append("sess-4", evt("x", i)).unwrap();

@@ -30,8 +30,7 @@ use async_trait::async_trait;
 use sha2::{Digest, Sha256};
 
 use crate::{
-    CacheLayout, ImageResolver, ImageResolverError, OciDigest, RegistryRef,
-    ResolvedImage,
+    CacheLayout, ImageResolver, ImageResolverError, OciDigest, RegistryRef, ResolvedImage,
 };
 
 /// Test-friendly / offline-friendly resolver. See module docs.
@@ -44,26 +43,30 @@ impl PrePopulatedResolver {
     /// Construct rooted at `cache_root` (in production this is
     /// `$RAXIS_DATA_DIR/oci-cache/`).
     pub fn new(cache_root: impl Into<PathBuf>) -> Self {
-        Self { layout: CacheLayout::new(cache_root) }
+        Self {
+            layout: CacheLayout::new(cache_root),
+        }
     }
 
     /// Borrow the layout the resolver is operating against. Tests
     /// use this to address the on-disk paths directly when staging
     /// fixtures.
-    pub fn layout(&self) -> &CacheLayout { &self.layout }
+    pub fn layout(&self) -> &CacheLayout {
+        &self.layout
+    }
 }
 
 #[async_trait]
 impl ImageResolver for PrePopulatedResolver {
     async fn resolve(
         &self,
-        oci_digest:     &OciDigest,
+        oci_digest: &OciDigest,
         _registry_hint: Option<&RegistryRef>,
     ) -> Result<ResolvedImage, ImageResolverError> {
         let rootfs = self.layout.rootfs_image_path(oci_digest);
         if !rootfs.exists() {
             return Err(ImageResolverError::RegistryUnreachable {
-                host:   "<pre-populated-only>".to_owned(),
+                host: "<pre-populated-only>".to_owned(),
                 detail: format!(
                     "PrePopulatedResolver does not pull from a registry; \
                      rootfs.img missing at {}",
@@ -82,14 +85,14 @@ impl ImageResolver for PrePopulatedResolver {
             return Err(ImageResolverError::DigestMismatch {
                 expected: *oci_digest,
                 actual,
-                path:     rootfs,
+                path: rootfs,
             });
         }
 
         Ok(ResolvedImage {
             rootfs_image_path: rootfs,
-            oci_config_path:   self.layout.oci_config_path(oci_digest),
-            verified_digest:   *oci_digest,
+            oci_config_path: self.layout.oci_config_path(oci_digest),
+            verified_digest: *oci_digest,
         })
     }
 
@@ -107,24 +110,30 @@ impl ImageResolver for PrePopulatedResolver {
 
         for shard_entry in read_dir_or_empty(&images_root)? {
             let shard = shard_entry.map_err(|source| ImageResolverError::Io {
-                path:   images_root.clone(),
+                path: images_root.clone(),
                 source,
             })?;
             for digest_entry in read_dir_or_empty(&shard.path())? {
                 let digest_dir = digest_entry.map_err(|source| ImageResolverError::Io {
-                    path:   shard.path(),
+                    path: shard.path(),
                     source,
                 })?;
-                let Some(name) = digest_dir.file_name().to_str().map(str::to_owned) else { continue };
-                let canonical  = format!("sha256:{name}");
-                let Ok(digest) = canonical.parse::<OciDigest>() else { continue };
+                let Some(name) = digest_dir.file_name().to_str().map(str::to_owned) else {
+                    continue;
+                };
+                let canonical = format!("sha256:{name}");
+                let Ok(digest) = canonical.parse::<OciDigest>() else {
+                    continue;
+                };
                 if live_digests.contains(&digest) {
                     continue;
                 }
                 bytes_freed += dir_size(&digest_dir.path())?;
-                fs::remove_dir_all(&digest_dir.path()).map_err(|source| ImageResolverError::Io {
-                    path:   digest_dir.path(),
-                    source,
+                fs::remove_dir_all(&digest_dir.path()).map_err(|source| {
+                    ImageResolverError::Io {
+                        path: digest_dir.path(),
+                        source,
+                    }
                 })?;
             }
         }
@@ -142,12 +151,14 @@ fn compute_image_sha256(path: &std::path::Path) -> Result<OciDigest, ImageResolv
         source,
     })?;
     let mut hasher = Sha256::new();
-    let mut buf    = [0u8; 64 * 1024];
+    let mut buf = [0u8; 64 * 1024];
     loop {
-        let n = file.read(&mut buf).map_err(|source| ImageResolverError::Io {
-            path: path.to_path_buf(),
-            source,
-        })?;
+        let n = file
+            .read(&mut buf)
+            .map_err(|source| ImageResolverError::Io {
+                path: path.to_path_buf(),
+                source,
+            })?;
         if n == 0 {
             break;
         }
@@ -168,12 +179,12 @@ fn read_dir_or_empty(p: &std::path::Path) -> Result<fs::ReadDir, ImageResolverEr
 fn dir_size(p: &std::path::Path) -> Result<u64, ImageResolverError> {
     let mut total = 0u64;
     for entry in read_dir_or_empty(p)? {
-        let entry  = entry.map_err(|source| ImageResolverError::Io {
-            path:   p.to_path_buf(),
+        let entry = entry.map_err(|source| ImageResolverError::Io {
+            path: p.to_path_buf(),
             source,
         })?;
-        let meta   = entry.metadata().map_err(|source| ImageResolverError::Io {
-            path:   entry.path(),
+        let meta = entry.metadata().map_err(|source| ImageResolverError::Io {
+            path: entry.path(),
             source,
         })?;
         if meta.is_file() {
@@ -215,10 +226,10 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_returns_paths_for_pre_staged_digest() {
-        let tmp      = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let resolver = PrePopulatedResolver::new(tmp.path());
 
-        let bytes  = b"deterministic-image-bytes" as &[u8];
+        let bytes = b"deterministic-image-bytes" as &[u8];
         let digest = sha256_of(bytes);
         stage(resolver.layout(), &digest, bytes);
 
@@ -236,12 +247,13 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_returns_registry_unreachable_on_cache_miss() {
-        let tmp      = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let resolver = PrePopulatedResolver::new(tmp.path());
 
         let digest: OciDigest =
             "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-                .parse().unwrap();
+                .parse()
+                .unwrap();
         let err = resolver.resolve(&digest, None).await.unwrap_err();
         match err {
             ImageResolverError::RegistryUnreachable { host, .. } => {
@@ -253,25 +265,32 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_returns_digest_mismatch_when_bytes_disagree() {
-        let tmp      = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let resolver = PrePopulatedResolver::new(tmp.path());
 
         // Stage `rootfs.img` under digest A but with bytes that hash to digest B.
         let real_bytes = b"actual-bytes" as &[u8];
-        let claimed:  OciDigest =
+        let claimed: OciDigest =
             "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-                .parse().unwrap();
+                .parse()
+                .unwrap();
         let actual = sha256_of(real_bytes);
-        assert_ne!(claimed, actual,
-            "fixture sanity: claimed and actual must differ");
+        assert_ne!(
+            claimed, actual,
+            "fixture sanity: claimed and actual must differ"
+        );
 
         stage(resolver.layout(), &claimed, real_bytes);
 
         let err = resolver.resolve(&claimed, None).await.unwrap_err();
         match err {
-            ImageResolverError::DigestMismatch { expected, actual: got, path: _ } => {
+            ImageResolverError::DigestMismatch {
+                expected,
+                actual: got,
+                path: _,
+            } => {
                 assert_eq!(expected, claimed);
-                assert_eq!(got,      actual);
+                assert_eq!(got, actual);
             }
             other => panic!("unexpected error: {other:?}"),
         }
@@ -279,22 +298,24 @@ mod tests {
 
     #[tokio::test]
     async fn prune_unreferenced_removes_dead_digests_only() {
-        let tmp      = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let resolver = PrePopulatedResolver::new(tmp.path());
 
         let alive_bytes = b"alive" as &[u8];
-        let dead_bytes  = b"dead"  as &[u8];
-        let alive       = sha256_of(alive_bytes);
-        let dead        = sha256_of(dead_bytes);
+        let dead_bytes = b"dead" as &[u8];
+        let alive = sha256_of(alive_bytes);
+        let dead = sha256_of(dead_bytes);
         stage(resolver.layout(), &alive, alive_bytes);
-        stage(resolver.layout(), &dead,  dead_bytes);
+        stage(resolver.layout(), &dead, dead_bytes);
 
         let mut live = HashSet::new();
         live.insert(alive);
 
         let freed = resolver.prune_unreferenced(&live).unwrap();
-        assert!(freed > 0,
-            "prune should report some bytes freed for the dead digest");
+        assert!(
+            freed > 0,
+            "prune should report some bytes freed for the dead digest"
+        );
 
         // `alive` survives.
         assert!(resolver.layout().rootfs_image_path(&alive).exists());
@@ -304,9 +325,9 @@ mod tests {
 
     #[tokio::test]
     async fn prune_unreferenced_is_idempotent() {
-        let tmp      = TempDir::new().unwrap();
+        let tmp = TempDir::new().unwrap();
         let resolver = PrePopulatedResolver::new(tmp.path());
-        let live     = HashSet::new();
+        let live = HashSet::new();
 
         // Empty cache: first call is a no-op (returns 0).
         let freed = resolver.prune_unreferenced(&live).unwrap();
@@ -322,8 +343,8 @@ mod tests {
         // Construct a resolver pointing at a path that doesn't
         // exist. prune must not panic; it must return 0.
         let resolver = PrePopulatedResolver::new("/tmp/raxis-image-cache-does-not-exist-xyz");
-        let live     = HashSet::new();
-        let freed    = resolver.prune_unreferenced(&live).unwrap();
+        let live = HashSet::new();
+        let freed = resolver.prune_unreferenced(&live).unwrap();
         assert_eq!(freed, 0);
     }
 }

@@ -22,9 +22,9 @@
 
 use std::fs::{self, File};
 use std::io::{BufRead, BufReader, Seek, SeekFrom};
-use std::path::PathBuf;
 #[cfg(test)]
 use std::path::Path;
+use std::path::PathBuf;
 
 use raxis_observability::protocol::Frame;
 
@@ -60,7 +60,9 @@ impl Reader {
     }
 
     /// True iff a segment file is currently open.
-    pub fn segment_open(&self) -> bool { self.handle.is_some() }
+    pub fn segment_open(&self) -> bool {
+        self.handle.is_some()
+    }
 
     /// Currently-open segment file name, or `""` when none open.
     pub fn current_segment(&self) -> &str {
@@ -72,7 +74,7 @@ impl Reader {
     pub fn entry(&self) -> Option<CursorEntry> {
         self.handle.as_ref().map(|h| CursorEntry {
             segment: h.name.clone(),
-            offset:  h.offset,
+            offset: h.offset,
         })
     }
 
@@ -93,7 +95,10 @@ impl Reader {
         let name = if entry.segment.is_empty() {
             match self.lowest_segment()? {
                 Some(s) => s,
-                None    => { self.handle = None; return Ok(()); }
+                None => {
+                    self.handle = None;
+                    return Ok(());
+                }
             }
         } else {
             entry.segment.clone()
@@ -104,7 +109,10 @@ impl Reader {
             // catching the EOF. Advance to whatever's lowest now.
             return match self.lowest_segment()? {
                 Some(s) => self.open_named(&s, 0),
-                None    => { self.handle = None; Ok(()) }
+                None => {
+                    self.handle = None;
+                    Ok(())
+                }
             };
         }
         self.open_named(&name, entry.offset)
@@ -119,10 +127,11 @@ impl Reader {
         };
         let mut buf = String::new();
         let pre = handle.offset;
-        let n = handle.inner
+        let n = handle
+            .inner
             .read_line(&mut buf)
             .map_err(|e| ReaderError::Io {
-                path:   handle.name.clone(),
+                path: handle.name.clone(),
                 source: e,
             })?;
         if n == 0 {
@@ -136,26 +145,33 @@ impl Reader {
             // the underlying file and the buffered position so the
             // next read sees the partial line as a fresh start.
             let target = pre;
-            handle.inner.get_mut()
+            handle
+                .inner
+                .get_mut()
                 .seek(SeekFrom::Start(target))
                 .map_err(|e| ReaderError::Io {
-                    path:   handle.name.clone(),
+                    path: handle.name.clone(),
                     source: e,
                 })?;
             // Replace BufReader so its internal cache is reset.
-            let f = File::open(self.dir.join(&handle.name))
-                .map_err(|e| ReaderError::Io { path: handle.name.clone(), source: e })?;
+            let f = File::open(self.dir.join(&handle.name)).map_err(|e| ReaderError::Io {
+                path: handle.name.clone(),
+                source: e,
+            })?;
             let mut new_reader = BufReader::new(f);
             new_reader
                 .seek(SeekFrom::Start(target))
-                .map_err(|e| ReaderError::Io { path: handle.name.clone(), source: e })?;
+                .map_err(|e| ReaderError::Io {
+                    path: handle.name.clone(),
+                    source: e,
+                })?;
             handle.inner = new_reader;
             return Ok(None);
         }
         handle.offset = pre + n as u64;
         handle.frames_yielded += 1;
-        let frame: Frame = serde_json::from_str(buf.trim_end_matches('\n'))
-            .map_err(|e| ReaderError::Decode {
+        let frame: Frame =
+            serde_json::from_str(buf.trim_end_matches('\n')).map_err(|e| ReaderError::Decode {
                 path: handle.name.clone(),
                 source: e,
             })?;
@@ -180,7 +196,9 @@ impl Reader {
     /// `true` when a next segment was opened, `false` when we ran
     /// out of segments.
     pub fn advance_segment(&mut self) -> Result<bool, ReaderError> {
-        let Some(handle) = self.handle.take() else { return Ok(false); };
+        let Some(handle) = self.handle.take() else {
+            return Ok(false);
+        };
         let next = self.next_segment_after(&handle.name)?;
         if let Some(name) = next {
             self.open_named(&name, 0)?;
@@ -192,16 +210,21 @@ impl Reader {
 
     fn open_named(&mut self, name: &str, at_offset: u64) -> Result<(), ReaderError> {
         let path = self.dir.join(name);
-        let mut f = File::open(&path)
-            .map_err(|e| ReaderError::Io { path: name.to_owned(), source: e })?;
+        let mut f = File::open(&path).map_err(|e| ReaderError::Io {
+            path: name.to_owned(),
+            source: e,
+        })?;
         if at_offset > 0 {
             f.seek(SeekFrom::Start(at_offset))
-                .map_err(|e| ReaderError::Io { path: name.to_owned(), source: e })?;
+                .map_err(|e| ReaderError::Io {
+                    path: name.to_owned(),
+                    source: e,
+                })?;
         }
         self.handle = Some(OpenSegment {
-            name:           name.to_owned(),
-            inner:          BufReader::new(f),
-            offset:         at_offset,
+            name: name.to_owned(),
+            inner: BufReader::new(f),
+            offset: at_offset,
             frames_yielded: 0,
         });
         Ok(())
@@ -209,14 +232,12 @@ impl Reader {
 
     fn list_segments(&self) -> Result<Vec<String>, ReaderError> {
         let mut out = Vec::new();
-        for entry in fs::read_dir(&self.dir)
-            .map_err(|e| ReaderError::Io {
-                path:   self.dir.display().to_string(),
-                source: e,
-            })?
-        {
+        for entry in fs::read_dir(&self.dir).map_err(|e| ReaderError::Io {
+            path: self.dir.display().to_string(),
+            source: e,
+        })? {
             let entry = entry.map_err(|e| ReaderError::Io {
-                path:   self.dir.display().to_string(),
+                path: self.dir.display().to_string(),
                 source: e,
             })?;
             if !entry.file_type().map(|t| t.is_file()).unwrap_or(false) {
@@ -240,7 +261,8 @@ impl Reader {
     }
 
     fn next_segment_after(&self, current: &str) -> Result<Option<String>, ReaderError> {
-        Ok(self.list_segments()?
+        Ok(self
+            .list_segments()?
             .into_iter()
             .find(|n| n.as_str() > current))
     }
@@ -250,16 +272,17 @@ impl Reader {
     /// assert "the reader does not over-read into bytes the kernel
     /// hasn't flushed yet".
     pub fn current_size(&mut self) -> Result<u64, ReaderError> {
-        let Some(handle) = self.handle.as_mut() else { return Ok(0); };
-        let f = File::open(self.dir.join(&handle.name))
-            .map_err(|e| ReaderError::Io {
-                path:   handle.name.clone(),
-                source: e,
-            })?;
+        let Some(handle) = self.handle.as_mut() else {
+            return Ok(0);
+        };
+        let f = File::open(self.dir.join(&handle.name)).map_err(|e| ReaderError::Io {
+            path: handle.name.clone(),
+            source: e,
+        })?;
         let len = f
             .metadata()
             .map_err(|e| ReaderError::Io {
-                path:   handle.name.clone(),
+                path: handle.name.clone(),
                 source: e,
             })?
             .len();
@@ -274,7 +297,7 @@ impl Reader {
         for _ in 0..at_most {
             match self.next_frame()? {
                 Some(f) => out.push(f),
-                None    => break,
+                None => break,
             }
         }
         Ok(out)
@@ -290,18 +313,20 @@ pub enum ReaderError {
     #[error("io error reading segment {path}: {source}")]
     Io {
         /// Segment path or directory we were reading.
-        path:   String,
+        path: String,
         /// I/O source.
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     /// JSON decode error on a fully-flushed line. Indicates the
     /// kernel wrote a malformed frame; the pusher logs and skips.
     #[error("decode error in segment {path}: {source}")]
     Decode {
         /// Segment file name.
-        path:   String,
+        path: String,
         /// JSON source.
-        #[source] source: serde_json::Error,
+        #[source]
+        source: serde_json::Error,
     },
 }
 
@@ -310,8 +335,7 @@ mod tests {
     use super::*;
     use raxis_observability::protocol::{hex_span_id, hex_trace_id, Frame, SCHEMA_VERSION};
     use raxis_observability::types::{
-        AttrMap, MetricData, MetricName, MetricType, SpanData, SpanKind, SpanName, SpanStatus,
-        Unit,
+        AttrMap, MetricData, MetricName, MetricType, SpanData, SpanKind, SpanName, SpanStatus, Unit,
     };
     use raxis_observability::DataPoint;
     use std::io::Write;
@@ -329,37 +353,37 @@ mod tests {
     fn span_frame() -> Frame {
         let span = SpanData {
             trace_id: [1; 16],
-            span_id:  [2; 8],
+            span_id: [2; 8],
             parent_span_id: None,
-            name:     SpanName::IntentAdmission,
-            kind:     SpanKind::Internal,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 0,
-            end_unix_nanos:   1,
-            status:   SpanStatus::Ok,
+            end_unix_nanos: 1,
+            status: SpanStatus::Ok,
             status_message: None,
-            attrs:    AttrMap::new(),
-            events:   vec![],
+            attrs: AttrMap::new(),
+            events: vec![],
         };
         Frame::Span {
-            schema:         SCHEMA_VERSION,
+            schema: SCHEMA_VERSION,
             kernel_version: "0.1.0".into(),
-            trace_id:       hex_trace_id([1; 16]),
-            span_id:        hex_span_id([2; 8]),
+            trace_id: hex_trace_id([1; 16]),
+            span_id: hex_span_id([2; 8]),
             span,
         }
     }
 
     fn metric_frame() -> Frame {
         Frame::Metric {
-            schema:         SCHEMA_VERSION,
+            schema: SCHEMA_VERSION,
             kernel_version: "0.1.0".into(),
             metric: MetricData {
-                name:        MetricName::IntentAdmissionTotal,
+                name: MetricName::IntentAdmissionTotal,
                 metric_type: MetricType::Counter,
-                unit:        Unit::None,
-                labels:      AttrMap::new(),
-                datapoint:   DataPoint::Sum { value: 1.0 },
-                unix_nanos:  0,
+                unit: Unit::None,
+                labels: AttrMap::new(),
+                datapoint: DataPoint::Sum { value: 1.0 },
+                unix_nanos: 0,
             },
         }
     }
@@ -410,7 +434,7 @@ mod tests {
         let one_line_size = (m.len() + 1) as u64;
         let entry = CursorEntry {
             segment: "000001.jsonl".into(),
-            offset:  one_line_size,
+            offset: one_line_size,
         };
         r.open_from_cursor(&entry).unwrap();
         let rest = r.drain_up_to(10).unwrap();
@@ -438,7 +462,10 @@ mod tests {
         let second = r.next_frame().unwrap();
         assert!(second.is_none(), "partial line is held back");
         // Now finish the line — re-poll yields it.
-        let mut f = std::fs::OpenOptions::new().append(true).open(&path).unwrap();
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(&path)
+            .unwrap();
         // Append the rest of a valid frame.
         let rest = format!(
             r#"":"0.1.0","trace_id":"{}","span_id":"{}","span":{}}}"#,
@@ -447,13 +474,17 @@ mod tests {
             serde_json::to_string(&match span_frame() {
                 Frame::Span { span, .. } => span,
                 _ => unreachable!(),
-            }).unwrap(),
+            })
+            .unwrap(),
         );
         f.write_all(rest.as_bytes()).unwrap();
         f.write_all(b"\n").unwrap();
         f.sync_all().unwrap();
         let third = r.next_frame().unwrap();
-        assert!(third.is_some(), "after newline arrives, the held line yields");
+        assert!(
+            third.is_some(),
+            "after newline arrives, the held line yields"
+        );
     }
 
     #[test]

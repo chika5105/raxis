@@ -40,9 +40,7 @@ use axum::Json;
 use raxis_audit_tools::AuditEventKind;
 
 use crate::auth::DashboardRole;
-use crate::data::{
-    operator_outcome, CredentialListResponse, CredentialMetadata, CredentialReveal,
-};
+use crate::data::{operator_outcome, CredentialListResponse, CredentialMetadata, CredentialReveal};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
@@ -68,7 +66,9 @@ where
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let credentials = state.data.list_initiative_credentials(&initiative_id)?;
     Ok(Json(CredentialListResponse { credentials }))
@@ -103,7 +103,9 @@ where
             &credential_name,
             operator_outcome::REJECTED_PERMISSION,
         );
-        return Err(ApiError::Forbidden { required: "admin".into() });
+        return Err(ApiError::Forbidden {
+            required: "admin".into(),
+        });
     }
     // Step 2: rate limit. Throttled callers audit at
     // `RejectedValidation`; the route returns 429. We DO NOT
@@ -152,10 +154,10 @@ where
         .data
         .emit_operator_audit(AuditEventKind::OperatorRevealedCredential {
             operator_fingerprint: op.fingerprint.clone(),
-            initiative_id:        initiative_id.clone(),
-            credential_name:      credential_name.clone(),
-            severity:             "high".into(),
-            outcome:              operator_outcome::ACCEPTED.into(),
+            initiative_id: initiative_id.clone(),
+            credential_name: credential_name.clone(),
+            severity: "high".into(),
+            outcome: operator_outcome::ACCEPTED.into(),
         })?;
     Ok(Json(reveal))
 }
@@ -171,10 +173,10 @@ fn emit_initiative_revealed<D>(
 {
     let _ = data.emit_operator_audit(AuditEventKind::OperatorRevealedCredential {
         operator_fingerprint: op.fingerprint.clone(),
-        initiative_id:        initiative_id.to_owned(),
-        credential_name:      credential_name.to_owned(),
-        severity:             "high".into(),
-        outcome:              outcome.into(),
+        initiative_id: initiative_id.to_owned(),
+        credential_name: credential_name.to_owned(),
+        severity: "high".into(),
+        outcome: outcome.into(),
     });
 }
 
@@ -207,7 +209,9 @@ where
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     let credentials = state.data.list_system_credentials()?;
     Ok(Json(CredentialListResponse { credentials }))
@@ -240,7 +244,9 @@ where
             &credential_name,
             operator_outcome::REJECTED_PERMISSION,
         );
-        return Err(ApiError::Forbidden { required: "admin".into() });
+        return Err(ApiError::Forbidden {
+            required: "admin".into(),
+        });
     }
     if let Err(err) = state.data.enforce_reveal_rate_limit(&op.fingerprint) {
         emit_system_revealed(
@@ -253,13 +259,12 @@ where
     }
     let data = std::sync::Arc::clone(&state.data);
     let cred_for_fetch = credential_name.clone();
-    let result = tokio::task::spawn_blocking(move || {
-        data.reveal_system_credential(&cred_for_fetch)
-    })
-    .await
-    .map_err(|e| ApiError::Internal {
-        log_only: format!("reveal_system_credential join error: {e}"),
-    });
+    let result =
+        tokio::task::spawn_blocking(move || data.reveal_system_credential(&cred_for_fetch))
+            .await
+            .map_err(|e| ApiError::Internal {
+                log_only: format!("reveal_system_credential join error: {e}"),
+            });
     let reveal = match result.and_then(|r| r) {
         Ok(r) => r,
         Err(err) => {
@@ -276,9 +281,9 @@ where
         .data
         .emit_operator_audit(AuditEventKind::OperatorRevealedSystemCredential {
             operator_fingerprint: op.fingerprint.clone(),
-            credential_name:      credential_name.clone(),
-            severity:             "critical".into(),
-            outcome:              operator_outcome::ACCEPTED.into(),
+            credential_name: credential_name.clone(),
+            severity: "critical".into(),
+            outcome: operator_outcome::ACCEPTED.into(),
         })?;
     Ok(Json(reveal))
 }
@@ -293,9 +298,9 @@ fn emit_system_revealed<D>(
 {
     let _ = data.emit_operator_audit(AuditEventKind::OperatorRevealedSystemCredential {
         operator_fingerprint: op.fingerprint.clone(),
-        credential_name:      credential_name.to_owned(),
-        severity:             "critical".into(),
-        outcome:              outcome.into(),
+        credential_name: credential_name.to_owned(),
+        severity: "critical".into(),
+        outcome: outcome.into(),
     });
 }
 
@@ -424,10 +429,7 @@ mod tests {
     #[tokio::test]
     async fn reveal_initiative_admin_returns_plaintext_and_audits() {
         let d = InMemoryDashboardData::new();
-        d.push_initiative_credential(
-            "init-1",
-            fixture("test-pg-dev", "postgresql://u:p@h/db"),
-        );
+        d.push_initiative_credential("init-1", fixture("test-pg-dev", "postgresql://u:p@h/db"));
         let resp = reveal_initiative(
             axum::extract::State(_app_state(&d)),
             admin_op(),
@@ -561,12 +563,9 @@ mod tests {
     async fn list_system_metadata_visible_to_read_role() {
         let d = InMemoryDashboardData::new();
         d.push_system_credential(fixture("providers.anthropic-prod", "sk"));
-        let resp = list_system(
-            axum::extract::State(_app_state(&d)),
-            read_op(),
-        )
-        .await
-        .expect("read role lists system credential metadata");
+        let resp = list_system(axum::extract::State(_app_state(&d)), read_op())
+            .await
+            .expect("read role lists system credential metadata");
         let names: Vec<String> = resp.0.credentials.iter().map(|c| c.name.clone()).collect();
         assert!(
             names.iter().any(|n| n == "providers.anthropic-prod"),
@@ -579,9 +578,7 @@ mod tests {
         );
     }
 
-    fn _app_state(
-        data: &std::sync::Arc<InMemoryDashboardData>,
-    ) -> AppState<InMemoryDashboardData> {
+    fn _app_state(data: &std::sync::Arc<InMemoryDashboardData>) -> AppState<InMemoryDashboardData> {
         // Build a minimal AppState — auth state isn't exercised
         // by these tests; they bypass the extractor entirely by
         // calling the handler with a hand-rolled

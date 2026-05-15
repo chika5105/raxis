@@ -12,13 +12,13 @@
 
 use std::path::PathBuf;
 
-use raxis_store::Store;
 use raxis_policy::PolicyBundle;
+use raxis_store::Store;
 use raxis_types::{CapabilityClass, DelegationStatus, SessionId, SubmittedClaim};
 
-use crate::authority::delegation;
-use super::policy_lookup::{ClaimType, check_claim_scope};
+use super::policy_lookup::{check_claim_scope, ClaimType};
 use super::GateError;
+use crate::authority::delegation;
 
 // ---------------------------------------------------------------------------
 // ClaimCheckResult — matches spec §2.3 claim.rs variant mapping exactly.
@@ -32,7 +32,9 @@ pub enum ClaimCheckResult {
     /// All required claims satisfied, but one or more delegations were StaleOnNextUse.
     /// `stale_capabilities` carries the CapabilityClass values for each stale delegation.
     /// gates/mod.rs calls record_capability_use for each on terminal Pass.
-    SufficientStale { stale_capabilities: Vec<CapabilityClass> },
+    SufficientStale {
+        stale_capabilities: Vec<CapabilityClass>,
+    },
 
     /// One or more required claim types have no matching submitted claim.
     /// Collected across all claim types (useful for planner diagnostics).
@@ -43,7 +45,10 @@ pub enum ClaimCheckResult {
     DelegationInsufficient { claim_type: String },
 
     /// A submitted claim's scope does not cover all touched paths (first encountered).
-    ScopeInsufficient { claim_type: String, uncovered_paths: Vec<PathBuf> },
+    ScopeInsufficient {
+        claim_type: String,
+        uncovered_paths: Vec<PathBuf>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -66,12 +71,12 @@ pub enum ClaimCheckResult {
 ///
 /// Failure precedence: DelegationInsufficient > ScopeInsufficient > Insufficient.
 pub fn evaluate(
-    session_id:    &SessionId,
-    required:      &[ClaimType],
-    submitted:     &[SubmittedClaim],
+    session_id: &SessionId,
+    required: &[ClaimType],
+    submitted: &[SubmittedClaim],
     touched_paths: &[PathBuf],
-    policy:        &PolicyBundle,
-    store:         &Store,
+    policy: &PolicyBundle,
+    store: &Store,
 ) -> Result<ClaimCheckResult, GateError> {
     let mut failing_claims: Vec<String> = Vec::new();
     let mut scope_failure: Option<(String, Vec<PathBuf>)> = None;

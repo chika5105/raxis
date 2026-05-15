@@ -51,8 +51,8 @@ pub use exporter::{NoopExporter, ObservabilityExporter, RingFileExporter};
 pub use hub::{DropReason, HubConfig, ObservabilityHub, RecordingSpan};
 pub use redact::{RedactError, Redactor};
 pub use types::{
-    AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType,
-    SpanData, SpanEvent, SpanKind, SpanName, SpanStatus, Unit,
+    AttrMap, AttrValue, DataPoint, EventName, MetricData, MetricName, MetricType, SpanData,
+    SpanEvent, SpanKind, SpanName, SpanStatus, Unit,
 };
 
 // ---------------------------------------------------------------------------
@@ -70,21 +70,17 @@ pub use types::{
 /// request, success or failure. Closed allow-list labels match
 /// `redact::ALLOW_LIST` (`route`, `http_method`, `http_status`).
 pub fn record_dashboard_http_request(
-    hub:         &ObservabilityHub,
-    route:       &str,
+    hub: &ObservabilityHub,
+    route: &str,
     http_method: &str,
     http_status: i64,
     duration_ms: i64,
 ) {
-    if !hub.enabled() { return; }
-    let mut labels = redact::attrs([
-        ("route",       route),
-        ("http_method", http_method),
-    ]);
-    labels.insert(
-        "http_status".to_owned(),
-        AttrValue::I64(http_status),
-    );
+    if !hub.enabled() {
+        return;
+    }
+    let mut labels = redact::attrs([("route", route), ("http_method", http_method)]);
+    labels.insert("http_status".to_owned(), AttrValue::I64(http_status));
     hub.record_histogram(
         MetricName::DashboardHttpRequestDuration,
         labels,
@@ -94,12 +90,10 @@ pub fn record_dashboard_http_request(
 
 /// `raxis.dashboard.sse.connection.active` gauge — sampled on
 /// connect and disconnect.
-pub fn record_dashboard_sse_active(
-    hub:   &ObservabilityHub,
-    route: &str,
-    count: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_dashboard_sse_active(hub: &ObservabilityHub, route: &str, count: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("route", route)]);
     hub.record_gauge(
         MetricName::DashboardSseConnectionActive,
@@ -110,12 +104,10 @@ pub fn record_dashboard_sse_active(
 
 /// `raxis.dashboard.sse.event.total` plus
 /// `raxis.dashboard.sse.lag.duration`.
-pub fn record_dashboard_sse_event(
-    hub:    &ObservabilityHub,
-    route:  &str,
-    lag_ms: i64,
-) {
-    if !hub.enabled() { return; }
+pub fn record_dashboard_sse_event(hub: &ObservabilityHub, route: &str, lag_ms: i64) {
+    if !hub.enabled() {
+        return;
+    }
     let labels = redact::attrs([("route", route)]);
     hub.record_counter(MetricName::DashboardSseEventTotal, labels.clone(), 1.0);
     hub.record_histogram(

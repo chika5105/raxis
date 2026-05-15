@@ -242,10 +242,10 @@ impl PlanBundle {
     /// Most callers should prefer this over the struct literal.
     pub fn new_v2_1(
         created_at_unix_secs: u64,
-        signed_at_unix_secs:  u64,
-        bundle_nonce:         BundleNonce,
-        plan_root_relpath:    String,
-        artifacts:            Vec<BundleArtifact>,
+        signed_at_unix_secs: u64,
+        bundle_nonce: BundleNonce,
+        plan_root_relpath: String,
+        artifacts: Vec<BundleArtifact>,
     ) -> Self {
         Self {
             schema_version: SchemaVersion::V2_1,
@@ -261,14 +261,14 @@ impl PlanBundle {
     /// cutover compat path (`accept_unfresh_v2_0_bundles = true`).
     pub fn new_v2_0_legacy(
         created_at_unix_secs: u64,
-        plan_root_relpath:    String,
-        artifacts:            Vec<BundleArtifact>,
+        plan_root_relpath: String,
+        artifacts: Vec<BundleArtifact>,
     ) -> Self {
         Self {
             schema_version: SchemaVersion::V2_0,
             created_at_unix_secs,
             signed_at_unix_secs: None,
-            bundle_nonce:        None,
+            bundle_nonce: None,
             plan_root_relpath,
             artifacts,
         }
@@ -289,8 +289,11 @@ mod tests {
     fn schema_version_round_trips_through_u16() {
         for &variant in &SchemaVersion::ALL {
             let v = variant.as_u16();
-            assert_eq!(SchemaVersion::from_u16(v), Some(variant),
-                "round-trip failed for {variant:?} (wire = {v})");
+            assert_eq!(
+                SchemaVersion::from_u16(v),
+                Some(variant),
+                "round-trip failed for {variant:?} (wire = {v})"
+            );
         }
         assert_eq!(SchemaVersion::V2_0.as_u16(), 1);
         assert_eq!(SchemaVersion::V2_1.as_u16(), 2);
@@ -306,15 +309,18 @@ mod tests {
     #[test]
     fn schema_version_carries_freshness_envelope_only_for_v2_1() {
         assert!(!SchemaVersion::V2_0.carries_freshness_envelope());
-        assert!( SchemaVersion::V2_1.carries_freshness_envelope());
+        assert!(SchemaVersion::V2_1.carries_freshness_envelope());
     }
 
     #[test]
     fn schema_version_variant_count_is_pinned() {
-        assert_eq!(SchemaVersion::ALL.len(), 2,
+        assert_eq!(
+            SchemaVersion::ALL.len(),
+            2,
             "SchemaVersion has exactly 2 wire-stable variants \
              (V2_0 | V2_1); bumping this requires a Migration that \
-             ALTERs the CHECK on plan_bundles.schema_version.");
+             ALTERs the CHECK on plan_bundles.schema_version."
+        );
     }
 
     // ── BundleSha256 / BundleNonce / OperatorFingerprint round-trip ───
@@ -352,34 +358,38 @@ mod tests {
     fn new_v2_1_populates_freshness_envelope() {
         let nonce = BundleNonce::new([0x11u8; 16]);
         let pb = PlanBundle::new_v2_1(
-            100, 200, nonce, "myplan".to_owned(),
+            100,
+            200,
+            nonce,
+            "myplan".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  b"hello".to_vec(),
+                name: "plan.toml".to_owned(),
+                bytes: b"hello".to_vec(),
                 sha256: BundleSha256::new([0u8; 32]),
             }],
         );
-        assert_eq!(pb.schema_version,       SchemaVersion::V2_1);
+        assert_eq!(pb.schema_version, SchemaVersion::V2_1);
         assert_eq!(pb.created_at_unix_secs, 100);
-        assert_eq!(pb.signed_at_unix_secs,  Some(200));
-        assert_eq!(pb.bundle_nonce,         Some(nonce));
-        assert_eq!(pb.plan_root_relpath,    "myplan");
-        assert_eq!(pb.artifacts.len(),      1);
+        assert_eq!(pb.signed_at_unix_secs, Some(200));
+        assert_eq!(pb.bundle_nonce, Some(nonce));
+        assert_eq!(pb.plan_root_relpath, "myplan");
+        assert_eq!(pb.artifacts.len(), 1);
     }
 
     #[test]
     fn new_v2_0_legacy_omits_freshness_envelope() {
         let pb = PlanBundle::new_v2_0_legacy(
-            42, "old-plan".to_owned(),
+            42,
+            "old-plan".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  Vec::new(),
+                name: "plan.toml".to_owned(),
+                bytes: Vec::new(),
                 sha256: BundleSha256::new([0u8; 32]),
             }],
         );
-        assert_eq!(pb.schema_version,      SchemaVersion::V2_0);
+        assert_eq!(pb.schema_version, SchemaVersion::V2_0);
         assert_eq!(pb.signed_at_unix_secs, None);
-        assert_eq!(pb.bundle_nonce,        None);
+        assert_eq!(pb.bundle_nonce, None);
         assert!(pb.schema_version.carries_freshness_envelope() == false);
     }
 
@@ -389,21 +399,21 @@ mod tests {
     #[test]
     fn bundle_artifact_equality_is_content_defined() {
         let a = BundleArtifact {
-            name:   "plan.toml".to_owned(),
-            bytes:  b"hello".to_vec(),
+            name: "plan.toml".to_owned(),
+            bytes: b"hello".to_vec(),
             sha256: BundleSha256::new([0xAAu8; 32]),
         };
         let b = BundleArtifact {
-            name:   "plan.toml".to_owned(),
-            bytes:  b"hello".to_vec(),
+            name: "plan.toml".to_owned(),
+            bytes: b"hello".to_vec(),
             sha256: BundleSha256::new([0xAAu8; 32]),
         };
         assert_eq!(a, b);
 
         // Different bytes → different.
         let c = BundleArtifact {
-            name:   "plan.toml".to_owned(),
-            bytes:  b"goodbye".to_vec(),
+            name: "plan.toml".to_owned(),
+            bytes: b"goodbye".to_vec(),
             sha256: BundleSha256::new([0xAAu8; 32]),
         };
         assert_ne!(a, c);

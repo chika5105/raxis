@@ -18,8 +18,8 @@
 // token is returned once to the caller (the kernel spawn path) and never stored.
 // This is the "store-the-hash, not-the-secret" pattern.
 
-use raxis_store::{Store, Table};
 use raxis_crypto::token::{generate_verifier_token, sha256_hex};
+use raxis_store::{Store, Table};
 use raxis_types::unix_now_secs;
 
 use crate::authority::keys::AuthorityError;
@@ -32,17 +32,17 @@ const VRT: &str = Table::VerifierRunTokens.as_str();
 /// hash. DDL Table 12 requires task_id, gate_type, evaluation_sha columns;
 /// the caller (verifier_runner.rs) supplies all three.
 pub fn issue_verifier_token(
-    run_id:         &str,
-    task_id:        &str,
-    gate_type:      &str,
+    run_id: &str,
+    task_id: &str,
+    gate_type: &str,
     evaluation_sha: &str,
-    ttl_secs:       u64,
-    store:          &Store,
+    ttl_secs: u64,
+    store: &Store,
 ) -> Result<String, AuthorityError> {
     // RNG failure aborts issuance; we never persist a verifier-run-token row
     // whose `token_hash` was derived from a degraded random source.
     let (raw_token, token_hash) = generate_verifier_token()?;
-    let now        = unix_now_secs();
+    let now = unix_now_secs();
     let expires_at = now + ttl_secs as i64;
 
     // DDL Table 12 PKs on verifier_run_id; issue_verifier_token receives run_id
@@ -55,8 +55,17 @@ pub fn issue_verifier_token(
                  token_hash, issued_at, expires_at, consumed)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 0)"
         ),
-        rusqlite::params![run_id, task_id, gate_type, evaluation_sha, &token_hash, now, expires_at],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+        rusqlite::params![
+            run_id,
+            task_id,
+            gate_type,
+            evaluation_sha,
+            &token_hash,
+            now,
+            expires_at
+        ],
+    )
+    .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     Ok(raw_token)
 }
@@ -78,10 +87,7 @@ pub fn issue_verifier_token(
 /// rejected.
 ///
 /// Does NOT consume the token — see `consume_verifier_token`.
-pub fn validate_verifier_token(
-    raw_token: &str,
-    store: &Store,
-) -> Result<String, AuthorityError> {
+pub fn validate_verifier_token(raw_token: &str, store: &Store) -> Result<String, AuthorityError> {
     let conn = store.lock_sync();
     validate_verifier_token_in_tx(&conn, raw_token)
 }
@@ -93,7 +99,7 @@ pub fn validate_verifier_token(
 /// `conn.transaction()` so the three steps are atomic against a
 /// concurrent token expiry sweep.
 pub fn validate_verifier_token_in_tx(
-    conn:      &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     raw_token: &str,
 ) -> Result<String, AuthorityError> {
     // Reject malformed hex up-front rather than collapsing to an empty buffer
@@ -104,14 +110,16 @@ pub fn validate_verifier_token_in_tx(
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let (run_id, expires_at, consumed): (String, i64, i64) = conn.query_row(
-        &format!("SELECT verifier_run_id, expires_at, consumed FROM {VRT} WHERE token_hash=?1"),
-        rusqlite::params![&token_hash],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => AuthorityError::TokenNotFound,
-        other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
-    })?;
+    let (run_id, expires_at, consumed): (String, i64, i64) = conn
+        .query_row(
+            &format!("SELECT verifier_run_id, expires_at, consumed FROM {VRT} WHERE token_hash=?1"),
+            rusqlite::params![&token_hash],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AuthorityError::TokenNotFound,
+            other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
+        })?;
 
     if consumed != 0 {
         return Err(AuthorityError::TokenConsumed);
@@ -145,17 +153,21 @@ pub fn consume_verifier_token(raw_token: &str, store: &Store) -> Result<(), Auth
 /// undoing the just-inserted `witness_records` row so the gate evaluator
 /// never sees a witness whose producer received a rejection reply.
 pub fn consume_verifier_token_in_tx(
-    conn:      &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     raw_token: &str,
 ) -> Result<(), AuthorityError> {
     let raw_bytes = hex::decode(raw_token).map_err(|_| AuthorityError::TokenMismatch)?;
     let token_hash = sha256_hex(&raw_bytes);
     let now = unix_now_secs();
 
-    let rows = conn.execute(
-        &format!("UPDATE {VRT} SET consumed=1, consumed_at=?1 WHERE token_hash=?2 AND consumed=0"),
-        rusqlite::params![now, &token_hash],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    let rows = conn
+        .execute(
+            &format!(
+                "UPDATE {VRT} SET consumed=1, consumed_at=?1 WHERE token_hash=?2 AND consumed=0"
+            ),
+            rusqlite::params![now, &token_hash],
+        )
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     if rows == 0 {
         Err(AuthorityError::TokenConsumed)

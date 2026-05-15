@@ -34,33 +34,40 @@ use crate::GlobalFlags;
 // ---------------------------------------------------------------------------
 
 pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
-    let mut template:        &str           = "feature";
-    let mut output:          PathBuf        = PathBuf::from("./plan.toml");
+    let mut template: &str = "feature";
+    let mut output: PathBuf = PathBuf::from("./plan.toml");
     let mut initiative_name: Option<String> = None;
-    let mut list_templates:  bool           = false;
-    let mut force:           bool           = false;
+    let mut list_templates: bool = false;
+    let mut force: bool = false;
 
     let mut i = 0;
     while i < args.len() {
         let a = args[i].as_str();
         match a {
-            "--list-templates" => { list_templates = true; }
-            "--force"          => { force = true; }
+            "--list-templates" => {
+                list_templates = true;
+            }
+            "--force" => {
+                force = true;
+            }
             "--template" | "-t" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::Usage(
-                    "missing value for --template".into()))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("missing value for --template".into()))?;
                 template = Box::leak(v.clone().into_boxed_str());
                 i += 1;
             }
             "--output" | "-o" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::Usage(
-                    "missing value for --output".into()))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("missing value for --output".into()))?;
                 output = PathBuf::from(v);
                 i += 1;
             }
             "--initiative-name" => {
-                let v = args.get(i + 1).ok_or_else(|| CliError::Usage(
-                    "missing value for --initiative-name".into()))?;
+                let v = args
+                    .get(i + 1)
+                    .ok_or_else(|| CliError::Usage("missing value for --initiative-name".into()))?;
                 initiative_name = Some(v.clone());
                 i += 1;
             }
@@ -83,20 +90,25 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
             println!("  {name:<22}  {summary}");
         }
         println!();
-        println!(
-            "Usage: raxis plan init --template <name> --output <path>"
-        );
+        println!("Usage: raxis plan init --template <name> --output <path>");
         return Ok(());
     }
 
-    let tpl = TEMPLATES.iter().find(|t| t.name == template).ok_or_else(|| {
-        CliError::Usage(format!(
-            "FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND: template {template:?} is not \
+    let tpl = TEMPLATES
+        .iter()
+        .find(|t| t.name == template)
+        .ok_or_else(|| {
+            CliError::Usage(format!(
+                "FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND: template {template:?} is not \
              one of {}. List available templates with \
              `raxis plan init --list-templates`.",
-            TEMPLATES.iter().map(|t| t.name).collect::<Vec<_>>().join(", "),
-        ))
-    })?;
+                TEMPLATES
+                    .iter()
+                    .map(|t| t.name)
+                    .collect::<Vec<_>>()
+                    .join(", "),
+            ))
+        })?;
 
     if output.exists() && !force {
         return Err(CliError::Usage(format!(
@@ -109,14 +121,22 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let body = render_template(tpl, initiative_name.as_deref());
     write_atomic(&output, body.as_bytes())?;
 
-    println!("Wrote {} ({} bytes) using template {:?}.",
-             output.display(), body.len(), tpl.name);
+    println!(
+        "Wrote {} ({} bytes) using template {:?}.",
+        output.display(),
+        body.len(),
+        tpl.name
+    );
     println!("Next steps:");
-    println!("  1. Open {} and edit the [[tasks]] sections.", output.display());
-    println!("  2. Run `raxis plan validate {}` to check the schema.",
-             output.display());
-    println!("  3. When ready: `raxis submit plan {}`.",
-             output.display());
+    println!(
+        "  1. Open {} and edit the [[tasks]] sections.",
+        output.display()
+    );
+    println!(
+        "  2. Run `raxis plan validate {}` to check the schema.",
+        output.display()
+    );
+    println!("  3. When ready: `raxis submit plan {}`.", output.display());
     Ok(())
 }
 
@@ -134,36 +154,36 @@ fn print_usage() {
 // ---------------------------------------------------------------------------
 
 struct Template {
-    name:    &'static str,
+    name: &'static str,
     summary: &'static str,
-    body:    &'static str,
+    body: &'static str,
 }
 
 const TEMPLATES: &[Template] = &[
     Template {
-        name:    "feature",
+        name: "feature",
         summary: "Adding a new feature with one Executor and a Reviewer gate.",
-        body:    include_str!("../../templates/plan_feature.toml"),
+        body: include_str!("../../templates/plan_feature.toml"),
     },
     Template {
-        name:    "bugfix",
+        name: "bugfix",
         summary: "Fixing a reported bug; reproduce → fix → regression-test → merge.",
-        body:    include_str!("../../templates/plan_bugfix.toml"),
+        body: include_str!("../../templates/plan_bugfix.toml"),
     },
     Template {
-        name:    "dependency-upgrade",
+        name: "dependency-upgrade",
         summary: "Bumping a dependency version with regression-test verification.",
-        body:    include_str!("../../templates/plan_dependency_upgrade.toml"),
+        body: include_str!("../../templates/plan_dependency_upgrade.toml"),
     },
     Template {
-        name:    "migration",
+        name: "migration",
         summary: "Schema or configuration migrations with rollback verification.",
-        body:    include_str!("../../templates/plan_migration.toml"),
+        body: include_str!("../../templates/plan_migration.toml"),
     },
     Template {
-        name:    "experiment",
+        name: "experiment",
         summary: "Time-bounded exploratory work that does not produce a merge.",
-        body:    include_str!("../../templates/plan_experiment.toml"),
+        body: include_str!("../../templates/plan_experiment.toml"),
     },
 ];
 
@@ -180,15 +200,14 @@ fn render_template(tpl: &Template, initiative_name: Option<&str>) -> String {
 // ---------------------------------------------------------------------------
 
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
-    let parent = path.parent().filter(|p| !p.as_os_str().is_empty())
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
         .map(|p| p.to_path_buf())
         .unwrap_or_else(|| PathBuf::from("."));
     fs::create_dir_all(&parent)
         .map_err(|e| CliError::Usage(format!("create dir {}: {e}", parent.display())))?;
-    let tmp = parent.join(format!(
-        ".raxis-plan-init.{}.tmp",
-        std::process::id(),
-    ));
+    let tmp = parent.join(format!(".raxis-plan-init.{}.tmp", std::process::id(),));
     {
         let mut f = fs::File::create(&tmp)
             .map_err(|e| CliError::Usage(format!("create tempfile {}: {e}", tmp.display())))?;
@@ -197,9 +216,13 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<(), CliError> {
         f.sync_all()
             .map_err(|e| CliError::Usage(format!("fsync tempfile {}: {e}", tmp.display())))?;
     }
-    fs::rename(&tmp, path)
-        .map_err(|e| CliError::Usage(format!("rename {} → {}: {e}",
-                                             tmp.display(), path.display())))?;
+    fs::rename(&tmp, path).map_err(|e| {
+        CliError::Usage(format!(
+            "rename {} → {}: {e}",
+            tmp.display(),
+            path.display()
+        ))
+    })?;
     Ok(())
 }
 
@@ -215,15 +238,19 @@ mod tests {
     fn every_bundled_template_renders_non_empty_toml() {
         // Each template MUST be a non-empty string and parse as TOML.
         for tpl in TEMPLATES {
-            assert!(!tpl.body.trim().is_empty(),
-                    "template {:?} is empty", tpl.name);
+            assert!(
+                !tpl.body.trim().is_empty(),
+                "template {:?} is empty",
+                tpl.name
+            );
             let rendered = render_template(tpl, Some("smoke"));
-            assert!(!rendered.contains("@@INITIATIVE_NAME@@"),
-                    "template {:?} still has unsubstituted placeholder",
-                    tpl.name);
+            assert!(
+                !rendered.contains("@@INITIATIVE_NAME@@"),
+                "template {:?} still has unsubstituted placeholder",
+                tpl.name
+            );
             toml::from_str::<toml::Value>(&rendered)
-                .unwrap_or_else(|e| panic!(
-                    "template {:?} must parse as TOML: {e}", tpl.name));
+                .unwrap_or_else(|e| panic!("template {:?} must parse as TOML: {e}", tpl.name));
         }
     }
 
@@ -250,7 +277,9 @@ mod tests {
         // `GlobalFlags` plumbing not constructible from this unit
         // test).
         let unknown = TEMPLATES.iter().find(|t| t.name == "no-such-template");
-        assert!(unknown.is_none(),
-                "test fixture must keep `no-such-template` outside the registry");
+        assert!(
+            unknown.is_none(),
+            "test fixture must keep `no-such-template` outside the registry"
+        );
     }
 }

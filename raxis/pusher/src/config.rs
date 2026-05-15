@@ -77,7 +77,7 @@ impl PusherConfig {
             PathBuf::from(&observability.ring.dir)
         };
         let cursor_path = ring_root.join("cursor.toml");
-        let lock_path   = ring_root.join("lock");
+        let lock_path = ring_root.join("lock");
         let events_path = ring_root.join("pusher-events.jsonl");
 
         Ok(Self {
@@ -133,49 +133,49 @@ pub enum ConfigError {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::BTreeMap;
     use raxis_policy::{
         ObservabilityMetricsConfig, ObservabilityPusherTlsConfig, ObservabilityTracesConfig,
     };
+    use std::collections::BTreeMap;
 
     fn enabled_obs(_data_dir: &std::path::Path) -> ObservabilityConfig {
         ObservabilityConfig {
             enabled: true,
             ring: ObservabilityRingConfig {
-                dir:               String::new(),
+                dir: String::new(),
                 segment_max_bytes: 16 * 1024 * 1024,
-                max_total_bytes:   512 * 1024 * 1024,
-                max_queue_depth:   8192,
+                max_total_bytes: 512 * 1024 * 1024,
+                max_queue_depth: 8192,
             },
             traces: ObservabilityTracesConfig {
-                enabled:             true,
-                sample_rate:         0.1,
-                max_attrs_per_span:  32,
+                enabled: true,
+                sample_rate: 0.1,
+                max_attrs_per_span: 32,
                 max_events_per_span: 16,
             },
             metrics: ObservabilityMetricsConfig {
-                enabled:           true,
-                export_interval:   Duration::from_secs(15),
+                enabled: true,
+                export_interval: Duration::from_secs(15),
                 histogram_buckets: vec![1.0, 5.0, 10.0],
             },
             resource: ObservabilityResourceConfig {
                 service_name: "raxis-kernel".to_owned(),
-                environment:  String::new(),
-                extra:        BTreeMap::new(),
+                environment: String::new(),
+                extra: BTreeMap::new(),
             },
             pusher: Some(ObservabilityPusherConfig {
-                otlp_endpoint:       "https://otlp.example.com:4317".to_owned(),
-                otlp_protocol:       "http".to_owned(),
-                otlp_compression:    "gzip".to_owned(),
+                otlp_endpoint: "https://otlp.example.com:4317".to_owned(),
+                otlp_protocol: "http".to_owned(),
+                otlp_compression: "gzip".to_owned(),
                 otlp_export_timeout: Duration::from_secs(10),
-                otlp_batch_size:     512,
+                otlp_batch_size: 512,
                 otlp_flush_interval: Duration::from_secs(5),
-                otlp_max_inflight:   4,
-                backoff_initial:     Duration::from_millis(500),
-                backoff_max:         Duration::from_secs(30),
-                backoff_jitter:      0.25,
-                tls:                 ObservabilityPusherTlsConfig::default(),
-                headers:             BTreeMap::new(),
+                otlp_max_inflight: 4,
+                backoff_initial: Duration::from_millis(500),
+                backoff_max: Duration::from_secs(30),
+                backoff_jitter: 0.25,
+                tls: ObservabilityPusherTlsConfig::default(),
+                headers: BTreeMap::new(),
             }),
         }
     }
@@ -188,9 +188,13 @@ mod tests {
             dir.path().to_owned(),
             "0.1.0",
             9501,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(cfg.ring_root, dir.path().join("observability"));
-        assert_eq!(cfg.cursor_path, dir.path().join("observability/cursor.toml"));
+        assert_eq!(
+            cfg.cursor_path,
+            dir.path().join("observability/cursor.toml")
+        );
         assert_eq!(cfg.kernel_version, "0.1.0");
         assert_eq!(cfg.batch_size(), 512);
     }

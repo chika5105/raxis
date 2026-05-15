@@ -48,11 +48,7 @@ impl WitnessResultClass {
     /// **Spec drift contract.** Adding a new variant requires both a
     /// length bump here AND a new migration that ALTERs the CHECK
     /// constraint on already-installed databases.
-    pub const ALL: [Self; 3] = [
-        Self::Pass,
-        Self::Fail,
-        Self::Inconclusive,
-    ];
+    pub const ALL: [Self; 3] = [Self::Pass, Self::Fail, Self::Inconclusive];
 
     pub fn as_sql_str(self) -> &'static str {
         match self {
@@ -184,12 +180,11 @@ mod tests {
     fn fixture_submission() -> WitnessSubmission {
         WitnessSubmission {
             verifier_token: "tok-abc".to_owned(),
-            task_id:        TaskId::parse("task-1").expect("valid task_id"),
-            gate_type:      GateType::parse("TestCoverage").expect("valid gate_type"),
-            evaluation_sha: CommitSha::parse(
-                "abcd1234abcd1234abcd1234abcd1234abcd1234"
-            ).expect("valid 40-char SHA"),
-            result_class:   WitnessResultClass::Pass,
+            task_id: TaskId::parse("task-1").expect("valid task_id"),
+            gate_type: GateType::parse("TestCoverage").expect("valid gate_type"),
+            evaluation_sha: CommitSha::parse("abcd1234abcd1234abcd1234abcd1234abcd1234")
+                .expect("valid 40-char SHA"),
+            result_class: WitnessResultClass::Pass,
             body: serde_json::json!({
                 "coverage_pct": 92.5,
                 "lines_uncovered": 14,
@@ -220,29 +215,32 @@ mod tests {
         // raxis-ipc::frame). If the kernel and verifier ever disagree
         // about the wire codec, this test will not catch it — but
         // `raxis-ipc::frame::round_trip_*` tests pin THAT contract.
-        let encoded = bincode::serde::encode_to_vec(
-            &original, bincode::config::standard(),
-        ).expect("encode WitnessSubmission via bincode standard()");
+        let encoded = bincode::serde::encode_to_vec(&original, bincode::config::standard())
+            .expect("encode WitnessSubmission via bincode standard()");
         let (decoded, _consumed): (WitnessSubmission, _) =
-            bincode::serde::decode_from_slice(
-                &encoded, bincode::config::standard(),
-            ).expect("decode WitnessSubmission via bincode standard()");
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                .expect("decode WitnessSubmission via bincode standard()");
 
         // Field-by-field equality. We do NOT derive PartialEq on
         // `WitnessSubmission` (the body is `serde_json::Value` which
         // does have PartialEq), but we have to compare each field
         // explicitly because the struct itself does not.
         assert_eq!(decoded.verifier_token, original.verifier_token);
-        assert_eq!(decoded.task_id.as_str(),         original.task_id.as_str());
-        assert_eq!(decoded.gate_type.as_str(),       original.gate_type.as_str());
-        assert_eq!(decoded.evaluation_sha.as_str(),  original.evaluation_sha.as_str());
-        assert_eq!(decoded.result_class,             original.result_class);
+        assert_eq!(decoded.task_id.as_str(), original.task_id.as_str());
+        assert_eq!(decoded.gate_type.as_str(), original.gate_type.as_str());
+        assert_eq!(
+            decoded.evaluation_sha.as_str(),
+            original.evaluation_sha.as_str()
+        );
+        assert_eq!(decoded.result_class, original.result_class);
         // Most important assertion: the body round-trips with full
         // structural equality, including the nested object and the
         // `null` value (which is its own discriminant in
         // `serde_json::Value`).
-        assert_eq!(decoded.body, original.body,
-            "WitnessSubmission.body must round-trip through bincode without drift");
+        assert_eq!(
+            decoded.body, original.body,
+            "WitnessSubmission.body must round-trip through bincode without drift"
+        );
     }
 
     #[test]
@@ -254,13 +252,11 @@ mod tests {
         let mut sub = fixture_submission();
         sub.body = serde_json::json!({});
 
-        let encoded = bincode::serde::encode_to_vec(
-            &sub, bincode::config::standard(),
-        ).expect("encode empty-body submission");
+        let encoded = bincode::serde::encode_to_vec(&sub, bincode::config::standard())
+            .expect("encode empty-body submission");
         let (decoded, _): (WitnessSubmission, _) =
-            bincode::serde::decode_from_slice(
-                &encoded, bincode::config::standard(),
-            ).expect("decode empty-body submission");
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                .expect("decode empty-body submission");
         assert_eq!(decoded.body, serde_json::json!({}));
     }
 
@@ -272,13 +268,11 @@ mod tests {
         let mut sub = fixture_submission();
         sub.body = serde_json::Value::Null;
 
-        let encoded = bincode::serde::encode_to_vec(
-            &sub, bincode::config::standard(),
-        ).expect("encode null-body submission");
+        let encoded = bincode::serde::encode_to_vec(&sub, bincode::config::standard())
+            .expect("encode null-body submission");
         let (decoded, _): (WitnessSubmission, _) =
-            bincode::serde::decode_from_slice(
-                &encoded, bincode::config::standard(),
-            ).expect("decode null-body submission");
+            bincode::serde::decode_from_slice(&encoded, bincode::config::standard())
+                .expect("decode null-body submission");
         assert_eq!(decoded.body, serde_json::Value::Null);
     }
 }

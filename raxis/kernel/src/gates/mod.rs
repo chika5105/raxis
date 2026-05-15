@@ -24,8 +24,8 @@ use std::path::{Path, PathBuf};
 use raxis_types::{SessionId, SubmittedClaim};
 
 use crate::authority::delegation;
-use crate::witness_index::ResultClass;
 use crate::ipc::context::HandlerContext;
+use crate::witness_index::ResultClass;
 
 // ---------------------------------------------------------------------------
 // GateError
@@ -90,10 +90,10 @@ pub enum GateEvalResult {
 ///   4. Witness check per gate type. On full pass: record_capability_use for stale caps.
 ///   5. Spawn verifiers for missing gates.
 pub async fn evaluate_claims(
-    session_id:       &SessionId,
-    evaluation_sha:   &str,
-    task_id:          &str,
-    touched_paths:    &[PathBuf],
+    session_id: &SessionId,
+    evaluation_sha: &str,
+    task_id: &str,
+    touched_paths: &[PathBuf],
     // Intentionally unused — see Step 2.5 below. The kernel auto-
     // derives claims from its own witness records; planner-submitted
     // claims are discarded as a security property (the untrusted
@@ -104,8 +104,8 @@ pub async fn evaluate_claims(
     // rights — a contract change of that scope deserves a real PR
     // rather than a silent restoration.
     _submitted_claims_discarded: &[SubmittedClaim],
-    worktree_root:    &Path,
-    ctx:              &HandlerContext,
+    worktree_root: &Path,
+    ctx: &HandlerContext,
 ) -> Result<GateEvalResult, GateError> {
     // Pin one snapshot of the policy bundle for the duration of this
     // gate evaluation. INV-POLICY-01: an in-process epoch advance must
@@ -114,7 +114,7 @@ pub async fn evaluate_claims(
     // every claim/witness/proof check on the same epoch.
     let policy_snapshot = ctx.policy.load_full();
     let policy: &raxis_policy::PolicyBundle = &policy_snapshot;
-    let store  = ctx.store.as_ref();
+    let store = ctx.store.as_ref();
 
     // ── Step 1: Break-glass ────────────────────────────────────────────────
     // V1 Tier 4 — emergency operator override (kernel-core.md §2.3
@@ -136,7 +136,9 @@ pub async fn evaluate_claims(
 
     // Fast path: no claims required and no gates configured.
     if required_claims.is_empty() && policy.gates().is_empty() {
-        return Ok(GateEvalResult::Pass { delegate_renewal_required: false });
+        return Ok(GateEvalResult::Pass {
+            delegate_renewal_required: false,
+        });
     }
 
     // ── Step 2.5: Auto-derive claims from witness records ───────────────
@@ -204,7 +206,9 @@ pub async fn evaluate_claims(
             stale_capabilities = vec![];
             delegate_renewal_required = false;
         }
-        ClaimCheckResult::SufficientStale { stale_capabilities: caps } => {
+        ClaimCheckResult::SufficientStale {
+            stale_capabilities: caps,
+        } => {
             stale_capabilities = caps;
             delegate_renewal_required = true;
         }
@@ -218,7 +222,10 @@ pub async fn evaluate_claims(
                 reason: format!("delegation insufficient for claim type: {claim_type}"),
             });
         }
-        ClaimCheckResult::ScopeInsufficient { claim_type, uncovered_paths } => {
+        ClaimCheckResult::ScopeInsufficient {
+            claim_type,
+            uncovered_paths,
+        } => {
             return Ok(GateEvalResult::ClaimInsufficient {
                 reason: format!(
                     "scope insufficient for {claim_type}: {} path(s) uncovered",
@@ -248,7 +255,9 @@ pub async fn evaluate_claims(
                     .map_err(|e| GateError::AuthorityError(e.to_string()))?;
             }
         }
-        return Ok(GateEvalResult::Pass { delegate_renewal_required });
+        return Ok(GateEvalResult::Pass {
+            delegate_renewal_required,
+        });
     }
 
     // ── Step 5: Spawn verifiers for missing gates ─────────────────────────
@@ -270,11 +279,8 @@ pub async fn evaluate_claims(
     //                                  store-level fault.
     //   - `Err(_other)`              → defensive catch-all.
     for gate_type in &missing_gates {
-        let vconfig = verifier_runner::VerifierConfig::from_policy(
-            policy,
-            gate_type,
-            &ctx.data_dir,
-        );
+        let vconfig =
+            verifier_runner::VerifierConfig::from_policy(policy, gate_type, &ctx.data_dir);
         let Some(vconfig) = vconfig else { continue };
 
         match verifier_runner::spawn_verifier(
@@ -284,7 +290,9 @@ pub async fn evaluate_claims(
             worktree_root,
             &vconfig,
             store,
-        ).await {
+        )
+        .await
+        {
             Ok(_) => {}
             Err(GateError::VerifierCapExceeded { .. }) => {
                 eprintln!(
@@ -334,9 +342,9 @@ pub async fn evaluate_claims(
 mod auto_claim_tests {
     use raxis_types::SubmittedClaim;
 
-    use crate::witness_index::{self, WitnessRecord, ResultClass};
-    use crate::gates::witness;
     use crate::gates::policy_lookup::ClaimType;
+    use crate::gates::witness;
+    use crate::witness_index::{self, ResultClass, WitnessRecord};
 
     use raxis_crypto::token::sha256_hex;
     use raxis_test_support::mem_store;
@@ -377,11 +385,12 @@ mod auto_claim_tests {
             rusqlite::params![
                 initiative_id,
                 "ApprovedPlan",
-                "{}",                  // terminal_criteria_json
-                "0".repeat(64),         // plan_artifact_sha256
-                0_i64,                  // created_at
+                "{}",           // terminal_criteria_json
+                "0".repeat(64), // plan_artifact_sha256
+                0_i64,          // created_at
             ],
-        ).expect("seed_witness initiatives insert");
+        )
+        .expect("seed_witness initiatives insert");
 
         conn.execute(
             "INSERT OR IGNORE INTO tasks (task_id, initiative_id, lane_id, state, \
@@ -397,7 +406,8 @@ mod auto_claim_tests {
                 0_i64,
                 0_i64,
             ],
-        ).expect("seed_witness tasks insert");
+        )
+        .expect("seed_witness tasks insert");
 
         conn.execute(
             "INSERT INTO verifier_run_tokens (verifier_run_id, task_id, gate_type, \
@@ -412,22 +422,22 @@ mod auto_claim_tests {
                 0_i64,
                 i64::MAX,
             ],
-        ).expect("seed_witness verifier_run_tokens insert");
+        )
+        .expect("seed_witness verifier_run_tokens insert");
 
         let record = WitnessRecord {
             verifier_run_id: run_id.clone(),
-            evaluation_sha:  evaluation_sha.to_owned(),
-            task_id:         task_id.to_owned(),
-            gate_type:       gate_type.to_owned(),
+            evaluation_sha: evaluation_sha.to_owned(),
+            task_id: task_id.to_owned(),
+            gate_type: gate_type.to_owned(),
             result_class,
-            blob_sha256:     blob_sha.clone(),
-            blob_path:       blob_sha.clone(),
-            recorded_at:     0,
+            blob_sha256: blob_sha.clone(),
+            blob_path: blob_sha.clone(),
+            recorded_at: 0,
         };
 
-        witness_index::insert_witness_index_in_tx(
-            &conn, &record, raxis_types::unix_now_secs(),
-        ).expect("seed_witness insert");
+        witness_index::insert_witness_index_in_tx(&conn, &record, raxis_types::unix_now_secs())
+            .expect("seed_witness insert");
 
         blob_sha
     }
@@ -456,9 +466,8 @@ mod auto_claim_tests {
                 continue;
             }
 
-            let w = witness::lookup(
-                evaluation_sha, task_id, claim_type_str, None, store,
-            ).expect("witness lookup");
+            let w = witness::lookup(evaluation_sha, task_id, claim_type_str, None, store)
+                .expect("witness lookup");
 
             if let Some(ref rec) = w {
                 if rec.result_class == ResultClass::Pass {
@@ -479,20 +488,19 @@ mod auto_claim_tests {
         let task_id = "task-1";
         let eval_sha = "abcd1234abcd1234abcd1234abcd1234abcd1234";
 
-        let blob_sha = seed_witness(
-            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
-        );
+        let blob_sha = seed_witness(&store, task_id, eval_sha, "TestSuite", ResultClass::Pass);
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
         let submitted: Vec<SubmittedClaim> = vec![];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
         assert_eq!(effective.len(), 1, "should auto-derive exactly one claim");
         assert_eq!(effective[0].claim_type, "TestSuite");
-        assert_eq!(effective[0].evidence_ref.as_deref(), Some(blob_sha.as_str()));
+        assert_eq!(
+            effective[0].evidence_ref.as_deref(),
+            Some(blob_sha.as_str())
+        );
     }
 
     #[test]
@@ -501,18 +509,17 @@ mod auto_claim_tests {
         let task_id = "task-2";
         let eval_sha = "beef1234beef1234beef1234beef1234beef1234";
 
-        seed_witness(
-            &store, task_id, eval_sha, "TestSuite", ResultClass::Fail,
-        );
+        seed_witness(&store, task_id, eval_sha, "TestSuite", ResultClass::Fail);
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
         let submitted: Vec<SubmittedClaim> = vec![];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
-        assert!(effective.is_empty(), "failing witness must not produce a claim");
+        assert!(
+            effective.is_empty(),
+            "failing witness must not produce a claim"
+        );
     }
 
     #[test]
@@ -522,17 +529,22 @@ mod auto_claim_tests {
         let eval_sha = "dead1234dead1234dead1234dead1234dead1234";
 
         seed_witness(
-            &store, task_id, eval_sha, "TestSuite", ResultClass::Inconclusive,
+            &store,
+            task_id,
+            eval_sha,
+            "TestSuite",
+            ResultClass::Inconclusive,
         );
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
         let submitted: Vec<SubmittedClaim> = vec![];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
-        assert!(effective.is_empty(), "inconclusive witness must not produce a claim");
+        assert!(
+            effective.is_empty(),
+            "inconclusive witness must not produce a claim"
+        );
     }
 
     #[test]
@@ -542,9 +554,7 @@ mod auto_claim_tests {
         let eval_sha = "cafe1234cafe1234cafe1234cafe1234cafe1234";
 
         // Auto-derivable: TestSuite has a Pass witness
-        seed_witness(
-            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
-        );
+        seed_witness(&store, task_id, eval_sha, "TestSuite", ResultClass::Pass);
 
         let required = vec![
             ClaimType::Named("TestSuite".to_owned()),
@@ -557,14 +567,16 @@ mod auto_claim_tests {
             evidence_ref: None,
         }];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
         // Only TestSuite should appear (auto-derived from witness).
         // WriteCode is NOT present — no witness exists for it, and
         // the planner's assertion is discarded.
-        assert_eq!(effective.len(), 1, "only witness-backed claims should appear");
+        assert_eq!(
+            effective.len(),
+            1,
+            "only witness-backed claims should appear"
+        );
         assert_eq!(effective[0].claim_type, "TestSuite");
         assert!(
             !effective.iter().any(|c| c.claim_type == "WriteCode"),
@@ -578,9 +590,7 @@ mod auto_claim_tests {
         let task_id = "task-5";
         let eval_sha = "f00d1234f00d1234f00d1234f00d1234f00d1234";
 
-        let blob_sha = seed_witness(
-            &store, task_id, eval_sha, "TestSuite", ResultClass::Pass,
-        );
+        let blob_sha = seed_witness(&store, task_id, eval_sha, "TestSuite", ResultClass::Pass);
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
 
@@ -591,9 +601,7 @@ mod auto_claim_tests {
             evidence_ref: Some("planner-fabricated-ref".to_owned()),
         }];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
         assert_eq!(effective.len(), 1);
         assert_eq!(
@@ -611,17 +619,22 @@ mod auto_claim_tests {
 
         // Even if someone made a gate named "StrictDefault" (they shouldn't)
         seed_witness(
-            &store, task_id, eval_sha, "StrictDefault", ResultClass::Pass,
+            &store,
+            task_id,
+            eval_sha,
+            "StrictDefault",
+            ResultClass::Pass,
         );
 
         let required = vec![ClaimType::StrictDefault];
         let submitted: Vec<SubmittedClaim> = vec![];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
-        assert!(effective.is_empty(), "StrictDefault must never be auto-derived");
+        assert!(
+            effective.is_empty(),
+            "StrictDefault must never be auto-derived"
+        );
     }
 
     #[test]
@@ -634,9 +647,7 @@ mod auto_claim_tests {
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
         let submitted: Vec<SubmittedClaim> = vec![];
 
-        let effective = auto_derive_claims(
-            &required, &submitted, task_id, eval_sha, &store,
-        );
+        let effective = auto_derive_claims(&required, &submitted, task_id, eval_sha, &store);
 
         assert!(effective.is_empty(), "no witness → no auto-derived claim");
     }
@@ -648,7 +659,11 @@ mod auto_claim_tests {
 
         // Witness exists for a DIFFERENT evaluation_sha
         seed_witness(
-            &store, task_id, "old_sha_old_sha_old_sha_old_sha_old_sha_", "TestSuite", ResultClass::Pass,
+            &store,
+            task_id,
+            "old_sha_old_sha_old_sha_old_sha_old_sha_",
+            "TestSuite",
+            ResultClass::Pass,
         );
 
         let required = vec![ClaimType::Named("TestSuite".to_owned())];
@@ -656,9 +671,16 @@ mod auto_claim_tests {
 
         // Query against a different sha
         let effective = auto_derive_claims(
-            &required, &submitted, task_id, "new_sha_new_sha_new_sha_new_sha_new_sha_", &store,
+            &required,
+            &submitted,
+            task_id,
+            "new_sha_new_sha_new_sha_new_sha_new_sha_",
+            &store,
         );
 
-        assert!(effective.is_empty(), "witness for different SHA must not satisfy this intent");
+        assert!(
+            effective.is_empty(),
+            "witness for different SHA must not satisfy this intent"
+        );
     }
 }

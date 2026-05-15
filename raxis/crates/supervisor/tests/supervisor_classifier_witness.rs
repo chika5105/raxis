@@ -13,9 +13,7 @@ use std::sync::Arc;
 use raxis_supervisor::log::SupervisorLog;
 use raxis_supervisor::sentinel::{read_sentinel, SENTINEL_FILENAME};
 use raxis_supervisor::signal::IntentionalShutdownFlag;
-use raxis_supervisor::supervisor::{
-    run_supervisor_loop, FinalOutcome, SupervisorConfig,
-};
+use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 
 /// Resolve the path to a fake-child binary by name. Cargo writes
 /// these next to the test binary itself when the workspace is
@@ -31,8 +29,8 @@ fn fake_child(name: &str) -> PathBuf {
     //   3. a new arm in the match below
     let path = match name {
         "exit70" => env!("CARGO_BIN_EXE_supervisor-fake-child-exit70"),
-        "exit0"  => env!("CARGO_BIN_EXE_supervisor-fake-child-exit0"),
-        "panic"  => env!("CARGO_BIN_EXE_supervisor-fake-child-panic"),
+        "exit0" => env!("CARGO_BIN_EXE_supervisor-fake-child-exit0"),
+        "panic" => env!("CARGO_BIN_EXE_supervisor-fake-child-panic"),
         "sleep_forever" => env!("CARGO_BIN_EXE_supervisor-fake-child-sleep-forever"),
         "slow_sigterm" => env!("CARGO_BIN_EXE_supervisor-fake-child-slow-sigterm"),
         other => panic!("unknown fake-child binary: {other}"),
@@ -41,20 +39,20 @@ fn fake_child(name: &str) -> PathBuf {
 }
 
 fn cfg_for(
-    data_dir:       &std::path::Path,
-    binary:         PathBuf,
-    max_attempts:   u32,
+    data_dir: &std::path::Path,
+    binary: PathBuf,
+    max_attempts: u32,
     max_child_runs: Option<u32>,
 ) -> SupervisorConfig {
     SupervisorConfig {
-        data_dir:               data_dir.to_path_buf(),
-        kernel_binary:          binary,
-        kernel_args:            Vec::new(),
-        kernel_env:             Vec::new(),
+        data_dir: data_dir.to_path_buf(),
+        kernel_binary: binary,
+        kernel_args: Vec::new(),
+        kernel_env: Vec::new(),
         max_attempts,
-        window_secs:            60,
-        shutdown_grace_secs:    1,
-        restart_backoff_ms:     10,
+        window_secs: 60,
+        shutdown_grace_secs: 1,
+        restart_backoff_ms: 10,
         max_child_runs,
     }
 }
@@ -130,7 +128,9 @@ async fn exit_101_panic_restarts_until_breaker_trips() {
     // expect 3 spawns.
     assert_eq!(report.child_runs_observed, 3);
     match report.final_outcome {
-        FinalOutcome::CircuitOpen { attempts_in_window, .. } => {
+        FinalOutcome::CircuitOpen {
+            attempts_in_window, ..
+        } => {
             assert_eq!(attempts_in_window, 3);
         }
         other => panic!("expected CircuitOpen, got {other:?}"),
@@ -146,11 +146,7 @@ async fn exit_101_panic_restarts_until_breaker_trips() {
 async fn cold_start_with_open_breaker_refuses_to_spawn() {
     let dir = tempfile::tempdir().unwrap();
     // Pre-trip the breaker by recording 4 attempts (max=3).
-    let mut breaker = raxis_supervisor::CircuitBreaker::load_or_default(
-        dir.path(),
-        3,
-        60,
-    );
+    let mut breaker = raxis_supervisor::CircuitBreaker::load_or_default(dir.path(), 3, 60);
     for _ in 0..4 {
         breaker.record_attempt(1_000, "DeadlockDetected");
     }

@@ -19,7 +19,7 @@ use raxis_types::{unix_now_secs, LineageId, SessionId};
 use crate::authority::keys::AuthorityError;
 use raxis_crypto::token::generate_session_token;
 
-const SESSIONS:    &str = Table::Sessions.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
 const NONCE_CACHE: &str = Table::NonceCache.as_str();
 
 /// Role of a session — corresponds to the authenticated process type.
@@ -45,7 +45,7 @@ impl Role {
 pub struct SessionRow {
     pub session_id: String,
     pub role: String,
-    pub session_token: String,  // raw 32-byte token, hex-encoded (64 chars)
+    pub session_token: String, // raw 32-byte token, hex-encoded (64 chars)
     pub sequence_number: i64,
     pub worktree_root: Option<String>,
     pub base_sha: Option<String>,
@@ -103,7 +103,10 @@ pub struct SessionConfig {
 
 impl Default for SessionConfig {
     fn default() -> Self {
-        Self { default_ttl_secs: 86400, fetch_quota: 1000 }
+        Self {
+            default_ttl_secs: 86400,
+            fetch_quota: 1000,
+        }
     }
 }
 
@@ -149,28 +152,30 @@ pub fn create_session(
 
     // DDL Table 4 column names: role_id (not role), revoked INTEGER DEFAULT 0.
     let store = store.lock_sync();
-    store.execute(
-        &format!(
-            "INSERT INTO {SESSIONS} (
+    store
+        .execute(
+            &format!(
+                "INSERT INTO {SESSIONS} (
                 session_id, role_id, session_token, sequence_number,
                 worktree_root, base_sha, base_tracking_ref,
                 lineage_id, fetch_quota, created_at, expires_at, revoked
              ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0)"
-        ),
-        rusqlite::params![
-            session_id.as_str(),
-            role.as_str(),
-            &session_token,
-            0i64,
-            worktree_root.as_deref(),
-            base_sha.as_deref(),
-            base_tracking_ref.as_deref(),
-            lineage_id.as_str(),
-            config.fetch_quota,
-            now_secs,
-            expires_at,
-        ],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+            ),
+            rusqlite::params![
+                session_id.as_str(),
+                role.as_str(),
+                &session_token,
+                0i64,
+                worktree_root.as_deref(),
+                base_sha.as_deref(),
+                base_tracking_ref.as_deref(),
+                lineage_id.as_str(),
+                config.fetch_quota,
+                now_secs,
+                expires_at,
+            ],
+        )
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     Ok((session_id, session_token))
 }
@@ -179,45 +184,49 @@ pub fn create_session(
 /// if no row exists, or `SessionRevoked` / `SessionExpired` where applicable.
 pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, AuthorityError> {
     let store = store.lock_sync();
-    let row = store.query_row(
-        &format!(
-            "SELECT session_id, role_id, session_token, sequence_number,
+    let row = store
+        .query_row(
+            &format!(
+                "SELECT session_id, role_id, session_token, sequence_number,
                     worktree_root, base_sha, base_tracking_ref,
                     lineage_id, revoked_at, expires_at,
                     session_agent_type, can_delegate, initiative_id
              FROM {SESSIONS} WHERE session_id = ?1"
-        ),
-        rusqlite::params![session_id.as_str()],
-        |row| {
-            let agent_type_sql: Option<String> = row.get(10)?;
-            let can_delegate_int: i64 = row.get(11)?;
-            Ok(SessionRow {
-                session_id:        row.get(0)?,
-                role:              row.get(1)?,  // mapped from role_id column
-                session_token:     row.get(2)?,
-                sequence_number:   row.get(3)?,
-                worktree_root:     row.get(4)?,
-                base_sha:          row.get(5)?,
-                base_tracking_ref: row.get(6)?,
-                lineage_id:        row.get(7)?,
-                revoked_at:        row.get(8)?,
-                expires_at:        row.get(9)?,
-                session_agent_type: agent_type_sql
-                    .as_deref()
-                    .and_then(raxis_types::SessionAgentType::from_sql_str),
-                can_delegate:      can_delegate_int != 0,
-                initiative_id:     row.get(12)?,
-            })
-        },
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
-        other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
-    })?;
+            ),
+            rusqlite::params![session_id.as_str()],
+            |row| {
+                let agent_type_sql: Option<String> = row.get(10)?;
+                let can_delegate_int: i64 = row.get(11)?;
+                Ok(SessionRow {
+                    session_id: row.get(0)?,
+                    role: row.get(1)?, // mapped from role_id column
+                    session_token: row.get(2)?,
+                    sequence_number: row.get(3)?,
+                    worktree_root: row.get(4)?,
+                    base_sha: row.get(5)?,
+                    base_tracking_ref: row.get(6)?,
+                    lineage_id: row.get(7)?,
+                    revoked_at: row.get(8)?,
+                    expires_at: row.get(9)?,
+                    session_agent_type: agent_type_sql
+                        .as_deref()
+                        .and_then(raxis_types::SessionAgentType::from_sql_str),
+                    can_delegate: can_delegate_int != 0,
+                    initiative_id: row.get(12)?,
+                })
+            },
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
+            other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
+        })?;
 
     // DDL Table 4: revoked INTEGER (0/1 flag) + revoked_at (nullable timestamp).
     // Check both: revoked=1 is the gate; revoked_at carries the time.
     if row.revoked_at.is_some() {
-        return Err(AuthorityError::SessionRevoked { revoked_at: row.revoked_at.unwrap_or(0) });
+        return Err(AuthorityError::SessionRevoked {
+            revoked_at: row.revoked_at.unwrap_or(0),
+        });
     }
     if row.expires_at < unix_now_secs() {
         return Err(AuthorityError::SessionExpired);
@@ -234,7 +243,10 @@ pub fn get_session(session_id: &SessionId, store: &Store) -> Result<SessionRow, 
 /// Returns the raw row without applying revoked/expired guards — the caller
 /// performs those checks (they need the raw row for sequence number access).
 /// `SessionNotFound` if no row matches the token.
-pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<SessionRow, AuthorityError> {
+pub fn get_session_by_token(
+    session_token: &str,
+    store: &Store,
+) -> Result<SessionRow, AuthorityError> {
     let conn = store.lock_sync();
     conn.query_row(
         &format!(
@@ -249,24 +261,25 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
             let agent_type_sql: Option<String> = row.get(10)?;
             let can_delegate_int: i64 = row.get(11)?;
             Ok(SessionRow {
-                session_id:        row.get(0)?,
-                role:              row.get(1)?,
-                session_token:     row.get(2)?,
-                sequence_number:   row.get(3)?,
-                worktree_root:     row.get(4)?,
-                base_sha:          row.get(5)?,
+                session_id: row.get(0)?,
+                role: row.get(1)?,
+                session_token: row.get(2)?,
+                sequence_number: row.get(3)?,
+                worktree_root: row.get(4)?,
+                base_sha: row.get(5)?,
                 base_tracking_ref: row.get(6)?,
-                lineage_id:        row.get(7)?,
-                revoked_at:        row.get(8)?,
-                expires_at:        row.get(9)?,
+                lineage_id: row.get(7)?,
+                revoked_at: row.get(8)?,
+                expires_at: row.get(9)?,
                 session_agent_type: agent_type_sql
                     .as_deref()
                     .and_then(raxis_types::SessionAgentType::from_sql_str),
-                can_delegate:      can_delegate_int != 0,
-                initiative_id:     row.get(12)?,
+                can_delegate: can_delegate_int != 0,
+                initiative_id: row.get(12)?,
             })
         },
-    ).map_err(|e| match e {
+    )
+    .map_err(|e| match e {
         rusqlite::Error::QueryReturnedNoRows => AuthorityError::SessionNotFound,
         other => AuthorityError::Store(raxis_store::StoreError::Rusqlite(other)),
     })
@@ -279,10 +292,14 @@ pub fn get_session_by_token(session_token: &str, store: &Store) -> Result<Sessio
 pub fn revoke_session(session_id: &SessionId, store: &Store) -> Result<(), AuthorityError> {
     let now = unix_now_secs();
     let store = store.lock_sync();
-    let rows = store.execute(
-        &format!("UPDATE {SESSIONS} SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0"),
-        rusqlite::params![now, session_id.as_str()],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+    let rows = store
+        .execute(
+            &format!(
+                "UPDATE {SESSIONS} SET revoked=1, revoked_at=?1 WHERE session_id=?2 AND revoked=0"
+            ),
+            rusqlite::params![now, session_id.as_str()],
+        )
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     if rows == 0 {
         Err(AuthorityError::SessionRevoked { revoked_at: now })
@@ -306,13 +323,15 @@ pub fn update_sequence_number(
     store: &Store,
 ) -> Result<(), AuthorityError> {
     let store = store.lock_sync();
-    let rows = store.execute(
-        &format!(
-            "UPDATE {SESSIONS} SET sequence_number = ?1
+    let rows = store
+        .execute(
+            &format!(
+                "UPDATE {SESSIONS} SET sequence_number = ?1
              WHERE session_id = ?2 AND sequence_number = ?3"
-        ),
-        rusqlite::params![expected_current + 1, session_id.as_str(), expected_current],
-    ).map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
+            ),
+            rusqlite::params![expected_current + 1, session_id.as_str(), expected_current],
+        )
+        .map_err(|e| AuthorityError::Store(raxis_store::StoreError::Rusqlite(e)))?;
 
     if rows == 0 {
         Err(AuthorityError::SequenceMismatch)
@@ -358,17 +377,15 @@ pub enum EnvelopeReplayReason {
 /// emission. The handler maps each reason to `PlannerErrorCode::Unauthorized`
 /// per INV-08 to avoid leaking which check failed.
 pub fn accept_envelope_and_advance_sequence(
-    session_id:      &SessionId,
-    presented_seq:   i64,
-    envelope_nonce:  &str,
-    store:           &Store,
+    session_id: &SessionId,
+    presented_seq: i64,
+    envelope_nonce: &str,
+    store: &Store,
 ) -> Result<(), EnvelopeReplayReason> {
     // Sanity: nonce must be 32 hex chars (16 bytes). A malformed nonce is a
     // protocol violation and we treat it as DuplicateNonce-equivalent —
     // surfaces as UNAUTHORIZED, no observable difference to the planner.
-    if envelope_nonce.len() != 32
-        || !envelope_nonce.chars().all(|c| c.is_ascii_hexdigit())
-    {
+    if envelope_nonce.len() != 32 || !envelope_nonce.chars().all(|c| c.is_ascii_hexdigit()) {
         return Err(EnvelopeReplayReason::DuplicateNonce);
     }
 
@@ -520,8 +537,7 @@ mod tests {
         accept_envelope_and_advance_sequence(&sid, 1, &nonce(0xCD), &store).unwrap();
 
         // Same nonce, NEXT sequence number → still rejected (UNIQUE on nonce).
-        let err =
-            accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xCD), &store).unwrap_err();
+        let err = accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xCD), &store).unwrap_err();
         assert_eq!(err, EnvelopeReplayReason::DuplicateNonce);
 
         // Sequence number must not have advanced.
@@ -542,11 +558,13 @@ mod tests {
         let store = store_with_session(&sid);
 
         // Skip seq 1, jump to seq 2 — must reject with SequenceGap.
-        let err =
-            accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xEF), &store).unwrap_err();
+        let err = accept_envelope_and_advance_sequence(&sid, 2, &nonce(0xEF), &store).unwrap_err();
         assert_eq!(
             err,
-            EnvelopeReplayReason::SequenceGap { expected: 1, presented: 2 }
+            EnvelopeReplayReason::SequenceGap {
+                expected: 1,
+                presented: 2
+            }
         );
 
         // No nonce_cache row was written.
@@ -570,8 +588,7 @@ mod tests {
 
         // Try to re-accept seq=1 with a fresh nonce. The sequence check (A)
         // catches this before we reach the nonce insert.
-        let err =
-            accept_envelope_and_advance_sequence(&sid, 1, &nonce(0x22), &store).unwrap_err();
+        let err = accept_envelope_and_advance_sequence(&sid, 1, &nonce(0x22), &store).unwrap_err();
         assert!(matches!(err, EnvelopeReplayReason::SequenceGap { .. }));
     }
 
@@ -581,8 +598,7 @@ mod tests {
         let store = store_with_session(&sid);
 
         // Wrong length.
-        let err =
-            accept_envelope_and_advance_sequence(&sid, 1, "abc", &store).unwrap_err();
+        let err = accept_envelope_and_advance_sequence(&sid, 1, "abc", &store).unwrap_err();
         assert_eq!(err, EnvelopeReplayReason::DuplicateNonce);
 
         // Non-hex character.
@@ -619,10 +635,11 @@ mod tests {
         let store = store_with_session(&sid);
 
         let row = get_session(&sid, &store).expect("session must read");
-        assert!(row.session_agent_type.is_none(),
-            "V1 row ⇒ NULL agent_type ⇒ Rust None");
-        assert!(!row.can_delegate,
-            "V1 row default DDL: can_delegate = 0");
+        assert!(
+            row.session_agent_type.is_none(),
+            "V1 row ⇒ NULL agent_type ⇒ Rust None"
+        );
+        assert!(!row.can_delegate, "V1 row default DDL: can_delegate = 0");
     }
 
     #[test]
@@ -644,14 +661,19 @@ mod tests {
                     raxis_types::SessionAgentType::Orchestrator.as_sql_str(),
                     sid.as_str(),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let row = get_session(&sid, &store).expect("session must read");
-        assert_eq!(row.session_agent_type,
-            Some(raxis_types::SessionAgentType::Orchestrator));
-        assert!(row.can_delegate,
-            "Orchestrator session must round-trip can_delegate=1");
+        assert_eq!(
+            row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Orchestrator)
+        );
+        assert!(
+            row.can_delegate,
+            "Orchestrator session must round-trip can_delegate=1"
+        );
     }
 
     #[test]
@@ -669,15 +691,20 @@ mod tests {
                     raxis_types::SessionAgentType::Executor.as_sql_str(),
                     sid.as_str(),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let row = get_session(&sid, &store).expect("session must read");
-        assert_eq!(row.session_agent_type,
-            Some(raxis_types::SessionAgentType::Executor));
-        assert!(!row.can_delegate,
+        assert_eq!(
+            row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Executor)
+        );
+        assert!(
+            !row.can_delegate,
             "Executor session must NOT have can_delegate=1 \
-             (INV-DELEGATE-01)");
+             (INV-DELEGATE-01)"
+        );
     }
 
     #[test]
@@ -697,13 +724,15 @@ mod tests {
                     raxis_types::SessionAgentType::Reviewer.as_sql_str(),
                     sid.as_str(),
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
-        let row = get_session_by_token("tok", &store)
-            .expect("session must be readable by token");
-        assert_eq!(row.session_agent_type,
-            Some(raxis_types::SessionAgentType::Reviewer));
+        let row = get_session_by_token("tok", &store).expect("session must be readable by token");
+        assert_eq!(
+            row.session_agent_type,
+            Some(raxis_types::SessionAgentType::Reviewer)
+        );
         assert!(!row.can_delegate);
     }
 
@@ -728,4 +757,3 @@ mod tests {
         assert_eq!(s, 10);
     }
 }
-

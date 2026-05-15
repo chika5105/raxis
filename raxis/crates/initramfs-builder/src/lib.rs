@@ -124,17 +124,17 @@ pub enum EntryKind {
 pub(crate) struct CpioEntry {
     /// Path inside the archive. Always relative-form (never starts
     /// with `/`, never contains `..` or empty components).
-    pub(crate) path:  String,
+    pub(crate) path: String,
     /// POSIX mode bits including the file-type field. The `add_*`
     /// methods OR in the right `S_IF*` constant so the caller passes
     /// only the permission bits.
-    pub(crate) mode:  u32,
+    pub(crate) mode: u32,
     /// Owning user id. Defaults to `0`.
-    pub(crate) uid:   u32,
+    pub(crate) uid: u32,
     /// Owning group id. Defaults to `0`.
-    pub(crate) gid:   u32,
+    pub(crate) gid: u32,
     /// Entry contents and shape.
-    pub(crate) kind:  EntryKind,
+    pub(crate) kind: EntryKind,
 }
 
 /// Builder for one cpio.gz initramfs archive.
@@ -145,7 +145,7 @@ pub(crate) struct CpioEntry {
 pub struct InitramfsBuilder {
     /// Entries indexed by path. `BTreeMap` so iteration is sorted by
     /// path (ASCII byte order) — that's the determinism guarantee.
-    entries:           BTreeMap<String, CpioEntry>,
+    entries: BTreeMap<String, CpioEntry>,
     /// `c_mtime` stamped into every entry. Defaults to `0`.
     source_date_epoch: u64,
 }
@@ -174,7 +174,7 @@ pub enum InitramfsError {
     #[error("io error reading {path:?}: {source}")]
     Io {
         /// Host path being read.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,
@@ -207,7 +207,7 @@ impl InitramfsBuilder {
     /// Empty builder with `source_date_epoch = 0`.
     pub fn new() -> Self {
         Self {
-            entries:           BTreeMap::new(),
+            entries: BTreeMap::new(),
             source_date_epoch: 0,
         }
     }
@@ -226,18 +226,19 @@ impl InitramfsBuilder {
     pub fn add_directory(&mut self, path: &str, mode: u32) -> Result<(), InitramfsError> {
         let path = normalise_archive_path(path)?;
         let mode = (mode & 0o7777) | S_IFDIR;
-        self.insert(CpioEntry { path, mode, uid: 0, gid: 0, kind: EntryKind::Directory })
+        self.insert(CpioEntry {
+            path,
+            mode,
+            uid: 0,
+            gid: 0,
+            kind: EntryKind::Directory,
+        })
     }
 
     /// Add a regular-file entry with the given bytes. `mode` is the
     /// permission bits only (e.g., `0o755` for an executable);
     /// we OR in `S_IFREG`.
-    pub fn add_file(
-        &mut self,
-        path: &str,
-        mode: u32,
-        data: Vec<u8>,
-    ) -> Result<(), InitramfsError> {
+    pub fn add_file(&mut self, path: &str, mode: u32, data: Vec<u8>) -> Result<(), InitramfsError> {
         let path = normalise_archive_path(path)?;
         let mode = (mode & 0o7777) | S_IFREG;
         self.insert(CpioEntry {
@@ -265,7 +266,9 @@ impl InitramfsBuilder {
             mode,
             uid: 0,
             gid: 0,
-            kind: EntryKind::Symlink { target: target.to_owned() },
+            kind: EntryKind::Symlink {
+                target: target.to_owned(),
+            },
         })
     }
 
@@ -298,7 +301,7 @@ impl InitramfsBuilder {
     /// individual entries afterwards if needed.
     pub fn add_tree_from_disk(
         &mut self,
-        host_root:      &Path,
+        host_root: &Path,
         archive_prefix: &str,
     ) -> Result<(), InitramfsError> {
         use std::os::unix::fs::{FileTypeExt, PermissionsExt};
@@ -306,7 +309,7 @@ impl InitramfsBuilder {
         let host_root = host_root.to_owned();
         if !host_root.is_dir() {
             return Err(InitramfsError::Io {
-                path:   host_root.clone(),
+                path: host_root.clone(),
                 source: std::io::Error::new(
                     std::io::ErrorKind::NotFound,
                     "host_root is not a directory",
@@ -321,11 +324,11 @@ impl InitramfsBuilder {
         let mut stack: Vec<PathBuf> = vec![host_root.clone()];
         while let Some(dir) = stack.pop() {
             for entry in std::fs::read_dir(&dir).map_err(|e| InitramfsError::Io {
-                path:   dir.clone(),
+                path: dir.clone(),
                 source: e,
             })? {
                 let entry = entry.map_err(|e| InitramfsError::Io {
-                    path:   dir.clone(),
+                    path: dir.clone(),
                     source: e,
                 })?;
                 let host_path = entry.path();
@@ -335,13 +338,18 @@ impl InitramfsBuilder {
                 let archive_path = if archive_prefix.is_empty() {
                     rel.to_string_lossy().into_owned()
                 } else {
-                    format!("{}/{}", archive_prefix.trim_matches('/'), rel.to_string_lossy())
+                    format!(
+                        "{}/{}",
+                        archive_prefix.trim_matches('/'),
+                        rel.to_string_lossy()
+                    )
                 };
 
                 // `symlink_metadata` so we don't follow symlinks on
                 // the host side — the symlink itself is the entry.
-                let md = std::fs::symlink_metadata(&host_path).map_err(|e| {
-                    InitramfsError::Io { path: host_path.clone(), source: e }
+                let md = std::fs::symlink_metadata(&host_path).map_err(|e| InitramfsError::Io {
+                    path: host_path.clone(),
+                    source: e,
                 })?;
                 let ft = md.file_type();
                 let mode_bits = md.permissions().mode() & 0o7777;
@@ -350,19 +358,18 @@ impl InitramfsBuilder {
                     self.add_directory(&archive_path, mode_bits)?;
                     stack.push(host_path);
                 } else if ft.is_file() {
-                    let data = std::fs::read(&host_path).map_err(|e| {
-                        InitramfsError::Io { path: host_path.clone(), source: e }
+                    let data = std::fs::read(&host_path).map_err(|e| InitramfsError::Io {
+                        path: host_path.clone(),
+                        source: e,
                     })?;
                     self.add_file(&archive_path, mode_bits, data)?;
                 } else if ft.is_symlink() {
-                    let target = std::fs::read_link(&host_path).map_err(|e| {
-                        InitramfsError::Io { path: host_path.clone(), source: e }
-                    })?;
-                    self.add_symlink(
-                        &archive_path,
-                        &target.to_string_lossy(),
-                        mode_bits,
-                    )?;
+                    let target =
+                        std::fs::read_link(&host_path).map_err(|e| InitramfsError::Io {
+                            path: host_path.clone(),
+                            source: e,
+                        })?;
+                    self.add_symlink(&archive_path, &target.to_string_lossy(), mode_bits)?;
                 } else {
                     let kind = if ft.is_block_device() {
                         "block device"
@@ -420,7 +427,9 @@ impl InitramfsBuilder {
 
     fn insert(&mut self, e: CpioEntry) -> Result<(), InitramfsError> {
         if self.entries.contains_key(&e.path) {
-            return Err(InitramfsError::DuplicatePath { path: e.path.clone() });
+            return Err(InitramfsError::DuplicatePath {
+                path: e.path.clone(),
+            });
         }
         self.entries.insert(e.path.clone(), e);
         Ok(())
@@ -457,9 +466,7 @@ fn normalise_archive_path(s: &str) -> Result<String, InitramfsError> {
         match c {
             Component::Normal(seg) => match seg.to_str() {
                 Some(s) if !s.is_empty() => out.push(s),
-                _ => {
-                    return Err(InitramfsError::InvalidPath { path: s.to_owned() })
-                }
+                _ => return Err(InitramfsError::InvalidPath { path: s.to_owned() }),
             },
             Component::CurDir => continue,
             Component::ParentDir | Component::RootDir | Component::Prefix(_) => {
@@ -477,27 +484,27 @@ fn normalise_archive_path(s: &str) -> Result<String, InitramfsError> {
 /// data + pad. Offsets are aligned to 4-byte boundaries (per the
 /// newc spec the kernel parses).
 fn write_newc_entry<W: Write>(
-    w:     &mut W,
-    e:     &CpioEntry,
-    ino:   u32,
+    w: &mut W,
+    e: &CpioEntry,
+    ino: u32,
     mtime: u64,
 ) -> Result<(), InitramfsError> {
     // Resolve filesize + body-bytes-to-write up front. For symlinks
     // the body is the target path; for directories it's empty.
     let body: &[u8] = match &e.kind {
         EntryKind::RegularFile { data } => data,
-        EntryKind::Symlink     { target } => target.as_bytes(),
-        EntryKind::Directory             => &[],
+        EntryKind::Symlink { target } => target.as_bytes(),
+        EntryKind::Directory => &[],
     };
     let nlink: u32 = match &e.kind {
         EntryKind::Directory => 2,
-        _                    => 1,
+        _ => 1,
     };
 
     // The cpio name field includes the trailing null byte in
     // `c_namesize`. So namesize = name.len() + 1.
     let name_bytes = e.path.as_bytes();
-    let namesize   = name_bytes.len() as u32 + 1;
+    let namesize = name_bytes.len() as u32 + 1;
 
     // Header: 13 fields × 8 hex chars + 6-byte magic = 110 bytes.
     w.write_all(NEWC_MAGIC)?;
@@ -506,14 +513,14 @@ fn write_newc_entry<W: Write>(
     write_hex8(w, e.uid)?;
     write_hex8(w, e.gid)?;
     write_hex8(w, nlink)?;
-    write_hex8(w, mtime as u32)?;          // c_mtime
-    write_hex8(w, body.len() as u32)?;     // c_filesize
-    write_hex8(w, 0)?;                     // c_devmajor
-    write_hex8(w, 0)?;                     // c_devminor
-    write_hex8(w, 0)?;                     // c_rdevmajor
-    write_hex8(w, 0)?;                     // c_rdevminor
-    write_hex8(w, namesize)?;              // c_namesize
-    write_hex8(w, 0)?;                     // c_check (newc = 0)
+    write_hex8(w, mtime as u32)?; // c_mtime
+    write_hex8(w, body.len() as u32)?; // c_filesize
+    write_hex8(w, 0)?; // c_devmajor
+    write_hex8(w, 0)?; // c_devminor
+    write_hex8(w, 0)?; // c_rdevmajor
+    write_hex8(w, 0)?; // c_rdevminor
+    write_hex8(w, namesize)?; // c_namesize
+    write_hex8(w, 0)?; // c_check (newc = 0)
 
     // Name + null terminator.
     w.write_all(name_bytes)?;
@@ -541,21 +548,21 @@ fn write_newc_trailer<W: Write>(w: &mut W) -> Result<(), InitramfsError> {
     let namesize: u32 = name.len() as u32 + 1;
 
     w.write_all(NEWC_MAGIC)?;
-    write_hex8(w, 0)?;          // c_ino
-    write_hex8(w, 0)?;          // c_mode
-    write_hex8(w, 0)?;          // c_uid
-    write_hex8(w, 0)?;          // c_gid
-    write_hex8(w, 1)?;          // c_nlink — the kernel doesn't enforce
-                                //           this but every cpio writer
-                                //           in the wild emits 1 here.
-    write_hex8(w, 0)?;          // c_mtime
-    write_hex8(w, 0)?;          // c_filesize
-    write_hex8(w, 0)?;          // c_devmajor
-    write_hex8(w, 0)?;          // c_devminor
-    write_hex8(w, 0)?;          // c_rdevmajor
-    write_hex8(w, 0)?;          // c_rdevminor
-    write_hex8(w, namesize)?;   // c_namesize
-    write_hex8(w, 0)?;          // c_check
+    write_hex8(w, 0)?; // c_ino
+    write_hex8(w, 0)?; // c_mode
+    write_hex8(w, 0)?; // c_uid
+    write_hex8(w, 0)?; // c_gid
+    write_hex8(w, 1)?; // c_nlink — the kernel doesn't enforce
+                       //           this but every cpio writer
+                       //           in the wild emits 1 here.
+    write_hex8(w, 0)?; // c_mtime
+    write_hex8(w, 0)?; // c_filesize
+    write_hex8(w, 0)?; // c_devmajor
+    write_hex8(w, 0)?; // c_devminor
+    write_hex8(w, 0)?; // c_rdevmajor
+    write_hex8(w, 0)?; // c_rdevminor
+    write_hex8(w, namesize)?; // c_namesize
+    write_hex8(w, 0)?; // c_check
 
     w.write_all(name)?;
     w.write_all(&[0u8])?;
@@ -593,18 +600,18 @@ mod tests {
     /// to round-trip what we wrote.
     fn parse_first_entry(buf: &[u8]) -> (String, u32, u32, u32, Vec<u8>) {
         assert_eq!(&buf[0..6], NEWC_MAGIC, "newc magic mismatch");
-        let ino      = parse_hex8(&buf[6..14]);
-        let mode     = parse_hex8(&buf[14..22]);
+        let ino = parse_hex8(&buf[6..14]);
+        let mode = parse_hex8(&buf[14..22]);
         let filesize = parse_hex8(&buf[54..62]);
         let namesize = parse_hex8(&buf[94..102]) as usize;
         let name_start = 110;
-        let name_end   = 110 + namesize - 1; // strip null
+        let name_end = 110 + namesize - 1; // strip null
         let name = std::str::from_utf8(&buf[name_start..name_end])
             .unwrap()
             .to_owned();
         let header_plus_name = 110 + namesize;
         let body_start = header_plus_name + (4 - header_plus_name % 4) % 4;
-        let body_end   = body_start + filesize as usize;
+        let body_end = body_start + filesize as usize;
         let body = buf[body_start..body_end].to_vec();
         (name, mode, filesize, ino, body)
     }
@@ -659,13 +666,16 @@ mod tests {
     #[test]
     fn determinism_byte_for_byte_across_builds() {
         let build = || -> Vec<u8> {
-            let mut b = InitramfsBuilder::new()
-                .with_source_date_epoch(1_700_000_000);
+            let mut b = InitramfsBuilder::new().with_source_date_epoch(1_700_000_000);
             b.add_directory("etc", 0o755).unwrap();
             b.add_file("etc/hostname", 0o644, b"raxis-orchestrator\n".to_vec())
                 .unwrap();
-            b.add_file("init", 0o755, b"#!/bin/sh\nexec /usr/local/bin/raxis-orchestrator $@\n".to_vec())
-                .unwrap();
+            b.add_file(
+                "init",
+                0o755,
+                b"#!/bin/sh\nexec /usr/local/bin/raxis-orchestrator $@\n".to_vec(),
+            )
+            .unwrap();
             b.add_directory("usr", 0o755).unwrap();
             b.add_directory("usr/local", 0o755).unwrap();
             b.add_directory("usr/local/bin", 0o755).unwrap();
@@ -679,14 +689,16 @@ mod tests {
         };
         let a = build();
         let b = build();
-        assert_eq!(a, b, "two builds with the same logical input must produce identical bytes");
+        assert_eq!(
+            a, b,
+            "two builds with the same logical input must produce identical bytes"
+        );
     }
 
     #[test]
     fn determinism_byte_for_byte_across_gz_builds() {
         let build = || -> Vec<u8> {
-            let mut b = InitramfsBuilder::new()
-                .with_source_date_epoch(1_700_000_000);
+            let mut b = InitramfsBuilder::new().with_source_date_epoch(1_700_000_000);
             b.add_file("init", 0o755, b"hello".to_vec()).unwrap();
             b.finalise_to_cpio_gz().unwrap()
         };
@@ -709,7 +721,7 @@ mod tests {
 
     #[test]
     fn trailer_is_emitted_with_canonical_name() {
-        let b     = InitramfsBuilder::new();
+        let b = InitramfsBuilder::new();
         let bytes = b.finalise_to_cpio().unwrap();
         // Empty builder => only trailer.
         let (n, _, _, _, _) = parse_first_entry(&bytes);
@@ -730,7 +742,10 @@ mod tests {
         // Verify all three entries showed up.
         let paths: Vec<_> = b.entries.keys().cloned().collect();
         assert!(paths.contains(&"etc".to_owned()), "etc dir: {paths:?}");
-        assert!(paths.contains(&"etc/hostname".to_owned()), "etc/hostname: {paths:?}");
+        assert!(
+            paths.contains(&"etc/hostname".to_owned()),
+            "etc/hostname: {paths:?}"
+        );
         assert!(paths.contains(&"init".to_owned()), "init: {paths:?}");
     }
 
@@ -750,11 +765,10 @@ mod tests {
         use flate2::read::GzDecoder;
         use std::io::Read;
 
-        let mut b = InitramfsBuilder::new()
-            .with_source_date_epoch(1);
+        let mut b = InitramfsBuilder::new().with_source_date_epoch(1);
         b.add_file("init", 0o755, b"hi".to_vec()).unwrap();
         let cpio = b.finalise_to_cpio().unwrap();
-        let gz   = b.finalise_to_cpio_gz().unwrap();
+        let gz = b.finalise_to_cpio_gz().unwrap();
 
         let mut decoded = Vec::new();
         GzDecoder::new(&gz[..]).read_to_end(&mut decoded).unwrap();
@@ -773,7 +787,7 @@ mod tests {
 
     #[test]
     fn empty_builder_emits_just_trailer() {
-        let b     = InitramfsBuilder::new();
+        let b = InitramfsBuilder::new();
         let bytes = b.finalise_to_cpio().unwrap();
         // 110 (header) + 11 (name+null) + pad to 4 = 124 bytes for
         // the trailer alone.

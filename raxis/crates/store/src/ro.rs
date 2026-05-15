@@ -105,10 +105,12 @@ pub enum RoError {
 
     /// `MAX(version)` returned a value that does not match this CLI
     /// build's `SCHEMA_VERSION`. Spec-mandated CLI exit code is 7.
-    #[error("kernel.db schema version mismatch: db is at v{actual}, this CLI expects v{expected}; \
-             {recommendation}")]
+    #[error(
+        "kernel.db schema version mismatch: db is at v{actual}, this CLI expects v{expected}; \
+             {recommendation}"
+    )]
     SchemaMismatch {
-        actual:  i64,
+        actual: i64,
         expected: u32,
         /// Human-actionable next step. Two cases:
         ///   actual < expected  → upgrade the kernel (it owns
@@ -141,7 +143,7 @@ pub enum RoError {
 /// legitimate reason for a read-only handle to need mutable access.
 pub struct RoConn {
     inner: Connection,
-    path:  PathBuf,
+    path: PathBuf,
 }
 
 // Manual `Debug` because `rusqlite::Connection` does not implement
@@ -218,7 +220,10 @@ pub fn open(data_dir: &Path) -> Result<RoConn, RoError> {
         &db_path,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
-    .map_err(|e| RoError::OpenFailed { path: db_path.clone(), source: e })?;
+    .map_err(|e| RoError::OpenFailed {
+        path: db_path.clone(),
+        source: e,
+    })?;
 
     // We do NOT re-set `journal_mode = WAL` here — sqlite refuses
     // PRAGMA journal_mode in a read-only connection, and the kernel
@@ -227,7 +232,10 @@ pub fn open(data_dir: &Path) -> Result<RoConn, RoError> {
     // joins via FK and expects FK-enforced semantics).
     let _ = conn.execute_batch("PRAGMA foreign_keys = ON;");
 
-    let ro = RoConn { inner: conn, path: db_path.clone() };
+    let ro = RoConn {
+        inner: conn,
+        path: db_path.clone(),
+    };
     assert_compatible_schema(&ro, SCHEMA_VERSION)?;
     Ok(ro)
 }
@@ -252,10 +260,10 @@ pub fn assert_compatible_schema(conn: &RoConn, expected: u32) -> Result<(), RoEr
 
     let actual = match row {
         Ok(v) => v,
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
-            if msg.contains("no such table") =>
-        {
-            return Err(RoError::SchemaMissing { path: conn.path().to_owned() });
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
+            return Err(RoError::SchemaMissing {
+                path: conn.path().to_owned(),
+            });
         }
         Err(other) => return Err(RoError::Sqlite(other)),
     };
@@ -339,7 +347,11 @@ mod tests {
         let conn = open(tmp.path()).expect("open");
         let err = assert_compatible_schema(&conn, SCHEMA_VERSION + 1).unwrap_err();
         match err {
-            RoError::SchemaMismatch { actual, expected, recommendation } => {
+            RoError::SchemaMismatch {
+                actual,
+                expected,
+                recommendation,
+            } => {
                 assert_eq!(actual, SCHEMA_VERSION as i64);
                 assert_eq!(expected, SCHEMA_VERSION + 1);
                 assert!(
@@ -365,21 +377,27 @@ mod tests {
         {
             let store = crate::Store::open(&tmp.path().join(KERNEL_DB_FILE)).unwrap();
             let guard = store.lock_sync();
-            guard.execute(
-                &format!(
-                    "INSERT OR REPLACE INTO {SCHEMA_VERSION_TABLE} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT OR REPLACE INTO {SCHEMA_VERSION_TABLE} \
                      (version, applied_at) \
                      VALUES (?1, strftime('%s', 'now'))"
-                ),
-                rusqlite::params![SCHEMA_VERSION + 5],
-            ).unwrap();
+                    ),
+                    rusqlite::params![SCHEMA_VERSION + 5],
+                )
+                .unwrap();
         }
         // Now the on-disk MAX(version) is `SCHEMA_VERSION + 5`. Open
         // with the CLI's normal `open()` — that internally calls
         // `assert_compatible_schema(SCHEMA_VERSION)` and must fail.
         let err = open(tmp.path()).unwrap_err();
         match err {
-            RoError::SchemaMismatch { actual, expected, recommendation } => {
+            RoError::SchemaMismatch {
+                actual,
+                expected,
+                recommendation,
+            } => {
                 assert_eq!(actual, (SCHEMA_VERSION + 5) as i64);
                 assert_eq!(expected, SCHEMA_VERSION);
                 assert!(
@@ -401,7 +419,8 @@ mod tests {
         let alien_path = tmp.path().join(KERNEL_DB_FILE);
         {
             let conn = Connection::open(&alien_path).unwrap();
-            conn.execute_batch("CREATE TABLE foo (id INTEGER);").unwrap();
+            conn.execute_batch("CREATE TABLE foo (id INTEGER);")
+                .unwrap();
         }
         let err = open(tmp.path()).unwrap_err();
         match err {

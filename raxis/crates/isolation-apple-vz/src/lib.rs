@@ -60,8 +60,7 @@ use std::time::Duration;
 
 use raxis_isolation::{
     Backend, CapabilityKind, CapabilityValue, ExitStatus, IntentFrame, IsolationError,
-    IsolationLevel, PushFrame, Session, SessionTransportId, VerifiedImage, VmSpec,
-    WorkspaceMount,
+    IsolationLevel, PushFrame, Session, SessionTransportId, VerifiedImage, VmSpec, WorkspaceMount,
 };
 
 use crate::config::{translate, AvfConfig};
@@ -103,8 +102,8 @@ impl HostSupport {
     /// Translate to the substrate trait's tier.
     pub const fn isolation_level(&self) -> IsolationLevel {
         match self {
-            Self::Supported            => IsolationLevel::R1Conformant,
-            Self::Unsupported { .. }    => IsolationLevel::FallbackOnly,
+            Self::Supported => IsolationLevel::R1Conformant,
+            Self::Unsupported { .. } => IsolationLevel::FallbackOnly,
         }
     }
 }
@@ -143,9 +142,9 @@ pub struct AppleVzBackend {
     runtime_dir: PathBuf,
     /// Boot grace: how long we wait for `VZVirtualMachine.start`'s
     /// completion handler to fire.
-    boot_grace:  Duration,
+    boot_grace: Duration,
     /// Graceful stop grace.
-    stop_grace:  Duration,
+    stop_grace: Duration,
 }
 
 impl AppleVzBackend {
@@ -153,8 +152,8 @@ impl AppleVzBackend {
     pub fn new(runtime_dir: impl Into<PathBuf>) -> Self {
         Self {
             runtime_dir: runtime_dir.into(),
-            boot_grace:  DEFAULT_BOOT_GRACE,
-            stop_grace:  DEFAULT_STOP_GRACE,
+            boot_grace: DEFAULT_BOOT_GRACE,
+            stop_grace: DEFAULT_STOP_GRACE,
         }
     }
 
@@ -174,9 +173,9 @@ impl AppleVzBackend {
 impl Backend for AppleVzBackend {
     fn spawn(
         &self,
-        image:    &VerifiedImage,
-        mounts:   &[WorkspaceMount],
-        spec:     &VmSpec,
+        image: &VerifiedImage,
+        mounts: &[WorkspaceMount],
+        spec: &VmSpec,
     ) -> Result<Box<dyn Session>, IsolationError> {
         // Refuse fast on unsupported hosts.
         match probe_host() {
@@ -196,28 +195,31 @@ impl Backend for AppleVzBackend {
         }
 
         // Translate spec.
-        let cfg: AvfConfig = translate(image, mounts, spec).map_err(|e| {
-            IsolationError::SpawnFailed(format!("{BACKEND_ID}: config: {e}"))
-        })?;
+        let cfg: AvfConfig = translate(image, mounts, spec)
+            .map_err(|e| IsolationError::SpawnFailed(format!("{BACKEND_ID}: config: {e}")))?;
         let planner_port = cfg.vsock.planner_port;
-        let guest_cid    = cfg.vsock.guest_cid;
+        let guest_cid = cfg.vsock.guest_cid;
 
         let mut runtime = AvfRuntime::new(cfg);
-        runtime.start(self.boot_grace).map_err(translate_runtime_err)?;
+        runtime
+            .start(self.boot_grace)
+            .map_err(translate_runtime_err)?;
 
         // Establish the planner-port VSock channel. The fd is owned
         // by the runtime's `VZVirtioSocketConnection`; we record the
         // raw fd here so `Session::push` / `recv_intent` can
         // length-prefix the kernel ↔ planner frames over it.
-        let vsock_fd = runtime.connect_vsock(planner_port).map_err(translate_runtime_err)?;
+        let vsock_fd = runtime
+            .connect_vsock(planner_port)
+            .map_err(translate_runtime_err)?;
 
         Ok(Box::new(AppleVzSession {
-            backend_id:   BACKEND_ID,
-            runtime:      Some(runtime),
+            backend_id: BACKEND_ID,
+            runtime: Some(runtime),
             vsock_fd,
-            terminated:   false,
-            vsock_cid:    guest_cid,
-            stop_grace:   self.stop_grace,
+            terminated: false,
+            vsock_cid: guest_cid,
+            stop_grace: self.stop_grace,
         }))
     }
 
@@ -227,13 +229,13 @@ impl Backend for AppleVzBackend {
 
     fn capability(&self, kind: CapabilityKind) -> CapabilityValue {
         match kind {
-            CapabilityKind::KvmAvailable         => CapabilityValue::Bool(false),
+            CapabilityKind::KvmAvailable => CapabilityValue::Bool(false),
             CapabilityKind::AttestationSupported => CapabilityValue::Bool(false),
             // Apple-VZ boot is observably ~200 ms in the canonical
             // path per `extensibility-traits.md §3.5`.
-            CapabilityKind::BootLatencyMs        => CapabilityValue::Int(200),
-            CapabilityKind::MaxConcurrentVms     => CapabilityValue::Int(64),
-            CapabilityKind::MemoryEncryption     => CapabilityValue::Bool(false),
+            CapabilityKind::BootLatencyMs => CapabilityValue::Int(200),
+            CapabilityKind::MaxConcurrentVms => CapabilityValue::Int(64),
+            CapabilityKind::MemoryEncryption => CapabilityValue::Bool(false),
         }
     }
 
@@ -244,24 +246,24 @@ impl Backend for AppleVzBackend {
 
 fn translate_runtime_err(e: RuntimeError) -> IsolationError {
     match e {
-        RuntimeError::Unsupported            => IsolationError::BackendInternal(format!(
+        RuntimeError::Unsupported => IsolationError::BackendInternal(format!(
             "{BACKEND_ID}: AVF runtime not available on this target"
         )),
-        RuntimeError::InvalidConfig(reason)  => IsolationError::SpawnFailed(format!(
-            "{BACKEND_ID}: {reason}"
-        )),
-        RuntimeError::StartFailed(reason)    => IsolationError::SpawnFailed(format!(
-            "{BACKEND_ID}: start: {reason}"
-        )),
-        RuntimeError::StartTimeout(d)        => IsolationError::SpawnFailed(format!(
-            "{BACKEND_ID}: start timeout after {d:?}"
-        )),
-        RuntimeError::StopFailed(reason)     => IsolationError::BackendInternal(format!(
-            "{BACKEND_ID}: stop: {reason}"
-        )),
-        RuntimeError::VsockConnect { port, reason } => IsolationError::TransportFault(format!(
-            "{BACKEND_ID}: vsock CONNECT {port}: {reason}"
-        )),
+        RuntimeError::InvalidConfig(reason) => {
+            IsolationError::SpawnFailed(format!("{BACKEND_ID}: {reason}"))
+        }
+        RuntimeError::StartFailed(reason) => {
+            IsolationError::SpawnFailed(format!("{BACKEND_ID}: start: {reason}"))
+        }
+        RuntimeError::StartTimeout(d) => {
+            IsolationError::SpawnFailed(format!("{BACKEND_ID}: start timeout after {d:?}"))
+        }
+        RuntimeError::StopFailed(reason) => {
+            IsolationError::BackendInternal(format!("{BACKEND_ID}: stop: {reason}"))
+        }
+        RuntimeError::VsockConnect { port, reason } => {
+            IsolationError::TransportFault(format!("{BACKEND_ID}: vsock CONNECT {port}: {reason}"))
+        }
     }
 }
 
@@ -279,20 +281,20 @@ fn translate_runtime_err(e: RuntimeError) -> IsolationError {
 /// pinned byte-exact to the same wire contract.
 pub struct AppleVzSession {
     /// Stable identifier reported to audit logs.
-    backend_id:    &'static str,
+    backend_id: &'static str,
     /// AVF runtime owning the live `VZVirtualMachine`. `None` after
     /// `terminate` / `shutdown` reaps.
-    runtime:       Option<AvfRuntime>,
+    runtime: Option<AvfRuntime>,
     /// Negotiated VSock fd used for `push` / `recv_intent` framing.
     /// `-1` when no vsock channel has been established (e.g.
     /// macOS host without entitlements).
-    vsock_fd:      std::os::raw::c_int,
+    vsock_fd: std::os::raw::c_int,
     /// Idempotent-terminate flag.
-    terminated:    bool,
+    terminated: bool,
     /// Guest CID at boot; recorded so `session_identity` is stable.
-    vsock_cid:     u32,
+    vsock_cid: u32,
     /// Configured graceful-shutdown grace.
-    stop_grace:    Duration,
+    stop_grace: Duration,
 }
 
 impl std::fmt::Debug for AppleVzSession {
@@ -333,9 +335,8 @@ impl Session for AppleVzSession {
                 "{BACKEND_ID}: push: no vsock channel established",
             )));
         }
-        write_length_prefixed_frame(self.vsock_fd, &frame.bytes).map_err(|e| {
-            IsolationError::TransportFault(format!("{BACKEND_ID}: push: {e}"))
-        })
+        write_length_prefixed_frame(self.vsock_fd, &frame.bytes)
+            .map_err(|e| IsolationError::TransportFault(format!("{BACKEND_ID}: push: {e}")))
     }
 
     fn recv_intent(&mut self) -> Result<IntentFrame, IsolationError> {
@@ -349,9 +350,8 @@ impl Session for AppleVzSession {
                 "{BACKEND_ID}: recv: no vsock channel established",
             )));
         }
-        let bytes = read_length_prefixed_frame(self.vsock_fd).map_err(|e| {
-            IsolationError::TransportFault(format!("{BACKEND_ID}: recv: {e}"))
-        })?;
+        let bytes = read_length_prefixed_frame(self.vsock_fd)
+            .map_err(|e| IsolationError::TransportFault(format!("{BACKEND_ID}: recv: {e}")))?;
         Ok(IntentFrame { bytes })
     }
 
@@ -387,7 +387,8 @@ impl Session for AppleVzSession {
                 ExitStatus::GracefulExit { code: 0 }
             } else {
                 ExitStatus::BackendError(
-                    exit.reason.unwrap_or_else(|| "AVF stop failed without error string".to_owned()),
+                    exit.reason
+                        .unwrap_or_else(|| "AVF stop failed without error string".to_owned()),
                 )
             });
         }
@@ -395,7 +396,9 @@ impl Session for AppleVzSession {
     }
 
     fn session_identity(&self) -> SessionTransportId {
-        SessionTransportId::Vsock { cid: self.vsock_cid }
+        SessionTransportId::Vsock {
+            cid: self.vsock_cid,
+        }
     }
 
     /// Surrender the host-side virtio-vsock fd to the kernel's IPC
@@ -453,7 +456,7 @@ impl Session for AppleVzSession {
     /// forwarder is `raxis-tproxy::loopback_forwarder`.
     fn register_loopback_listener(
         &mut self,
-        vsock_port:         u32,
+        vsock_port: u32,
         host_loopback_port: u16,
     ) -> Result<(), IsolationError> {
         if self.terminated {
@@ -524,10 +527,7 @@ enum FrameError {
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn write_length_prefixed_frame(
-    fd: std::os::raw::c_int,
-    payload: &[u8],
-) -> Result<(), FrameError> {
+fn write_length_prefixed_frame(fd: std::os::raw::c_int, payload: &[u8]) -> Result<(), FrameError> {
     use std::io::Write;
     use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
@@ -540,9 +540,8 @@ fn write_length_prefixed_frame(
     // and release without taking ownership, so the AVF-owned close
     // path remains intact.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let mut file: std::fs::File = std::fs::File::from(
-        borrowed.try_clone_to_owned().map_err(FrameError::Write)?,
-    );
+    let mut file: std::fs::File =
+        std::fs::File::from(borrowed.try_clone_to_owned().map_err(FrameError::Write)?);
     let prefix = (n as u32).to_be_bytes();
     file.write_all(&prefix).map_err(FrameError::Write)?;
     file.write_all(payload).map_err(FrameError::Write)?;
@@ -557,16 +556,13 @@ fn write_length_prefixed_frame(
 
 #[cfg(unix)]
 #[allow(unsafe_code)]
-fn read_length_prefixed_frame(
-    fd: std::os::raw::c_int,
-) -> Result<Vec<u8>, FrameError> {
+fn read_length_prefixed_frame(fd: std::os::raw::c_int) -> Result<Vec<u8>, FrameError> {
     use std::os::fd::{BorrowedFd, FromRawFd, IntoRawFd, OwnedFd};
 
     // SAFETY: see write helper.
     let borrowed = unsafe { BorrowedFd::borrow_raw(fd) };
-    let mut file: std::fs::File = std::fs::File::from(
-        borrowed.try_clone_to_owned().map_err(FrameError::Read)?,
-    );
+    let mut file: std::fs::File =
+        std::fs::File::from(borrowed.try_clone_to_owned().map_err(FrameError::Read)?);
 
     let mut len_buf = [0u8; 4];
     read_exact_or_closed(&mut file, &mut len_buf)?;
@@ -584,10 +580,7 @@ fn read_length_prefixed_frame(
 }
 
 #[cfg(unix)]
-fn read_exact_or_closed<R: std::io::Read>(
-    r: &mut R,
-    out: &mut [u8],
-) -> Result<(), FrameError> {
+fn read_exact_or_closed<R: std::io::Read>(r: &mut R, out: &mut [u8]) -> Result<(), FrameError> {
     let mut filled = 0usize;
     while filled < out.len() {
         let n = r.read(&mut out[filled..]).map_err(FrameError::Read)?;
@@ -615,9 +608,7 @@ fn write_length_prefixed_frame(
 }
 
 #[cfg(not(unix))]
-fn read_length_prefixed_frame(
-    _fd: std::os::raw::c_int,
-) -> Result<Vec<u8>, FrameError> {
+fn read_length_prefixed_frame(_fd: std::os::raw::c_int) -> Result<Vec<u8>, FrameError> {
     Err(FrameError::Read(std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "AVF vsock framing requires a Unix file descriptor",
@@ -640,35 +631,35 @@ mod tests {
         // The substrate-level tests target failure surfaces; the path
         // here is the per-role rootfs (after the V2 substrate fix).
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "raxis-test-avf-1".to_owned(),
+            image_id: "raxis-test-avf-1".to_owned(),
         }
     }
 
     fn fixture_mount() -> WorkspaceMount {
         WorkspaceMount {
-            host_path:    PathBuf::from("/tmp/raxis-fixture-workspace"),
-            guest_path:   "/workspace".to_owned(),
-            mode:         MountMode::ReadOnly,
+            host_path: PathBuf::from("/tmp/raxis-fixture-workspace"),
+            guest_path: "/workspace".to_owned(),
+            mode: MountMode::ReadOnly,
             content_hash: Some(ContentHash([0u8; 32])),
         }
     }
 
     fn fixture_spec(token: &str) -> VmSpec {
         VmSpec {
-            vcpu_count:        1,
-            mem_mib:           128,
-            egress_tier:       EgressTier::None,
-            cgroup_quota:     None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken(token.to_owned()),
-            vsock_cid:         Some(7),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 128,
+            egress_tier: EgressTier::None,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken(token.to_owned()),
+            vsock_cid: Some(7),
+            virtio_fs_mounts: Vec::new(),
             linux_kernel_path: std::path::PathBuf::from("/var/raxis/test/vmlinux.bin"),
-            env:               Default::default(),
+            env: Default::default(),
             guest_console_log: None,
         }
     }
@@ -682,7 +673,10 @@ mod tests {
             IsolationLevel::R1Conformant
         );
         assert_eq!(
-            HostSupport::Unsupported { reason: "linux".into() }.isolation_level(),
+            HostSupport::Unsupported {
+                reason: "linux".into()
+            }
+            .isolation_level(),
             IsolationLevel::FallbackOnly,
         );
     }
@@ -795,7 +789,10 @@ mod tests {
                 matches!(e, IsolationError::BackendInternal(_))
             }),
             (
-                RuntimeError::VsockConnect { port: 1024, reason: "x".to_owned() },
+                RuntimeError::VsockConnect {
+                    port: 1024,
+                    reason: "x".to_owned(),
+                },
                 &|e| matches!(e, IsolationError::TransportFault(_)),
             ),
         ];

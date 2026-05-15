@@ -80,7 +80,9 @@ pub struct Cursor {
     pub metrics: CursorEntry,
 }
 
-fn default_cursor_schema() -> u32 { CURSOR_SCHEMA }
+fn default_cursor_schema() -> u32 {
+    CURSOR_SCHEMA
+}
 
 impl Cursor {
     /// Load the cursor from disk; if the file is missing, return a
@@ -91,15 +93,19 @@ impl Cursor {
         if !path.exists() {
             return Ok(Self::default_at_zero());
         }
-        let body = fs::read_to_string(path)
-            .map_err(|e| CursorError::Read { path: path.to_owned(), source: e })?;
-        let cur: Cursor = toml::from_str(&body)
-            .map_err(|e| CursorError::Parse { path: path.to_owned(), source: e })?;
+        let body = fs::read_to_string(path).map_err(|e| CursorError::Read {
+            path: path.to_owned(),
+            source: e,
+        })?;
+        let cur: Cursor = toml::from_str(&body).map_err(|e| CursorError::Parse {
+            path: path.to_owned(),
+            source: e,
+        })?;
         if cur.schema != CURSOR_SCHEMA {
             return Err(CursorError::SchemaMismatch {
-                path:     path.to_owned(),
+                path: path.to_owned(),
                 expected: CURSOR_SCHEMA,
-                actual:   cur.schema,
+                actual: cur.schema,
             });
         }
         Ok(cur)
@@ -111,14 +117,15 @@ impl Cursor {
     /// cursor on disk.
     pub fn persist(&self, path: &Path) -> Result<(), CursorError> {
         if let Some(parent) = path.parent() {
-            fs::create_dir_all(parent)
-                .map_err(|e| CursorError::Persist {
-                    path:   path.to_owned(),
-                    source: e,
-                })?;
+            fs::create_dir_all(parent).map_err(|e| CursorError::Persist {
+                path: path.to_owned(),
+                source: e,
+            })?;
         }
-        let body = toml::to_string_pretty(self)
-            .map_err(|e| CursorError::Encode { path: path.to_owned(), source: e })?;
+        let body = toml::to_string_pretty(self).map_err(|e| CursorError::Encode {
+            path: path.to_owned(),
+            source: e,
+        })?;
         let tmp = path.with_extension("toml.tmp");
         {
             let mut f = fs::OpenOptions::new()
@@ -126,14 +133,24 @@ impl Cursor {
                 .create(true)
                 .truncate(true)
                 .open(&tmp)
-                .map_err(|e| CursorError::Persist { path: tmp.clone(), source: e })?;
+                .map_err(|e| CursorError::Persist {
+                    path: tmp.clone(),
+                    source: e,
+                })?;
             f.write_all(body.as_bytes())
-                .map_err(|e| CursorError::Persist { path: tmp.clone(), source: e })?;
-            f.sync_all()
-                .map_err(|e| CursorError::Persist { path: tmp.clone(), source: e })?;
+                .map_err(|e| CursorError::Persist {
+                    path: tmp.clone(),
+                    source: e,
+                })?;
+            f.sync_all().map_err(|e| CursorError::Persist {
+                path: tmp.clone(),
+                source: e,
+            })?;
         }
-        fs::rename(&tmp, path)
-            .map_err(|e| CursorError::Persist { path: path.to_owned(), source: e })?;
+        fs::rename(&tmp, path).map_err(|e| CursorError::Persist {
+            path: path.to_owned(),
+            source: e,
+        })?;
         Ok(())
     }
 
@@ -141,7 +158,7 @@ impl Cursor {
     /// can advance bytes after each successful read.
     pub fn entry_mut(&mut self, stream: Stream) -> &mut CursorEntry {
         match stream {
-            Stream::Spans   => &mut self.spans,
+            Stream::Spans => &mut self.spans,
             Stream::Metrics => &mut self.metrics,
         }
     }
@@ -149,7 +166,7 @@ impl Cursor {
     /// Read-only accessor.
     pub fn entry(&self, stream: Stream) -> &CursorEntry {
         match stream {
-            Stream::Spans   => &self.spans,
+            Stream::Spans => &self.spans,
             Stream::Metrics => &self.metrics,
         }
     }
@@ -169,12 +186,12 @@ impl Cursor {
 
     fn default_at_zero() -> Self {
         Self {
-            schema:               CURSOR_SCHEMA,
-            pusher_version:       env!("CARGO_PKG_VERSION").to_owned(),
-            last_export_unix:     0,
+            schema: CURSOR_SCHEMA,
+            pusher_version: env!("CARGO_PKG_VERSION").to_owned(),
+            last_export_unix: 0,
             consecutive_failures: 0,
-            spans:                CursorEntry::default(),
-            metrics:              CursorEntry::default(),
+            spans: CursorEntry::default(),
+            metrics: CursorEntry::default(),
         }
     }
 }
@@ -186,43 +203,47 @@ pub enum CursorError {
     #[error("cursor read failed: {path:?}: {source}")]
     Read {
         /// Cursor path.
-        path:   PathBuf,
+        path: PathBuf,
         /// IO source.
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     /// TOML parse failure on a cursor file that exists.
     #[error("cursor parse failed: {path:?}: {source}")]
     Parse {
         /// Cursor path.
-        path:   PathBuf,
+        path: PathBuf,
         /// TOML source.
-        #[source] source: toml::de::Error,
+        #[source]
+        source: toml::de::Error,
     },
     /// Cursor schema mismatch — refuses to load.
     #[error("cursor schema mismatch at {path:?}: expected {expected}, got {actual}")]
     SchemaMismatch {
         /// Cursor path.
-        path:     PathBuf,
+        path: PathBuf,
         /// Expected schema (current binary).
         expected: u32,
         /// Schema found on disk.
-        actual:   u32,
+        actual: u32,
     },
     /// Filesystem write or rename failure.
     #[error("cursor persist failed: {path:?}: {source}")]
     Persist {
         /// Path attempted (tempfile or final).
-        path:   PathBuf,
+        path: PathBuf,
         /// IO source.
-        #[source] source: std::io::Error,
+        #[source]
+        source: std::io::Error,
     },
     /// TOML serialise failure.
     #[error("cursor encode failed: {path:?}: {source}")]
     Encode {
         /// Cursor path.
-        path:   PathBuf,
+        path: PathBuf,
         /// TOML serialise source.
-        #[source] source: toml::ser::Error,
+        #[source]
+        source: toml::ser::Error,
     },
 }
 
@@ -245,8 +266,14 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("cursor.toml");
         let mut cur = Cursor::default_at_zero();
-        cur.spans = CursorEntry { segment: "000007.jsonl".into(), offset: 4096 };
-        cur.metrics = CursorEntry { segment: "000003.jsonl".into(), offset: 1234 };
+        cur.spans = CursorEntry {
+            segment: "000007.jsonl".into(),
+            offset: 4096,
+        };
+        cur.metrics = CursorEntry {
+            segment: "000003.jsonl".into(),
+            offset: 1234,
+        };
         cur.record_success(1_715_000_000);
         cur.persist(&path).unwrap();
 
@@ -263,7 +290,9 @@ mod tests {
         std::fs::write(&path, "schema = 999\n").unwrap();
         let err = Cursor::load_or_init(&path).unwrap_err();
         match err {
-            CursorError::SchemaMismatch { actual, expected, .. } => {
+            CursorError::SchemaMismatch {
+                actual, expected, ..
+            } => {
                 assert_eq!(actual, 999);
                 assert_eq!(expected, CURSOR_SCHEMA);
             }

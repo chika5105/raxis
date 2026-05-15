@@ -226,14 +226,14 @@ pub(crate) enum AnthropicSseEvent {
 impl AnthropicSseEvent {
     pub(crate) fn parse(name: &str) -> Self {
         match name {
-            "message_start"        => Self::MessageStart,
-            "content_block_start"  => Self::ContentBlockStart,
-            "content_block_delta"  => Self::ContentBlockDelta,
-            "content_block_stop"   => Self::ContentBlockStop,
-            "message_delta"        => Self::MessageDelta,
-            "message_stop"         => Self::MessageStop,
-            "ping"                 => Self::Ping,
-            _                      => Self::Other,
+            "message_start" => Self::MessageStart,
+            "content_block_start" => Self::ContentBlockStart,
+            "content_block_delta" => Self::ContentBlockDelta,
+            "content_block_stop" => Self::ContentBlockStop,
+            "message_delta" => Self::MessageDelta,
+            "message_stop" => Self::MessageStop,
+            "ping" => Self::Ping,
+            _ => Self::Other,
         }
     }
 }
@@ -254,7 +254,7 @@ pub struct SseFrame {
     pub event: String,
     /// SSE data payload (concatenation of all `data: <line>` lines
     /// joined by `\n`, per the W3C spec).
-    pub data:  String,
+    pub data: String,
 }
 
 /// Stream-aware SSE byte parser. Keeps a rolling buffer of bytes
@@ -269,7 +269,9 @@ pub struct SseParser {
 impl SseParser {
     /// Construct a fresh parser with empty internal buffer.
     pub fn new() -> Self {
-        Self { buf: Vec::with_capacity(4096) }
+        Self {
+            buf: Vec::with_capacity(4096),
+        }
     }
 
     /// Append a chunk and return every now-complete frame, in
@@ -282,7 +284,9 @@ impl SseParser {
             // Look for `\n\n` (frame terminator). Naive scan;
             // the buffer is small per-chunk and SSE frames are
             // small (≤4 KiB typical for Anthropic).
-            let Some(end) = find_double_newline(&self.buf) else { break };
+            let Some(end) = find_double_newline(&self.buf) else {
+                break;
+            };
             let frame_bytes: Vec<u8> = self.buf.drain(..end + 2).collect();
             let frame_str = match std::str::from_utf8(&frame_bytes) {
                 Ok(s) => s,
@@ -326,7 +330,7 @@ fn find_double_newline(buf: &[u8]) -> Option<usize> {
 
 fn parse_sse_frame(frame: &str) -> Option<SseFrame> {
     let mut event: Option<String> = None;
-    let mut data:  Vec<&str>      = Vec::new();
+    let mut data: Vec<&str> = Vec::new();
     for line in frame.lines() {
         if line.is_empty() {
             continue;
@@ -365,7 +369,7 @@ struct AnthropicMessageStart {
 
 #[derive(Debug, Deserialize)]
 struct AnthropicMessageStartMessage {
-    id:    String,
+    id: String,
     model: String,
     #[serde(default)]
     usage: Option<Usage>,
@@ -373,7 +377,7 @@ struct AnthropicMessageStartMessage {
 
 #[derive(Debug, Deserialize)]
 struct AnthropicContentBlockStart {
-    index:         u32,
+    index: u32,
     content_block: serde_json::Value,
 }
 
@@ -419,25 +423,25 @@ pub struct AnthropicStreamAggregator {
     /// `content_block_stop` the entry is finalized and pushed
     /// into [`Self::content`].
     pending_blocks: std::collections::HashMap<u32, PendingBlock>,
-    content:        Vec<ContentBlock>,
-    id:             Option<String>,
-    model:          Option<String>,
-    stop_reason:    Option<String>,
-    usage:          Usage,
+    content: Vec<ContentBlock>,
+    id: Option<String>,
+    model: Option<String>,
+    stop_reason: Option<String>,
+    usage: Usage,
 }
 
 #[derive(Debug, Default)]
 struct PendingBlock {
     /// `"text"` or `"tool_use"`.
-    kind:        String,
+    kind: String,
     /// For `text` blocks.
-    text:        String,
+    text: String,
     /// For `tool_use` blocks.
     tool_use_id: Option<String>,
-    tool_name:   Option<String>,
+    tool_name: Option<String>,
     /// Streamed JSON fragments — concatenated and parsed at
     /// `content_block_stop`.
-    json_buf:    String,
+    json_buf: String,
 }
 
 impl Default for AnthropicStreamAggregator {
@@ -451,11 +455,11 @@ impl AnthropicStreamAggregator {
     pub fn new() -> Self {
         Self {
             pending_blocks: std::collections::HashMap::new(),
-            content:        Vec::new(),
-            id:             None,
-            model:          None,
-            stop_reason:    None,
-            usage:          Usage::default(),
+            content: Vec::new(),
+            id: None,
+            model: None,
+            stop_reason: None,
+            usage: Usage::default(),
         }
     }
 
@@ -473,13 +477,13 @@ impl AnthropicStreamAggregator {
             AnthropicSseEvent::MessageStart => {
                 let parsed: AnthropicMessageStart = serde_json::from_str(&frame.data)
                     .map_err(|e| ModelError::Json(e.to_string()))?;
-                self.id    = Some(parsed.message.id.clone());
+                self.id = Some(parsed.message.id.clone());
                 self.model = Some(parsed.message.model.clone());
                 if let Some(u) = parsed.message.usage {
                     self.usage = u;
                 }
                 out.push(StreamEvent::MessageStart {
-                    id:    parsed.message.id,
+                    id: parsed.message.id,
                     model: parsed.message.model,
                 });
             }
@@ -514,7 +518,7 @@ impl AnthropicStreamAggregator {
                 }
                 self.pending_blocks.insert(parsed.index, pending);
                 out.push(StreamEvent::ContentBlockStart {
-                    index:      parsed.index,
+                    index: parsed.index,
                     block_kind: kind,
                 });
             }
@@ -551,9 +555,7 @@ impl AnthropicStreamAggregator {
                         entry.json_buf.push_str(&frag);
                         out.push(StreamEvent::ContentBlockDelta {
                             index: parsed.index,
-                            delta: ContentBlockDeltaPayload::InputJsonDelta {
-                                partial_json: frag,
-                            },
+                            delta: ContentBlockDeltaPayload::InputJsonDelta { partial_json: frag },
                         });
                     }
                     _ => {
@@ -574,8 +576,8 @@ impl AnthropicStreamAggregator {
                                     .map_err(|e| ModelError::Json(e.to_string()))?
                             };
                             ContentBlock::ToolUse {
-                                id:    pending.tool_use_id.unwrap_or_default(),
-                                name:  pending.tool_name.unwrap_or_default(),
+                                id: pending.tool_use_id.unwrap_or_default(),
+                                name: pending.tool_name.unwrap_or_default(),
                                 input,
                             }
                         }
@@ -590,7 +592,9 @@ impl AnthropicStreamAggregator {
                     };
                     self.content.push(block);
                 }
-                out.push(StreamEvent::ContentBlockStop { index: parsed.index });
+                out.push(StreamEvent::ContentBlockStop {
+                    index: parsed.index,
+                });
             }
             AnthropicSseEvent::MessageDelta => {
                 let parsed: AnthropicMessageDelta = serde_json::from_str(&frame.data)
@@ -644,9 +648,9 @@ impl AnthropicStreamAggregator {
         let id = self
             .id
             .ok_or_else(|| ModelError::Json("stream had no message_start frame".to_owned()))?;
-        let model = self
-            .model
-            .ok_or_else(|| ModelError::Json("stream had no model id in message_start".to_owned()))?;
+        let model = self.model.ok_or_else(|| {
+            ModelError::Json("stream had no model id in message_start".to_owned())
+        })?;
         Ok(MessageResponse {
             id,
             kind: "message".to_owned(),
@@ -682,8 +686,7 @@ mod tests {
 
     #[test]
     fn sse_parser_handles_multi_line_data() {
-        let frames =
-            parse_one("event: message_delta\ndata: line one\ndata: line two\n\n");
+        let frames = parse_one("event: message_delta\ndata: line one\ndata: line two\n\n");
         assert_eq!(frames.len(), 1);
         assert_eq!(frames[0].data, "line one\nline two");
     }
@@ -716,9 +719,7 @@ mod tests {
 
     #[test]
     fn sse_parser_emits_multiple_frames_per_chunk() {
-        let frames = parse_one(
-            "event: ping\ndata: {}\n\nevent: message_stop\ndata: {}\n\n",
-        );
+        let frames = parse_one("event: ping\ndata: {}\n\nevent: message_stop\ndata: {}\n\n");
         assert_eq!(frames.len(), 2);
         assert_eq!(frames[0].event, "ping");
         assert_eq!(frames[1].event, "message_stop");
@@ -894,8 +895,7 @@ mod tests {
         let out = agg
             .ingest(&SseFrame {
                 event: "content_block_delta".to_owned(),
-                data: r#"{"index":0,"delta":{"type":"some_future_delta_kind","x":1}}"#
-                    .to_owned(),
+                data: r#"{"index":0,"delta":{"type":"some_future_delta_kind","x":1}}"#.to_owned(),
             })
             .unwrap();
         assert!(out.is_empty(), "unknown delta must produce no events");

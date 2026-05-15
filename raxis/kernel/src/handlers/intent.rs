@@ -35,28 +35,27 @@
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use raxis_types::{
-    unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome,
-    IntentRequest, IntentResponse, PlannerErrorCode, SessionId, SubmittedClaim,
-    TaskState,
-};
 use raxis_store::{Store, Table};
+use raxis_types::{
+    unix_now_secs, BudgetSnapshot, InitiativeState, IntentKind, IntentOutcome, IntentRequest,
+    IntentResponse, PlannerErrorCode, SessionId, SubmittedClaim, TaskState,
+};
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
 // `Table` enum; FSM state strings come from `*State::as_sql_str()`.
-const TASKS:                       &str = Table::Tasks.as_str();
-const TASK_INTENT_RANGES:          &str = Table::TaskIntentRanges.as_str();
-const INITIATIVES:                 &str = Table::Initiatives.as_str();
-const TASK_EXPORTED_PATH_SNAPSHOTS:&str = Table::TaskExportedPathSnapshots.as_str();
-const SUBTASK_ACTIVATIONS:         &str = Table::SubtaskActivations.as_str();
-const SESSIONS:                    &str = Table::Sessions.as_str();
-const TASK_DAG_EDGES:              &str = Table::TaskDagEdges.as_str();
+const TASKS: &str = Table::Tasks.as_str();
+const TASK_INTENT_RANGES: &str = Table::TaskIntentRanges.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
+const TASK_EXPORTED_PATH_SNAPSHOTS: &str = Table::TaskExportedPathSnapshots.as_str();
+const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
+const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
 
 use crate::authority;
 use crate::gates::{self, GateEvalResult};
 use crate::initiatives::task_transitions::{
-    emit_task_state_changed_audit, transition_task as fsm_transition,
-    transition_task_in_tx, TaskTransitionRecord, TransitionActor,
+    emit_task_state_changed_audit, transition_task as fsm_transition, transition_task_in_tx,
+    TaskTransitionRecord, TransitionActor,
 };
 use crate::ipc::context::HandlerContext;
 use crate::observability::record_intent_admission;
@@ -132,19 +131,19 @@ pub async fn handle(req: IntentRequest, ctx: &Arc<HandlerContext>) -> IntentResp
             sequence_number: seq,
             task_state,
             outcome: IntentOutcome::Rejected {
-                error_code:   code,
+                error_code: code,
                 error_detail: None,
             },
         },
     };
     let latency_ms = started.elapsed().as_millis().min(i64::MAX as u128) as i64;
     let (verdict_label, verdict_reason): (&'static str, String) = match &resp.outcome {
-        IntentOutcome::Accepted { .. }                => ("Accepted", "ok".to_owned()),
-        IntentOutcome::Rejected { error_code, .. }    => ("Rejected", error_code.to_string()),
+        IntentOutcome::Accepted { .. } => ("Accepted", "ok".to_owned()),
+        IntentOutcome::Rejected { error_code, .. } => ("Rejected", error_code.to_string()),
     };
-    span.set_attr("verdict",        verdict_label);
+    span.set_attr("verdict", verdict_label);
     span.set_attr("verdict_reason", verdict_reason.as_str());
-    span.set_attr("latency_ms",     latency_ms);
+    span.set_attr("latency_ms", latency_ms);
     span.set_status(raxis_observability::SpanStatus::Ok, None);
     span.end();
     record_intent_admission(
@@ -322,21 +321,28 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     // ONE spawn_blocking so each call site is legal AND so we incur a
     // single hop into the blocking pool rather than 10+.
     let pre_gate = {
-        let ctx_arc      = Arc::clone(ctx);
-        let policy_arc   = Arc::clone(&policy_snapshot);
+        let ctx_arc = Arc::clone(ctx);
+        let policy_arc = Arc::clone(&policy_snapshot);
         let session_clone = session.clone();
         let session_id_clone = session_id.clone();
-        let req_clone    = req.clone();
+        let req_clone = req.clone();
         tokio::task::spawn_blocking(move || {
-            run_phase_a(req_clone, session_clone, session_id_clone, seq, policy_arc, ctx_arc)
+            run_phase_a(
+                req_clone,
+                session_clone,
+                session_id_clone,
+                seq,
+                policy_arc,
+                ctx_arc,
+            )
         })
         .await
         .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
     };
 
     let pre_state = match pre_gate {
-        PreGateOutcome::Reject(code, state)  => return Err((code, state)),
-        PreGateOutcome::EarlyResponse(resp)  => {
+        PreGateOutcome::Reject(code, state) => return Err((code, state)),
+        PreGateOutcome::EarlyResponse(resp) => {
             // ── V2 Step 6 — Orchestrator continuation re-spawn ────────────
             //
             // The Orchestrator in V2.4 is short-lived per decision: it
@@ -374,14 +380,12 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             // for VM boot) does not stall the IntentResponse.
             let respawn_kinds = matches!(
                 req.intent_kind,
-                IntentKind::CompleteTask
-                    | IntentKind::SubmitReview
-                    | IntentKind::ReportFailure,
+                IntentKind::CompleteTask | IntentKind::SubmitReview | IntentKind::ReportFailure,
             );
             if respawn_kinds {
                 let task_id_for_lookup = req.task_id.as_str().to_owned();
-                let store_for_lookup   = Arc::clone(&ctx.store);
-                let initiative_id_opt  = tokio::task::spawn_blocking(move || {
+                let store_for_lookup = Arc::clone(&ctx.store);
+                let initiative_id_opt = tokio::task::spawn_blocking(move || {
                     let conn = store_for_lookup.lock_sync();
                     conn.query_row(
                         "SELECT initiative_id FROM tasks WHERE task_id = ?1",
@@ -397,12 +401,11 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                 if let Some(init_id) = initiative_id_opt {
                     let ctx_for_respawn = Arc::clone(ctx);
                     tokio::spawn(async move {
-                        crate::session_spawn_orchestrator
-                            ::respawn_orchestrator_for_initiative(
-                                &init_id,
-                                ctx_for_respawn,
-                            )
-                            .await;
+                        crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
+                            &init_id,
+                            ctx_for_respawn,
+                        )
+                        .await;
                     });
                 } else {
                     eprintln!(
@@ -417,7 +420,7 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
             }
             return Ok(resp);
         }
-        PreGateOutcome::Proceed(s)           => s,
+        PreGateOutcome::Proceed(s) => s,
     };
 
     // ── Phase B (async) — Step 9: Gate evaluation ─────────────────────────
@@ -448,15 +451,17 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
         }
         GateEvalResult::PendingWitness { missing_gates } => {
             pending_gates = missing_gates.clone();
-            warn_stale    = false;
+            warn_stale = false;
         }
-        GateEvalResult::Pass { delegate_renewal_required } => {
+        GateEvalResult::Pass {
+            delegate_renewal_required,
+        } => {
             pending_gates = vec![];
-            warn_stale    = *delegate_renewal_required;
+            warn_stale = *delegate_renewal_required;
         }
         GateEvalResult::BreakglassPass { activation_id } => {
             pending_gates = vec![];
-            warn_stale    = false;
+            warn_stale = false;
             // V1 Tier 4 — every gate-bypass admission appends a
             // `BreakglassAction` event to the audit chain so the
             // post-incident review can enumerate every action
@@ -499,9 +504,9 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
 
     // ── Phase C (spawn_blocking) — Steps 10-13 + final response ───────────
     let task_id_owned = req.task_id.as_str().to_owned();
-    let intent_kind   = req.intent_kind;
+    let intent_kind = req.intent_kind;
     let session_id_str = session_id.as_str().to_owned();
-    let ctx_arc    = Arc::clone(ctx);
+    let ctx_arc = Arc::clone(ctx);
     let policy_arc = Arc::clone(&policy_snapshot);
     tokio::task::spawn_blocking(move || {
         run_phase_c(
@@ -533,7 +538,7 @@ fn run_phase_a(
     policy_snapshot: Arc<raxis_policy::PolicyBundle>,
     ctx: Arc<HandlerContext>,
 ) -> PreGateOutcome {
-    let store  = ctx.store.as_ref();
+    let store = ctx.store.as_ref();
     let policy = policy_snapshot.as_ref();
 
     // ── Step 2: INV-01 — accept envelope (sequence + nonce) atomically ────
@@ -570,9 +575,9 @@ fn run_phase_a(
         // nothing to commit, and the rejection itself is the event.
         let _ = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::ReplayRejected {
-                session_id:   session_id.as_str().to_owned(),
+                session_id: session_id.as_str().to_owned(),
                 sequence_num: seq,
-                reason:       format!("{reason:?}"),
+                reason: format!("{reason:?}"),
             },
             Some(session_id.as_str()),
             None,
@@ -629,8 +634,12 @@ fn run_phase_a(
     {
         let initiative_id = match session.initiative_id.as_deref() {
             Some(id) => id.to_owned(),
-            None => return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPolicyViolation, TaskState::Admitted),
+            None => {
+                return PreGateOutcome::Reject(
+                    PlannerErrorCode::FailPolicyViolation,
+                    TaskState::Admitted,
+                )
+            }
         };
         return match handle_structured_output_initiative_scoped(
             req,
@@ -640,7 +649,7 @@ fn run_phase_a(
             store,
             ctx.as_ref(),
         ) {
-            Ok(resp)        => PreGateOutcome::EarlyResponse(resp),
+            Ok(resp) => PreGateOutcome::EarlyResponse(resp),
             Err((code, st)) => PreGateOutcome::Reject(code, st),
         };
     }
@@ -648,8 +657,9 @@ fn run_phase_a(
     // ── Step 3: Load task row ─────────────────────────────────────────────
     let task = match load_task(req.task_id.as_str(), store) {
         Ok(t) => t,
-        Err(_) => return PreGateOutcome::Reject(
-            PlannerErrorCode::FailUnknownTask, TaskState::Admitted),
+        Err(_) => {
+            return PreGateOutcome::Reject(PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
+        }
     };
 
     let task_state = parse_task_state(&task.state);
@@ -682,10 +692,7 @@ fn run_phase_a(
     // here would race the WAL snapshot against the in-flight transaction.
     let quarantine_lookup = {
         let conn = store.lock_sync();
-        raxis_store::views::initiative_quarantines::is_quarantined_rw(
-            &conn,
-            &task.initiative_id,
-        )
+        raxis_store::views::initiative_quarantines::is_quarantined_rw(&conn, &task.initiative_id)
     };
     match quarantine_lookup {
         Ok(false) => {}
@@ -696,8 +703,7 @@ fn run_phase_a(
                 req.task_id.as_str(),
                 task.initiative_id,
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailInitiativeQuarantined, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailInitiativeQuarantined, task_state);
         }
         Err(e) => {
             // Treat read errors as quarantine-uncertain → fail closed,
@@ -709,8 +715,7 @@ fn run_phase_a(
                 req.task_id.as_str(),
                 task.initiative_id,
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailInitiativeQuarantined, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailInitiativeQuarantined, task_state);
         }
     }
 
@@ -736,7 +741,8 @@ fn run_phase_a(
             cumulative_token_cost_micros,
         } => cumulative_token_cost_micros,
         crate::scheduler::budget::TokenBudgetVerdict::Reject {
-            cumulative_token_cost_micros, ceiling_micros,
+            cumulative_token_cost_micros,
+            ceiling_micros,
         } => {
             eprintln!(
                 "{{\"level\":\"warn\",\"event\":\"IntentRejectedTokenBudget\",\
@@ -744,8 +750,7 @@ fn run_phase_a(
                  \"ceiling_micros\":{ceiling_micros}}}",
                 req.task_id.as_str(),
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPolicyViolation, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state);
         }
     };
 
@@ -770,7 +775,7 @@ fn run_phase_a(
                      WHERE task_id = ?4"
                 ),
                 rusqlite::params![
-                    report.input_tokens  as i64,
+                    report.input_tokens as i64,
                     report.output_tokens as i64,
                     new_token_cost_micros as i64,
                     req.task_id.as_str(),
@@ -805,43 +810,72 @@ fn run_phase_a(
     // already (intent_kind, session_agent_type)-authorized.
     match req.intent_kind {
         IntentKind::ReportFailure => {
-            return match handle_report_failure(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
-                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
-                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            return match handle_report_failure(
+                req,
+                task_state,
+                &session_id,
+                seq,
+                store,
+                policy,
+                ctx.as_ref(),
+            ) {
+                Ok(resp) => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st)) => PreGateOutcome::Reject(code, st),
             };
         }
         IntentKind::CompleteTask => {
-            return match handle_complete_task(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
-                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
-                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            return match handle_complete_task(
+                req,
+                task_state,
+                &session_id,
+                seq,
+                store,
+                policy,
+                ctx.as_ref(),
+            ) {
+                Ok(resp) => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st)) => PreGateOutcome::Reject(code, st),
             };
         }
         IntentKind::SubmitReview => {
-            return match handle_submit_review(req, task_state, &session_id, seq, store, policy, ctx.as_ref()) {
-                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
-                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            return match handle_submit_review(
+                req,
+                task_state,
+                &session_id,
+                seq,
+                store,
+                policy,
+                ctx.as_ref(),
+            ) {
+                Ok(resp) => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st)) => PreGateOutcome::Reject(code, st),
             };
         }
         IntentKind::SingleCommit | IntentKind::IntegrationMerge => {}
-        IntentKind::ActivateSubTask
-        | IntentKind::RetrySubTask => {
+        IntentKind::ActivateSubTask | IntentKind::RetrySubTask => {
             // Belt-and-braces: `handle_inner` intercepts both kinds
             // BEFORE Phase A (early-dispatch into
             // `handle_activate_sub_task` / `handle_retry_sub_task`),
             // so this arm only fires if a future regression lets an
             // ActivateSubTask / RetrySubTask slip past the early-
             // dispatch. INV-08 — coarse code on the wire.
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPolicyViolation, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state);
         }
         IntentKind::StructuredOutput => {
             // V2 §3.2 — typed mid-session output. NON-TERMINAL: the
             // session continues; we do not transition the task FSM
             // and we do not run gate evaluation (the payload is not
             // a commit). Validate, persist, return.
-            return match handle_structured_output(req, task_state, &session_id, seq, store, ctx.as_ref()) {
-                Ok(resp)         => PreGateOutcome::EarlyResponse(resp),
-                Err((code, st))  => PreGateOutcome::Reject(code, st),
+            return match handle_structured_output(
+                req,
+                task_state,
+                &session_id,
+                seq,
+                store,
+                ctx.as_ref(),
+            ) {
+                Ok(resp) => PreGateOutcome::EarlyResponse(resp),
+                Err((code, st)) => PreGateOutcome::Reject(code, st),
             };
         }
     }
@@ -867,8 +901,12 @@ fn run_phase_a(
     // block — `resolved_via_escalation = None`.
     if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
         if let Some(esc_id) = req.resolved_via_escalation.as_ref() {
-            if let Err(e) = crate::handlers::integration_merge_attribution
-                ::verify_merge_conflict_resolution(esc_id, &session_id, store)
+            if let Err(e) =
+                crate::handlers::integration_merge_attribution::verify_merge_conflict_resolution(
+                    esc_id,
+                    &session_id,
+                    store,
+                )
             {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"IntegrationMergeAttributionRejected\",\
@@ -879,8 +917,7 @@ fn run_phase_a(
                     esc_id.as_str(),
                     e.diagnostic_code(),
                 );
-                return PreGateOutcome::Reject(
-                    PlannerErrorCode::FailPolicyViolation, task_state);
+                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state);
             }
         }
     }
@@ -925,16 +962,18 @@ fn run_phase_a(
         let pending: bool = {
             let conn = store.lock_sync();
             match conn.query_row(
-                &format!(
-                    "SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"
-                ),
+                &format!("SELECT git_apply_pending FROM {INITIATIVES} WHERE initiative_id = ?1"),
                 rusqlite::params![initiative_id.as_str()],
                 |r| r.get::<_, Option<i64>>(0),
             ) {
                 Ok(opt) => opt.unwrap_or(0) != 0,
                 Err(rusqlite::Error::QueryReturnedNoRows) => false,
-                Err(_) => return PreGateOutcome::Reject(
-                    PlannerErrorCode::FailPolicyViolation, task_state),
+                Err(_) => {
+                    return PreGateOutcome::Reject(
+                        PlannerErrorCode::FailPolicyViolation,
+                        task_state,
+                    )
+                }
             }
         };
         if pending {
@@ -944,8 +983,7 @@ fn run_phase_a(
                  \"diagnostic\":\"prior IntegrationMerge committed Phase 1 but Phase 3 has not cleared the flag — boot recovery must complete first\"}}",
                 req.task_id.as_str(),
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailGitApplyPending, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailGitApplyPending, task_state);
         }
     }
 
@@ -998,9 +1036,8 @@ fn run_phase_a(
     if matches!(req.intent_kind, IntentKind::IntegrationMerge) {
         let initiative_id = task.initiative_id.clone();
         let blocker: Option<(String, String)> = {
-            use crate::initiatives::review_aggregation
-                ::compute_aggregate_review_outcome_with_conn;
             use crate::initiatives::plan_registry::TaskKey;
+            use crate::initiatives::review_aggregation::compute_aggregate_review_outcome_with_conn;
             let conn = store.lock_sync();
             // Pull every task in the initiative once so the per-row
             // aggregate-verdict fold below borrows the registry +
@@ -1010,10 +1047,9 @@ fn run_phase_a(
                  ORDER BY admitted_at ASC, task_id ASC"
             )) {
                 Ok(mut stmt) => {
-                    match stmt.query_map(
-                        rusqlite::params![initiative_id.as_str()],
-                        |r| r.get::<_, String>(0),
-                    ) {
+                    match stmt.query_map(rusqlite::params![initiative_id.as_str()], |r| {
+                        r.get::<_, String>(0)
+                    }) {
                         Ok(it) => it.filter_map(Result::ok).collect(),
                         Err(_) => Vec::new(),
                     }
@@ -1023,14 +1059,15 @@ fn run_phase_a(
             let mut found: Option<(String, String)> = None;
             for tid in task_ids {
                 let key = TaskKey::new(initiative_id.as_str(), tid.as_str());
-                let is_executor = ctx.plan_registry.get(&key)
-                    .map(|f| f.session_agent_type
-                        == raxis_types::SessionAgentType::Executor)
+                let is_executor = ctx
+                    .plan_registry
+                    .get(&key)
+                    .map(|f| f.session_agent_type == raxis_types::SessionAgentType::Executor)
                     .unwrap_or(false);
-                if !is_executor { continue; }
-                match compute_aggregate_review_outcome_with_conn(
-                    &tid, &conn, None,
-                ) {
+                if !is_executor {
+                    continue;
+                }
+                match compute_aggregate_review_outcome_with_conn(&tid, &conn, None) {
                     Ok(outcome) => {
                         let v = outcome.verdict.wire_str();
                         if v == "AtLeastOneRejected" {
@@ -1060,8 +1097,7 @@ fn run_phase_a(
                  \"diagnostic\":\"executor task {blocker_task} has aggregate verdict {verdict_str}; orchestrator must retry_subtask before integration_merge per agent-disagreement.md §3.6 (paradigm-R-6 Fail-Closed Default)\"}}",
                 req.task_id.as_str(),
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailReviewOutstanding, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailReviewOutstanding, task_state);
         }
     }
 
@@ -1075,11 +1111,11 @@ fn run_phase_a(
     // ── Step 5: SHA range + ancestry ─────────────────────────────────────
     let head_sha_raw = match req.head_sha.as_ref().map(|s| s.as_str().to_owned()) {
         Some(s) => s,
-        None    => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+        None => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
     let base_sha_raw = match req.base_sha.as_ref().map(|s| s.as_str().to_owned()) {
         Some(s) => s,
-        None    => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+        None => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
 
     // The local newtype validation is preserved so we surface
@@ -1087,12 +1123,12 @@ fn run_phase_a(
     // tripping through the domain adapter (which would surface them
     // as `PreconditionFailed`).
     let _head_sha = match CommitSha::new(&head_sha_raw) {
-        Ok(s)   => s,
-        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+        Ok(s) => s,
+        Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
     let _base_sha = match CommitSha::new(&base_sha_raw) {
-        Ok(s)   => s,
-        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
+        Ok(s) => s,
+        Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::InvalidRequest, task_state),
     };
 
     // V2 migration: ancestry / topology / diff dispatch through the
@@ -1106,11 +1142,13 @@ fn run_phase_a(
     let rt_handle = tokio::runtime::Handle::current();
 
     // base must be an ancestor of head (ancestry invariant).
-    let is_anc = match rt_handle.block_on(
-        ctx.domain.is_ancestor(&base_sha_raw, &head_sha_raw, &worktree_path)
-    ) {
-        Ok(v)   => v,
-        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
+    let is_anc = match rt_handle.block_on(ctx.domain.is_ancestor(
+        &base_sha_raw,
+        &head_sha_raw,
+        &worktree_path,
+    )) {
+        Ok(v) => v,
+        Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
     };
     if !is_anc {
         return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state);
@@ -1120,20 +1158,23 @@ fn run_phase_a(
     // SingleCommit: enforce parent(head) == base (no merge commits in range).
     // IntegrationMerge: topology check is skipped.
     if matches!(req.intent_kind, IntentKind::SingleCommit) {
-        if let Err(_) = rt_handle.block_on(
-            ctx.domain.topology_check(&base_sha_raw, &head_sha_raw, &worktree_path)
-        ) {
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailInvalidCommitTopology, task_state);
+        if let Err(_) = rt_handle.block_on(ctx.domain.topology_check(
+            &base_sha_raw,
+            &head_sha_raw,
+            &worktree_path,
+        )) {
+            return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidCommitTopology, task_state);
         }
     }
 
     // ── Step 7: VCS diff → touched_paths ──────────────────────────────────
-    let touched_resources = match rt_handle.block_on(
-        ctx.domain.compute_touched_paths(&base_sha_raw, &head_sha_raw, &worktree_path)
-    ) {
-        Ok(r)   => r,
-        Err(_)  => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
+    let touched_resources = match rt_handle.block_on(ctx.domain.compute_touched_paths(
+        &base_sha_raw,
+        &head_sha_raw,
+        &worktree_path,
+    )) {
+        Ok(r) => r,
+        Err(_) => return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidDiff, task_state),
     };
     let touched_paths: Vec<std::path::PathBuf> = touched_resources
         .resources
@@ -1194,8 +1235,7 @@ fn run_phase_a(
                 req.task_id.as_str(),
                 violation.paths.len(),
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPathPolicyViolation, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailPathPolicyViolation, task_state);
         }
         Err(e) => {
             // Registry miss or invalid glob in the signed plan — still
@@ -1206,8 +1246,7 @@ fn run_phase_a(
                  \"task_id\":\"{}\",\"reason\":\"{e}\"}}",
                 req.task_id.as_str(),
             );
-            return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPathPolicyViolation, task_state);
+            return PreGateOutcome::Reject(PlannerErrorCode::FailPathPolicyViolation, task_state);
         }
     }
 
@@ -1215,9 +1254,10 @@ fn run_phase_a(
     // Spec: cost is computed from touched_paths + intent_kind against policy.
     let estimated_cost =
         match budget::compute_admission_cost(&touched_paths, req.intent_kind, policy) {
-            Ok(c)   => c,
-            Err(_)  => return PreGateOutcome::Reject(
-                PlannerErrorCode::FailPolicyViolation, task_state),
+            Ok(c) => c,
+            Err(_) => {
+                return PreGateOutcome::Reject(PlannerErrorCode::FailPolicyViolation, task_state)
+            }
         };
 
     PreGateOutcome::Proceed(PreGateState {
@@ -1249,7 +1289,7 @@ fn run_phase_c(
     policy_snapshot: Arc<raxis_policy::PolicyBundle>,
     ctx: Arc<HandlerContext>,
 ) -> HandlerResult {
-    let store  = ctx.store.as_ref();
+    let store = ctx.store.as_ref();
     let policy = policy_snapshot.as_ref();
     // `mut` so the IntegrationMerge completion cascade further down
     // can rebind it to `Completed` when the synthetic coordinator
@@ -1272,7 +1312,9 @@ fn run_phase_c(
     // failure mode binary: either every write commits or every write rolls
     // back, leaving the operator's abort intact.
     let mut conn = store.lock_sync();
-    let tx = conn.transaction().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    let tx = conn
+        .transaction()
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
     // ── PendingWitness branch: transition Admitted → GatesPending ────────
     //
@@ -1292,7 +1334,13 @@ fn run_phase_c(
             TaskState::GatesPending,
             Some("gates pending: witnesses required"),
             TransitionActor::Kernel,
-        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, TaskState::GatesPending))?;
+        )
+        .map_err(|_| {
+            (
+                PlannerErrorCode::FailTaskNotRunning,
+                TaskState::GatesPending,
+            )
+        })?;
         pending_audits.push(rec);
     }
 
@@ -1310,7 +1358,8 @@ fn run_phase_c(
             task_id_owned.as_str(),
             pre_state.estimated_cost,
             policy,
-        ).map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailBudgetExceeded, task_state))?;
     }
 
     // ── Step 11: FSM transition via task_transitions (INV-INIT-04) ───────
@@ -1322,7 +1371,8 @@ fn run_phase_c(
             TaskState::Running,
             None,
             TransitionActor::Kernel,
-        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Running))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Running))?;
         pending_audits.push(rec);
     }
     // Running + gate pass: no transition needed; task stays Running.
@@ -1336,7 +1386,8 @@ fn run_phase_c(
         pre_state.head_sha_raw.as_str(),
         pre_state.base_sha_raw.as_str(),
         session_id_str.as_str(),
-    ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    )
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
     // ── Step 12A: Record accepted intent range (INV-TASK-PATH-02 substrate)
     insert_task_intent_range_in_tx(
@@ -1344,7 +1395,8 @@ fn run_phase_c(
         task_id_owned.as_str(),
         pre_state.base_sha_raw.as_str(),
         pre_state.head_sha_raw.as_str(),
-    ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    )
+    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
     // ── Step 12B (V2.5 §11.1 Phase 1): set git_apply_pending = 1 ─────────
     //
@@ -1364,8 +1416,10 @@ fn run_phase_c(
     // race the recovery on next boot.
     if matches!(intent_kind, IntentKind::IntegrationMerge) {
         let updated = raxis_store::views::initiatives::set_git_apply_pending(
-            &tx, pre_state.task.initiative_id.as_str(),
-        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            &tx,
+            pre_state.task.initiative_id.as_str(),
+        )
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
         if updated != 1 {
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"GitApplyPendingSetMissed\",\
@@ -1376,7 +1430,8 @@ fn run_phase_c(
         }
     }
 
-    tx.commit().map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+    tx.commit()
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
     drop(conn);
 
     // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` post-commit emit —
@@ -1388,11 +1443,7 @@ fn run_phase_c(
     // dashboard never sees Running / GatesPending and Admitted
     // appears to jump straight to Completed/Failed.
     for rec in &pending_audits {
-        emit_task_state_changed_audit(
-            ctx.audit.as_ref(),
-            rec,
-            Some(session_id_str.as_str()),
-        );
+        emit_task_state_changed_audit(ctx.audit.as_ref(), rec, Some(session_id_str.as_str()));
     }
 
     // ── Step 13: Audit stub + Accepted response ───────────────────────────
@@ -1428,17 +1479,16 @@ fn run_phase_c(
     // (the boot-time reconciler, INV-INIT-09, closes any gap on next
     // boot from the `task_intent_ranges` row the tx persisted at
     // Step 12A).
-    let remaining_units = lane_budget_snapshot(
-        &pre_state.task.lane_id, policy, store,
-    ).admission_units;
+    let remaining_units =
+        lane_budget_snapshot(&pre_state.task.lane_id, policy, store).admission_units;
     let initiative_id_for_audit = pre_state.task.initiative_id.clone();
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::IntentAccepted {
-            task_id:         task_id_owned.clone(),
-            session_id:      session_id_str.clone(),
-            intent_kind:     intent_kind.as_str().to_owned(),
-            base_sha:        Some(pre_state.base_sha_raw.clone()),
-            head_sha:        Some(pre_state.head_sha_raw.clone()),
+            task_id: task_id_owned.clone(),
+            session_id: session_id_str.clone(),
+            intent_kind: intent_kind.as_str().to_owned(),
+            base_sha: Some(pre_state.base_sha_raw.clone()),
+            head_sha: Some(pre_state.head_sha_raw.clone()),
             sequence_number: seq,
             remaining_units,
         },
@@ -1477,16 +1527,16 @@ fn run_phase_c(
     // needs).
     if matches!(intent_kind, IntentKind::IntegrationMerge) {
         let initiative_id_owned = pre_state.task.initiative_id.clone();
-        let (operator_assisted, escalation_id) =
-            match pre_state.resolved_via_escalation.as_ref() {
-                Some(id) => (true,  Some(id.as_str().to_owned())),
-                None     => (false, None),
-            };
+        let (operator_assisted, escalation_id) = match pre_state.resolved_via_escalation.as_ref() {
+            Some(id) => (true, Some(id.as_str().to_owned())),
+            None => (false, None),
+        };
 
         // ── V2 §1.2 Phase 2 — host-side fast-forward ───────────────
         let main_repo_root = ctx.data_dir.join("repositories").join("main");
         let orch_worktree_root = pre_state.worktree_path.clone();
-        let initiative_target_ref = ctx.plan_registry
+        let initiative_target_ref = ctx
+            .plan_registry
             .orchestrator(&initiative_id_owned)
             .map(|o| o.target_ref)
             .unwrap_or_else(|| {
@@ -1523,7 +1573,8 @@ fn run_phase_c(
                 {
                     let conn = store.lock_sync();
                     match raxis_store::views::initiatives::clear_git_apply_pending(
-                        &conn, initiative_id_owned.as_str(),
+                        &conn,
+                        initiative_id_owned.as_str(),
                     ) {
                         Ok(1) => {}
                         Ok(n) => {
@@ -1562,9 +1613,8 @@ fn run_phase_c(
                 // here is logged and ignored — the merge already
                 // didn't succeed and re-trying boot recovery is the
                 // operator's recourse.
-                let merge_failure_reason = format!(
-                    "IntegrationMerge fast-forward failed ({category}): {reason}",
-                );
+                let merge_failure_reason =
+                    format!("IntegrationMerge fast-forward failed ({category}): {reason}",);
                 {
                     let conn = store.lock_sync();
                     if let Err(e) = conn.execute(
@@ -1605,9 +1655,9 @@ fn run_phase_c(
                 if let Err(e) = ctx.audit.emit(
                     raxis_audit_tools::AuditEventKind::MergeFastForwardFailed {
                         initiative_id: initiative_id_owned.clone(),
-                        commit_sha:    pre_state.head_sha_raw.clone(),
-                        target_ref:    initiative_target_ref.clone(),
-                        category:      category.to_owned(),
+                        commit_sha: pre_state.head_sha_raw.clone(),
+                        target_ref: initiative_target_ref.clone(),
+                        category: category.to_owned(),
                         reason,
                     },
                     Some(session_id_str.as_str()),
@@ -1626,12 +1676,12 @@ fn run_phase_c(
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::IntegrationMergeCompleted {
                 initiative_id: initiative_id_owned.clone(),
-                session_id:    session_id_str.clone(),
-                commit_sha:    pre_state.head_sha_raw.clone(),
-                previous_sha:  pre_state.base_sha_raw.clone(),
+                session_id: session_id_str.clone(),
+                commit_sha: pre_state.head_sha_raw.clone(),
+                previous_sha: pre_state.base_sha_raw.clone(),
                 operator_assisted,
                 escalation_id,
-                target_ref:    initiative_target_ref.clone(),
+                target_ref: initiative_target_ref.clone(),
             },
             Some(session_id_str.as_str()),
             Some(task_id_owned.as_str()),
@@ -1694,15 +1744,13 @@ fn run_phase_c(
                     );
 
                     let from_state = outcome.initiative_from.clone();
-                    let to_state   = outcome.initiative_to.clone();
-                    if !from_state.is_empty()
-                        && from_state != to_state
-                    {
+                    let to_state = outcome.initiative_to.clone();
+                    if !from_state.is_empty() && from_state != to_state {
                         if let Err(e) = ctx.audit.emit(
                             raxis_audit_tools::AuditEventKind::InitiativeStateChanged {
                                 initiative_id: initiative_id_owned.clone(),
-                                from_state:    from_state.clone(),
-                                to_state:      to_state.clone(),
+                                from_state: from_state.clone(),
+                                to_state: to_state.clone(),
                             },
                             Some(session_id_str.as_str()),
                             Some(task_id_owned.as_str()),
@@ -1747,8 +1795,8 @@ fn run_phase_c(
         // remote would race the operator's manual recovery and could
         // surface a misleading "successful push" to the audit chain.
         if policy.git_auto_push() && host_merge_succeeded {
-            let remote  = policy.git_push_remote().to_owned();
-            let target  = initiative_target_ref.clone();
+            let remote = policy.git_push_remote().to_owned();
+            let target = initiative_target_ref.clone();
             let refspec = format!("{target}:{target}");
 
             // V2.5 `integration-merge.md §11.5` — wait for
@@ -1780,11 +1828,11 @@ fn run_phase_c(
                 if let Err(e) = ctx.audit.emit(
                     raxis_audit_tools::AuditEventKind::PushFailed {
                         initiative_id: initiative_id_owned.clone(),
-                        commit_sha:    pre_state.head_sha_raw.clone(),
-                        remote:        remote.clone(),
-                        refspec:       refspec.clone(),
-                        category:      "pending_git_apply".to_owned(),
-                        reason:        "git_apply_pending did not clear within 5s deadline".to_owned(),
+                        commit_sha: pre_state.head_sha_raw.clone(),
+                        remote: remote.clone(),
+                        refspec: refspec.clone(),
+                        category: "pending_git_apply".to_owned(),
+                        reason: "git_apply_pending did not clear within 5s deadline".to_owned(),
                     },
                     Some(session_id_str.as_str()),
                     Some(task_id_owned.as_str()),
@@ -1805,8 +1853,10 @@ fn run_phase_c(
                         task_state
                     },
                     outcome: IntentOutcome::Accepted {
-                        remaining_budget:      lane_budget_snapshot(
-                            &pre_state.task.lane_id, policy, store,
+                        remaining_budget: lane_budget_snapshot(
+                            &pre_state.task.lane_id,
+                            policy,
+                            store,
                         ),
                         warn_delegation_stale: warn_stale,
                     },
@@ -1816,9 +1866,9 @@ fn run_phase_c(
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::PushAttempted {
                     initiative_id: initiative_id_owned.clone(),
-                    commit_sha:    pre_state.head_sha_raw.clone(),
-                    remote:        remote.clone(),
-                    refspec:       refspec.clone(),
+                    commit_sha: pre_state.head_sha_raw.clone(),
+                    remote: remote.clone(),
+                    refspec: refspec.clone(),
                 },
                 Some(session_id_str.as_str()),
                 Some(task_id_owned.as_str()),
@@ -1830,8 +1880,7 @@ fn run_phase_c(
                 );
             }
 
-            const KERNEL_PUSH_DEADLINE: std::time::Duration =
-                std::time::Duration::from_secs(30);
+            const KERNEL_PUSH_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
             let result = raxis_domain_git::push_to_remote(
                 &main_repo_root,
                 &remote,
@@ -1844,10 +1893,10 @@ fn run_phase_c(
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::PushCompleted {
                             initiative_id: initiative_id_owned.clone(),
-                            commit_sha:    pre_state.head_sha_raw.clone(),
-                            remote:        outcome.remote,
-                            refspec:       outcome.refspec,
-                            summary:       outcome.summary,
+                            commit_sha: pre_state.head_sha_raw.clone(),
+                            remote: outcome.remote,
+                            refspec: outcome.refspec,
+                            summary: outcome.summary,
                         },
                         Some(session_id_str.as_str()),
                         Some(task_id_owned.as_str()),
@@ -1861,14 +1910,16 @@ fn run_phase_c(
                 }
                 Err(err) => {
                     let (category, reason): (&str, String) = match &err {
-                        raxis_domain_git::PushError::PushFailed { stderr, .. } =>
-                            ("push_failed", stderr.clone()),
-                        raxis_domain_git::PushError::SpawnFailed(r) =>
-                            ("spawn_failed", r.clone()),
-                        raxis_domain_git::PushError::DeadlineExceeded(d) =>
-                            ("deadline_exceeded", format!("{d:?}")),
-                        raxis_domain_git::PushError::MainRepoUnopenable { reason, .. } =>
-                            ("unopenable_repo", reason.clone()),
+                        raxis_domain_git::PushError::PushFailed { stderr, .. } => {
+                            ("push_failed", stderr.clone())
+                        }
+                        raxis_domain_git::PushError::SpawnFailed(r) => ("spawn_failed", r.clone()),
+                        raxis_domain_git::PushError::DeadlineExceeded(d) => {
+                            ("deadline_exceeded", format!("{d:?}"))
+                        }
+                        raxis_domain_git::PushError::MainRepoUnopenable { reason, .. } => {
+                            ("unopenable_repo", reason.clone())
+                        }
                     };
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"PushFailed\",\
@@ -1877,10 +1928,10 @@ fn run_phase_c(
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::PushFailed {
                             initiative_id: initiative_id_owned.clone(),
-                            commit_sha:    pre_state.head_sha_raw.clone(),
-                            remote:        remote.clone(),
-                            refspec:       refspec.clone(),
-                            category:      category.to_owned(),
+                            commit_sha: pre_state.head_sha_raw.clone(),
+                            remote: remote.clone(),
+                            refspec: refspec.clone(),
+                            category: category.to_owned(),
                             reason,
                         },
                         Some(session_id_str.as_str()),
@@ -1910,7 +1961,7 @@ fn run_phase_c(
         sequence_number: seq,
         task_state: final_task_state,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: warn_stale,
         },
     })
@@ -1997,7 +2048,8 @@ fn handle_report_failure(
     let mut pending_audits: Vec<TaskTransitionRecord> = Vec::new();
     {
         let mut conn = store.lock_sync();
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
         if task_state == TaskState::Admitted {
             let rec = transition_task_in_tx(
@@ -2006,7 +2058,8 @@ fn handle_report_failure(
                 TaskState::Running,
                 None,
                 TransitionActor::Kernel,
-            ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+            )
+            .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
             pending_audits.push(rec);
         }
         // Bump BEFORE the Failed cascade — `transition_task_in_tx`
@@ -2042,7 +2095,8 @@ fn handle_report_failure(
             TaskState::Failed,
             Some(justification.as_str()),
             TransitionActor::Kernel,
-        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
         pending_audits.push(rec_failed);
 
         // Release the lane budget reservation in the same tx as the
@@ -2053,17 +2107,17 @@ fn handle_report_failure(
         // `Failed → Admitted` retry that might re-arm the
         // reservation; the SELECT and the DELETE serialise under
         // the single-writer SQLite transaction.
-        let lane_id_for_release: Option<String> = tx.query_row(
-            &format!("SELECT lane_id FROM {TASKS} WHERE task_id = ?1"),
-            rusqlite::params![req.task_id.as_str()],
-            |r| r.get(0),
-        ).ok();
+        let lane_id_for_release: Option<String> = tx
+            .query_row(
+                &format!("SELECT lane_id FROM {TASKS} WHERE task_id = ?1"),
+                rusqlite::params![req.task_id.as_str()],
+                |r| r.get(0),
+            )
+            .ok();
         if let Some(lane_id) = lane_id_for_release.as_deref() {
-            if let Err(e) = crate::scheduler::budget::release_budget_in_tx(
-                &tx,
-                lane_id,
-                req.task_id.as_str(),
-            ) {
+            if let Err(e) =
+                crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, req.task_id.as_str())
+            {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"ReleaseBudgetFailed\",\
                      \"task_id\":\"{}\",\"lane_id\":\"{}\",\
@@ -2084,11 +2138,7 @@ fn handle_report_failure(
     // (two distinct edges), and BOTH need to land on the
     // dashboard's `SubscribeInitiative` push stream.
     for rec in &pending_audits {
-        emit_task_state_changed_audit(
-            ctx.audit.as_ref(),
-            rec,
-            Some(session_id.as_str()),
-        );
+        emit_task_state_changed_audit(ctx.audit.as_ref(), rec, Some(session_id.as_str()));
     }
 
     // Surface a redacted-but-substantially-fuller justification in
@@ -2119,7 +2169,7 @@ fn handle_report_failure(
         sequence_number: seq,
         task_state: TaskState::Failed,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -2152,13 +2202,13 @@ fn handle_report_failure(
 // ---------------------------------------------------------------------------
 
 fn handle_complete_task(
-    req:        IntentRequest,
+    req: IntentRequest,
     task_state: TaskState,
     session_id: &SessionId,
-    seq:        u64,
-    store:      &Store,
-    policy:     &raxis_policy::PolicyBundle,
-    ctx:        &HandlerContext,
+    seq: u64,
+    store: &Store,
+    policy: &raxis_policy::PolicyBundle,
+    ctx: &HandlerContext,
 ) -> HandlerResult {
     // V2.5 — accept both `Admitted` and `Running` states.
     //
@@ -2208,14 +2258,16 @@ fn handle_complete_task(
     let worktree_path = std::path::PathBuf::from(worktree_root);
 
     let req_head_str = req.head_sha.as_ref().map(|s| s.as_str()).unwrap_or("");
-    let req_head     = if req_head_str.is_empty() {
+    let req_head = if req_head_str.is_empty() {
         // §2.5.8 edge-case: empty head_sha + no recorded ranges + NULL
         // H_bind = trivial vacuous pass. We model this as `None` and
         // skip the trailing-segment branch entirely.
         None
     } else {
-        Some(CommitSha::new(req_head_str)
-            .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?)
+        Some(
+            CommitSha::new(req_head_str)
+                .map_err(|_| (PlannerErrorCode::InvalidRequest, task_state))?,
+        )
     };
 
     // ── 1b. V2.5 — `Admitted`-state inline Phase A admission ──────────────
@@ -2277,29 +2329,38 @@ fn handle_complete_task(
             let rt_handle = tokio::runtime::Handle::current();
 
             // Ancestry.
-            let is_anc = rt_handle.block_on(
-                ctx.domain.is_ancestor(&base_str, &head_str, &worktree_path)
-            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            let is_anc = rt_handle
+                .block_on(ctx.domain.is_ancestor(&base_str, &head_str, &worktree_path))
+                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
             if !is_anc {
                 eprintln!(
                     "{{\"level\":\"warn\",\"event\":\"CompleteTaskAdmitAncestryViolation\",\
                      \"task_id\":\"{}\",\"base\":\"{}\",\"head\":\"{}\"}}",
-                    req.task_id.as_str(), base_str, head_str,
+                    req.task_id.as_str(),
+                    base_str,
+                    head_str,
                 );
                 return Err((PlannerErrorCode::FailInvalidDiff, task_state));
             }
 
             // Topology — parent(head) == base; no merge commits.
-            rt_handle.block_on(
-                ctx.domain.topology_check(&base_str, &head_str, &worktree_path)
-            ).map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+            rt_handle
+                .block_on(
+                    ctx.domain
+                        .topology_check(&base_str, &head_str, &worktree_path),
+                )
+                .map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
 
             // Diff → touched_paths, project to workspace-relative
             // paths the path-scope check expects.
-            let resources = rt_handle.block_on(
-                ctx.domain.compute_touched_paths(&base_str, &head_str, &worktree_path)
-            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-            let touched_admit: Vec<PathBuf> = resources.resources
+            let resources = rt_handle
+                .block_on(
+                    ctx.domain
+                        .compute_touched_paths(&base_str, &head_str, &worktree_path),
+                )
+                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            let touched_admit: Vec<PathBuf> = resources
+                .resources
                 .iter()
                 .map(|r| {
                     let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
@@ -2347,25 +2408,22 @@ fn handle_complete_task(
             // (Admitted → Completed), which is the iter56 paper-cut.
             {
                 let mut conn = store.lock_sync();
-                let tx = conn.transaction()
+                let tx = conn
+                    .transaction()
                     .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-                insert_task_intent_range_in_tx(
-                    &tx, req.task_id.as_str(), &base_str, &head_str,
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                insert_task_intent_range_in_tx(&tx, req.task_id.as_str(), &base_str, &head_str)
+                    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
                 let rec = transition_task_in_tx(
                     &tx,
                     req.task_id.as_str(),
                     TaskState::Running,
                     None,
                     TransitionActor::Kernel,
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                )
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
                 tx.commit()
                     .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-                emit_task_state_changed_audit(
-                    ctx.audit.as_ref(),
-                    &rec,
-                    Some(session_id.as_str()),
-                );
+                emit_task_state_changed_audit(ctx.audit.as_ref(), &rec, Some(session_id.as_str()));
             }
             admitted_inline = true;
         }
@@ -2404,9 +2462,12 @@ fn handle_complete_task(
             .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
         let _h = CommitSha::new(head_str)
             .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
-        let resources = rt_handle.block_on(
-            ctx.domain.compute_touched_paths(base_str, head_str, &worktree_path)
-        ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+        let resources = rt_handle
+            .block_on(
+                ctx.domain
+                    .compute_touched_paths(base_str, head_str, &worktree_path),
+            )
+            .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
         for r in resources.resources {
             let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
             full_touched_paths.insert(PathBuf::from(stripped));
@@ -2424,13 +2485,20 @@ fn handle_complete_task(
             let _h_bind_sha = CommitSha::new(h_bind_str)
                 .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
             // 4a — topology check on the trailing range (no carve-out).
-            rt_handle.block_on(
-                ctx.domain.topology_check(h_bind_str, h_req.as_str(), &worktree_path)
-            ).map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
+            rt_handle
+                .block_on(
+                    ctx.domain
+                        .topology_check(h_bind_str, h_req.as_str(), &worktree_path),
+                )
+                .map_err(|_| (PlannerErrorCode::FailInvalidCommitTopology, task_state))?;
             // 4b — diff the trailing range.
-            let trailing = rt_handle.block_on(
-                ctx.domain.compute_touched_paths(h_bind_str, h_req.as_str(), &worktree_path)
-            ).map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
+            let trailing = rt_handle
+                .block_on(ctx.domain.compute_touched_paths(
+                    h_bind_str,
+                    h_req.as_str(),
+                    &worktree_path,
+                ))
+                .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
             for r in trailing.resources {
                 let stripped = r.uri.strip_prefix("path:///").unwrap_or(&r.uri);
                 full_touched_paths.insert(PathBuf::from(stripped));
@@ -2478,9 +2546,10 @@ fn handle_complete_task(
     // intersected with `path_export_globs` if defined. The persistence
     // happens inside the same SQLite tx as the Running → Completed
     // status update — see `commit_task_completion` below.
-    let plan_fields = ctx.plan_registry.get(
-        &crate::initiatives::TaskKey::new(&task.initiative_id, req.task_id.as_str()),
-    );
+    let plan_fields = ctx.plan_registry.get(&crate::initiatives::TaskKey::new(
+        &task.initiative_id,
+        req.task_id.as_str(),
+    ));
     let export_paths: Vec<String> = plan_fields
         .as_ref()
         .filter(|f| f.path_export_to_successors)
@@ -2587,11 +2656,11 @@ fn handle_complete_task(
     let base_sha_audit = req.base_sha.as_ref().map(|s| s.as_str().to_owned());
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::IntentAccepted {
-            task_id:         req.task_id.as_str().to_owned(),
-            session_id:      session_id.as_str().to_owned(),
-            intent_kind:     "CompleteTask".to_owned(),
-            base_sha:        base_sha_audit,
-            head_sha:        head_sha_audit,
+            task_id: req.task_id.as_str().to_owned(),
+            session_id: session_id.as_str().to_owned(),
+            intent_kind: "CompleteTask".to_owned(),
+            base_sha: base_sha_audit,
+            head_sha: head_sha_audit,
             sequence_number: seq,
             remaining_units: remaining.admission_units,
         },
@@ -2611,7 +2680,7 @@ fn handle_complete_task(
         sequence_number: seq,
         task_state: TaskState::Completed,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -2624,19 +2693,23 @@ fn handle_complete_task(
 /// of CompleteTask is skipped (§2.5.8 step 4 vacuous case).
 fn read_completion_inputs(
     task_id: &str,
-    store:   &Store,
+    store: &Store,
 ) -> Result<(Option<String>, Vec<(String, String)>), ()> {
     let conn = store.lock_sync();
 
-    let h_bind: Option<String> = conn.query_row(
-        &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
-        rusqlite::params![task_id],
-        |r| r.get::<_, Option<String>>(0),
-    ).map_err(|_| ())?;
+    let h_bind: Option<String> = conn
+        .query_row(
+            &format!("SELECT evaluation_sha FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![task_id],
+            |r| r.get::<_, Option<String>>(0),
+        )
+        .map_err(|_| ())?;
 
-    let mut stmt = conn.prepare_cached(&format!(
-        "SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id = ?1",
-    )).map_err(|_| ())?;
+    let mut stmt = conn
+        .prepare_cached(&format!(
+            "SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id = ?1",
+        ))
+        .map_err(|_| ())?;
     let ranges: Vec<(String, String)> = stmt
         .query_map(rusqlite::params![task_id], |r| Ok((r.get(0)?, r.get(1)?)))
         .map_err(|_| ())?
@@ -2663,12 +2736,15 @@ fn read_completion_inputs(
 /// exact-or-trailing-slash strings — see `path_scope::PathEntry`.)
 fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<String> {
     if export_globs.is_empty() {
-        return touched.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        return touched
+            .iter()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
     }
 
     let opts = glob::MatchOptions {
-        case_sensitive:              true,
-        require_literal_separator:   true,
+        case_sensitive: true,
+        require_literal_separator: true,
         require_literal_leading_dot: false,
     };
 
@@ -2676,9 +2752,12 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
         .iter()
         .filter_map(|g| glob::Pattern::new(g).ok())
         .collect();
-    if compiled.is_empty() { return Vec::new(); }
+    if compiled.is_empty() {
+        return Vec::new();
+    }
 
-    touched.iter()
+    touched
+        .iter()
         .filter_map(|p| {
             if compiled.iter().any(|g| g.matches_path_with(p, opts)) {
                 Some(p.to_string_lossy().into_owned())
@@ -2798,7 +2877,7 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 /// per-session sequence-number gate (INV-01).
 fn increment_executor_review_reject_count(
     executor_task_id: &str,
-    store:            &Store,
+    store: &Store,
 ) -> Result<usize, rusqlite::Error> {
     let conn = store.lock_sync();
     let affected = conn.execute(
@@ -2854,7 +2933,7 @@ fn increment_executor_review_reject_count(
 /// self-declared failures from the crash budget. The wire surface
 /// (the `RetrySubTask` ceiling check) does not change.
 pub(crate) fn bump_executor_crash_retry_count_in_tx(
-    tx:               &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Transaction<'_>,
     executor_task_id: &str,
 ) -> Result<usize, rusqlite::Error> {
     tx.execute(
@@ -2903,7 +2982,7 @@ pub(crate) fn bump_executor_crash_retry_count_in_tx(
 /// the spawn-side considered dead.
 fn active_orchestrator_session_id_for_initiative(
     initiative_id: &str,
-    store:         &Store,
+    store: &Store,
 ) -> Option<String> {
     let now = unix_now_secs();
     let conn = store.lock_sync();
@@ -2924,7 +3003,8 @@ fn active_orchestrator_session_id_for_initiative(
             now,
         ],
         |r| r.get::<_, String>(0),
-    ).ok()
+    )
+    .ok()
 }
 
 fn handle_submit_review(
@@ -2993,11 +3073,7 @@ fn handle_submit_review(
                 // structural set-up step. Without this emit the
                 // Reviewer task appears to jump from Admitted
                 // straight to Completed.
-                emit_task_state_changed_audit(
-                    ctx.audit.as_ref(),
-                    &rec,
-                    Some(session_id.as_str()),
-                );
+                emit_task_state_changed_audit(ctx.audit.as_ref(), &rec, Some(session_id.as_str()));
             }
             Err(_) => {
                 eprintln!(
@@ -3019,7 +3095,7 @@ fn handle_submit_review(
     // ── 2. Wire payload validation ────────────────────────────────────────
     let approved = match req.approved {
         Some(v) => v,
-        None    => return Err((PlannerErrorCode::InvalidRequest, task_state)),
+        None => return Err((PlannerErrorCode::InvalidRequest, task_state)),
     };
 
     // The reviewer's own task_id (NOT the Executor's). Used as the
@@ -3065,7 +3141,8 @@ fn handle_submit_review(
     // (Step 22). One join per SubmitReview, two consumers.
     let predecessors: Vec<String> = {
         let mut conn = store.lock_sync();
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
         // Reverse-DAG: find every predecessor task_id of this
@@ -3073,17 +3150,18 @@ fn handle_submit_review(
         // there is exactly one (the Executor); we tolerate
         // multiple at the kernel layer and append to each.
         let predecessors: Vec<String> = {
-            let mut stmt = tx.prepare(
-                &format!(
+            let mut stmt = tx
+                .prepare(&format!(
                     "SELECT predecessor_task_id FROM {dag_edges}
                      WHERE successor_task_id = ?1",
                     dag_edges = Table::TaskDagEdges.as_str(),
-                )
-            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
-            let rows = stmt.query_map(
-                rusqlite::params![reviewer_task_id.as_str()],
-                |r| r.get::<_, String>(0),
-            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                ))
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+            let rows = stmt
+                .query_map(rusqlite::params![reviewer_task_id.as_str()], |r| {
+                    r.get::<_, String>(0)
+                })
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
             rows.filter_map(Result::ok).collect()
         };
 
@@ -3106,19 +3184,19 @@ fn handle_submit_review(
             // string → existing || new). `COALESCE(last_critique, '')`
             // keeps the SQL single-statement and idempotent across
             // null-vs-string starting state.
-            let mut update_stmt = tx.prepare(
-                &format!(
+            let mut update_stmt = tx
+                .prepare(&format!(
                     "UPDATE {tasks} SET last_critique =
                         COALESCE(last_critique, '') || ?1
                      WHERE task_id = ?2",
                     tasks = Table::Tasks.as_str(),
-                )
-            ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                ))
+                .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
             for predecessor in &predecessors {
-                update_stmt.execute(
-                    rusqlite::params![formatted, predecessor.as_str()],
-                ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+                update_stmt
+                    .execute(rusqlite::params![formatted, predecessor.as_str()])
+                    .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
             }
         }
 
@@ -3141,7 +3219,8 @@ fn handle_submit_review(
                 tasks = Table::Tasks.as_str(),
             ),
             rusqlite::params![verdict.as_sql_str(), req.task_id.as_str()],
-        ).map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
 
         // Reviewer's own task FSM: Running → Completed. The Reviewer
         // has done its job — successful or not, the Reviewer task
@@ -3155,7 +3234,8 @@ fn handle_submit_review(
             TaskState::Completed,
             None,
             TransitionActor::Kernel,
-        ).map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailTaskNotRunning, task_state))?;
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailPolicyViolation, task_state))?;
@@ -3176,8 +3256,7 @@ fn handle_submit_review(
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"ReviewSubmitted\",\
          \"reviewer_task_id\":\"{}\",\"approved\":{}}}",
-        reviewer_task_id,
-        approved,
+        reviewer_task_id, approved,
     );
 
     // V1 §2.5.2 + INV-AUDIT-PAIRED-01 + raxis-concepts/06-audit-chain.md §1
@@ -3221,11 +3300,11 @@ fn handle_submit_review(
     };
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::IntentAccepted {
-            task_id:         req.task_id.as_str().to_owned(),
-            session_id:      session_id.as_str().to_owned(),
-            intent_kind:     "SubmitReview".to_owned(),
-            base_sha:        None,
-            head_sha:        None,
+            task_id: req.task_id.as_str().to_owned(),
+            session_id: session_id.as_str().to_owned(),
+            intent_kind: "SubmitReview".to_owned(),
+            base_sha: None,
+            head_sha: None,
             sequence_number: seq,
             remaining_units: remaining_units_audit,
         },
@@ -3300,7 +3379,7 @@ fn handle_submit_review(
     // harness still observes its `Accepted` response.
     let task = load_task(req.task_id.as_str(), store)
         .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Completed))?;
-    let session_id_str    = session_id.as_str().to_owned();
+    let session_id_str = session_id.as_str().to_owned();
     let initiative_id_str = task.initiative_id.clone();
 
     // Resolve the live Orchestrator session for this initiative
@@ -3314,21 +3393,18 @@ fn handle_submit_review(
     let orchestrator_session_id =
         active_orchestrator_session_id_for_initiative(&initiative_id_str, store)
             .and_then(|s| SessionId::parse(&s).ok());
-    let initiative_id_obj =
-        raxis_types::InitiativeId::parse(&initiative_id_str).ok();
+    let initiative_id_obj = raxis_types::InitiativeId::parse(&initiative_id_str).ok();
     let push_now_unix = unix_now_secs() as i64;
     for predecessor in &predecessors {
-        let outcome = match crate::initiatives::review_aggregation
-            ::compute_aggregate_review_outcome(
-                predecessor.as_str(),
-                store,
-                Some(crate::initiatives::review_aggregation::AgentTypeFilter {
-                    plan_registry:    ctx.plan_registry.as_ref(),
-                    initiative_id:    initiative_id_str.as_str(),
-                    reviewer_task_id: reviewer_task_id.as_str(),
-                }),
-            )
-        {
+        let outcome = match crate::initiatives::review_aggregation::compute_aggregate_review_outcome(
+            predecessor.as_str(),
+            store,
+            Some(crate::initiatives::review_aggregation::AgentTypeFilter {
+                plan_registry: ctx.plan_registry.as_ref(),
+                initiative_id: initiative_id_str.as_str(),
+                reviewer_task_id: reviewer_task_id.as_str(),
+            }),
+        ) {
             Ok(o) => o,
             Err(e) => {
                 eprintln!(
@@ -3344,12 +3420,15 @@ fn handle_submit_review(
         let verdict_str = match outcome.verdict {
             // Silent: not yet at terminal state.
             crate::initiatives::review_aggregation::AggregateReviewVerdict::Pending => continue,
-            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed
-                => "AllPassed",
-            crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected
-                => "AtLeastOneRejected",
-            crate::initiatives::review_aggregation::AggregateReviewVerdict::NoSuccessors
-                => "NoSuccessors",
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AllPassed => {
+                "AllPassed"
+            }
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected => {
+                "AtLeastOneRejected"
+            }
+            crate::initiatives::review_aggregation::AggregateReviewVerdict::NoSuccessors => {
+                "NoSuccessors"
+            }
         };
 
         // V2 §Step 25 — bump the Executor's `review_reject_count` once
@@ -3364,9 +3443,7 @@ fn handle_submit_review(
             outcome.verdict,
             crate::initiatives::review_aggregation::AggregateReviewVerdict::AtLeastOneRejected,
         ) {
-            match increment_executor_review_reject_count(
-                predecessor.as_str(), store,
-            ) {
+            match increment_executor_review_reject_count(predecessor.as_str(), store) {
                 Ok(0) => {
                     // The Executor's activation row vanished between
                     // the aggregator's read and this bump — a recovery
@@ -3405,10 +3482,10 @@ fn handle_submit_review(
 
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
-                executor_task_id:               predecessor.clone(),
-                triggered_by_reviewer_task_id:  reviewer_task_id.clone(),
-                reviewer_count:                 outcome.count,
-                verdict:                        verdict_str.to_owned(),
+                executor_task_id: predecessor.clone(),
+                triggered_by_reviewer_task_id: reviewer_task_id.clone(),
+                reviewer_count: outcome.count,
+                verdict: verdict_str.to_owned(),
             },
             Some(session_id_str.as_str()),
             Some(reviewer_task_id.as_str()),
@@ -3506,7 +3583,7 @@ fn handle_submit_review(
         sequence_number: seq,
         task_state: TaskState::Completed,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -3546,34 +3623,33 @@ fn handle_submit_review(
 // ---------------------------------------------------------------------------
 
 fn handle_structured_output(
-    req:        IntentRequest,
+    req: IntentRequest,
     task_state: TaskState,
     session_id: &SessionId,
-    seq:        u64,
-    store:      &Store,
-    ctx:        &HandlerContext,
+    seq: u64,
+    store: &Store,
+    ctx: &HandlerContext,
 ) -> HandlerResult {
     // ── 1. Wire payload validation ────────────────────────────────────────
     let mut payload = match req.structured_output {
         Some(p) => p,
-        None    => return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
+        None => return Err((PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
     };
 
     // ── 2. Normalise (and reject hard-failures only) ──────────────────────
     if payload.validate_and_normalise().is_err() {
-        return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, task_state));
+        return Err((PlannerErrorCode::FailStructuredOutputInvalid, task_state));
     }
 
     // ── 3. Look up task scope (initiative_id, lane_id) for the audit row.
     let task = load_task(req.task_id.as_str(), store)
         .map_err(|_| (PlannerErrorCode::FailUnknownTask, task_state))?;
 
-    let kind_tag    = payload.variant_tag();
-    let severity    = match &payload {
-        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } =>
-            Some(severity.as_str().to_owned()),
+    let kind_tag = payload.variant_tag();
+    let severity = match &payload {
+        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } => {
+            Some(severity.as_str().to_owned())
+        }
         _ => None,
     };
 
@@ -3584,9 +3660,8 @@ fn handle_structured_output(
     // permits. Belt-and-braces: surface the failure as
     // `FailStructuredOutputInvalid` instead of unwrapping.
     let payload_json = match serde_json::to_string(&payload) {
-        Ok(s)  => s,
-        Err(_) => return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
+        Ok(s) => s,
+        Err(_) => return Err((PlannerErrorCode::FailStructuredOutputInvalid, task_state)),
     };
     let payload_bytes = u32::try_from(payload_json.len()).unwrap_or(u32::MAX);
 
@@ -3600,18 +3675,19 @@ fn handle_structured_output(
     let emitted_at = unix_now_secs();
     {
         let mut conn = store.lock_sync();
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
 
         let so_table = Table::StructuredOutputs.as_str();
 
-        let count: u32 = tx.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"
-            ),
-            rusqlite::params![session_id.as_str()],
-            |r| r.get::<_, i64>(0).map(|v| v as u32),
-        ).unwrap_or(0);
+        let count: u32 = tx
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"),
+                rusqlite::params![session_id.as_str()],
+                |r| r.get::<_, i64>(0).map(|v| v as u32),
+            )
+            .unwrap_or(0);
 
         if count >= raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT {
             // INV-08 — coarse code only. The internal log carries
@@ -3623,7 +3699,9 @@ fn handle_structured_output(
                 req.task_id.as_str(),
             );
             return Err((
-                PlannerErrorCode::FailStructuredOutputRateLimited, task_state));
+                PlannerErrorCode::FailStructuredOutputRateLimited,
+                task_state,
+            ));
         }
 
         tx.execute(
@@ -3643,7 +3721,8 @@ fn handle_structured_output(
                 payload_json,
                 emitted_at as i64,
             ],
-        ).map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
@@ -3652,12 +3731,12 @@ fn handle_structured_output(
     // ── 5. Audit emit AFTER the commit (§2.5.2 audit-after-commit) ────────
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
-            output_id:     output_id.clone(),
+            output_id: output_id.clone(),
             initiative_id: task.initiative_id.clone(),
-            task_id:       req.task_id.as_str().to_owned(),
-            session_id:    session_id.as_str().to_owned(),
-            output_kind:   kind_tag.to_owned(),
-            severity:      severity.clone(),
+            task_id: req.task_id.as_str().to_owned(),
+            session_id: session_id.as_str().to_owned(),
+            output_kind: kind_tag.to_owned(),
+            severity: severity.clone(),
             payload_bytes,
         },
         Some(session_id.as_str()),
@@ -3695,7 +3774,7 @@ fn handle_structured_output(
         sequence_number: seq,
         task_state,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -3751,12 +3830,12 @@ fn handle_structured_output(
 // transaction, and the audit-after-commit emit — is byte-identical
 // to [`handle_structured_output`].
 fn handle_structured_output_initiative_scoped(
-    req:           IntentRequest,
+    req: IntentRequest,
     initiative_id: &str,
-    session_id:    &SessionId,
-    seq:           u64,
-    store:         &Store,
-    ctx:           &HandlerContext,
+    session_id: &SessionId,
+    seq: u64,
+    store: &Store,
+    ctx: &HandlerContext,
 ) -> HandlerResult {
     // Synthetic state surfaced through the rejection / success path —
     // matches the per-task convention (`Admitted | Running` are the
@@ -3766,14 +3845,12 @@ fn handle_structured_output_initiative_scoped(
     // ── 1. Wire payload validation ────────────────────────────────────────
     let mut payload = match req.structured_output {
         Some(p) => p,
-        None    => return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
+        None => return Err((PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
     };
 
     // ── 2. Normalise (and reject hard-failures only) ──────────────────────
     if payload.validate_and_normalise().is_err() {
-        return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, synth_state));
+        return Err((PlannerErrorCode::FailStructuredOutputInvalid, synth_state));
     }
 
     // ── 3. Initiative-quarantine read (kernel-store.md §2.5.8) ────────────
@@ -3784,10 +3861,7 @@ fn handle_structured_output_initiative_scoped(
     // concurrent quarantine landing on the same initiative.
     let quarantine_lookup = {
         let conn = store.lock_sync();
-        raxis_store::views::initiative_quarantines::is_quarantined_rw(
-            &conn,
-            initiative_id,
-        )
+        raxis_store::views::initiative_quarantines::is_quarantined_rw(&conn, initiative_id)
     };
     match quarantine_lookup {
         Ok(false) => {}
@@ -3796,50 +3870,49 @@ fn handle_structured_output_initiative_scoped(
                 "{{\"level\":\"warn\",\"event\":\"IntentRejectedQuarantined\",\
                  \"initiative_id\":\"{initiative_id}\",\"actor\":\"orchestrator\"}}",
             );
-            return Err((
-                PlannerErrorCode::FailInitiativeQuarantined, synth_state));
+            return Err((PlannerErrorCode::FailInitiativeQuarantined, synth_state));
         }
         Err(e) => {
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"QuarantineLookupError\",\
                  \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
             );
-            return Err((
-                PlannerErrorCode::FailInitiativeQuarantined, synth_state));
+            return Err((PlannerErrorCode::FailInitiativeQuarantined, synth_state));
         }
     }
 
-    let kind_tag    = payload.variant_tag();
-    let severity    = match &payload {
-        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } =>
-            Some(severity.as_str().to_owned()),
+    let kind_tag = payload.variant_tag();
+    let severity = match &payload {
+        raxis_types::StructuredOutputKind::DiagnosticFlag { severity, .. } => {
+            Some(severity.as_str().to_owned())
+        }
         _ => None,
     };
 
     let payload_json = match serde_json::to_string(&payload) {
-        Ok(s)  => s,
-        Err(_) => return Err((
-            PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
+        Ok(s) => s,
+        Err(_) => return Err((PlannerErrorCode::FailStructuredOutputInvalid, synth_state)),
     };
     let payload_bytes = u32::try_from(payload_json.len()).unwrap_or(u32::MAX);
 
     // ── 4. Rate-limit COUNT + INSERT inside one BEGIN IMMEDIATE tx ────────
-    let output_id  = uuid::Uuid::new_v4().to_string();
+    let output_id = uuid::Uuid::new_v4().to_string();
     let emitted_at = unix_now_secs();
     {
         let mut conn = store.lock_sync();
-        let tx = conn.transaction()
+        let tx = conn
+            .transaction()
             .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
 
         let so_table = Table::StructuredOutputs.as_str();
 
-        let count: u32 = tx.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"
-            ),
-            rusqlite::params![session_id.as_str()],
-            |r| r.get::<_, i64>(0).map(|v| v as u32),
-        ).unwrap_or(0);
+        let count: u32 = tx
+            .query_row(
+                &format!("SELECT COUNT(*) FROM {so_table} WHERE session_id = ?1"),
+                rusqlite::params![session_id.as_str()],
+                |r| r.get::<_, i64>(0).map(|v| v as u32),
+            )
+            .unwrap_or(0);
 
         if count >= raxis_types::STRUCTURED_OUTPUT_PER_SESSION_RATE_LIMIT {
             eprintln!(
@@ -3849,7 +3922,9 @@ fn handle_structured_output_initiative_scoped(
                 session_id.as_str(),
             );
             return Err((
-                PlannerErrorCode::FailStructuredOutputRateLimited, synth_state));
+                PlannerErrorCode::FailStructuredOutputRateLimited,
+                synth_state,
+            ));
         }
 
         // task_id IS NULL — orchestrator outputs scope to the
@@ -3870,7 +3945,8 @@ fn handle_structured_output_initiative_scoped(
                 payload_json,
                 emitted_at as i64,
             ],
-        ).map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
+        )
+        .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
 
         tx.commit()
             .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
@@ -3888,12 +3964,12 @@ fn handle_structured_output_initiative_scoped(
     // pivots to NULL.
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
-            output_id:     output_id.clone(),
+            output_id: output_id.clone(),
             initiative_id: initiative_id.to_owned(),
-            task_id:       req.task_id.as_str().to_owned(),
-            session_id:    session_id.as_str().to_owned(),
-            output_kind:   kind_tag.to_owned(),
-            severity:      severity.clone(),
+            task_id: req.task_id.as_str().to_owned(),
+            session_id: session_id.as_str().to_owned(),
+            output_kind: kind_tag.to_owned(),
+            severity: severity.clone(),
             payload_bytes,
         },
         Some(session_id.as_str()),
@@ -3922,9 +3998,9 @@ fn handle_structured_output_initiative_scoped(
     let remaining = BudgetSnapshot { admission_units: 0 };
     Ok(IntentResponse {
         sequence_number: seq,
-        task_state:      synth_state,
+        task_state: synth_state,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -4025,7 +4101,7 @@ fn handle_structured_output_initiative_scoped(
 /// digest the kernel saw matches the digest the policy declared
 /// (`INV-OPERATOR-CUSTOM-IMAGE-01`).
 struct VmImageResolutionOk {
-    verified:            raxis_isolation::VerifiedImage,
+    verified: raxis_isolation::VerifiedImage,
     verified_oci_digest: String,
 }
 
@@ -4046,23 +4122,31 @@ enum VmImageResolveError {
     /// `[[vm_images]]` entry exists but its `oci_digest` no longer
     /// parses as `sha256:<64-hex>`. Defense-in-depth — the policy
     /// loader rejects malformed digests at admission.
-    MalformedDigest { alias: String, raw: String, detail: String },
+    MalformedDigest {
+        alias: String,
+        raw: String,
+        detail: String,
+    },
     /// Resolver detected an on-disk byte mismatch against the
     /// policy-declared digest. This is the `INV-OPERATOR-CUSTOM-IMAGE-01`
     /// trigger; the activation handler emits
     /// `SecurityViolationDetected` with the expected / actual hex
     /// strings before failing the activation.
     DigestMismatch {
-        alias:    String,
+        alias: String,
         expected: String,
-        actual:   String,
-        path:     String,
+        actual: String,
+        path: String,
     },
     /// Catch-all for the remaining `ImageResolverError` variants
     /// (registry unreachable, auth, not-found, transient 5xx,
     /// unsupported media type, cache-corrupt, I/O). The detail
     /// string is the resolver's `Display` rendering.
-    ResolverFailure { alias: String, raw_digest: String, detail: String },
+    ResolverFailure {
+        alias: String,
+        raw_digest: String,
+        detail: String,
+    },
 }
 
 impl VmImageResolveError {
@@ -4086,7 +4170,12 @@ impl VmImageResolveError {
                      \"raw_digest\":\"{raw}\",\"detail\":\"{detail}\"}}"
                 );
             }
-            VmImageResolveError::DigestMismatch { alias, expected, actual, path } => {
+            VmImageResolveError::DigestMismatch {
+                alias,
+                expected,
+                actual,
+                path,
+            } => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
                      \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
@@ -4095,7 +4184,11 @@ impl VmImageResolveError {
                      \"path\":\"{path}\"}}"
                 );
             }
-            VmImageResolveError::ResolverFailure { alias, raw_digest, detail } => {
+            VmImageResolveError::ResolverFailure {
+                alias,
+                raw_digest,
+                detail,
+            } => {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"VmImageResolveFailed\",\
                      \"task_id\":\"{task_id}\",\"alias\":\"{alias}\",\
@@ -4109,46 +4202,52 @@ impl VmImageResolveError {
 
 async fn resolve_vm_image_override(
     policy: &raxis_policy::PolicyBundle,
-    alias:  &str,
-    ctx:    &Arc<HandlerContext>,
+    alias: &str,
+    ctx: &Arc<HandlerContext>,
 ) -> Result<VmImageResolutionOk, VmImageResolveError> {
     use std::str::FromStr;
 
-    let entry = policy.vm_image_by_name(alias).ok_or_else(|| {
-        VmImageResolveError::AliasDropped { alias: alias.to_owned() }
-    })?;
-    let digest = raxis_image_cache::OciDigest::from_str(&entry.oci_digest)
-        .map_err(|e| VmImageResolveError::MalformedDigest {
-            alias:  alias.to_owned(),
-            raw:    entry.oci_digest.clone(),
+    let entry =
+        policy
+            .vm_image_by_name(alias)
+            .ok_or_else(|| VmImageResolveError::AliasDropped {
+                alias: alias.to_owned(),
+            })?;
+    let digest = raxis_image_cache::OciDigest::from_str(&entry.oci_digest).map_err(|e| {
+        VmImageResolveError::MalformedDigest {
+            alias: alias.to_owned(),
+            raw: entry.oci_digest.clone(),
             detail: e.to_string(),
-        })?;
+        }
+    })?;
     let resolved = ctx
         .image_resolver
         .resolve(&digest, None)
         .await
         .map_err(|e| match e {
             raxis_image_cache::ImageResolverError::DigestMismatch {
-                expected, actual, path,
+                expected,
+                actual,
+                path,
             } => VmImageResolveError::DigestMismatch {
-                alias:    alias.to_owned(),
+                alias: alias.to_owned(),
                 expected: expected.to_string(),
-                actual:   actual.to_string(),
-                path:     path.display().to_string(),
+                actual: actual.to_string(),
+                path: path.display().to_string(),
             },
             other => VmImageResolveError::ResolverFailure {
-                alias:      alias.to_owned(),
+                alias: alias.to_owned(),
                 raw_digest: entry.oci_digest.clone(),
-                detail:     other.to_string(),
+                detail: other.to_string(),
             },
         })?;
     let verified_oci_digest = resolved.verified_digest.to_string();
     Ok(VmImageResolutionOk {
         verified: raxis_isolation::VerifiedImage {
-            kind:      raxis_isolation::ImageKind::RootfsErofs,
-            body:      raxis_isolation::ImageBody::Path(resolved.rootfs_image_path),
+            kind: raxis_isolation::ImageKind::RootfsErofs,
+            body: raxis_isolation::ImageBody::Path(resolved.rootfs_image_path),
             signature: raxis_isolation::ImageSignature(Vec::new()),
-            image_id:  alias.to_owned(),
+            image_id: alias.to_owned(),
         },
         verified_oci_digest,
     })
@@ -4173,7 +4272,7 @@ async fn resolve_vm_image_override(
 /// can pin the predicate against `task_dag_edges` + `tasks` without
 /// standing up a full `HandlerContext` + substrate spawn service.
 fn missing_predecessors_for_activation(
-    tx:      &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Transaction<'_>,
     task_id: &str,
 ) -> rusqlite::Result<Vec<(String, String)>> {
     let mut stmt = tx.prepare(&format!(
@@ -4192,11 +4291,11 @@ fn missing_predecessors_for_activation(
 }
 
 async fn handle_activate_sub_task(
-    req:        IntentRequest,
-    _session:   authority::session::SessionRow,
+    req: IntentRequest,
+    _session: authority::session::SessionRow,
     session_id: SessionId,
-    seq:        u64,
-    ctx:        &Arc<HandlerContext>,
+    seq: u64,
+    ctx: &Arc<HandlerContext>,
 ) -> HandlerResult {
     // ── Step 1: replay protection (envelope acceptance) ────────────────
     let presented_seq_i64 = match i64::try_from(seq) {
@@ -4204,14 +4303,17 @@ async fn handle_activate_sub_task(
         Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
     };
     {
-        let store     = Arc::clone(&ctx.store);
-        let session   = session_id.clone();
-        let nonce     = req.envelope_nonce.clone();
-        let audit     = Arc::clone(&ctx.audit);
+        let store = Arc::clone(&ctx.store);
+        let session = session_id.clone();
+        let nonce = req.envelope_nonce.clone();
+        let audit = Arc::clone(&ctx.audit);
         let session_s = session.as_str().to_owned();
         let result = tokio::task::spawn_blocking(move || {
             authority::session::accept_envelope_and_advance_sequence(
-                &session, presented_seq_i64, &nonce, &store,
+                &session,
+                presented_seq_i64,
+                &nonce,
+                &store,
             )
         })
         .await
@@ -4219,9 +4321,9 @@ async fn handle_activate_sub_task(
         if let Err(reason) = result {
             let _ = audit.emit(
                 raxis_audit_tools::AuditEventKind::ReplayRejected {
-                    session_id:   session_s,
+                    session_id: session_s,
                     sequence_num: seq,
-                    reason:       format!("{reason:?}"),
+                    reason: format!("{reason:?}"),
                 },
                 Some(session_id.as_str()),
                 None,
@@ -4241,9 +4343,7 @@ async fn handle_activate_sub_task(
     // a credential proxy state file, and a substrate VM image
     // copy-on-write base — so we want this fence as early in the
     // path as possible.
-    if crate::capacity::refuse_if_disk_full(
-        ctx.disk_watchdog.as_deref(),
-    ).is_err() {
+    if crate::capacity::refuse_if_disk_full(ctx.disk_watchdog.as_deref()).is_err() {
         return Err((PlannerErrorCode::FailDiskFull, TaskState::Admitted));
     }
 
@@ -4266,18 +4366,20 @@ async fn handle_activate_sub_task(
     {
         let policy_snapshot = ctx.policy.load();
         let cap = policy_snapshot.host_capacity().max_concurrent_vms;
-        let running = u32::try_from(ctx.session_spawn.active_count().await)
-            .unwrap_or(u32::MAX);
+        let running = u32::try_from(ctx.session_spawn.active_count().await).unwrap_or(u32::MAX);
         if let crate::capacity::AdmissionDecision::Deferred {
-            reason, current_running, cap: observed_cap,
-        } = crate::capacity::check_vm_concurrency_cap(running, cap) {
+            reason,
+            current_running,
+            cap: observed_cap,
+        } = crate::capacity::check_vm_concurrency_cap(running, cap)
+        {
             let _ = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::AdmissionDeferredAtCap {
-                    cap_kind:        reason.cap_kind().to_owned(),
+                    cap_kind: reason.cap_kind().to_owned(),
                     current_running,
-                    cap:             observed_cap,
-                    initiative_id:   None,
-                    task_id:         Some(req.task_id.as_str().to_owned()),
+                    cap: observed_cap,
+                    initiative_id: None,
+                    task_id: Some(req.task_id.as_str().to_owned()),
                 },
                 Some(session_id.as_str()),
                 Some(req.task_id.as_str()),
@@ -4299,12 +4401,12 @@ async fn handle_activate_sub_task(
     // succeeds (Step 4). The cross-column CHECK enforces this:
     // `Active` requires non-NULL `session_id` AND non-NULL
     // `activated_at`, and we have neither yet.
-    let task_id_owned     = req.task_id.as_str().to_owned();
+    let task_id_owned = req.task_id.as_str().to_owned();
     let plan_registry_arc = Arc::clone(&ctx.plan_registry);
 
     #[derive(Clone)]
     struct ActivationLookup {
-        agent_kind:    crate::session_spawn_orchestrator::ExecutorAgentKind,
+        agent_kind: crate::session_spawn_orchestrator::ExecutorAgentKind,
         initiative_id: String,
         new_session_id: String,
         new_lineage_id: String,
@@ -4339,7 +4441,10 @@ async fn handle_activate_sub_task(
     // transaction's reject classes.
     #[derive(Debug)]
     enum ActivateRejection {
-        Standard { code: PlannerErrorCode, state: TaskState },
+        Standard {
+            code: PlannerErrorCode,
+            state: TaskState,
+        },
         DependencyNotMet {
             /// `(predecessor_task_id, observed_state)` for every
             /// edge whose predecessor was NOT `Completed` at the
@@ -4356,197 +4461,236 @@ async fn handle_activate_sub_task(
 
     let lookup: ActivationLookup = {
         let store_arc = Arc::clone(&ctx.store);
-        let task_id   = task_id_owned.clone();
-        let lookup_result = tokio::task::spawn_blocking(move || -> Result<ActivationLookup, ActivateRejection> {
-            let mut conn = store_arc.lock_sync();
-            let tx = conn.transaction()
-                .map_err(|_| ActivateRejection::standard(
-                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
+        let task_id = task_id_owned.clone();
+        let lookup_result =
+            tokio::task::spawn_blocking(move || -> Result<ActivationLookup, ActivateRejection> {
+                let mut conn = store_arc.lock_sync();
+                let tx = conn.transaction().map_err(|_| {
+                    ActivateRejection::standard(
+                        PlannerErrorCode::FailPolicyViolation,
+                        TaskState::Admitted,
+                    )
+                })?;
 
-            // 2a. Activation row — must exist, must be PendingActivation.
-            let activation_id: String = {
-                let row: Result<(String, String, String), rusqlite::Error> = tx.query_row(
-                    &format!(
-                        "SELECT activation_id, activation_state, initiative_id
+                // 2a. Activation row — must exist, must be PendingActivation.
+                let activation_id: String = {
+                    let row: Result<(String, String, String), rusqlite::Error> = tx.query_row(
+                        &format!(
+                            "SELECT activation_id, activation_state, initiative_id
                            FROM {SUBTASK_ACTIVATIONS}
                           WHERE task_id = ?1
                           ORDER BY created_at DESC
                           LIMIT 1"
-                    ),
-                    rusqlite::params![&task_id],
-                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-                );
-                let (activation_id, state, _initiative_id) = match row {
-                    Ok(r)  => r,
-                    Err(_) => return Err(ActivateRejection::standard(
-                        PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
-                };
-                if state != "PendingActivation" {
-                    return Err(ActivateRejection::standard(
-                        PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
-                }
-                activation_id
-            };
-
-            // 2b. Task row — must be Admitted, and must carry a
-            //      typed `session_agent_type` (Executor or Reviewer)
-            //      retrievable from the in-memory plan registry.
-            let task_row: (String, String) = match tx.query_row(
-                &format!("SELECT initiative_id, state FROM {TASKS} WHERE task_id = ?1"),
-                rusqlite::params![&task_id],
-                |r| Ok((r.get(0)?, r.get(1)?)),
-            ) {
-                Ok(r)  => r,
-                Err(_) => return Err(ActivateRejection::standard(
-                    PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
-            };
-            let (initiative_id, task_state_str) = task_row;
-            if task_state_str != TaskState::Admitted.as_sql_str() {
-                return Err(ActivateRejection::standard(
-                    PlannerErrorCode::FailTaskNotRunning,
-                    parse_task_state(&task_state_str)));
-            }
-
-            // 2b.5. INV-KERNEL-DAG-AUTHORITY-01 — predecessor-completion
-            //       gate. The Orchestrator is an untrusted LLM agent
-            //       (paradigm.md §3.4); even if its NNSP and the KSB's
-            //       Layer-2 prompt-hiding both correctly steer it to
-            //       only emit `ActivateSubTask` for tasks whose
-            //       predecessors have completed, a hallucinating or
-            //       compromised orchestrator could ignore those signals
-            //       and submit `ActivateSubTask` for a task whose
-            //       predecessors are still `Admitted` / `Running` /
-            //       `GatesPending`. Without a kernel-side gate, that
-            //       admission would (a) skip review gates by activating
-            //       a downstream Executor before its predecessor
-            //       Reviewer voted, (b) reorder tasks to circumvent
-            //       plan-author-declared dependency constraints, and
-            //       (c) violate paradigm-`R-2` / `R-5` / `R-11`.
-            //
-            //       The check joins `task_dag_edges` (predecessors of
-            //       this task) against `tasks` (predecessor states)
-            //       inside the same transaction as 2a/2b so the
-            //       admission decision is atomic with the rest of the
-            //       activation-row pivot pipeline. The check uses
-            //       kernel-owned tables exclusively — the Orchestrator
-            //       contributes only the `task_id` lookup key.
-            //
-            //       Spec: `agent-disagreement.md §3.6` (Authority
-            //       boundary), `v2-deep-spec.md §Step 21` (the
-            //       `DEPENDENCY_NOT_MET` rejection contract), and
-            //       `specs/invariants.md
-            //       INV-KERNEL-DAG-AUTHORITY-01`.
-            let missing_predecessors = match missing_predecessors_for_activation(
-                &tx, &task_id,
-            ) {
-                Ok(v)  => v,
-                Err(_) => return Err(ActivateRejection::standard(
-                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
-            };
-            if !missing_predecessors.is_empty() {
-                return Err(ActivateRejection::DependencyNotMet {
-                    missing: missing_predecessors,
-                });
-            }
-
-            // The plan registry holds the typed `session_agent_type`
-            // (the `tasks` DDL stores it as a string column on
-            // older migrations; the in-memory plan registry is the
-            // canonical V2 source). The same registry entry carries
-            // the V2.5 `vm_image` alias chosen at admission time.
-            let (agent_kind, vm_image_alias, task_prompt) = {
-                let key = crate::initiatives::plan_registry::TaskKey::new(
-                    &initiative_id, &task_id,
-                );
-                let fields = match plan_registry_arc.get(&key) {
-                    Some(f) => f,
-                    None    => return Err(ActivateRejection::standard(
-                        PlannerErrorCode::FailUnknownTask, TaskState::Admitted)),
-                };
-                let kind = match fields.session_agent_type {
-                    raxis_types::SessionAgentType::Executor =>
-                        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor,
-                    raxis_types::SessionAgentType::Reviewer =>
-                        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer,
-                    raxis_types::SessionAgentType::Orchestrator => {
-                        // Defense-in-depth — `approve_plan`'s structural
-                        // validator already rejects Orchestrator-typed
-                        // `[[tasks]]` blocks, but a corrupt registry
-                        // entry would surface here as a policy
-                        // violation rather than a substrate error.
+                        ),
+                        rusqlite::params![&task_id],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    );
+                    let (activation_id, state, _initiative_id) = match row {
+                        Ok(r) => r,
+                        Err(_) => {
+                            return Err(ActivateRejection::standard(
+                                PlannerErrorCode::FailUnknownTask,
+                                TaskState::Admitted,
+                            ))
+                        }
+                    };
+                    if state != "PendingActivation" {
                         return Err(ActivateRejection::standard(
-                            PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
+                            PlannerErrorCode::FailPolicyViolation,
+                            TaskState::Admitted,
+                        ));
+                    }
+                    activation_id
+                };
+
+                // 2b. Task row — must be Admitted, and must carry a
+                //      typed `session_agent_type` (Executor or Reviewer)
+                //      retrievable from the in-memory plan registry.
+                let task_row: (String, String) = match tx.query_row(
+                    &format!("SELECT initiative_id, state FROM {TASKS} WHERE task_id = ?1"),
+                    rusqlite::params![&task_id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                ) {
+                    Ok(r) => r,
+                    Err(_) => {
+                        return Err(ActivateRejection::standard(
+                            PlannerErrorCode::FailUnknownTask,
+                            TaskState::Admitted,
+                        ))
                     }
                 };
-                // V2 `v2_extended_gaps.md §1.1` — fetch the
-                // operator-authored seed prompt out of the same
-                // signed-plan-derived registry entry so the spawn
-                // path can stamp it into the planner's env table.
-                (kind, fields.vm_image, fields.description)
-            };
+                let (initiative_id, task_state_str) = task_row;
+                if task_state_str != TaskState::Admitted.as_sql_str() {
+                    return Err(ActivateRejection::standard(
+                        PlannerErrorCode::FailTaskNotRunning,
+                        parse_task_state(&task_state_str),
+                    ));
+                }
 
-            // 2c. Mint the new Executor / Reviewer session row.
-            //     `lineage_id` is freshly generated (the activation
-            //     is the start of a new lineage; tying it to the
-            //     Orchestrator's lineage would conflate parent /
-            //     child trust scopes).
-            let new_session_id  = raxis_types::SessionId::new_v4();
-            let new_session_str = new_session_id.as_str().to_owned();
-            let new_lineage_id  = uuid::Uuid::new_v4().to_string();
-            let session_token   = match raxis_crypto::token::generate_session_token() {
-                Ok(t)  => t,
-                Err(_) => return Err(ActivateRejection::standard(
-                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)),
-            };
-            let now_secs   = unix_now_secs();
-            let expires_at = now_secs + 86_400;
-            let agent_type_str = match agent_kind {
-                crate::session_spawn_orchestrator::ExecutorAgentKind::Executor =>
-                    raxis_types::SessionAgentType::Executor.as_sql_str(),
-                crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer =>
-                    raxis_types::SessionAgentType::Reviewer.as_sql_str(),
-            };
-            tx.execute(
-                &format!(
-                    "INSERT INTO {SESSIONS} (
+                // 2b.5. INV-KERNEL-DAG-AUTHORITY-01 — predecessor-completion
+                //       gate. The Orchestrator is an untrusted LLM agent
+                //       (paradigm.md §3.4); even if its NNSP and the KSB's
+                //       Layer-2 prompt-hiding both correctly steer it to
+                //       only emit `ActivateSubTask` for tasks whose
+                //       predecessors have completed, a hallucinating or
+                //       compromised orchestrator could ignore those signals
+                //       and submit `ActivateSubTask` for a task whose
+                //       predecessors are still `Admitted` / `Running` /
+                //       `GatesPending`. Without a kernel-side gate, that
+                //       admission would (a) skip review gates by activating
+                //       a downstream Executor before its predecessor
+                //       Reviewer voted, (b) reorder tasks to circumvent
+                //       plan-author-declared dependency constraints, and
+                //       (c) violate paradigm-`R-2` / `R-5` / `R-11`.
+                //
+                //       The check joins `task_dag_edges` (predecessors of
+                //       this task) against `tasks` (predecessor states)
+                //       inside the same transaction as 2a/2b so the
+                //       admission decision is atomic with the rest of the
+                //       activation-row pivot pipeline. The check uses
+                //       kernel-owned tables exclusively — the Orchestrator
+                //       contributes only the `task_id` lookup key.
+                //
+                //       Spec: `agent-disagreement.md §3.6` (Authority
+                //       boundary), `v2-deep-spec.md §Step 21` (the
+                //       `DEPENDENCY_NOT_MET` rejection contract), and
+                //       `specs/invariants.md
+                //       INV-KERNEL-DAG-AUTHORITY-01`.
+                let missing_predecessors = match missing_predecessors_for_activation(&tx, &task_id)
+                {
+                    Ok(v) => v,
+                    Err(_) => {
+                        return Err(ActivateRejection::standard(
+                            PlannerErrorCode::FailPolicyViolation,
+                            TaskState::Admitted,
+                        ))
+                    }
+                };
+                if !missing_predecessors.is_empty() {
+                    return Err(ActivateRejection::DependencyNotMet {
+                        missing: missing_predecessors,
+                    });
+                }
+
+                // The plan registry holds the typed `session_agent_type`
+                // (the `tasks` DDL stores it as a string column on
+                // older migrations; the in-memory plan registry is the
+                // canonical V2 source). The same registry entry carries
+                // the V2.5 `vm_image` alias chosen at admission time.
+                let (agent_kind, vm_image_alias, task_prompt) = {
+                    let key =
+                        crate::initiatives::plan_registry::TaskKey::new(&initiative_id, &task_id);
+                    let fields = match plan_registry_arc.get(&key) {
+                        Some(f) => f,
+                        None => {
+                            return Err(ActivateRejection::standard(
+                                PlannerErrorCode::FailUnknownTask,
+                                TaskState::Admitted,
+                            ))
+                        }
+                    };
+                    let kind = match fields.session_agent_type {
+                        raxis_types::SessionAgentType::Executor => {
+                            crate::session_spawn_orchestrator::ExecutorAgentKind::Executor
+                        }
+                        raxis_types::SessionAgentType::Reviewer => {
+                            crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer
+                        }
+                        raxis_types::SessionAgentType::Orchestrator => {
+                            // Defense-in-depth — `approve_plan`'s structural
+                            // validator already rejects Orchestrator-typed
+                            // `[[tasks]]` blocks, but a corrupt registry
+                            // entry would surface here as a policy
+                            // violation rather than a substrate error.
+                            return Err(ActivateRejection::standard(
+                                PlannerErrorCode::FailPolicyViolation,
+                                TaskState::Admitted,
+                            ));
+                        }
+                    };
+                    // V2 `v2_extended_gaps.md §1.1` — fetch the
+                    // operator-authored seed prompt out of the same
+                    // signed-plan-derived registry entry so the spawn
+                    // path can stamp it into the planner's env table.
+                    (kind, fields.vm_image, fields.description)
+                };
+
+                // 2c. Mint the new Executor / Reviewer session row.
+                //     `lineage_id` is freshly generated (the activation
+                //     is the start of a new lineage; tying it to the
+                //     Orchestrator's lineage would conflate parent /
+                //     child trust scopes).
+                let new_session_id = raxis_types::SessionId::new_v4();
+                let new_session_str = new_session_id.as_str().to_owned();
+                let new_lineage_id = uuid::Uuid::new_v4().to_string();
+                let session_token = match raxis_crypto::token::generate_session_token() {
+                    Ok(t) => t,
+                    Err(_) => {
+                        return Err(ActivateRejection::standard(
+                            PlannerErrorCode::FailPolicyViolation,
+                            TaskState::Admitted,
+                        ))
+                    }
+                };
+                let now_secs = unix_now_secs();
+                let expires_at = now_secs + 86_400;
+                let agent_type_str = match agent_kind {
+                    crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => {
+                        raxis_types::SessionAgentType::Executor.as_sql_str()
+                    }
+                    crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => {
+                        raxis_types::SessionAgentType::Reviewer.as_sql_str()
+                    }
+                };
+                tx.execute(
+                    &format!(
+                        "INSERT INTO {SESSIONS} (
                         session_id, role_id, session_token, sequence_number,
                         worktree_root, base_sha, base_tracking_ref,
                         lineage_id, fetch_quota, created_at, expires_at, revoked,
                         session_agent_type, can_delegate
                      ) VALUES (?1,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,0,?12,0)"
-                ),
-                rusqlite::params![
-                    new_session_str,
-                    "Planner",
-                    session_token,
-                    0i64,
-                    Option::<String>::None,
-                    Option::<String>::None,
-                    Option::<String>::None,
+                    ),
+                    rusqlite::params![
+                        new_session_str,
+                        "Planner",
+                        session_token,
+                        0i64,
+                        Option::<String>::None,
+                        Option::<String>::None,
+                        Option::<String>::None,
+                        new_lineage_id,
+                        1000i64,
+                        now_secs,
+                        expires_at,
+                        agent_type_str,
+                    ],
+                )
+                .map_err(|_| {
+                    ActivateRejection::standard(
+                        PlannerErrorCode::FailPolicyViolation,
+                        TaskState::Admitted,
+                    )
+                })?;
+
+                tx.commit().map_err(|_| {
+                    ActivateRejection::standard(
+                        PlannerErrorCode::FailPolicyViolation,
+                        TaskState::Admitted,
+                    )
+                })?;
+
+                Ok(ActivationLookup {
+                    agent_kind,
+                    initiative_id,
+                    new_session_id: new_session_str,
                     new_lineage_id,
-                    1000i64,
-                    now_secs,
-                    expires_at,
-                    agent_type_str,
-                ],
-            ).map_err(|_| ActivateRejection::standard(
-                PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
-
-            tx.commit()
-                .map_err(|_| ActivateRejection::standard(
-                    PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?;
-
-            Ok(ActivationLookup {
-                agent_kind,
-                initiative_id,
-                new_session_id: new_session_str,
-                new_lineage_id,
-                activation_id,
-                vm_image_alias,
-                task_prompt,
+                    activation_id,
+                    vm_image_alias,
+                    task_prompt,
+                })
             })
-        })
-        .await;
+            .await;
         let lookup_result: Result<ActivationLookup, ActivateRejection> = match lookup_result {
             Ok(inner) => inner,
             Err(_join_err) => {
@@ -4556,14 +4700,11 @@ async fn handle_activate_sub_task(
                 // intent. Audit chain is not extended for this
                 // path (the spawn_blocking failure is a kernel-
                 // internal infra fault, not an admission decision).
-                return Err((
-                    PlannerErrorCode::FailPolicyViolation,
-                    TaskState::Admitted,
-                ));
+                return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
             }
         };
         match lookup_result {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(rej) => match rej {
                 ActivateRejection::Standard { code, state } => {
                     return Err((code, state));
@@ -4578,9 +4719,7 @@ async fn handle_activate_sub_task(
                     // pattern in `run_phase_a` Step 3d).
                     let missing_json = missing
                         .iter()
-                        .map(|(id, st)| format!(
-                            "{{\"task\":\"{id}\",\"state\":\"{st}\"}}",
-                        ))
+                        .map(|(id, st)| format!("{{\"task\":\"{id}\",\"state\":\"{st}\"}}",))
                         .collect::<Vec<_>>()
                         .join(",");
                     eprintln!(
@@ -4598,10 +4737,10 @@ async fn handle_activate_sub_task(
                     // failure does not change the rejection.
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::IntentRejected {
-                            task_id:         task_id_owned.clone(),
-                            session_id:      session_id.as_str().to_owned(),
-                            intent_kind:     IntentKind::ActivateSubTask.as_str().to_owned(),
-                            error_code:      "DEPENDENCY_NOT_MET".to_owned(),
+                            task_id: task_id_owned.clone(),
+                            session_id: session_id.as_str().to_owned(),
+                            intent_kind: IntentKind::ActivateSubTask.as_str().to_owned(),
+                            error_code: "DEPENDENCY_NOT_MET".to_owned(),
                             sequence_number: seq,
                         },
                         Some(session_id.as_str()),
@@ -4632,7 +4771,7 @@ async fn handle_activate_sub_task(
     let policy_snapshot = ctx.policy.load_full();
     let allowlist = raxis_egress_admission::EgressAllowlist {
         exact_hosts: policy_snapshot.egress_domains().to_vec(),
-        patterns:    policy_snapshot.egress_patterns().to_vec(),
+        patterns: policy_snapshot.egress_patterns().to_vec(),
         credential_proxy_real_targets: Default::default(),
     };
 
@@ -4645,12 +4784,11 @@ async fn handle_activate_sub_task(
     // blob via the wired `ImageResolver`. The spawn helper
     // re-checks `INV-PLANNER-HARNESS-02` defensively.
     let image_override = if !lookup.vm_image_alias.is_empty() {
-        match resolve_vm_image_override(
-            &policy_snapshot,
-            &lookup.vm_image_alias,
-            ctx,
-        ).await {
-            Ok(VmImageResolutionOk { verified, verified_oci_digest }) => {
+        match resolve_vm_image_override(&policy_snapshot, &lookup.vm_image_alias, ctx).await {
+            Ok(VmImageResolutionOk {
+                verified,
+                verified_oci_digest,
+            }) => {
                 // INV-OPERATOR-CUSTOM-IMAGE-02 / INV-IMAGE-RESOLUTION-PER-ROLE-01
                 // mechanical witness — the audit chain records every
                 // successful operator-image resolution with the alias
@@ -4666,16 +4804,16 @@ async fn handle_activate_sub_task(
                 // here would be a much worse property.
                 if let Err(e) = ctx.audit.emit(
                     raxis_audit_tools::AuditEventKind::VmImageResolved {
-                        session_id:    lookup.new_session_id.clone(),
-                        task_id:       Some(task_id_owned.clone()),
+                        session_id: lookup.new_session_id.clone(),
+                        task_id: Some(task_id_owned.clone()),
                         initiative_id: lookup.initiative_id.clone(),
-                        alias:         lookup.vm_image_alias.clone(),
-                        oci_digest:    verified_oci_digest,
+                        alias: lookup.vm_image_alias.clone(),
+                        oci_digest: verified_oci_digest,
                         // V2.5 only emits this for Executor activations
                         // (Reviewer / Orchestrator bypass this path
                         // entirely per INV-PLANNER-HARNESS-02 /
                         // INV-PLANNER-HARNESS-05).
-                        agent_role:    "Executor".to_owned(),
+                        agent_role: "Executor".to_owned(),
                     },
                     Some(lookup.new_session_id.as_str()),
                     Some(task_id_owned.as_str()),
@@ -4712,14 +4850,18 @@ async fn handle_activate_sub_task(
                 // the eventual TaskFailed event via the
                 // `FailPolicyViolation` return below.
                 if let VmImageResolveError::DigestMismatch {
-                    expected, actual, path, ..
-                } = &e {
+                    expected,
+                    actual,
+                    path,
+                    ..
+                } = &e
+                {
                     if let Err(audit_err) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::SecurityViolationDetected {
                             violation_kind: "OperatorImageDigestMismatch".to_owned(),
-                            expected:       Some(expected.clone()),
-                            actual:         Some(actual.clone()),
-                            path:           Some(path.clone()),
+                            expected: Some(expected.clone()),
+                            actual: Some(actual.clone()),
+                            path: Some(path.clone()),
                         },
                         Some(lookup.new_session_id.as_str()),
                         Some(task_id_owned.as_str()),
@@ -4816,7 +4958,8 @@ async fn handle_activate_sub_task(
         // ref is needed by `provision_orchestrator_worktree`'s
         // first-spawn path; the re-attach path ignores it.
         let policy_for_target = ctx.policy.load_full();
-        let target_ref = ctx.plan_registry
+        let target_ref = ctx
+            .plan_registry
             .orchestrator(&lookup.initiative_id)
             .map(|o| o.target_ref)
             .unwrap_or_else(|| policy_for_target.git_default_target_ref().to_owned());
@@ -4853,9 +4996,9 @@ async fn handle_activate_sub_task(
                         rusqlite::params![&task_id_for_eval],
                         |r| r.get::<_, Option<String>>(0),
                     )
-                }).await.map_err(|_| (
-                    PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted,
-                ))?;
+                })
+                .await
+                .map_err(|_| (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted))?;
                 let sha = match row {
                     Ok(Some(s)) => s,
                     _ => {
@@ -4866,10 +5009,7 @@ async fn handle_activate_sub_task(
                              commit_task_completion must run first\"}}",
                             task_id_owned,
                         );
-                        return Err((
-                            PlannerErrorCode::FailWorktreeProvision,
-                            TaskState::Admitted,
-                        ));
+                        return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
                     }
                 };
                 (Some(sha), "reviewer")
@@ -4878,9 +5018,9 @@ async fn handle_activate_sub_task(
         };
 
         let initiative_for_provision = lookup.initiative_id.clone();
-        let session_for_provision    = lookup.new_session_id.clone();
+        let session_for_provision = lookup.new_session_id.clone();
         let target_ref_for_provision = target_ref.clone();
-        let data_dir_for_provision   = data_dir.clone();
+        let data_dir_for_provision = data_dir.clone();
         let provision_started = std::time::Instant::now();
         let provisioned: Result<(raxis_isolation::WorkspaceMount, String, String), String> =
             tokio::task::spawn_blocking(move || {
@@ -4888,22 +5028,27 @@ async fn handle_activate_sub_task(
                     &data_dir_for_provision,
                     &initiative_for_provision,
                     &target_ref_for_provision,
-                ).map_err(|e| format!("orchestrator anchor: {e}"))?;
+                )
+                .map_err(|e| format!("orchestrator anchor: {e}"))?;
                 let mount = match evaluation_sha_for_reviewer.as_deref() {
                     Some(eval_sha) => crate::worktree_provisioning::provision_reviewer_worktree(
                         &data_dir_for_provision,
                         &session_for_provision,
                         &anchor,
                         eval_sha,
-                    ).map_err(|e| format!("reviewer provisioning: {e}"))?,
+                    )
+                    .map_err(|e| format!("reviewer provisioning: {e}"))?,
                     None => crate::worktree_provisioning::provision_executor_worktree(
                         &data_dir_for_provision,
                         &session_for_provision,
                         &anchor,
-                    ).map_err(|e| format!("executor provisioning: {e}"))?,
+                    )
+                    .map_err(|e| format!("executor provisioning: {e}"))?,
                 };
                 Ok((mount, anchor.base_sha, anchor.base_tracking_ref))
-            }).await.map_err(|e| {
+            })
+            .await
+            .map_err(|e| {
                 eprintln!(
                     "{{\"level\":\"error\",\"event\":\"ActivateSubTaskProvisionJoinFailed\",\
                      \"task_id\":\"{}\",\"kind\":\"{}\",\"error\":\"{}\"}}",
@@ -4923,7 +5068,11 @@ async fn handle_activate_sub_task(
         // (`executor` | `reviewer`); `outcome` is `ok` on success,
         // `provision_failed` on a typed ProvisionError surfaced by the
         // blocking task body.
-        let provision_outcome = if provisioned.is_ok() { "ok" } else { "provision_failed" };
+        let provision_outcome = if provisioned.is_ok() {
+            "ok"
+        } else {
+            "provision_failed"
+        };
         crate::observability::record_git_worktree_provision(
             &ctx.observability,
             dispatch_kind,
@@ -4945,11 +5094,11 @@ async fn handle_activate_sub_task(
         // Best-effort: a failure here surfaces downstream as a
         // FailPolicyViolation on the first intent, which we
         // surface eagerly here as a typed provisioning failure.
-        let store_for_update      = Arc::clone(&ctx.store);
+        let store_for_update = Arc::clone(&ctx.store);
         let session_id_for_update = lookup.new_session_id.clone();
-        let worktree_root_str     = mount.host_path.display().to_string();
-        let base_sha_str          = base_sha.clone();
-        let tracking_ref_str      = base_tracking_ref.clone();
+        let worktree_root_str = mount.host_path.display().to_string();
+        let base_sha_str = base_sha.clone();
+        let tracking_ref_str = base_tracking_ref.clone();
         let updated: Result<(), rusqlite::Error> = tokio::task::spawn_blocking(move || {
             let conn = store_for_update.lock_sync();
             conn.execute(
@@ -4968,19 +5117,16 @@ async fn handle_activate_sub_task(
                 ],
             )?;
             Ok(())
-        }).await.map_err(|_| (
-            PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted,
-        ))?;
+        })
+        .await
+        .map_err(|_| (PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted))?;
         if let Err(e) = updated {
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"ActivateSubTaskWorktreeRowUpdateFailed\",\
                  \"task_id\":\"{}\",\"session_id\":\"{}\",\"error\":\"{}\"}}",
                 task_id_owned, lookup.new_session_id, e,
             );
-            return Err((
-                PlannerErrorCode::FailWorktreeProvision,
-                TaskState::Admitted,
-            ));
+            return Err((PlannerErrorCode::FailWorktreeProvision, TaskState::Admitted));
         }
 
         vec![mount]
@@ -5034,8 +5180,7 @@ async fn handle_activate_sub_task(
                  \"hint\":\"sub-task activation exhausted its transient-retry budget; \
                             the parent initiative cannot make further progress \
                             without operator-driven recovery (recovery::reconcile)\"}}",
-                task_id_owned, lookup.new_session_id, lookup.initiative_id,
-                lookup.agent_kind, e,
+                task_id_owned, lookup.new_session_id, lookup.initiative_id, lookup.agent_kind, e,
             );
             // INV-FAILURE-REASON-MANDATORY-01: surface the
             // substrate spawn error as a real `block_reason` on
@@ -5081,52 +5226,53 @@ async fn handle_activate_sub_task(
                     ),
                     rusqlite::params![task_id_for_block, spawn_block_reason],
                 );
-            }).await;
+            })
+            .await;
             return Err((PlannerErrorCode::FailPolicyViolation, TaskState::Admitted));
         }
     };
 
     // ── Step 4: activation-row → Active; persist substrate metadata. ───
     {
-        let store_arc        = Arc::clone(&ctx.store);
-        let activation_id    = lookup.activation_id.clone();
-        let new_session_id   = lookup.new_session_id.clone();
-        let vsock_cid        = spawn_handle.vsock_cid;
-        let activate_result = tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
-            let mut conn = store_arc.lock_sync();
-            let tx = conn.transaction()?;
-            let now = unix_now_secs();
+        let store_arc = Arc::clone(&ctx.store);
+        let activation_id = lookup.activation_id.clone();
+        let new_session_id = lookup.new_session_id.clone();
+        let vsock_cid = spawn_handle.vsock_cid;
+        let activate_result =
+            tokio::task::spawn_blocking(move || -> Result<(), rusqlite::Error> {
+                let mut conn = store_arc.lock_sync();
+                let tx = conn.transaction()?;
+                let now = unix_now_secs();
 
-            // Activation FSM: PendingActivation → Active. The cross-
-            // column CHECK requires `session_id IS NOT NULL` and
-            // `activated_at IS NOT NULL`; both stamped here.
-            tx.execute(
-                &format!(
-                    "UPDATE {SUBTASK_ACTIVATIONS}
+                // Activation FSM: PendingActivation → Active. The cross-
+                // column CHECK requires `session_id IS NOT NULL` and
+                // `activated_at IS NOT NULL`; both stamped here.
+                tx.execute(
+                    &format!(
+                        "UPDATE {SUBTASK_ACTIVATIONS}
                         SET activation_state = 'Active',
                             session_id       = ?1,
                             activated_at     = ?2
                       WHERE activation_id   = ?3
                         AND activation_state = 'PendingActivation'"
-                ),
-                rusqlite::params![&new_session_id, now, &activation_id],
-            )?;
-
-            // Persist the substrate's vsock CID on the session row
-            // so the kernel's per-session admission listener can
-            // verify guest provenance (`vm-network-isolation.md §3`
-            // CID allowlist).
-            if let Some(cid) = vsock_cid {
-                tx.execute(
-                    &format!(
-                        "UPDATE {SESSIONS} SET vsock_cid = ?1 WHERE session_id = ?2"
                     ),
-                    rusqlite::params![cid as i64, &new_session_id],
+                    rusqlite::params![&new_session_id, now, &activation_id],
                 )?;
-            }
 
-            tx.commit()
-        }).await;
+                // Persist the substrate's vsock CID on the session row
+                // so the kernel's per-session admission listener can
+                // verify guest provenance (`vm-network-isolation.md §3`
+                // CID allowlist).
+                if let Some(cid) = vsock_cid {
+                    tx.execute(
+                        &format!("UPDATE {SESSIONS} SET vsock_cid = ?1 WHERE session_id = ?2"),
+                        rusqlite::params![cid as i64, &new_session_id],
+                    )?;
+                }
+
+                tx.commit()
+            })
+            .await;
         match activate_result {
             Ok(Ok(())) => {}
             Ok(Err(e)) => {
@@ -5173,24 +5319,31 @@ async fn handle_activate_sub_task(
     // `auto_spawn_orchestrator_session_in_tx` audit pairing in
     // `lifecycle::approve_plan`.
     let agent_type_str = match lookup.agent_kind {
-        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor =>
-            raxis_types::SessionAgentType::Executor.as_sql_str().to_owned(),
-        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer =>
-            raxis_types::SessionAgentType::Reviewer.as_sql_str().to_owned(),
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => {
+            raxis_types::SessionAgentType::Executor
+                .as_sql_str()
+                .to_owned()
+        }
+        crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => {
+            raxis_types::SessionAgentType::Reviewer
+                .as_sql_str()
+                .to_owned()
+        }
     };
     let role_str = match lookup.agent_kind {
         crate::session_spawn_orchestrator::ExecutorAgentKind::Executor => "executor",
         crate::session_spawn_orchestrator::ExecutorAgentKind::Reviewer => "reviewer",
-    }.to_owned();
+    }
+    .to_owned();
     if let Err(e) = ctx.audit.emit(
         raxis_audit_tools::AuditEventKind::SessionCreated {
-            session_id:        lookup.new_session_id.clone(),
-            role:              role_str,
-            lineage_id:        lookup.new_lineage_id.clone(),
-            worktree_root:     None,
-            initiative_id:     Some(lookup.initiative_id.clone()),
+            session_id: lookup.new_session_id.clone(),
+            role: role_str,
+            lineage_id: lookup.new_lineage_id.clone(),
+            worktree_root: None,
+            initiative_id: Some(lookup.initiative_id.clone()),
             plan_bundle_sha256: None,
-            policy_epoch:      Some(policy_snapshot.epoch()),
+            policy_epoch: Some(policy_snapshot.epoch()),
             session_agent_type: Some(agent_type_str),
         },
         Some(&lookup.new_session_id),
@@ -5220,8 +5373,8 @@ async fn handle_activate_sub_task(
     // crashed the whole worker on the very first ActivateSubTask
     // ack — `full_e2e_session_lifecycle` reproduces it deterministically.
     let task_id_for_budget = task_id_owned.clone();
-    let store_for_budget   = Arc::clone(&ctx.store);
-    let policy_for_budget  = Arc::clone(&policy_snapshot);
+    let store_for_budget = Arc::clone(&ctx.store);
+    let policy_for_budget = Arc::clone(&policy_snapshot);
     let remaining = tokio::task::spawn_blocking(move || -> Result<BudgetSnapshot, ()> {
         let task = load_task(&task_id_for_budget, store_for_budget.as_ref())?;
         Ok(lane_budget_snapshot(
@@ -5232,13 +5385,13 @@ async fn handle_activate_sub_task(
     })
     .await
     .map_err(|_| (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted))?
-    .map_err(|_| (PlannerErrorCode::FailUnknownTask,     TaskState::Admitted))?;
+    .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
 
     Ok(IntentResponse {
         sequence_number: seq,
-        task_state:      TaskState::Admitted,
+        task_state: TaskState::Admitted,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -5320,11 +5473,11 @@ async fn handle_activate_sub_task(
 //   * `FAIL_POLICY_VIOLATION` — defense-in-depth catch for
 //     internal SQL / authority errors.
 async fn handle_retry_sub_task(
-    req:        IntentRequest,
-    _session:   authority::session::SessionRow,
+    req: IntentRequest,
+    _session: authority::session::SessionRow,
     session_id: SessionId,
-    seq:        u64,
-    ctx:        &Arc<HandlerContext>,
+    seq: u64,
+    ctx: &Arc<HandlerContext>,
 ) -> HandlerResult {
     // ── Step 1: replay protection (envelope acceptance) ───────────────
     let presented_seq_i64 = match i64::try_from(seq) {
@@ -5332,14 +5485,17 @@ async fn handle_retry_sub_task(
         Err(_) => return Err((PlannerErrorCode::Unauthorized, TaskState::Admitted)),
     };
     {
-        let store     = Arc::clone(&ctx.store);
-        let session   = session_id.clone();
-        let nonce     = req.envelope_nonce.clone();
-        let audit     = Arc::clone(&ctx.audit);
+        let store = Arc::clone(&ctx.store);
+        let session = session_id.clone();
+        let nonce = req.envelope_nonce.clone();
+        let audit = Arc::clone(&ctx.audit);
         let session_s = session.as_str().to_owned();
         let result = tokio::task::spawn_blocking(move || {
             authority::session::accept_envelope_and_advance_sequence(
-                &session, presented_seq_i64, &nonce, &store,
+                &session,
+                presented_seq_i64,
+                &nonce,
+                &store,
             )
         })
         .await
@@ -5347,9 +5503,9 @@ async fn handle_retry_sub_task(
         if let Err(reason) = result {
             let _ = audit.emit(
                 raxis_audit_tools::AuditEventKind::ReplayRejected {
-                    session_id:   session_s,
+                    session_id: session_s,
                     sequence_num: seq,
-                    reason:       format!("{reason:?}"),
+                    reason: format!("{reason:?}"),
                 },
                 Some(session_id.as_str()),
                 None,
@@ -5389,30 +5545,26 @@ async fn handle_retry_sub_task(
         let lookup: Result<String, ()> = tokio::task::spawn_blocking(move || {
             let conn = store_arc.lock_sync();
             conn.query_row(
-                &format!(
-                    "SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"
-                ),
+                &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id_clone],
                 |r| r.get::<_, String>(0),
-            ).map_err(|_| ())
+            )
+            .map_err(|_| ())
         })
         .await
         .map_err(|_| {
             admit_emit(false, crate::observability::ADMIT_REASON_OTHER);
             (PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
         })?;
-        let initiative_id = lookup
-            .map_err(|_| {
-                admit_emit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
-                (PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
-            })?;
+        let initiative_id = lookup.map_err(|_| {
+            admit_emit(false, crate::observability::ADMIT_REASON_UNKNOWN_LANE);
+            (PlannerErrorCode::FailUnknownTask, TaskState::Admitted)
+        })?;
 
-        let key = crate::initiatives::plan_registry::TaskKey::new(
-            &initiative_id, &task_id_owned,
-        );
+        let key = crate::initiatives::plan_registry::TaskKey::new(&initiative_id, &task_id_owned);
         let fields = match ctx.plan_registry.get(&key) {
             Some(f) => f,
-            None    => {
+            None => {
                 // Fail-closed: a missing registry entry means the
                 // plan-bundle-sealing rehydration didn't see this
                 // task, which is structurally impossible for an
@@ -5445,11 +5597,11 @@ async fn handle_retry_sub_task(
     // claimed).
     #[derive(Clone)]
     struct RetryDecision {
-        prior_activation_id:    String,
-        prior_session_id:       Option<String>,
-        new_activation_id:      String,
-        crash_retry_count:      i64,
-        review_reject_count:    i64,
+        prior_activation_id: String,
+        prior_session_id: Option<String>,
+        new_activation_id: String,
+        crash_retry_count: i64,
+        review_reject_count: i64,
         /// `true` iff the retry was admitted via either of the
         /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
         /// review-rejection branches:
@@ -5463,7 +5615,7 @@ async fn handle_retry_sub_task(
         /// the audit chain anchor that disambiguates retry-after-
         /// review from retry-after-crash for the
         /// `ReviewerSubstantiveDisagreementWitness`.
-        from_review_rejection:  bool,
+        from_review_rejection: bool,
     }
 
     let decision: RetryDecision = {
@@ -5861,20 +6013,17 @@ async fn handle_retry_sub_task(
         let session_spawn = Arc::clone(&ctx.session_spawn);
         let task_id_for_log = task_id_owned.clone();
         tokio::spawn(async move {
-            match tokio::time::timeout(
-                watchdog,
-                session_spawn.terminate_session(&prior_sid, grace),
-            ).await {
-                Ok(Ok(_))  => {}
+            match tokio::time::timeout(watchdog, session_spawn.terminate_session(&prior_sid, grace))
+                .await
+            {
+                Ok(Ok(_)) => {}
                 Ok(Err(e)) => {
                     // Quiet on the SessionNotActive case — it's the
                     // expected path for crash-driven retries. Verbose
                     // on anything else so operators can diagnose
                     // pathological shutdown bugs.
-                    let is_not_active = matches!(
-                        e,
-                        raxis_session_spawn::SpawnError::SessionNotActive { .. },
-                    );
+                    let is_not_active =
+                        matches!(e, raxis_session_spawn::SpawnError::SessionNotActive { .. },);
                     if !is_not_active {
                         eprintln!(
                             "{{\"level\":\"warn\",\
@@ -5891,7 +6040,9 @@ async fn handle_retry_sub_task(
                          \"event\":\"RetrySubTaskTerminateBestEffortTimeout\",\
                          \"task_id\":\"{}\",\"prior_session_id\":\"{}\",\
                          \"timeout_secs\":{}}}",
-                        task_id_for_log, prior_sid, watchdog.as_secs(),
+                        task_id_for_log,
+                        prior_sid,
+                        watchdog.as_secs(),
                     );
                 }
             }
@@ -5920,13 +6071,12 @@ async fn handle_retry_sub_task(
         let display = format!(
             "RetrySubTask: task_id={task_id_owned}, \
              prior_activation_id={}, new_activation_id={}",
-            decision.prior_activation_id,
-            decision.new_activation_id,
+            decision.prior_activation_id, decision.new_activation_id,
         );
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::SessionRevoked {
-                session_id:              prior_sid.clone(),
-                revoked_by:              session_id.as_str().to_owned(),
+                session_id: prior_sid.clone(),
+                revoked_by: session_id.as_str().to_owned(),
                 revoked_by_display_name: Some(display),
             },
             Some(prior_sid.as_str()),
@@ -5979,9 +6129,9 @@ async fn handle_retry_sub_task(
             u32::try_from(decision.review_reject_count).unwrap_or(u32::MAX);
         if let Err(e) = ctx.audit.emit(
             raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection {
-                task_id:             task_id_owned.clone(),
+                task_id: task_id_owned.clone(),
                 prior_activation_id: decision.prior_activation_id.clone(),
-                new_activation_id:   decision.new_activation_id.clone(),
+                new_activation_id: decision.new_activation_id.clone(),
                 review_reject_count: review_reject_count_u32,
             },
             Some(session_id.as_str()),
@@ -6089,9 +6239,9 @@ async fn handle_retry_sub_task(
     .map_err(|_| (PlannerErrorCode::FailUnknownTask, TaskState::Admitted))?;
     Ok(IntentResponse {
         sequence_number: seq,
-        task_state:      TaskState::Admitted,
+        task_state: TaskState::Admitted,
         outcome: IntentOutcome::Accepted {
-            remaining_budget:      remaining,
+            remaining_budget: remaining,
             warn_delegation_stale: false,
         },
     })
@@ -6110,11 +6260,11 @@ async fn handle_retry_sub_task(
 /// case (`PRIMARY KEY (task_id, path)` — same path inserted twice is a
 /// no-op, matching the spec's "ignore" rule).
 fn commit_task_completion(
-    task_id:        &str,
-    lane_id:        &str,
-    export_paths:   &[String],
+    task_id: &str,
+    lane_id: &str,
+    export_paths: &[String],
     evaluation_sha: Option<&str>,
-    store:          &Store,
+    store: &Store,
 ) -> Result<(), ()> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction().map_err(|_| ())?;
@@ -6134,35 +6284,34 @@ fn commit_task_completion(
     //    overwrites a previously-stamped SHA with NULL.
     let now = unix_now_secs();
     let completed_state = TaskState::Completed.as_sql_str();
-    let running_state   = TaskState::Running.as_sql_str();
-    let rows = tx.execute(
-        &format!(
-            "UPDATE {TASKS}
+    let running_state = TaskState::Running.as_sql_str();
+    let rows = tx
+        .execute(
+            &format!(
+                "UPDATE {TASKS}
                 SET state           = ?1,
                     transitioned_at = ?2,
                     evaluation_sha  = COALESCE(?5, evaluation_sha)
               WHERE task_id = ?3 AND state = ?4",
-        ),
-        rusqlite::params![
-            completed_state,
-            now,
-            task_id,
-            running_state,
-            evaluation_sha,
-        ],
-    ).map_err(|_| ())?;
+            ),
+            rusqlite::params![completed_state, now, task_id, running_state, evaluation_sha,],
+        )
+        .map_err(|_| ())?;
     if rows == 0 {
         return Err(());
     }
 
     // 2. Insert export snapshot rows (idempotent on PK).
     if !export_paths.is_empty() {
-        let mut stmt = tx.prepare_cached(&format!(
-            "INSERT OR IGNORE INTO {TASK_EXPORTED_PATH_SNAPSHOTS} (task_id, path)
+        let mut stmt = tx
+            .prepare_cached(&format!(
+                "INSERT OR IGNORE INTO {TASK_EXPORTED_PATH_SNAPSHOTS} (task_id, path)
              VALUES (?1, ?2)",
-        )).map_err(|_| ())?;
+            ))
+            .map_err(|_| ())?;
         for p in export_paths {
-            stmt.execute(rusqlite::params![task_id, p]).map_err(|_| ())?;
+            stmt.execute(rusqlite::params![task_id, p])
+                .map_err(|_| ())?;
         }
     }
 
@@ -6232,16 +6381,18 @@ fn commit_task_completion(
     // status, the export snapshots, AND the activation closure all
     // commit together or all roll back. A crash mid-cascade is
     // impossible.
-    let activation_rows = tx.execute(
-        &format!(
-            "UPDATE {SUBTASK_ACTIVATIONS}
+    let activation_rows = tx
+        .execute(
+            &format!(
+                "UPDATE {SUBTASK_ACTIVATIONS}
                 SET activation_state = 'Completed',
                     terminated_at    = ?1
               WHERE task_id          = ?2
                 AND activation_state = 'Active'"
-        ),
-        rusqlite::params![now, task_id],
-    ).map_err(|_| ())?;
+            ),
+            rusqlite::params![now, task_id],
+        )
+        .map_err(|_| ())?;
     if activation_rows > 0 {
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"ActivationCascadeTerminated\",\
@@ -6306,8 +6457,8 @@ fn commit_task_completion(
 // ---------------------------------------------------------------------------
 
 struct TaskRow {
-    lane_id:       String,
-    state:         String,
+    lane_id: String,
+    state: String,
     initiative_id: String,
     /// V2 `v2_extended_gaps.md §2.5` — running total of micro-dollar
     /// LLM-token cost on this task across every accepted intent.
@@ -6324,13 +6475,16 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
              FROM {TASKS} WHERE task_id = ?1"
         ),
         rusqlite::params![task_id],
-        |row| Ok(TaskRow {
-            lane_id:       row.get(0)?,
-            state:         row.get(1)?,
-            initiative_id: row.get(2)?,
-            cumulative_token_cost_micros: row.get::<_, i64>(3).map(|v| v as u64).unwrap_or(0),
-        }),
-    ).map_err(|_| ())
+        |row| {
+            Ok(TaskRow {
+                lane_id: row.get(0)?,
+                state: row.get(1)?,
+                initiative_id: row.get(2)?,
+                cumulative_token_cost_micros: row.get::<_, i64>(3).map(|v| v as u64).unwrap_or(0),
+            })
+        },
+    )
+    .map_err(|_| ())
 }
 
 /// Update intent-binding fields on the task row — standalone wrapper.
@@ -6340,11 +6494,11 @@ fn load_task(task_id: &str, store: &Store) -> Result<TaskRow, ()> {
 /// `#[cfg(test)]` fixtures that exercise the helper in isolation.
 #[cfg(test)]
 fn update_task_intent_fields(
-    task_id:        &str,
+    task_id: &str,
     evaluation_sha: &str,
-    base_sha:       &str,
-    session_id:     &str,
-    store:          &Store,
+    base_sha: &str,
+    session_id: &str,
+    store: &Store,
 ) -> Result<(), ()> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction().map_err(|_| ())?;
@@ -6363,11 +6517,11 @@ fn update_task_intent_fields(
 /// a matching task state. This helper takes `&Connection` so the caller
 /// passes the open `Transaction` (which derefs to `Connection`).
 fn update_task_intent_fields_in_tx(
-    conn:           &rusqlite::Connection,
-    task_id:        &str,
+    conn: &rusqlite::Connection,
+    task_id: &str,
     evaluation_sha: &str,
-    base_sha:       &str,
-    session_id:     &str,
+    base_sha: &str,
+    session_id: &str,
 ) -> Result<(), ()> {
     conn.execute(
         &format!(
@@ -6375,17 +6529,18 @@ fn update_task_intent_fields_in_tx(
              WHERE task_id = ?4"
         ),
         rusqlite::params![evaluation_sha, base_sha, session_id, task_id],
-    ).map_err(|_| ())?;
+    )
+    .map_err(|_| ())?;
     Ok(())
 }
 
 /// Append one row to `task_intent_ranges` — standalone wrapper for tests.
 #[cfg(test)]
 fn insert_task_intent_range(
-    task_id:  &str,
+    task_id: &str,
     base_sha: &str,
     head_sha: &str,
-    store:    &Store,
+    store: &Store,
 ) -> Result<(), ()> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction().map_err(|_| ())?;
@@ -6406,8 +6561,8 @@ fn insert_task_intent_range(
 /// transaction (`kernel-store.md` §2.5.1.1 Pattern B) so it commits or
 /// rolls back atomically with the FSM and budget writes.
 fn insert_task_intent_range_in_tx(
-    conn:     &rusqlite::Connection,
-    task_id:  &str,
+    conn: &rusqlite::Connection,
+    task_id: &str,
     base_sha: &str,
     head_sha: &str,
 ) -> Result<(), ()> {
@@ -6418,21 +6573,22 @@ fn insert_task_intent_range_in_tx(
              VALUES (?1, ?2, ?3, ?4)"
         ),
         rusqlite::params![task_id, base_sha, head_sha, unix_now_secs()],
-    ).map_err(|_| ())?;
+    )
+    .map_err(|_| ())?;
     Ok(())
 }
 
 fn parse_task_state(s: &str) -> TaskState {
     match s {
-        "Admitted"               => TaskState::Admitted,
-        "Running"                => TaskState::Running,
-        "GatesPending"           => TaskState::GatesPending,
-        "Completed"              => TaskState::Completed,
-        "Failed"                 => TaskState::Failed,
-        "Aborted"                => TaskState::Aborted,
-        "Cancelled"              => TaskState::Cancelled,
+        "Admitted" => TaskState::Admitted,
+        "Running" => TaskState::Running,
+        "GatesPending" => TaskState::GatesPending,
+        "Completed" => TaskState::Completed,
+        "Failed" => TaskState::Failed,
+        "Aborted" => TaskState::Aborted,
+        "Cancelled" => TaskState::Cancelled,
         "BlockedRecoveryPending" => TaskState::BlockedRecoveryPending,
-        _                        => TaskState::Admitted, // defensive; unknown treated as non-runnable
+        _ => TaskState::Admitted, // defensive; unknown treated as non-runnable
     }
 }
 
@@ -6446,27 +6602,34 @@ fn parse_task_state(s: &str) -> TaskState {
 fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static str, String) {
     use raxis_domain_git::MainMergeError;
     match err {
-        MainMergeError::MainRepoUnopenable { reason, path } =>
-            ("unopenable_main_repo", format!("{}: {reason}", path.display())),
-        MainMergeError::SourceUnopenable { reason, path } =>
-            ("unopenable_source_repo", format!("{}: {reason}", path.display())),
-        MainMergeError::FetchFailed(s) =>
-            ("git_failed", s.clone()),
-        MainMergeError::ShaMissingPostFetch { sha } =>
-            ("missing_commit", format!("sha {sha} not present in main ODB after fetch")),
+        MainMergeError::MainRepoUnopenable { reason, path } => (
+            "unopenable_main_repo",
+            format!("{}: {reason}", path.display()),
+        ),
+        MainMergeError::SourceUnopenable { reason, path } => (
+            "unopenable_source_repo",
+            format!("{}: {reason}", path.display()),
+        ),
+        MainMergeError::FetchFailed(s) => ("git_failed", s.clone()),
+        MainMergeError::ShaMissingPostFetch { sha } => (
+            "missing_commit",
+            format!("sha {sha} not present in main ODB after fetch"),
+        ),
         MainMergeError::RefUpdateFailed(s) => {
             // gix surfaces concurrent-advance races as a ref-txn
             // rejection — the message contains the previous and
             // expected SHAs. Pattern-match conservatively.
             let lower = s.to_lowercase();
-            if lower.contains("locked") || lower.contains("expected") || lower.contains("conflict") {
+            if lower.contains("locked") || lower.contains("expected") || lower.contains("conflict")
+            {
                 ("target_ref_advanced_concurrently", s.clone())
             } else {
                 ("git_failed", s.clone())
             }
         }
-        MainMergeError::InvalidSha { sha, reason } =>
-            ("invalid_sha", format!("sha {sha}: {reason}")),
+        MainMergeError::InvalidSha { sha, reason } => {
+            ("invalid_sha", format!("sha {sha}: {reason}"))
+        }
     }
 }
 
@@ -6483,9 +6646,9 @@ fn classify_merge_ff_error(err: &raxis_domain_git::MainMergeError) -> (&'static 
 /// same handler invocation in production) clears the loop on its
 /// first iteration.
 fn wait_for_git_apply_pending_clear(
-    store:         &Store,
+    store: &Store,
     initiative_id: &str,
-    deadline:      std::time::Duration,
+    deadline: std::time::Duration,
     poll_interval: std::time::Duration,
 ) -> bool {
     let start = std::time::Instant::now();
@@ -6555,15 +6718,15 @@ fn wait_for_git_apply_pending_clear(
 /// initiative row missing, etc.) collapses to `Ok(None)` so the
 /// caller does not double-emit a stale `InitiativeStateChanged`.
 pub(crate) struct IntegrationMergeFinalizeOutcome {
-    pub task_record:      TaskTransitionRecord,
-    pub initiative_from:  String,
-    pub initiative_to:    String,
+    pub task_record: TaskTransitionRecord,
+    pub initiative_from: String,
+    pub initiative_to: String,
 }
 
 fn finalize_integration_merge_completion(
-    store:         &Store,
+    store: &Store,
     initiative_id: &str,
-    task_id:       &str,
+    task_id: &str,
 ) -> Result<Option<IntegrationMergeFinalizeOutcome>, rusqlite::Error> {
     let now = unix_now_secs();
     let mut conn = store.lock_sync();
@@ -6616,7 +6779,7 @@ fn finalize_integration_merge_completion(
             return Ok(Some(IntegrationMergeFinalizeOutcome {
                 task_record,
                 initiative_from: s.clone(),
-                initiative_to:   s,
+                initiative_to: s,
             }));
         }
         Err(rusqlite::Error::QueryReturnedNoRows) => {
@@ -6624,7 +6787,7 @@ fn finalize_integration_merge_completion(
             return Ok(Some(IntegrationMergeFinalizeOutcome {
                 task_record,
                 initiative_from: String::new(),
-                initiative_to:   String::new(),
+                initiative_to: String::new(),
             }));
         }
         Err(e) => return Err(e),
@@ -6635,11 +6798,7 @@ fn finalize_integration_merge_completion(
             "UPDATE {INITIATIVES} SET state=?1, completed_at=?2
              WHERE initiative_id=?3"
         ),
-        rusqlite::params![
-            InitiativeState::Completed.as_sql_str(),
-            now,
-            initiative_id,
-        ],
+        rusqlite::params![InitiativeState::Completed.as_sql_str(), now, initiative_id,],
     )?;
 
     tx.commit()?;
@@ -6647,7 +6806,7 @@ fn finalize_integration_merge_completion(
     Ok(Some(IntegrationMergeFinalizeOutcome {
         task_record,
         initiative_from: from_state,
-        initiative_to:   InitiativeState::Completed.as_sql_str().to_owned(),
+        initiative_to: InitiativeState::Completed.as_sql_str().to_owned(),
     }))
 }
 
@@ -6722,7 +6881,8 @@ mod tests {
                 raxis_store::Table::Initiatives.as_str(),
             ),
             rusqlite::params![id, pending],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]
@@ -6737,8 +6897,10 @@ mod tests {
             std::time::Duration::from_millis(50),
         );
         assert!(cleared);
-        assert!(start.elapsed() < std::time::Duration::from_millis(50),
-            "no poll iteration should fire when flag is already 0");
+        assert!(
+            start.elapsed() < std::time::Duration::from_millis(50),
+            "no poll iteration should fire when flag is already 0"
+        );
     }
 
     #[test]
@@ -6749,8 +6911,7 @@ mod tests {
         let flipper = std::thread::spawn(move || {
             std::thread::sleep(std::time::Duration::from_millis(120));
             let g = store_handle.lock_sync();
-            raxis_store::views::initiatives::clear_git_apply_pending(&g, "init-flip")
-                .unwrap();
+            raxis_store::views::initiatives::clear_git_apply_pending(&g, "init-flip").unwrap();
         });
         let cleared = wait_for_git_apply_pending_clear(
             disk.store(),
@@ -6772,7 +6933,10 @@ mod tests {
             std::time::Duration::from_millis(150),
             std::time::Duration::from_millis(25),
         );
-        assert!(!cleared, "stuck flag must time out within the configured deadline");
+        assert!(
+            !cleared,
+            "stuck flag must time out within the configured deadline"
+        );
     }
 
     #[test]
@@ -6784,9 +6948,11 @@ mod tests {
             std::time::Duration::from_millis(50),
             std::time::Duration::from_millis(10),
         );
-        assert!(cleared,
+        assert!(
+            cleared,
             "QueryReturnedNoRows ⇒ defaults to 0 ⇒ wait clears (push will then \
-             fail later with a different error if the initiative truly was deleted)");
+             fail later with a different error if the initiative truly was deleted)"
+        );
     }
 
     // ── finalize_integration_merge_completion ─────────────────────────────
@@ -6811,7 +6977,8 @@ mod tests {
                 raxis_store::Table::Initiatives.as_str(),
             ),
             rusqlite::params![id, state],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn seed_synthetic_task_running(disk: &DiskStore, initiative_id: &str) {
@@ -6827,7 +6994,8 @@ mod tests {
                 raxis_store::Table::Tasks.as_str(),
             ),
             rusqlite::params![initiative_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn read_initiative_state(disk: &DiskStore, id: &str) -> Option<String> {
@@ -6839,7 +7007,8 @@ mod tests {
             ),
             rusqlite::params![id],
             |r| r.get::<_, String>(0),
-        ).ok()
+        )
+        .ok()
     }
 
     fn read_task_state_str(disk: &DiskStore, id: &str) -> Option<String> {
@@ -6851,7 +7020,8 @@ mod tests {
             ),
             rusqlite::params![id],
             |r| r.get::<_, String>(0),
-        ).ok()
+        )
+        .ok()
     }
 
     #[test]
@@ -6869,10 +7039,16 @@ mod tests {
         assert_eq!(from_state, "Executing");
         assert_eq!(to_state, "Completed");
 
-        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Completed"),
-            "initiative row must reflect the Executing → Completed transition");
-        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
-            "synthetic coordinator task must reflect the Running → Completed transition");
+        assert_eq!(
+            read_initiative_state(&disk, id).as_deref(),
+            Some("Completed"),
+            "initiative row must reflect the Executing → Completed transition"
+        );
+        assert_eq!(
+            read_task_state_str(&disk, id).as_deref(),
+            Some("Completed"),
+            "synthetic coordinator task must reflect the Running → Completed transition"
+        );
     }
 
     #[test]
@@ -6890,12 +7066,20 @@ mod tests {
         let result = finalize_integration_merge_completion(disk.store(), id, id)
             .expect("cascade must not return raw SQLite error on Aborted initiative");
 
-        assert!(result.is_none(),
-            "cascade must skip when initiative is no longer Executing");
-        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Aborted"),
-            "initiative state must NOT regress out of Aborted");
-        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
-            "synthetic task transition is independent — Running → Completed should still land");
+        assert!(
+            result.is_none(),
+            "cascade must skip when initiative is no longer Executing"
+        );
+        assert_eq!(
+            read_initiative_state(&disk, id).as_deref(),
+            Some("Aborted"),
+            "initiative state must NOT regress out of Aborted"
+        );
+        assert_eq!(
+            read_task_state_str(&disk, id).as_deref(),
+            Some("Completed"),
+            "synthetic task transition is independent — Running → Completed should still land"
+        );
     }
 
     #[test]
@@ -6918,17 +7102,24 @@ mod tests {
                 raxis_store::Table::Tasks.as_str(),
             ),
             rusqlite::params![id],
-        ).unwrap();
+        )
+        .unwrap();
         drop(g);
 
         let result = finalize_integration_merge_completion(disk.store(), id, id)
             .expect("cascade must not raise raw SQLite error on a re-run");
 
         assert!(result.is_none(), "second pass must be a structural no-op");
-        assert_eq!(read_initiative_state(&disk, id).as_deref(), Some("Completed"),
-            "initiative state must remain Completed");
-        assert_eq!(read_task_state_str(&disk, id).as_deref(), Some("Completed"),
-            "synthetic task state must remain Completed");
+        assert_eq!(
+            read_initiative_state(&disk, id).as_deref(),
+            Some("Completed"),
+            "initiative state must remain Completed"
+        );
+        assert_eq!(
+            read_task_state_str(&disk, id).as_deref(),
+            Some("Completed"),
+            "synthetic task state must remain Completed"
+        );
     }
 
     #[test]
@@ -6952,10 +7143,13 @@ mod tests {
         // FK enforcement is permissive in the test harness store;
         // the DELETE proceeds even with the dangling task FK.
         g.execute(
-            &format!("DELETE FROM {} WHERE initiative_id = ?1",
-                raxis_store::Table::Initiatives.as_str()),
+            &format!(
+                "DELETE FROM {} WHERE initiative_id = ?1",
+                raxis_store::Table::Initiatives.as_str()
+            ),
             rusqlite::params![id],
-        ).ok();
+        )
+        .ok();
         drop(g);
 
         // The cascade must not panic on a missing initiative row.
@@ -6994,21 +7188,21 @@ mod tests {
     /// is a placeholder it ignores.
     fn make_report_failure_request(task_id: &str, justification: &str) -> IntentRequest {
         IntentRequest {
-            session_token:   "tok".into(),
+            session_token: "tok".into(),
             sequence_number: 1,
-            envelope_nonce:  "0".repeat(32),
-            intent_kind:     IntentKind::ReportFailure,
-            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::ReportFailure,
+            task_id: raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   Some(justification.to_owned()),
+            justification: Some(justification.to_owned()),
             idempotency_key: None,
-            approval_token:  None,
-            approved:        None,
-            critique:        None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         }
     }
@@ -7053,8 +7247,11 @@ mod tests {
         .expect("ReportFailure from Admitted must be Accepted, not stranded");
 
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
-        assert_eq!(resp.task_state, TaskState::Failed,
-            "wire response must surface Failed so the orchestrator-respawn dispatcher triggers");
+        assert_eq!(
+            resp.task_state,
+            TaskState::Failed,
+            "wire response must surface Failed so the orchestrator-respawn dispatcher triggers"
+        );
         assert_eq!(
             task_state_of(&store, "t-fail-from-admitted"),
             TaskState::Failed.as_sql_str(),
@@ -7158,8 +7355,8 @@ mod tests {
     /// same store (e.g. the three-attempts crash-loop test) reuse
     /// the placeholder session row without colliding on its PK.
     fn seed_active_executor_activation(
-        store:             &Store,
-        task_id:           &str,
+        store: &Store,
+        task_id: &str,
         crash_retry_count: i64,
     ) -> String {
         let activation_id = uuid::Uuid::new_v4().to_string();
@@ -7199,7 +7396,8 @@ mod tests {
                            ?3, 0, ?4, ?4, NULL)"
             ),
             rusqlite::params![activation_id, task_id, crash_retry_count, now],
-        ).unwrap();
+        )
+        .unwrap();
         activation_id
     }
 
@@ -7219,7 +7417,8 @@ mod tests {
             ),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Read the `activation_state` for the most-recent activation
@@ -7236,7 +7435,8 @@ mod tests {
             ),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Helper for `three_consecutive_report_failures_*` — bypasses
@@ -7250,12 +7450,9 @@ mod tests {
                 "UPDATE {TASKS} SET state = ?1, transitioned_at = ?2
                   WHERE task_id = ?3"
             ),
-            rusqlite::params![
-                TaskState::Admitted.as_sql_str(),
-                unix_now_secs(),
-                task_id,
-            ],
-        ).unwrap();
+            rusqlite::params![TaskState::Admitted.as_sql_str(), unix_now_secs(), task_id,],
+        )
+        .unwrap();
     }
 
     /// Single `ReportFailure` from `Running` advances the matching
@@ -7312,9 +7509,7 @@ mod tests {
     fn report_failure_bumps_crash_retry_count_from_admitted() {
         let store = Arc::new(Store::open_in_memory().unwrap());
         seed_task(&store, "t-bump-from-admitted");
-        seed_active_executor_activation(
-            &store, "t-bump-from-admitted", /*crash*/ 0,
-        );
+        seed_active_executor_activation(&store, "t-bump-from-admitted", /*crash*/ 0);
         let policy = default_test_policy();
         let ctx = build_failure_test_ctx(store.clone());
 
@@ -7387,7 +7582,8 @@ mod tests {
                 &store,
                 &policy,
                 ctx.as_ref(),
-            ).unwrap();
+            )
+            .unwrap();
             assert_eq!(
                 read_latest_crash_retry_count(&store, "t-crash-loop"),
                 prior_count + 1,
@@ -7460,7 +7656,8 @@ mod tests {
                  VALUES ('init-int', ?1, '{{}}', 'deadbeef', ?2)"
             ),
             rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS}
@@ -7470,7 +7667,8 @@ mod tests {
                          1, ?3, ?3, 0)"
             ),
             rusqlite::params![task_id, TaskState::Admitted.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn count_intent_ranges(store: &Store, task_id: &str) -> i64 {
@@ -7479,7 +7677,8 @@ mod tests {
             &format!("SELECT COUNT(*) FROM {TASK_INTENT_RANGES} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -7491,10 +7690,13 @@ mod tests {
         assert_eq!(count_intent_ranges(&store, "t1"), 1);
 
         let conn = store.lock_sync();
-        let (base, head): (String, String) = conn.query_row(
-            &format!("SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id='t1'"),
-            [], |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (base, head): (String, String) = conn
+            .query_row(
+                &format!("SELECT base_sha, head_sha FROM {TASK_INTENT_RANGES} WHERE task_id='t1'"),
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         assert_eq!(base, "aaaaaaaa");
         assert_eq!(head, "bbbbbbbb");
     }
@@ -7545,7 +7747,8 @@ mod tests {
                          1, ?2, ?2, 0)"
             ),
             rusqlite::params![TaskState::Admitted.as_sql_str(), unix_now_secs()],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         // Same head_sha for two different tasks must coexist — the PK
@@ -7563,10 +7766,7 @@ mod tests {
         // Per §2.5.8 blast-radius table: `path_export_to_successors=true`
         // + no `path_export_globs` → export the full touched set
         // (coarse; operator's responsibility).
-        let touched = vec![
-            PathBuf::from("src/a.rs"),
-            PathBuf::from("docs/b.md"),
-        ];
+        let touched = vec![PathBuf::from("src/a.rs"), PathBuf::from("docs/b.md")];
         let exported = compute_export_set(&touched, &[]);
         assert_eq!(exported, vec!["src/a.rs", "docs/b.md"]);
     }
@@ -7578,23 +7778,20 @@ mod tests {
             PathBuf::from("src/scheduler/dag.rs"),
             PathBuf::from("README.md"),
         ];
-        let exported = compute_export_set(
-            &touched,
-            &["src/ipc/**".to_owned()],
-        );
+        let exported = compute_export_set(&touched, &["src/ipc/**".to_owned()]);
         assert_eq!(exported, vec!["src/ipc/handlers/new.rs"]);
     }
 
     #[test]
     fn export_set_uses_directory_aware_globs() {
         // §2.5.8 normative glob rule: `*` does NOT cross `/`.
-        let touched = vec![
-            PathBuf::from("src/lib.rs"),
-            PathBuf::from("src/sub/lib.rs"),
-        ];
+        let touched = vec![PathBuf::from("src/lib.rs"), PathBuf::from("src/sub/lib.rs")];
         let exported = compute_export_set(&touched, &["src/*".to_owned()]);
-        assert_eq!(exported, vec!["src/lib.rs"],
-            "single-* must not cross /, only top-level files match");
+        assert_eq!(
+            exported,
+            vec!["src/lib.rs"],
+            "single-* must not cross /, only top-level files match"
+        );
     }
 
     #[test]
@@ -7604,24 +7801,24 @@ mod tests {
         // result is "fewer paths exported", which is conservative
         // (errors-on-the-side-of-tighter-scope).
         let touched = vec![PathBuf::from("src/a.rs")];
-        let exported = compute_export_set(
-            &touched,
-            &["src/[unclosed".to_owned(), "src/**".to_owned()],
+        let exported =
+            compute_export_set(&touched, &["src/[unclosed".to_owned(), "src/**".to_owned()]);
+        assert_eq!(
+            exported,
+            vec!["src/a.rs"],
+            "unparseable glob is dropped; second valid glob still applies"
         );
-        assert_eq!(exported, vec!["src/a.rs"],
-            "unparseable glob is dropped; second valid glob still applies");
     }
 
     #[test]
     fn export_set_with_only_unparseable_globs_returns_empty() {
         // Edge: every glob malformed → conservative empty export.
         let touched = vec![PathBuf::from("src/a.rs")];
-        let exported = compute_export_set(
-            &touched,
-            &["[broken".to_owned()],
+        let exported = compute_export_set(&touched, &["[broken".to_owned()]);
+        assert!(
+            exported.is_empty(),
+            "no valid globs → no export; conservative posture"
         );
-        assert!(exported.is_empty(),
-            "no valid globs → no export; conservative posture");
     }
 
     // ── commit_task_completion — §2.5.8 line 2014 single-tx contract ──────
@@ -7649,7 +7846,8 @@ mod tests {
                          1, ?3, ?3, 0)"
             ),
             rusqlite::params![task_id, TaskState::Running.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn task_state_of(store: &Store, task_id: &str) -> String {
@@ -7658,7 +7856,8 @@ mod tests {
             &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn count_export_snapshots(store: &Store, task_id: &str) -> i64 {
@@ -7667,7 +7866,8 @@ mod tests {
             &format!("SELECT COUNT(*) FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     #[test]
@@ -7677,9 +7877,15 @@ mod tests {
 
         commit_task_completion("t1", "default", &[], None, &store).unwrap();
 
-        assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
-        assert_eq!(count_export_snapshots(&store, "t1"), 0,
-            "empty export list must write zero snapshot rows");
+        assert_eq!(
+            task_state_of(&store, "t1"),
+            TaskState::Completed.as_sql_str()
+        );
+        assert_eq!(
+            count_export_snapshots(&store, "t1"),
+            0,
+            "empty export list must write zero snapshot rows"
+        );
     }
 
     #[test]
@@ -7694,14 +7900,16 @@ mod tests {
 
         commit_task_completion("t1", "default", &exports, None, &store).unwrap();
 
-        assert_eq!(task_state_of(&store, "t1"), TaskState::Completed.as_sql_str());
+        assert_eq!(
+            task_state_of(&store, "t1"),
+            TaskState::Completed.as_sql_str()
+        );
         assert_eq!(count_export_snapshots(&store, "t1"), 3);
 
         // Spot-check one row to verify the path round-trips byte-equal.
         let conn = store.lock_sync();
-        let select_paths_sql = format!(
-            "SELECT path FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1"
-        );
+        let select_paths_sql =
+            format!("SELECT path FROM {TASK_EXPORTED_PATH_SNAPSHOTS} WHERE task_id = ?1");
         let mut paths: Vec<String> = conn
             .prepare(&select_paths_sql)
             .unwrap()
@@ -7726,12 +7934,15 @@ mod tests {
         seed_running_task(&store, "t1");
         let exports = vec![
             "src/a.rs".to_owned(),
-            "src/a.rs".to_owned(),  // duplicate inside the call
+            "src/a.rs".to_owned(), // duplicate inside the call
         ];
 
         commit_task_completion("t1", "default", &exports, None, &store).unwrap();
-        assert_eq!(count_export_snapshots(&store, "t1"), 1,
-            "PK (task_id, path) collapses duplicates to one row");
+        assert_eq!(
+            count_export_snapshots(&store, "t1"),
+            1,
+            "PK (task_id, path) collapses duplicates to one row"
+        );
     }
 
     #[test]
@@ -7741,24 +7952,29 @@ mod tests {
         // (or Aborted) returns Err(()) — caller surfaces this as
         // FailTaskNotRunning on the wire.
         let store = Store::open_in_memory().unwrap();
-        seed_task(&store, "t1");  // seeds in `Admitted` state
+        seed_task(&store, "t1"); // seeds in `Admitted` state
 
         let result = commit_task_completion("t1", "default", &[], None, &store);
-        assert!(result.is_err(),
-            "commit_task_completion must reject non-Running tasks");
-        assert_eq!(task_state_of(&store, "t1"), TaskState::Admitted.as_sql_str(),
-            "rejected commit must NOT modify the task state");
-        assert_eq!(count_export_snapshots(&store, "t1"), 0,
-            "rejected commit must NOT leak snapshot rows");
+        assert!(
+            result.is_err(),
+            "commit_task_completion must reject non-Running tasks"
+        );
+        assert_eq!(
+            task_state_of(&store, "t1"),
+            TaskState::Admitted.as_sql_str(),
+            "rejected commit must NOT modify the task state"
+        );
+        assert_eq!(
+            count_export_snapshots(&store, "t1"),
+            0,
+            "rejected commit must NOT leak snapshot rows"
+        );
     }
 
     /// Read the `(activation_state, terminated_at)` pair for the
     /// activation row identified by `activation_id`. Used by the
     /// cascade-terminate tests below.
-    fn read_activation_terminal(
-        store:         &Store,
-        activation_id: &str,
-    ) -> (String, Option<i64>) {
+    fn read_activation_terminal(store: &Store, activation_id: &str) -> (String, Option<i64>) {
         let conn = store.lock_sync();
         conn.query_row(
             &format!(
@@ -7767,7 +7983,8 @@ mod tests {
             ),
             rusqlite::params![activation_id],
             |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Primary regression guard for the iter-9 post-ceiling silence
@@ -7790,11 +8007,8 @@ mod tests {
     fn commit_task_completion_closes_active_activation_row() {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t-complete-cascade");
-        let activation_id = seed_active_executor_activation(
-            &store,
-            "t-complete-cascade",
-            /*crash*/ 0,
-        );
+        let activation_id =
+            seed_active_executor_activation(&store, "t-complete-cascade", /*crash*/ 0);
 
         commit_task_completion("t-complete-cascade", "default", &[], None, &store).unwrap();
 
@@ -7804,15 +8018,18 @@ mod tests {
             "task state must flip Running → Completed",
         );
 
-        let (state, terminated_at) =
-            read_activation_terminal(&store, &activation_id);
-        assert_eq!(state, "Completed",
+        let (state, terminated_at) = read_activation_terminal(&store, &activation_id);
+        assert_eq!(
+            state, "Completed",
             "activation row must transition Active → Completed when \
              commit_task_completion succeeds (mirror of c986e6d \
-             cascade for the success edge)");
-        assert!(terminated_at.is_some(),
+             cascade for the success edge)"
+        );
+        assert!(
+            terminated_at.is_some(),
             "Migration 5 CHECK (`activation_state IN ('Completed', 'Failed') \
-             ⇒ terminated_at IS NOT NULL`) must be satisfied");
+             ⇒ terminated_at IS NOT NULL`) must be satisfied"
+        );
     }
 
     /// Cascade lives INSIDE the transaction that flips the task: the
@@ -7824,9 +8041,7 @@ mod tests {
     fn commit_task_completion_atomically_writes_status_exports_and_activation() {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t-atomic");
-        let activation_id = seed_active_executor_activation(
-            &store, "t-atomic", /*crash*/ 0,
-        );
+        let activation_id = seed_active_executor_activation(&store, "t-atomic", /*crash*/ 0);
         let exports = vec!["src/a.rs".to_owned(), "src/b.rs".to_owned()];
 
         commit_task_completion("t-atomic", "default", &exports, None, &store).unwrap();
@@ -7836,8 +8051,7 @@ mod tests {
             TaskState::Completed.as_sql_str(),
         );
         assert_eq!(count_export_snapshots(&store, "t-atomic"), 2);
-        let (state, terminated_at) =
-            read_activation_terminal(&store, &activation_id);
+        let (state, terminated_at) = read_activation_terminal(&store, &activation_id);
         assert_eq!(state, "Completed");
         assert!(terminated_at.is_some());
     }
@@ -7857,9 +8071,7 @@ mod tests {
     fn commit_task_completion_cascade_is_idempotent_on_replay() {
         let store = Store::open_in_memory().unwrap();
         seed_running_task(&store, "t-replay");
-        let activation_id = seed_active_executor_activation(
-            &store, "t-replay", /*crash*/ 0,
-        );
+        let activation_id = seed_active_executor_activation(&store, "t-replay", /*crash*/ 0);
 
         commit_task_completion("t-replay", "default", &[], None, &store).unwrap();
         let (_, first_term) = read_activation_terminal(&store, &activation_id);
@@ -7869,13 +8081,16 @@ mod tests {
         // guard rejects (0 rows updated → Err), so the cascade never
         // runs. The activation row's terminated_at must be preserved.
         let result = commit_task_completion("t-replay", "default", &[], None, &store);
-        assert!(result.is_err(),
-            "second commit_task_completion on a Completed task must reject");
-        let (state, second_term) =
-            read_activation_terminal(&store, &activation_id);
+        assert!(
+            result.is_err(),
+            "second commit_task_completion on a Completed task must reject"
+        );
+        let (state, second_term) = read_activation_terminal(&store, &activation_id);
         assert_eq!(state, "Completed");
-        assert_eq!(second_term, first_term,
-            "terminated_at must be preserved across the rejected replay");
+        assert_eq!(
+            second_term, first_term,
+            "terminated_at must be preserved across the rejected replay"
+        );
     }
 
     /// `PendingActivation` rows (NULL `activated_at`) are intentionally
@@ -7907,18 +8122,22 @@ mod tests {
                            NULL, NULL, 0, 0, ?2, NULL, NULL)"
             ),
             rusqlite::params![&pending_id, now],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         commit_task_completion("t-pending", "default", &[], None, &store).unwrap();
 
-        let (state, terminated_at) =
-            read_activation_terminal(&store, &pending_id);
-        assert_eq!(state, "PendingActivation",
+        let (state, terminated_at) = read_activation_terminal(&store, &pending_id);
+        assert_eq!(
+            state, "PendingActivation",
             "PendingActivation rows must remain untouched (CHECK forbids \
-             flipping them to terminal without activated_at)");
-        assert!(terminated_at.is_none(),
-            "PendingActivation must keep terminated_at NULL");
+             flipping them to terminal without activated_at)"
+        );
+        assert!(
+            terminated_at.is_none(),
+            "PendingActivation must keep terminated_at NULL"
+        );
     }
 
     // ── read_completion_inputs — §2.5.8 step 1+2 ──────────────────────────
@@ -7928,8 +8147,10 @@ mod tests {
         let store = Store::open_in_memory().unwrap();
         seed_task(&store, "t1");
         let (h_bind, ranges) = read_completion_inputs("t1", &store).unwrap();
-        assert!(h_bind.is_none(),
-            "first-intent-not-yet-arrived → evaluation_sha is NULL");
+        assert!(
+            h_bind.is_none(),
+            "first-intent-not-yet-arrived → evaluation_sha is NULL"
+        );
         assert!(ranges.is_empty());
     }
 
@@ -7973,7 +8194,8 @@ mod tests {
                          1, ?3, ?3, 0)"
             ),
             rusqlite::params![executor_id, TaskState::Admitted.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         // Reviewer task — Running (the state SubmitReview requires).
         conn.execute(
             &format!(
@@ -7984,7 +8206,8 @@ mod tests {
                          1, ?3, ?3, 0)"
             ),
             rusqlite::params![reviewer_id, TaskState::Running.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         // DAG edge: executor → reviewer.
         conn.execute(
             &format!(
@@ -7995,7 +8218,8 @@ mod tests {
                 dag_edges = Table::TaskDagEdges.as_str(),
             ),
             rusqlite::params![executor_id, reviewer_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// V2.5+ §Step 25 test fixture — register the agent kind for
@@ -8025,9 +8249,9 @@ mod tests {
     /// semantics (see commit "kernel/initiatives: fail closed on
     /// missing plan-registry entry in AgentTypeFilter").
     fn seed_plan_registry_for_tasks(
-        registry:      &crate::initiatives::PlanRegistry,
+        registry: &crate::initiatives::PlanRegistry,
         initiative_id: &str,
-        tasks:         &[(&str, raxis_types::SessionAgentType)],
+        tasks: &[(&str, raxis_types::SessionAgentType)],
     ) {
         use crate::initiatives::plan_registry::{TaskKey, TaskPlanFields};
         for (task_id, agent_type) in tasks {
@@ -8047,7 +8271,8 @@ mod tests {
             &format!("SELECT last_critique FROM {TASKS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get::<_, Option<String>>(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn read_review_verdict(store: &Store, task_id: &str) -> Option<String> {
@@ -8056,7 +8281,8 @@ mod tests {
             &format!("SELECT review_verdict FROM {TASKS} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get::<_, Option<String>>(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Build a minimal `IntentRequest` for SubmitReview from
@@ -8070,21 +8296,21 @@ mod tests {
         critique: Option<&str>,
     ) -> IntentRequest {
         IntentRequest {
-            session_token:   "tok".into(),
+            session_token: "tok".into(),
             sequence_number: 1,
-            envelope_nonce:  "0".repeat(32),
-            intent_kind:     IntentKind::SubmitReview,
-            task_id:         raxis_types::TaskId::parse(reviewer_task_id).unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::SubmitReview,
+            task_id: raxis_types::TaskId::parse(reviewer_task_id).unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   None,
+            justification: None,
             idempotency_key: None,
-            approval_token:  None,
+            approval_token: None,
             approved,
-            critique:        critique.map(str::to_owned),
+            critique: critique.map(str::to_owned),
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         }
     }
@@ -8119,15 +8345,13 @@ mod tests {
     /// `handle_submit_review` code path uses only `ctx.audit`, so
     /// the rest of the dependencies are placeholders.
     fn build_review_test_ctx(
-        store:  Arc<Store>,
+        store: Arc<Store>,
         policy: raxis_policy::PolicyBundle,
     ) -> (Arc<HandlerContext>, Arc<raxis_test_support::FakeAuditSink>) {
         let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
         let data_dir = std::path::PathBuf::from("/tmp/raxis-submit-review-test");
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            &data_dir,
-            sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(&data_dir, sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(&data_dir);
@@ -8155,7 +8379,7 @@ mod tests {
     /// the Reviewer's own row, and returns Accepted.
     #[test]
     fn submit_review_approved_transitions_reviewer_to_completed() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
@@ -8170,17 +8394,31 @@ mod tests {
 
         let req = make_submit_review_request("rev1", Some(true), None);
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect("approval must be Accepted");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("approval must be Accepted");
 
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
         assert_eq!(resp.task_state, TaskState::Completed);
-        assert_eq!(task_state_of(&store, "rev1"), TaskState::Completed.as_sql_str());
-        assert!(read_last_critique(&store, "exe1").is_none(),
-            "approval path must not write to executor's last_critique");
-        assert_eq!(read_review_verdict(&store, "rev1"),
+        assert_eq!(
+            task_state_of(&store, "rev1"),
+            TaskState::Completed.as_sql_str()
+        );
+        assert!(
+            read_last_critique(&store, "exe1").is_none(),
+            "approval path must not write to executor's last_critique"
+        );
+        assert_eq!(
+            read_review_verdict(&store, "rev1"),
             Some(raxis_types::ReviewVerdict::Approved.as_sql_str().to_owned()),
-            "approval path must persist Approved verdict on Reviewer's own row");
+            "approval path must persist Approved verdict on Reviewer's own row"
+        );
     }
 
     /// Approval-with-critique-text: the spec says critique text on
@@ -8188,7 +8426,7 @@ mod tests {
     /// and the Executor's `last_critique` stays NULL.
     #[test]
     fn submit_review_approved_silently_drops_supplied_critique() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
@@ -8207,12 +8445,21 @@ mod tests {
             Some("kernel must drop this — approval path"),
         );
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect("approval must be Accepted");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("approval must be Accepted");
 
         assert_eq!(resp.task_state, TaskState::Completed);
-        assert!(read_last_critique(&store, "exe1").is_none(),
-            "approved=true critique must NOT be persisted");
+        assert!(
+            read_last_critique(&store, "exe1").is_none(),
+            "approved=true critique must NOT be persisted"
+        );
     }
 
     /// Rejection path: handler writes a formatted critique to the
@@ -8220,7 +8467,7 @@ mod tests {
     /// the Reviewer to Completed.
     #[test]
     fn submit_review_rejected_writes_formatted_critique_to_predecessor() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
@@ -8233,28 +8480,36 @@ mod tests {
             ],
         );
 
-        let req = make_submit_review_request(
-            "rev1",
-            Some(false),
-            Some("auth check missing on /admin"),
-        );
+        let req =
+            make_submit_review_request("rev1", Some(false), Some("auth check missing on /admin"));
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect("rejection must be Accepted (the handler accepts the verdict)");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("rejection must be Accepted (the handler accepts the verdict)");
 
         assert_eq!(resp.task_state, TaskState::Completed);
-        assert_eq!(task_state_of(&store, "rev1"), TaskState::Completed.as_sql_str());
-        // Spec format pinned: `[Reviewer <task_id>]: <critique>\n\n`.
-        let written = read_last_critique(&store, "exe1")
-            .expect("rejection must write last_critique");
         assert_eq!(
-            written,
-            "[Reviewer rev1]: auth check missing on /admin\n\n",
+            task_state_of(&store, "rev1"),
+            TaskState::Completed.as_sql_str()
+        );
+        // Spec format pinned: `[Reviewer <task_id>]: <critique>\n\n`.
+        let written =
+            read_last_critique(&store, "exe1").expect("rejection must write last_critique");
+        assert_eq!(
+            written, "[Reviewer rev1]: auth check missing on /admin\n\n",
             "critique format must match v2-deep-spec.md §Step 22 verbatim"
         );
-        assert_eq!(read_review_verdict(&store, "rev1"),
+        assert_eq!(
+            read_review_verdict(&store, "rev1"),
             Some(raxis_types::ReviewVerdict::Rejected.as_sql_str().to_owned()),
-            "rejection path must persist Rejected verdict on Reviewer's own row");
+            "rejection path must persist Rejected verdict on Reviewer's own row"
+        );
     }
 
     /// Aggregation across N parallel reviewers (Step 25): each
@@ -8262,7 +8517,7 @@ mod tests {
     /// arrival order; the Executor's column carries every entry.
     #[test]
     fn submit_review_rejected_aggregates_across_multiple_reviewers() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8284,7 +8539,8 @@ mod tests {
                              1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Running.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {dag_edges}
@@ -8294,7 +8550,8 @@ mod tests {
                     dag_edges = Table::TaskDagEdges.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         seed_plan_registry_for_tasks(
             &ctx.plan_registry,
@@ -8307,24 +8564,36 @@ mod tests {
         );
 
         // First reviewer rejects.
-        let req_a = make_submit_review_request(
-            "revA", Some(false), Some("missing input validation"),
-        );
+        let req_a =
+            make_submit_review_request("revA", Some(false), Some("missing input validation"));
         handle_submit_review(
-            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect("first rejection accepted");
+            req_a,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("first rejection accepted");
 
         // Second reviewer rejects.
-        let req_b = make_submit_review_request(
-            "revB", Some(false), Some("uses deprecated tokio API"),
-        );
+        let req_b =
+            make_submit_review_request("revB", Some(false), Some("uses deprecated tokio API"));
         handle_submit_review(
-            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
-        ).expect("second rejection accepted");
+            req_b,
+            TaskState::Running,
+            &dummy_session_id(),
+            2,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("second rejection accepted");
 
         // Both critiques visible on the Executor's row, in arrival order.
-        let aggregated = read_last_critique(&store, "exe1")
-            .expect("aggregated critiques must persist");
+        let aggregated =
+            read_last_critique(&store, "exe1").expect("aggregated critiques must persist");
         assert_eq!(
             aggregated,
             "[Reviewer revA]: missing input validation\n\n\
@@ -8337,37 +8606,57 @@ mod tests {
     /// NOT touch `tasks.last_critique` or the Reviewer's FSM.
     #[test]
     fn submit_review_missing_approved_returns_invalid_request() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", None, None);
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("missing approved must reject");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("missing approved must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
         // FSM unchanged: Reviewer still Running, Executor's column NULL.
-        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+        assert_eq!(
+            task_state_of(&store, "rev1"),
+            TaskState::Running.as_sql_str()
+        );
         assert!(read_last_critique(&store, "exe1").is_none());
     }
 
     /// Rejection with missing critique (None) → INVALID_REQUEST.
     #[test]
     fn submit_review_rejected_missing_critique_returns_invalid_request() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", Some(false), None);
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("missing critique on rejection must reject");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("missing critique on rejection must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
-        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+        assert_eq!(
+            task_state_of(&store, "rev1"),
+            TaskState::Running.as_sql_str()
+        );
         assert!(read_last_critique(&store, "exe1").is_none());
     }
 
@@ -8377,15 +8666,22 @@ mod tests {
     /// accepting a meaningless verdict.
     #[test]
     fn submit_review_rejected_empty_critique_returns_invalid_request() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_submit_review_request("rev1", Some(false), Some(""));
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("empty critique on rejection must reject");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("empty critique on rejection must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
         assert!(read_last_critique(&store, "exe1").is_none());
@@ -8396,7 +8692,7 @@ mod tests {
     /// the entire point of the cap (context-flooding DoS prevention).
     #[test]
     fn submit_review_rejected_oversized_critique_is_not_persisted() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
@@ -8405,13 +8701,25 @@ mod tests {
         let oversized = "x".repeat(raxis_types::MAX_CRITIQUE_BYTES + 1);
         let req = make_submit_review_request("rev1", Some(false), Some(&oversized));
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("oversized critique must reject");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("oversized critique must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
-        assert!(read_last_critique(&store, "exe1").is_none(),
-            "oversized critique MUST NOT be persisted (DoS prevention)");
-        assert_eq!(task_state_of(&store, "rev1"), TaskState::Running.as_sql_str());
+        assert!(
+            read_last_critique(&store, "exe1").is_none(),
+            "oversized critique MUST NOT be persisted (DoS prevention)"
+        );
+        assert_eq!(
+            task_state_of(&store, "rev1"),
+            TaskState::Running.as_sql_str()
+        );
     }
 
     /// Critique exactly at the cap (== MAX_CRITIQUE_BYTES) is
@@ -8419,7 +8727,7 @@ mod tests {
     /// flips `>` to `>=` regresses loudly.
     #[test]
     fn submit_review_rejected_critique_at_cap_is_accepted() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
@@ -8435,16 +8743,24 @@ mod tests {
         let at_cap = "y".repeat(raxis_types::MAX_CRITIQUE_BYTES);
         let req = make_submit_review_request("rev1", Some(false), Some(&at_cap));
         let resp = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect("critique at cap must be Accepted");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect("critique at cap must be Accepted");
 
         assert_eq!(resp.task_state, TaskState::Completed);
-        let written = read_last_critique(&store, "exe1")
-            .expect("at-cap critique must persist");
+        let written = read_last_critique(&store, "exe1").expect("at-cap critique must persist");
         // The persisted form is `[Reviewer rev1]: <text>\n\n`. Just
         // assert it carries the full body bytes.
-        assert!(written.contains(&at_cap),
-            "at-cap critique must be persisted in full");
+        assert!(
+            written.contains(&at_cap),
+            "at-cap critique must be persisted in full"
+        );
     }
 
     /// Reviewer task in a terminal (non-{Admitted, Running}) state
@@ -8462,19 +8778,24 @@ mod tests {
     /// real-world shape this gate exists to reject.
     #[test]
     fn submit_review_rejects_non_running_reviewer() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         // Caller passes Completed (a terminal state); the gate must
         // reject regardless of the actual DB state.
-        let req = make_submit_review_request(
-            "rev1", Some(false), Some("auth missing"),
-        );
+        let req = make_submit_review_request("rev1", Some(false), Some("auth missing"));
         let err = handle_submit_review(
-            req, TaskState::Completed, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("terminal-state reviewer must reject");
+            req,
+            TaskState::Completed,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("terminal-state reviewer must reject");
 
         assert_eq!(err.0, PlannerErrorCode::FailTaskNotRunning);
         // Critically: no side effects on the Executor's column.
@@ -8487,7 +8808,7 @@ mod tests {
     /// SubmitReview that has nowhere to route the critique.
     #[test]
     fn submit_review_rejected_with_no_predecessor_returns_invalid_request() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         // Insert a Reviewer task with NO `task_dag_edges` row.
@@ -8501,7 +8822,8 @@ mod tests {
                  VALUES ('init-rev-orphan', ?1, '{{}}', 'deadbeef', ?2)"
             ),
             rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         conn.execute(
             &format!(
                 "INSERT INTO {TASKS}
@@ -8512,20 +8834,32 @@ mod tests {
                          1, ?2, ?2, 0)"
             ),
             rusqlite::params![TaskState::Running.as_sql_str(), now],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         let req = make_submit_review_request(
-            "orphan-rev", Some(false), Some("no predecessor — defensive case"),
+            "orphan-rev",
+            Some(false),
+            Some("no predecessor — defensive case"),
         );
         let err = handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).expect_err("orphan reviewer must reject");
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .expect_err("orphan reviewer must reject");
 
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
         // Reviewer FSM unchanged.
-        assert_eq!(task_state_of(&store, "orphan-rev"),
-                   TaskState::Running.as_sql_str());
+        assert_eq!(
+            task_state_of(&store, "orphan-rev"),
+            TaskState::Running.as_sql_str()
+        );
     }
 
     /// V2 gap §12.2 — when the LAST sibling Reviewer submits
@@ -8534,7 +8868,7 @@ mod tests {
     /// event addressed to the Executor predecessor.
     #[test]
     fn submit_review_emits_all_passed_aggregation_audit_when_last_reviewer_approves() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8553,7 +8887,8 @@ mod tests {
                              1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Running.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {dag_edges}
@@ -8563,7 +8898,8 @@ mod tests {
                     dag_edges = Table::TaskDagEdges.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         seed_plan_registry_for_tasks(
             &ctx.plan_registry,
@@ -8579,8 +8915,15 @@ mod tests {
         // NO audit emission expected.
         let req_a = make_submit_review_request("revA", Some(true), None);
         handle_submit_review(
-            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
+            req_a,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
         assert!(
             sink.events().iter().all(|e| !matches!(
                 e.kind,
@@ -8593,17 +8936,31 @@ mod tests {
         // audit emission expected addressed to exe1.
         let req_b = make_submit_review_request("revB", Some(true), None);
         handle_submit_review(
-            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
-        ).unwrap();
+            req_b,
+            TaskState::Running,
+            &dummy_session_id(),
+            2,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        let agg_events: Vec<_> = sink.events()
+        let agg_events: Vec<_> = sink
+            .events()
             .into_iter()
-            .filter(|e| matches!(
-                e.kind,
-                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
-            ))
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+                )
+            })
             .collect();
-        assert_eq!(agg_events.len(), 1, "exactly one terminal aggregation event");
+        assert_eq!(
+            agg_events.len(),
+            1,
+            "exactly one terminal aggregation event"
+        );
         match &agg_events[0].kind {
             raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
                 executor_task_id,
@@ -8624,7 +8981,7 @@ mod tests {
     /// aggregator immediately. The audit row carries `count = 1`.
     #[test]
     fn submit_review_single_reviewer_approval_emits_terminal_aggregation() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
         seed_reviewer_with_executor_predecessor(&store, "rev-only", "exe1");
@@ -8632,24 +8989,38 @@ mod tests {
             &ctx.plan_registry,
             "init-rev",
             &[
-                ("exe1",     raxis_types::SessionAgentType::Executor),
+                ("exe1", raxis_types::SessionAgentType::Executor),
                 ("rev-only", raxis_types::SessionAgentType::Reviewer),
             ],
         );
 
         let req = make_submit_review_request("rev-only", Some(true), None);
         handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        let agg_events: Vec<_> = sink.events()
+        let agg_events: Vec<_> = sink
+            .events()
             .into_iter()
-            .filter(|e| matches!(
-                e.kind,
-                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
-            ))
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+                )
+            })
             .collect();
-        assert_eq!(agg_events.len(), 1, "single-reviewer approval terminates the aggregator");
+        assert_eq!(
+            agg_events.len(),
+            1,
+            "single-reviewer approval terminates the aggregator"
+        );
         match &agg_events[0].kind {
             raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted {
                 reviewer_count,
@@ -8668,7 +9039,7 @@ mod tests {
     /// emission carries `verdict = "AtLeastOneRejected"`.
     #[test]
     fn submit_review_emits_at_least_one_rejected_aggregation() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8687,7 +9058,8 @@ mod tests {
                              1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Running.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {dag_edges}
@@ -8697,7 +9069,8 @@ mod tests {
                     dag_edges = Table::TaskDagEdges.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         seed_plan_registry_for_tasks(
             &ctx.plan_registry,
@@ -8712,23 +9085,38 @@ mod tests {
         // revA approves → still Pending, no audit row.
         let req_a = make_submit_review_request("revA", Some(true), None);
         handle_submit_review(
-            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
+            req_a,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
         // revB rejects → aggregator terminates AtLeastOneRejected.
-        let req_b = make_submit_review_request(
-            "revB", Some(false), Some("missing test coverage"),
-        );
+        let req_b = make_submit_review_request("revB", Some(false), Some("missing test coverage"));
         handle_submit_review(
-            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
-        ).unwrap();
+            req_b,
+            TaskState::Running,
+            &dummy_session_id(),
+            2,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        let agg_events: Vec<_> = sink.events()
+        let agg_events: Vec<_> = sink
+            .events()
             .into_iter()
-            .filter(|e| matches!(
-                e.kind,
-                raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
-            ))
+            .filter(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::ReviewAggregationCompleted { .. },
+                )
+            })
             .collect();
         assert_eq!(agg_events.len(), 1);
         match &agg_events[0].kind {
@@ -8768,7 +9156,8 @@ mod tests {
                 task_id,
                 unix_now_secs() as i64,
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn read_review_reject_count(store: &Store, task_id: &str) -> i64 {
@@ -8780,7 +9169,8 @@ mod tests {
             ),
             rusqlite::params![task_id],
             |r| r.get::<_, i64>(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// V2 §Step 25 — a terminal-rejected aggregation must bump the
@@ -8791,7 +9181,7 @@ mod tests {
     /// check (`max_review_rejections`) reads against.
     #[test]
     fn submit_review_rejected_increments_executor_review_reject_count() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8806,24 +9196,37 @@ mod tests {
             ],
         );
 
-        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
-            "freshly-seeded activation row starts at zero");
+        assert_eq!(
+            read_review_reject_count(&store, "exe1"),
+            0,
+            "freshly-seeded activation row starts at zero"
+        );
 
         let req = make_submit_review_request("rev1", Some(false), Some("not yet"));
         handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        assert_eq!(read_review_reject_count(&store, "exe1"), 1,
+        assert_eq!(
+            read_review_reject_count(&store, "exe1"),
+            1,
             "single-Reviewer rejection bumps the Executor's counter \
-             from 0 → 1 (one rejection round)");
+             from 0 → 1 (one rejection round)"
+        );
     }
 
     /// Approval path must NOT bump `review_reject_count` — only
     /// terminal-rejected aggregations do.
     #[test]
     fn submit_review_approved_leaves_review_reject_count_at_zero() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8840,11 +9243,21 @@ mod tests {
 
         let req = make_submit_review_request("rev1", Some(true), None);
         handle_submit_review(
-            req, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
+            req,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
-            "AllPassed verdict must not increment the rejection counter");
+        assert_eq!(
+            read_review_reject_count(&store, "exe1"),
+            0,
+            "AllPassed verdict must not increment the rejection counter"
+        );
     }
 
     /// N-Reviewer panel: the aggregator only reaches terminal-rejected
@@ -8855,7 +9268,7 @@ mod tests {
     /// could accidentally regress here).
     #[test]
     fn submit_review_rejected_panel_increments_review_reject_count_once() {
-        let store  = Arc::new(Store::open_in_memory().unwrap());
+        let store = Arc::new(Store::open_in_memory().unwrap());
         let (ctx, _sink) = build_review_test_ctx(store.clone(), default_test_policy());
         let policy = default_test_policy();
 
@@ -8875,7 +9288,8 @@ mod tests {
                              1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Running.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {dag_edges}
@@ -8885,7 +9299,8 @@ mod tests {
                     dag_edges = Table::TaskDagEdges.as_str(),
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         seed_plan_registry_for_tasks(
             &ctx.plan_registry,
@@ -8900,20 +9315,40 @@ mod tests {
         // revA rejects first → still Pending (revB hasn't voted) → no bump.
         let req_a = make_submit_review_request("revA", Some(false), Some("first"));
         handle_submit_review(
-            req_a, TaskState::Running, &dummy_session_id(), 1, &store, &policy, &ctx,
-        ).unwrap();
-        assert_eq!(read_review_reject_count(&store, "exe1"), 0,
-            "Pending aggregation must not bump the counter");
+            req_a,
+            TaskState::Running,
+            &dummy_session_id(),
+            1,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
+        assert_eq!(
+            read_review_reject_count(&store, "exe1"),
+            0,
+            "Pending aggregation must not bump the counter"
+        );
 
         // revB rejects → terminal AtLeastOneRejected → bump once.
         let req_b = make_submit_review_request("revB", Some(false), Some("second"));
         handle_submit_review(
-            req_b, TaskState::Running, &dummy_session_id(), 2, &store, &policy, &ctx,
-        ).unwrap();
+            req_b,
+            TaskState::Running,
+            &dummy_session_id(),
+            2,
+            &store,
+            &policy,
+            &ctx,
+        )
+        .unwrap();
 
-        assert_eq!(read_review_reject_count(&store, "exe1"), 1,
+        assert_eq!(
+            read_review_reject_count(&store, "exe1"),
+            1,
             "exactly one rejection round across the panel — counter \
-             bumps once when the aggregator turns terminal-rejected");
+             bumps once when the aggregator turns terminal-rejected"
+        );
     }
 
     #[test]
@@ -8929,7 +9364,8 @@ mod tests {
             conn.execute(
                 &format!("UPDATE {TASKS} SET evaluation_sha = ?1 WHERE task_id = ?2"),
                 rusqlite::params!["head3", "t1"],
-            ).unwrap();
+            )
+            .unwrap();
         }
         insert_task_intent_range("t1", "base1", "head1", &store).unwrap();
         insert_task_intent_range("t1", "base2", "head2", &store).unwrap();
@@ -8938,11 +9374,14 @@ mod tests {
         let (h_bind, mut ranges) = read_completion_inputs("t1", &store).unwrap();
         ranges.sort();
         assert_eq!(h_bind.as_deref(), Some("head3"));
-        assert_eq!(ranges, vec![
-            ("base1".to_owned(), "head1".to_owned()),
-            ("base2".to_owned(), "head2".to_owned()),
-            ("base3".to_owned(), "head3".to_owned()),
-        ]);
+        assert_eq!(
+            ranges,
+            vec![
+                ("base1".to_owned(), "head1".to_owned()),
+                ("base2".to_owned(), "head2".to_owned()),
+                ("base3".to_owned(), "head3".to_owned()),
+            ]
+        );
     }
 
     // ── handle_structured_output (V2 §3.2) ────────────────────────────────
@@ -8977,7 +9416,8 @@ mod tests {
             ),
             rusqlite::params![session_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn make_structured_output_request(
@@ -8985,21 +9425,21 @@ mod tests {
         payload: Option<raxis_types::StructuredOutputKind>,
     ) -> IntentRequest {
         IntentRequest {
-            session_token:   "tok".into(),
+            session_token: "tok".into(),
             sequence_number: 1,
-            envelope_nonce:  "0".repeat(32),
-            intent_kind:     IntentKind::StructuredOutput,
-            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::StructuredOutput,
+            task_id: raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   None,
+            justification: None,
             idempotency_key: None,
-            approval_token:  None,
-            approved:        None,
-            critique:        None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: payload,
         }
     }
@@ -9016,9 +9456,8 @@ mod tests {
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
         let req = make_structured_output_request("exe1", None);
-        let err = handle_structured_output(
-            req, TaskState::Running, &session, 1, &store, &ctx,
-        ).expect_err("missing payload must be rejected");
+        let err = handle_structured_output(req, TaskState::Running, &session, 1, &store, &ctx)
+            .expect_err("missing payload must be rejected");
         assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputInvalid);
         assert_eq!(count_structured_outputs(&store, session.as_str()), 0);
     }
@@ -9039,14 +9478,13 @@ mod tests {
         let req = make_structured_output_request(
             "exe1",
             Some(raxis_types::StructuredOutputKind::TaskSummary {
-                commit_sha:    "not-a-real-sha".to_owned(),
+                commit_sha: "not-a-real-sha".to_owned(),
                 changed_paths: vec![],
-                approach:      "fix".to_owned(),
+                approach: "fix".to_owned(),
             }),
         );
-        let err = handle_structured_output(
-            req, TaskState::Running, &session, 1, &store, &ctx,
-        ).expect_err("non-hex commit_sha must be rejected");
+        let err = handle_structured_output(req, TaskState::Running, &session, 1, &store, &ctx)
+            .expect_err("non-hex commit_sha must be rejected");
         assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputInvalid);
         assert_eq!(count_structured_outputs(&store, session.as_str()), 0);
     }
@@ -9068,32 +9506,47 @@ mod tests {
             "exe1",
             Some(raxis_types::StructuredOutputKind::ProgressReport {
                 files_modified: vec!["a.rs".into(), "b.rs".into()],
-                tests_passing:  3,
-                tests_failing:  1,
-                confidence:     0.8,
+                tests_passing: 3,
+                tests_failing: 1,
+                confidence: 0.8,
             }),
         );
-        let resp = handle_structured_output(
-            req, TaskState::Running, &session, 1, &store, &ctx,
-        ).expect("progress report must be accepted");
+        let resp = handle_structured_output(req, TaskState::Running, &session, 1, &store, &ctx)
+            .expect("progress report must be accepted");
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
-        assert_eq!(resp.task_state, TaskState::Running,
-            "structured_output is NON-TERMINAL — task FSM stays put");
+        assert_eq!(
+            resp.task_state,
+            TaskState::Running,
+            "structured_output is NON-TERMINAL — task FSM stays put"
+        );
 
-        assert_eq!(count_structured_outputs(&store, session.as_str()), 1,
-            "exactly one row written to structured_outputs");
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            1,
+            "exactly one row written to structured_outputs"
+        );
 
         // Audit event landed on the sink with `output_kind = "progress_report"`.
         let events = sink.events();
-        let so_evt = events.iter().find(|e| matches!(
-            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
-        )).expect("StructuredOutputEmitted audit event missing");
+        let so_evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+                )
+            })
+            .expect("StructuredOutputEmitted audit event missing");
         if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
-            output_kind, severity, task_id, session_id: sid, ..
-        } = &so_evt.kind {
+            output_kind,
+            severity,
+            task_id,
+            session_id: sid,
+            ..
+        } = &so_evt.kind
+        {
             assert_eq!(output_kind, "progress_report");
-            assert!(severity.is_none(),
-                "progress_report carries no severity");
+            assert!(severity.is_none(), "progress_report carries no severity");
             assert_eq!(task_id, "exe1");
             assert_eq!(sid, session.as_str());
         }
@@ -9113,34 +9566,44 @@ mod tests {
             "exe1",
             Some(raxis_types::StructuredOutputKind::DiagnosticFlag {
                 severity: raxis_types::DiagnosticSeverity::Critical,
-                message:  "auth bypass!".into(),
+                message: "auth bypass!".into(),
                 evidence: Some("src/auth.rs:42".into()),
             }),
         );
-        handle_structured_output(
-            req, TaskState::Running, &session, 1, &store, &ctx,
-        ).expect("diagnostic flag must be accepted");
+        handle_structured_output(req, TaskState::Running, &session, 1, &store, &ctx)
+            .expect("diagnostic flag must be accepted");
 
         let conn = store.lock_sync();
-        let (kind, severity): (String, Option<String>) = conn.query_row(
-            &format!(
-                "SELECT kind, severity FROM {so} WHERE session_id = ?1",
-                so = Table::StructuredOutputs.as_str(),
-            ),
-            rusqlite::params![session.as_str()],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).unwrap();
+        let (kind, severity): (String, Option<String>) = conn
+            .query_row(
+                &format!(
+                    "SELECT kind, severity FROM {so} WHERE session_id = ?1",
+                    so = Table::StructuredOutputs.as_str(),
+                ),
+                rusqlite::params![session.as_str()],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
         drop(conn);
         assert_eq!(kind, "diagnostic_flag");
         assert_eq!(severity.as_deref(), Some("critical"));
 
         let events = sink.events();
-        let so_evt = events.iter().find(|e| matches!(
-            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
-        )).expect("StructuredOutputEmitted audit event missing");
+        let so_evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+                )
+            })
+            .expect("StructuredOutputEmitted audit event missing");
         if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
-            output_kind, severity, ..
-        } = &so_evt.kind {
+            output_kind,
+            severity,
+            ..
+        } = &so_evt.kind
+        {
             assert_eq!(output_kind, "diagnostic_flag");
             assert_eq!(severity.as_deref(), Some("critical"));
         }
@@ -9154,7 +9617,9 @@ mod tests {
     /// intent handler's Migration-18 code path exercises the same
     /// shape it sees in production.
     fn seed_orchestrator_session_for_initiative(
-        store: &Store, session_id: &str, initiative_id: &str,
+        store: &Store,
+        session_id: &str,
+        initiative_id: &str,
     ) {
         let conn = store.lock_sync();
         let now = unix_now_secs();
@@ -9166,12 +9631,9 @@ mod tests {
                      plan_artifact_sha256, created_at)
                  VALUES (?1, ?2, '{{}}', 'deadbeef', ?3)"
             ),
-            rusqlite::params![
-                initiative_id,
-                InitiativeState::Executing.as_sql_str(),
-                now,
-            ],
-        ).unwrap();
+            rusqlite::params![initiative_id, InitiativeState::Executing.as_sql_str(), now,],
+        )
+        .unwrap();
         conn.execute(
             &format!(
                 "INSERT INTO {SESSIONS} (
@@ -9184,7 +9646,8 @@ mod tests {
                           'Orchestrator',1,?4)"
             ),
             rusqlite::params![session_id, now, now + 86_400, initiative_id],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// Happy path: an Orchestrator session emits a ProgressReport,
@@ -9209,46 +9672,68 @@ mod tests {
             initiative_id,
             Some(raxis_types::StructuredOutputKind::ProgressReport {
                 files_modified: vec!["coordinator-note".into()],
-                tests_passing:  0,
-                tests_failing:  0,
-                confidence:     0.5,
+                tests_passing: 0,
+                tests_failing: 0,
+                confidence: 0.5,
             }),
         );
         let resp = handle_structured_output_initiative_scoped(
-            req, initiative_id, &session, 1, &store, &ctx,
-        ).expect("orchestrator progress report must be accepted");
+            req,
+            initiative_id,
+            &session,
+            1,
+            &store,
+            &ctx,
+        )
+        .expect("orchestrator progress report must be accepted");
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
-        assert_eq!(resp.task_state, TaskState::Running,
-            "orchestrator structured_output is NON-TERMINAL — synth state Running");
+        assert_eq!(
+            resp.task_state,
+            TaskState::Running,
+            "orchestrator structured_output is NON-TERMINAL — synth state Running"
+        );
 
         // Exactly one row written, with task_id IS NULL.
         let conn = store.lock_sync();
-        let (row_count, null_task_count): (i64, i64) = conn.query_row(
-            &format!(
-                "SELECT COUNT(*),
+        let (row_count, null_task_count): (i64, i64) = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*),
                         SUM(CASE WHEN task_id IS NULL THEN 1 ELSE 0 END)
                    FROM {so}
                   WHERE session_id = ?1",
-                so = Table::StructuredOutputs.as_str(),
-            ),
-            rusqlite::params![session.as_str()],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
-        ).unwrap();
+                    so = Table::StructuredOutputs.as_str(),
+                ),
+                rusqlite::params![session.as_str()],
+                |r| Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?)),
+            )
+            .unwrap();
         drop(conn);
-        assert_eq!(row_count,       1, "exactly one orchestrator output row");
+        assert_eq!(row_count, 1, "exactly one orchestrator output row");
         assert_eq!(null_task_count, 1, "the row's task_id must be NULL");
 
         let events = sink.events();
-        let so_evt = events.iter().find(|e| matches!(
-            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
-        )).expect("StructuredOutputEmitted audit event missing");
+        let so_evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+                )
+            })
+            .expect("StructuredOutputEmitted audit event missing");
         if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
-            output_kind, severity, initiative_id: ev_init, session_id: ev_sess, ..
-        } = &so_evt.kind {
+            output_kind,
+            severity,
+            initiative_id: ev_init,
+            session_id: ev_sess,
+            ..
+        } = &so_evt.kind
+        {
             assert_eq!(output_kind, "progress_report");
             assert!(severity.is_none());
-            assert_eq!(ev_init,  initiative_id);
-            assert_eq!(ev_sess,  session.as_str());
+            assert_eq!(ev_init, initiative_id);
+            assert_eq!(ev_sess, session.as_str());
         }
     }
 
@@ -9270,32 +9755,50 @@ mod tests {
                 initiative_id,
                 Some(raxis_types::StructuredOutputKind::ProgressReport {
                     files_modified: vec![],
-                    tests_passing:  i,
-                    tests_failing:  0,
-                    confidence:     0.5,
+                    tests_passing: i,
+                    tests_failing: 0,
+                    confidence: 0.5,
                 }),
             );
             handle_structured_output_initiative_scoped(
-                req, initiative_id, &session, (i as u64) + 1, &store, &ctx,
-            ).unwrap_or_else(|e| panic!("orch output #{i} rejected: {e:?}"));
+                req,
+                initiative_id,
+                &session,
+                (i as u64) + 1,
+                &store,
+                &ctx,
+            )
+            .unwrap_or_else(|e| panic!("orch output #{i} rejected: {e:?}"));
         }
-        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64);
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            cap as i64
+        );
 
         let req = make_structured_output_request(
             initiative_id,
             Some(raxis_types::StructuredOutputKind::ProgressReport {
                 files_modified: vec![],
-                tests_passing:  cap,
-                tests_failing:  0,
-                confidence:     0.5,
+                tests_passing: cap,
+                tests_failing: 0,
+                confidence: 0.5,
             }),
         );
         let err = handle_structured_output_initiative_scoped(
-            req, initiative_id, &session, (cap as u64) + 1, &store, &ctx,
-        ).expect_err("over-cap orch submission must be rejected");
+            req,
+            initiative_id,
+            &session,
+            (cap as u64) + 1,
+            &store,
+            &ctx,
+        )
+        .expect_err("over-cap orch submission must be rejected");
         assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputRateLimited);
-        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64,
-            "rate-limit rejection MUST NOT roll back prior rows");
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            cap as i64,
+            "rate-limit rejection MUST NOT roll back prior rows"
+        );
     }
 
     /// Quarantining the initiative the orchestrator coordinates must
@@ -9323,24 +9826,34 @@ mod tests {
                      VALUES (?1, ?2, 'op-fp-1', 'test quarantine')"
                 ),
                 rusqlite::params![initiative_id, now],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let req = make_structured_output_request(
             initiative_id,
             Some(raxis_types::StructuredOutputKind::ProgressReport {
                 files_modified: vec![],
-                tests_passing:  0,
-                tests_failing:  0,
-                confidence:     0.5,
+                tests_passing: 0,
+                tests_failing: 0,
+                confidence: 0.5,
             }),
         );
         let err = handle_structured_output_initiative_scoped(
-            req, initiative_id, &session, 1, &store, &ctx,
-        ).expect_err("quarantined initiative must reject orchestrator output");
+            req,
+            initiative_id,
+            &session,
+            1,
+            &store,
+            &ctx,
+        )
+        .expect_err("quarantined initiative must reject orchestrator output");
         assert_eq!(err.0, PlannerErrorCode::FailInitiativeQuarantined);
-        assert_eq!(count_structured_outputs(&store, session.as_str()), 0,
-            "no row may land when the initiative is quarantined");
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            0,
+            "no row may land when the initiative is quarantined"
+        );
     }
 
     /// Per-session rate limit: after
@@ -9362,33 +9875,51 @@ mod tests {
                 "exe1",
                 Some(raxis_types::StructuredOutputKind::ProgressReport {
                     files_modified: vec![],
-                    tests_passing:  i,
-                    tests_failing:  0,
-                    confidence:     0.5,
+                    tests_passing: i,
+                    tests_failing: 0,
+                    confidence: 0.5,
                 }),
             );
             handle_structured_output(
-                req, TaskState::Running, &session, (i as u64) + 1, &store, &ctx,
-            ).unwrap_or_else(|e| panic!("output #{i} rejected: {e:?}"));
+                req,
+                TaskState::Running,
+                &session,
+                (i as u64) + 1,
+                &store,
+                &ctx,
+            )
+            .unwrap_or_else(|e| panic!("output #{i} rejected: {e:?}"));
         }
-        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64);
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            cap as i64
+        );
 
         // The (cap+1)-th submission fails with the rate-limit code.
         let req = make_structured_output_request(
             "exe1",
             Some(raxis_types::StructuredOutputKind::ProgressReport {
                 files_modified: vec![],
-                tests_passing:  cap,
-                tests_failing:  0,
-                confidence:     0.5,
+                tests_passing: cap,
+                tests_failing: 0,
+                confidence: 0.5,
             }),
         );
         let err = handle_structured_output(
-            req, TaskState::Running, &session, (cap as u64) + 1, &store, &ctx,
-        ).expect_err("over-cap submission must be rejected");
+            req,
+            TaskState::Running,
+            &session,
+            (cap as u64) + 1,
+            &store,
+            &ctx,
+        )
+        .expect_err("over-cap submission must be rejected");
         assert_eq!(err.0, PlannerErrorCode::FailStructuredOutputRateLimited);
-        assert_eq!(count_structured_outputs(&store, session.as_str()), cap as i64,
-            "rate-limit rejection MUST NOT roll back prior rows");
+        assert_eq!(
+            count_structured_outputs(&store, session.as_str()),
+            cap as i64,
+            "rate-limit rejection MUST NOT roll back prior rows"
+        );
     }
 
     /// Truncation via `validate_and_normalise` runs BEFORE the
@@ -9404,36 +9935,44 @@ mod tests {
         seed_session(&store, session.as_str());
         seed_reviewer_with_executor_predecessor(&store, "rev1", "exe1");
 
-        let huge = "x".repeat(
-            raxis_types::STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES * 4
-        );
+        let huge = "x".repeat(raxis_types::STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES * 4);
         let req = make_structured_output_request(
             "exe1",
             Some(raxis_types::StructuredOutputKind::DiagnosticFlag {
                 severity: raxis_types::DiagnosticSeverity::Warning,
-                message:  huge.clone(),
+                message: huge.clone(),
                 evidence: None,
             }),
         );
-        handle_structured_output(
-            req, TaskState::Running, &session, 1, &store, &ctx,
-        ).expect("oversize message must be truncated, not rejected");
+        handle_structured_output(req, TaskState::Running, &session, 1, &store, &ctx)
+            .expect("oversize message must be truncated, not rejected");
 
         let events = sink.events();
-        let so_evt = events.iter().find(|e| matches!(
-            e.kind, raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
-        )).expect("audit event missing");
+        let so_evt = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    e.kind,
+                    raxis_audit_tools::AuditEventKind::StructuredOutputEmitted { .. },
+                )
+            })
+            .expect("audit event missing");
         if let raxis_audit_tools::AuditEventKind::StructuredOutputEmitted {
             payload_bytes, ..
-        } = &so_evt.kind {
+        } = &so_evt.kind
+        {
             // payload_json includes the JSON wrapper + truncated message
             // + "<truncated>" marker. Cap is the message body alone, so
             // we expect the JSON to be a small constant overhead larger.
             let cap = raxis_types::STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES as u32;
-            assert!(*payload_bytes <= cap + 256,
-                "payload_bytes {payload_bytes} exceeded cap {cap} + JSON overhead");
-            assert!((*payload_bytes as usize) < huge.len(),
-                "truncation must shrink the payload");
+            assert!(
+                *payload_bytes <= cap + 256,
+                "payload_bytes {payload_bytes} exceeded cap {cap} + JSON overhead"
+            );
+            assert!(
+                (*payload_bytes as usize) < huge.len(),
+                "truncation must shrink the payload"
+            );
         }
     }
 
@@ -9470,9 +10009,8 @@ mod tests {
         // opened. We reuse the standard test fixture for everything
         // else (audit sink, isolation backend, etc.).
         let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            tmp.path(), sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(tmp.path(), sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(tmp.path());
@@ -9507,45 +10045,56 @@ mod tests {
             for (i, payload) in [
                 raxis_types::StructuredOutputKind::ProgressReport {
                     files_modified: vec!["src/lib.rs".to_owned()],
-                    tests_passing:  3,
-                    tests_failing:  0,
-                    confidence:     0.8,
+                    tests_passing: 3,
+                    tests_failing: 0,
+                    confidence: 0.8,
                 },
                 raxis_types::StructuredOutputKind::DiagnosticFlag {
                     severity: raxis_types::DiagnosticSeverity::Warning,
-                    message:  "watch out".to_owned(),
+                    message: "watch out".to_owned(),
                     evidence: Some("src/lib.rs:42".to_owned()),
                 },
-            ].into_iter().enumerate() {
+            ]
+            .into_iter()
+            .enumerate()
+            {
                 let req = make_structured_output_request("exe1", Some(payload));
                 handle_structured_output(
-                    req, TaskState::Running, &session_for_blk,
-                    (i as u64) + 1, &store_for_blk, &ctx_for_blk,
-                ).expect("handle_structured_output must accept a normalised payload");
+                    req,
+                    TaskState::Running,
+                    &session_for_blk,
+                    (i as u64) + 1,
+                    &store_for_blk,
+                    &ctx_for_blk,
+                )
+                .expect("handle_structured_output must accept a normalised payload");
             }
-        }).await.expect("blocking seed task must succeed");
+        })
+        .await
+        .expect("blocking seed task must succeed");
 
         // Now drive the operator read path — same code path the IPC
         // dispatcher invokes for `OperatorRequest::ListTaskOutputs`.
-        let resp = crate::ipc::operator_ergonomics::handle_list_task_outputs(
-            "exe1".to_owned(),
-            &ctx,
-        ).await;
+        let resp =
+            crate::ipc::operator_ergonomics::handle_list_task_outputs("exe1".to_owned(), &ctx)
+                .await;
 
         match resp {
             OperatorResponse::TaskOutputsListed { task_id, outputs } => {
                 assert_eq!(task_id, "exe1");
-                assert_eq!(outputs.len(), 2,
-                    "operator must see both structured outputs");
+                assert_eq!(
+                    outputs.len(),
+                    2,
+                    "operator must see both structured outputs"
+                );
 
                 // Ordered by `emitted_at ASC`. Both rows are stamped
                 // by the same call to `unix_now_secs` inside the
                 // handler so the secondary sort on `output_id ASC`
                 // (UUID) breaks ties; we assert by kind instead of
                 // by relative position to keep the test stable.
-                let kinds: std::collections::HashSet<&str> = outputs.iter()
-                    .map(|o| o.kind.as_str())
-                    .collect();
+                let kinds: std::collections::HashSet<&str> =
+                    outputs.iter().map(|o| o.kind.as_str()).collect();
                 assert!(kinds.contains("progress_report"));
                 assert!(kinds.contains("diagnostic_flag"));
 
@@ -9553,13 +10102,17 @@ mod tests {
                     assert_eq!(o.task_id.as_deref(), Some("exe1"));
                     assert_eq!(o.session_id, session.as_str());
                     assert_eq!(o.initiative_id, "init-rev");
-                    assert!(!o.payload_json.is_empty(),
-                        "payload_json must be populated verbatim");
+                    assert!(
+                        !o.payload_json.is_empty(),
+                        "payload_json must be populated verbatim"
+                    );
                     if o.kind == "diagnostic_flag" {
                         assert_eq!(o.severity.as_deref(), Some("warning"));
                     } else {
-                        assert!(o.severity.is_none(),
-                            "non-diagnostic kinds must have no severity");
+                        assert!(
+                            o.severity.is_none(),
+                            "non-diagnostic kinds must have no severity"
+                        );
                     }
                 }
             }
@@ -9576,9 +10129,8 @@ mod tests {
         let store = Arc::new(Store::open(&db_path).expect("Store::open"));
 
         let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            tmp.path(), sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(tmp.path(), sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(tmp.path());
@@ -9601,12 +10153,15 @@ mod tests {
         let resp = crate::ipc::operator_ergonomics::handle_list_task_outputs(
             "no-such-task".to_owned(),
             &ctx,
-        ).await;
+        )
+        .await;
         match resp {
             OperatorResponse::TaskOutputsListed { task_id, outputs } => {
                 assert_eq!(task_id, "no-such-task");
-                assert!(outputs.is_empty(),
-                    "unknown task must yield an empty list, not an error");
+                assert!(
+                    outputs.is_empty(),
+                    "unknown task must yield an empty list, not an error"
+                );
             }
             other => panic!("expected TaskOutputsListed, got {other:?}"),
         }
@@ -9649,13 +10204,15 @@ mod tests {
     /// concurrent test runs isolated).
     fn build_retry_test_ctx(
         store: Arc<Store>,
-    ) -> (Arc<HandlerContext>, Arc<crate::initiatives::PlanRegistry>,
-          Arc<raxis_test_support::FakeAuditSink>) {
+    ) -> (
+        Arc<HandlerContext>,
+        Arc<crate::initiatives::PlanRegistry>,
+        Arc<raxis_test_support::FakeAuditSink>,
+    ) {
         let tmp_dir = tempfile::tempdir().expect("tempdir");
         let sink = Arc::new(raxis_test_support::FakeAuditSink::new());
-        let credentials = crate::ipc::context::build_default_test_credentials(
-            tmp_dir.path(), sink.clone(),
-        );
+        let credentials =
+            crate::ipc::context::build_default_test_credentials(tmp_dir.path(), sink.clone());
         let isolation = crate::ipc::context::build_fail_closed_test_isolation();
         let orchestrator_spawn = crate::ipc::context::build_test_orchestrator_spawn();
         let domain = crate::ipc::context::build_default_test_domain(tmp_dir.path());
@@ -9704,21 +10261,22 @@ mod tests {
                           'Orchestrator', 1)"
             ),
             rusqlite::params![dummy_session_id().as_str(), now, now + 86_400],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// Insert an initiative + task + Failed activation row + plan
     /// registry entry so the retry handler has a complete substrate
     /// to operate on.
     fn seed_failed_executor_for_retry(
-        store:           &Store,
-        registry:        &crate::initiatives::PlanRegistry,
-        task_id:         &str,
-        crash_count:     u32,
-        review_count:    u32,
-        max_crash:       Option<u32>,
-        max_review:      Option<u32>,
-        prior_session:   Option<&str>,
+        store: &Store,
+        registry: &crate::initiatives::PlanRegistry,
+        task_id: &str,
+        crash_count: u32,
+        review_count: u32,
+        max_crash: Option<u32>,
+        max_review: Option<u32>,
+        prior_session: Option<&str>,
     ) -> String {
         let initiative_id = "init-retry";
         let conn = store.lock_sync();
@@ -9729,8 +10287,8 @@ mod tests {
         // 1-second clock resolution the seed and the new row would
         // otherwise collide, leaving ordering up to the random
         // activation_id UUID and producing a flaky test.
-        let now_real    = unix_now_secs();
-        let prior_now   = now_real.saturating_sub(60);
+        let now_real = unix_now_secs();
+        let prior_now = now_real.saturating_sub(60);
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO {INITIATIVES}
@@ -9743,7 +10301,8 @@ mod tests {
                 InitiativeState::Executing.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         // Task row in `Failed` (the retry handler resets it to
         // `Admitted`). Use the kernel-store DDL field shape.
         conn.execute(
@@ -9760,7 +10319,8 @@ mod tests {
                 TaskState::Failed.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         // Optionally seed a prior session row so the retry path
         // exercises `sessions.revoked` mutation + audit emit.
         if let Some(prior_sid) = prior_session {
@@ -9776,10 +10336,13 @@ mod tests {
                               'Executor', 0)"
                 ),
                 rusqlite::params![
-                    prior_sid, format!("tok-{prior_sid}"),
-                    prior_now, prior_now + 86_400,
+                    prior_sid,
+                    format!("tok-{prior_sid}"),
+                    prior_now,
+                    prior_now + 86_400,
                 ],
-            ).unwrap();
+            )
+            .unwrap();
         }
         let prior_activation_id = uuid::Uuid::new_v4().to_string();
         // Failed activation row — terminal state; both timestamps
@@ -9805,15 +10368,14 @@ mod tests {
                 review_count as i64,
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         registry.insert(
-            crate::initiatives::plan_registry::TaskKey::new(
-                initiative_id, task_id,
-            ),
+            crate::initiatives::plan_registry::TaskKey::new(initiative_id, task_id),
             crate::initiatives::plan_registry::TaskPlanFields {
-                description:           "retry test fixture".to_owned(),
-                max_crash_retries:     max_crash,
+                description: "retry test fixture".to_owned(),
+                max_crash_retries: max_crash,
                 max_review_rejections: max_review,
                 ..Default::default()
             },
@@ -9839,16 +10401,16 @@ mod tests {
     /// so an accidental "retry a successful task" intent stays
     /// closed off.
     fn seed_completed_review_rejected_executor_for_retry(
-        store:           &Store,
-        registry:        &crate::initiatives::PlanRegistry,
-        task_id:         &str,
-        review_count:    u32,
-        max_review:      Option<u32>,
+        store: &Store,
+        registry: &crate::initiatives::PlanRegistry,
+        task_id: &str,
+        review_count: u32,
+        max_review: Option<u32>,
     ) -> String {
         let initiative_id = "init-retry";
         let conn = store.lock_sync();
-        let now_real    = unix_now_secs();
-        let prior_now   = now_real.saturating_sub(60);
+        let now_real = unix_now_secs();
+        let prior_now = now_real.saturating_sub(60);
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO {INITIATIVES}
@@ -9861,7 +10423,8 @@ mod tests {
                 InitiativeState::Executing.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         // Task row in `Completed` — the executor task-FSM stays
         // Completed regardless of review verdict (Option-A semantic
         // anchor). The retry handler resets it back to `Admitted`
@@ -9880,7 +10443,8 @@ mod tests {
                 TaskState::Completed.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let prior_activation_id = uuid::Uuid::new_v4().to_string();
         // `Completed` activation row — both timestamps populated;
         // `session_id` NULL because the cascade revokes the prior
@@ -9903,15 +10467,14 @@ mod tests {
                 review_count as i64,
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         registry.insert(
-            crate::initiatives::plan_registry::TaskKey::new(
-                initiative_id, task_id,
-            ),
+            crate::initiatives::plan_registry::TaskKey::new(initiative_id, task_id),
             crate::initiatives::plan_registry::TaskPlanFields {
-                description:           "completed-review-rejected fixture".to_owned(),
-                max_crash_retries:     None,
+                description: "completed-review-rejected fixture".to_owned(),
+                max_crash_retries: None,
                 max_review_rejections: max_review,
                 ..Default::default()
             },
@@ -9934,16 +10497,16 @@ mod tests {
     /// admit revoked it (the new PendingActivation row has not been
     /// bound to a session yet — that happens at `ActivateSubTask`).
     fn seed_pending_activation_after_retry_admit_for_retry(
-        store:           &Store,
-        registry:        &crate::initiatives::PlanRegistry,
-        task_id:         &str,
-        review_count:    u32,
-        max_review:      Option<u32>,
+        store: &Store,
+        registry: &crate::initiatives::PlanRegistry,
+        task_id: &str,
+        review_count: u32,
+        max_review: Option<u32>,
     ) -> String {
         let initiative_id = "init-retry";
         let conn = store.lock_sync();
-        let now_real    = unix_now_secs();
-        let prior_now   = now_real.saturating_sub(60);
+        let now_real = unix_now_secs();
+        let prior_now = now_real.saturating_sub(60);
         conn.execute(
             &format!(
                 "INSERT OR IGNORE INTO {INITIATIVES}
@@ -9956,7 +10519,8 @@ mod tests {
                 InitiativeState::Executing.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         // Task FSM is `Admitted` — the prior `RetrySubTask` admit
         // reset it (per Step 2e of `handle_retry_sub_task`) so the
         // follow-up `ActivateSubTask` is dispatch-legal. The fresh
@@ -9976,7 +10540,8 @@ mod tests {
                 TaskState::Admitted.as_sql_str(),
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         let prior_activation_id = uuid::Uuid::new_v4().to_string();
         // `PendingActivation` activation row — only `created_at` is
         // populated (`activated_at` and `terminated_at` are NULL
@@ -10002,15 +10567,14 @@ mod tests {
                 review_count as i64,
                 prior_now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         registry.insert(
-            crate::initiatives::plan_registry::TaskKey::new(
-                initiative_id, task_id,
-            ),
+            crate::initiatives::plan_registry::TaskKey::new(initiative_id, task_id),
             crate::initiatives::plan_registry::TaskPlanFields {
-                description:           "iter48-pending-activation fixture".to_owned(),
-                max_crash_retries:     None,
+                description: "iter48-pending-activation fixture".to_owned(),
+                max_crash_retries: None,
                 max_review_rejections: max_review,
                 ..Default::default()
             },
@@ -10023,21 +10587,21 @@ mod tests {
     /// the handler ignores.
     fn make_retry_request(task_id: &str, seq: u64) -> IntentRequest {
         IntentRequest {
-            session_token:   "tok-orch".into(),
+            session_token: "tok-orch".into(),
             sequence_number: seq,
-            envelope_nonce:  format!("{:0>32}", seq),
-            intent_kind:     IntentKind::RetrySubTask,
-            task_id:         raxis_types::TaskId::parse(task_id).unwrap(),
-            base_sha:        None,
-            head_sha:        None,
+            envelope_nonce: format!("{:0>32}", seq),
+            intent_kind: IntentKind::RetrySubTask,
+            task_id: raxis_types::TaskId::parse(task_id).unwrap(),
+            base_sha: None,
+            head_sha: None,
             submitted_claims: vec![],
-            justification:   None,
+            justification: None,
             idempotency_key: None,
-            approval_token:  None,
-            approved:        None,
-            critique:        None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:     None,
+            tokens_used: None,
             structured_output: None,
         }
     }
@@ -10049,19 +10613,19 @@ mod tests {
     /// type to type-check.
     fn dummy_orchestrator_session_row() -> authority::session::SessionRow {
         authority::session::SessionRow {
-            session_id:         dummy_session_id().as_str().to_owned(),
-            role:               "Orchestrator".to_owned(),
-            session_token:      "tok-orch".to_owned(),
-            sequence_number:    0,
-            worktree_root:      None,
-            base_sha:           None,
-            base_tracking_ref:  None,
-            lineage_id:         "lineage-orch".to_owned(),
-            expires_at:         unix_now_secs() + 86_400,
-            revoked_at:         None,
+            session_id: dummy_session_id().as_str().to_owned(),
+            role: "Orchestrator".to_owned(),
+            session_token: "tok-orch".to_owned(),
+            sequence_number: 0,
+            worktree_root: None,
+            base_sha: None,
+            base_tracking_ref: None,
+            lineage_id: "lineage-orch".to_owned(),
+            expires_at: unix_now_secs() + 86_400,
+            revoked_at: None,
             session_agent_type: Some(raxis_types::SessionAgentType::Orchestrator),
-            can_delegate:       true,
-            initiative_id:      None,
+            can_delegate: true,
+            initiative_id: None,
         }
     }
 
@@ -10071,32 +10635,37 @@ mod tests {
     /// `tokio::sync::Mutex::blocking_lock` — panics on the worker
     /// pool). Every retry-handler test runs on a multi-threaded
     /// runtime, so this is the only safe pattern.
-    async fn read_activations(store: Arc<Store>, task_id: &str)
-        -> Vec<(String, String, Option<String>, i64, i64)>
-    {
+    async fn read_activations(
+        store: Arc<Store>,
+        task_id: &str,
+    ) -> Vec<(String, String, Option<String>, i64, i64)> {
         let task_id = task_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
-            let mut stmt = conn.prepare(
-                &format!(
+            let mut stmt = conn
+                .prepare(&format!(
                     "SELECT activation_id, activation_state, session_id,
                             crash_retry_count, review_reject_count
                        FROM {SUBTASK_ACTIVATIONS}
                       WHERE task_id = ?1
                       ORDER BY created_at ASC, activation_id ASC"
-                ),
-            ).unwrap();
-            stmt.query_map(rusqlite::params![&task_id], |r| Ok((
+                ))
+                .unwrap();
+            stmt.query_map(rusqlite::params![&task_id], |r| {
+                Ok((
                     r.get::<_, String>(0)?,
                     r.get::<_, String>(1)?,
                     r.get::<_, Option<String>>(2)?,
                     r.get::<_, i64>(3)?,
                     r.get::<_, i64>(4)?,
-                )))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect()
-        }).await.unwrap()
+                ))
+            })
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect()
+        })
+        .await
+        .unwrap()
     }
 
     /// `sessions.revoked` flag, read on the blocking pool to avoid
@@ -10106,13 +10675,14 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             let conn = store.lock_sync();
             conn.query_row(
-                &format!(
-                    "SELECT revoked FROM {SESSIONS} WHERE session_id = ?1"
-                ),
+                &format!("SELECT revoked FROM {SESSIONS} WHERE session_id = ?1"),
                 rusqlite::params![&session_id],
                 |r| r.get::<_, i64>(0),
-            ).unwrap()
-        }).await.unwrap()
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     /// Read `tasks.state` for `task_id` on the blocking pool —
@@ -10125,8 +10695,11 @@ mod tests {
                 &format!("SELECT state FROM {TASKS} WHERE task_id = ?1"),
                 rusqlite::params![&task_id],
                 |r| r.get::<_, String>(0),
-            ).unwrap()
-        }).await.unwrap()
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     /// Happy path: prior activation is Failed with both counters
@@ -10145,12 +10718,18 @@ mod tests {
         let prior_activation_id = tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_failed_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
-                "exe-retry", /*crash*/ 1, /*review*/ 1,
-                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-retry",
+                /*crash*/ 1,
+                /*review*/ 1,
+                /*max_crash*/ Some(3),
+                /*max_review*/ Some(2),
                 /*prior_session*/ Some("11111111-2222-3333-4444-555555555555"),
             )
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-retry", 1);
         let resp = handle_retry_sub_task(
@@ -10159,46 +10738,66 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect("retry under budget must succeed");
+        )
+        .await
+        .expect("retry under budget must succeed");
 
-        assert_eq!(resp.task_state, TaskState::Admitted,
+        assert_eq!(
+            resp.task_state,
+            TaskState::Admitted,
             "retry resets tasks.state to Admitted so a subsequent \
-             ActivateSubTask can dispatch");
+             ActivateSubTask can dispatch"
+        );
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
 
         let activations = read_activations(store.clone(), "exe-retry").await;
-        assert_eq!(activations.len(), 2,
+        assert_eq!(
+            activations.len(),
+            2,
             "retry must INSERT a new row, never UPDATE the prior — \
-             one Failed (prior) + one PendingActivation (new) = 2");
+             one Failed (prior) + one PendingActivation (new) = 2"
+        );
         // Order is by created_at; the prior row was seeded first.
-        assert_eq!(activations[0].0, prior_activation_id,
-            "prior row must be the older one in created_at order");
-        assert_eq!(activations[0].1, "Failed",
-            "prior row state must remain Failed (immutable history)");
-        assert_eq!(activations[1].1, "PendingActivation",
+        assert_eq!(
+            activations[0].0, prior_activation_id,
+            "prior row must be the older one in created_at order"
+        );
+        assert_eq!(
+            activations[0].1, "Failed",
+            "prior row state must remain Failed (immutable history)"
+        );
+        assert_eq!(
+            activations[1].1, "PendingActivation",
             "new row state must be PendingActivation \
-             (the spawn handoff lands on `ActivateSubTask`)");
-        assert!(activations[1].2.is_none(),
-            "new PendingActivation row must have NULL session_id");
-        assert_eq!(activations[1].3, 1,
-            "new row must carry crash_retry_count=1 forward verbatim");
-        assert_eq!(activations[1].4, 1,
-            "new row must carry review_reject_count=1 forward verbatim");
+             (the spawn handoff lands on `ActivateSubTask`)"
+        );
+        assert!(
+            activations[1].2.is_none(),
+            "new PendingActivation row must have NULL session_id"
+        );
+        assert_eq!(
+            activations[1].3, 1,
+            "new row must carry crash_retry_count=1 forward verbatim"
+        );
+        assert_eq!(
+            activations[1].4, 1,
+            "new row must carry review_reject_count=1 forward verbatim"
+        );
 
         // Task FSM was Failed; retry resets it.
         let task_state = read_task_state(store.clone(), "exe-retry").await;
-        assert_eq!(task_state, TaskState::Admitted.as_sql_str(),
+        assert_eq!(
+            task_state,
+            TaskState::Admitted.as_sql_str(),
             "retry must reset tasks.state Failed → Admitted so the \
-             Phase A task-state gate accepts the subsequent ActivateSubTask");
+             Phase A task-state gate accepts the subsequent ActivateSubTask"
+        );
 
         // Prior session must be revoked (regardless of whether the
         // best-effort VM teardown succeeded — the SQL revoke is the
         // load-bearing mutation).
         assert_eq!(
-            read_session_revoked(
-                store.clone(),
-                "11111111-2222-3333-4444-555555555555",
-            ).await,
+            read_session_revoked(store.clone(), "11111111-2222-3333-4444-555555555555",).await,
             1,
             "retry must SQL-revoke the prior session so its token \
              cannot be replayed by a stale planner",
@@ -10217,13 +10816,18 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_failed_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-crash-ceiling",
-                /*crash*/ 3, /*review*/ 0,
-                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                /*crash*/ 3,
+                /*review*/ 0,
+                /*max_crash*/ Some(3),
+                /*max_review*/ Some(2),
                 /*prior_session*/ None,
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-crash-ceiling", 1);
         let err = handle_retry_sub_task(
@@ -10232,13 +10836,20 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err("crash_retry_count == max_crash_retries must reject");
-        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
-            "spec wire surface on RetrySubTask ceiling: FAIL_INVALID_REQUEST");
+        )
+        .await
+        .expect_err("crash_retry_count == max_crash_retries must reject");
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::InvalidRequest,
+            "spec wire surface on RetrySubTask ceiling: FAIL_INVALID_REQUEST"
+        );
 
         // No new activation row inserted.
         assert_eq!(
-            read_activations(store.clone(), "exe-crash-ceiling").await.len(),
+            read_activations(store.clone(), "exe-crash-ceiling")
+                .await
+                .len(),
             1,
             "rejected retry must NOT insert a new activation row",
         );
@@ -10258,13 +10869,18 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_failed_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-review-ceiling",
-                /*crash*/ 0, /*review*/ 2,
-                /*max_crash*/ Some(3), /*max_review*/ Some(2),
+                /*crash*/ 0,
+                /*review*/ 2,
+                /*max_crash*/ Some(3),
+                /*max_review*/ Some(2),
                 /*prior_session*/ None,
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-review-ceiling", 1);
         let err = handle_retry_sub_task(
@@ -10273,11 +10889,15 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err("review_reject_count == max_review_rejections must reject");
+        )
+        .await
+        .expect_err("review_reject_count == max_review_rejections must reject");
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
 
         assert_eq!(
-            read_activations(store.clone(), "exe-review-ceiling").await.len(),
+            read_activations(store.clone(), "exe-review-ceiling")
+                .await
+                .len(),
             1,
         );
     }
@@ -10301,13 +10921,18 @@ mod tests {
             // 1 / 1 is well under both defaults, so the retry must
             // succeed.
             seed_failed_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-default",
-                /*crash*/ 1, /*review*/ 1,
-                /*max_crash*/ None, /*max_review*/ None,
+                /*crash*/ 1,
+                /*review*/ 1,
+                /*max_crash*/ None,
+                /*max_review*/ None,
                 /*prior_session*/ None,
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-default", 1);
         let resp = handle_retry_sub_task(
@@ -10316,7 +10941,9 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect("retry under kernel default budget must succeed");
+        )
+        .await
+        .expect("retry under kernel default budget must succeed");
         assert_eq!(resp.task_state, TaskState::Admitted);
         assert_eq!(
             read_activations(store.clone(), "exe-default").await.len(),
@@ -10350,10 +10977,9 @@ mod tests {
                          plan_artifact_sha256, created_at)
                      VALUES ('init-retry', ?1, '{{}}', 'deadbeef', ?2)"
                 ),
-                rusqlite::params![
-                    InitiativeState::Executing.as_sql_str(), now,
-                ],
-            ).unwrap();
+                rusqlite::params![InitiativeState::Executing.as_sql_str(), now,],
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {TASKS}
@@ -10364,7 +10990,8 @@ mod tests {
                              'kernel', 1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Running.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             // Active row REQUIRES session_id IS NOT NULL per the
             // cross-column CHECK; seed a session row first.
             conn.execute(
@@ -10380,7 +11007,8 @@ mod tests {
                               'Executor', 0)"
                 ),
                 rusqlite::params![now, now + 86_400],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {SUBTASK_ACTIVATIONS}
@@ -10392,21 +11020,20 @@ mod tests {
                              '22222222-3333-4444-5555-666666666666', NULL,
                              0, 0, ?2, ?2, NULL)"
                 ),
-                rusqlite::params![
-                    uuid::Uuid::new_v4().to_string(), now,
-                ],
-            ).unwrap();
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), now,],
+            )
+            .unwrap();
             drop(conn);
             registry_for_seed.insert(
-                crate::initiatives::plan_registry::TaskKey::new(
-                    "init-retry", "exe-active",
-                ),
+                crate::initiatives::plan_registry::TaskKey::new("init-retry", "exe-active"),
                 crate::initiatives::plan_registry::TaskPlanFields {
                     description: "active fixture".to_owned(),
                     ..Default::default()
                 },
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-active", 1);
         let err = handle_retry_sub_task(
@@ -10415,10 +11042,15 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err("retry against an Active activation must reject");
-        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+        )
+        .await
+        .expect_err("retry against an Active activation must reject");
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::InvalidRequest,
             "Active prior state surfaces as INVALID_REQUEST \
-             (the spec's coarse code for a retry against a non-Failed row)");
+             (the spec's coarse code for a retry against a non-Failed row)"
+        );
     }
 
     /// Missing registry entry (plan-bundle-sealing didn't see this
@@ -10446,10 +11078,9 @@ mod tests {
                          plan_artifact_sha256, created_at)
                      VALUES ('init-retry', ?1, '{{}}', 'deadbeef', ?2)"
                 ),
-                rusqlite::params![
-                    InitiativeState::Executing.as_sql_str(), now,
-                ],
-            ).unwrap();
+                rusqlite::params![InitiativeState::Executing.as_sql_str(), now,],
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {TASKS}
@@ -10460,7 +11091,8 @@ mod tests {
                              'kernel', 1, ?2, ?2, 0)"
                 ),
                 rusqlite::params![TaskState::Failed.as_sql_str(), now],
-            ).unwrap();
+            )
+            .unwrap();
             // Activation row exists but registry entry doesn't.
             conn.execute(
                 &format!(
@@ -10472,11 +11104,12 @@ mod tests {
                      VALUES (?1, 'exe-orphan', 'init-retry', 'Failed',
                              NULL, NULL, 0, 0, ?2, ?2, ?2)"
                 ),
-                rusqlite::params![
-                    uuid::Uuid::new_v4().to_string(), now,
-                ],
-            ).unwrap();
-        }).await.unwrap();
+                rusqlite::params![uuid::Uuid::new_v4().to_string(), now,],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-orphan", 1);
         let err = handle_retry_sub_task(
@@ -10485,11 +11118,16 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err("missing registry entry must reject");
-        assert_eq!(err.0, PlannerErrorCode::FailUnknownTask,
+        )
+        .await
+        .expect_err("missing registry entry must reject");
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::FailUnknownTask,
             "the registry-miss arm surfaces as FAIL_UNKNOWN_TASK \
              (the operator-facing handle for 'this task is not \
-             tracked' — defense-in-depth against fail-open)");
+             tracked' — defense-in-depth against fail-open)"
+        );
     }
 
     /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` — Option A
@@ -10521,12 +11159,15 @@ mod tests {
         let prior_activation_id = tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_completed_review_rejected_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-completed-rejected",
                 /*review_count*/ 1,
-                /*max_review*/  Some(3),
+                /*max_review*/ Some(3),
             )
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-completed-rejected", 1);
         let resp = handle_retry_sub_task(
@@ -10535,33 +11176,44 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect(
+        )
+        .await
+        .expect(
             "Completed activation + review_reject_count > 0 \
              must admit the retry per Option A",
         );
         assert_eq!(resp.task_state, TaskState::Admitted);
         assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
 
-        let activations = read_activations(
-            store.clone(), "exe-completed-rejected",
-        ).await;
-        assert_eq!(activations.len(), 2,
+        let activations = read_activations(store.clone(), "exe-completed-rejected").await;
+        assert_eq!(
+            activations.len(),
+            2,
             "retry-from-Completed MUST insert a new row, leaving \
-             the prior Completed row immutable (FSM forward-only)");
+             the prior Completed row immutable (FSM forward-only)"
+        );
         assert_eq!(activations[0].0, prior_activation_id);
-        assert_eq!(activations[0].1, "Completed",
+        assert_eq!(
+            activations[0].1, "Completed",
             "prior row state MUST remain Completed — Option A \
              explicitly forbids the backward Completed → Failed \
-             transition that Option B would have required");
-        assert_eq!(activations[1].1, "PendingActivation",
+             transition that Option B would have required"
+        );
+        assert_eq!(
+            activations[1].1, "PendingActivation",
             "new row state MUST be PendingActivation (the spawn \
-             handoff lands on `ActivateSubTask`)");
-        assert!(activations[1].2.is_none(),
-            "new PendingActivation row MUST have NULL session_id");
-        assert_eq!(activations[1].4, 1,
+             handoff lands on `ActivateSubTask`)"
+        );
+        assert!(
+            activations[1].2.is_none(),
+            "new PendingActivation row MUST have NULL session_id"
+        );
+        assert_eq!(
+            activations[1].4, 1,
             "new row MUST carry review_reject_count = 1 forward \
              from the prior row (the counter is denormalised; \
-             handle_retry_sub_task itself does NOT bump)");
+             handle_retry_sub_task itself does NOT bump)"
+        );
 
         // Audit anchor — the new event variant the witness matches
         // on. Distinct from `SessionVmSpawned` (which fires on EVERY
@@ -10572,30 +11224,43 @@ mod tests {
         // variant tag AND the payload shape so a future refactor
         // that renames the event silently breaks here.
         let events = sink.events();
-        let respawn = events.iter().find(|e| matches!(
-            &e.kind,
-            raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection { .. },
-        )).expect(
-            "Option-A retry path MUST emit \
+        let respawn = events
+            .iter()
+            .find(|e| {
+                matches!(
+                    &e.kind,
+                    raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection { .. },
+                )
+            })
+            .expect(
+                "Option-A retry path MUST emit \
              ExecutorRespawnFromReviewRejection — without this anchor \
              the realistic-scenario witness cannot disambiguate \
              retry-after-review from retry-after-crash",
-        );
+            );
         match &respawn.kind {
             raxis_audit_tools::AuditEventKind::ExecutorRespawnFromReviewRejection {
-                task_id, prior_activation_id: ev_prior, new_activation_id: ev_new,
+                task_id,
+                prior_activation_id: ev_prior,
+                new_activation_id: ev_new,
                 review_reject_count,
             } => {
                 assert_eq!(task_id, "exe-completed-rejected");
-                assert_eq!(ev_prior, &prior_activation_id,
+                assert_eq!(
+                    ev_prior, &prior_activation_id,
                     "audit payload MUST quote the actual prior activation id, \
-                     not a fresh uuid — forensic replay relies on it");
-                assert_eq!(ev_new, &activations[1].0,
+                     not a fresh uuid — forensic replay relies on it"
+                );
+                assert_eq!(
+                    ev_new, &activations[1].0,
                     "audit payload MUST quote the activation_id of the new \
-                     PendingActivation row");
-                assert_eq!(*review_reject_count, 1,
+                     PendingActivation row"
+                );
+                assert_eq!(
+                    *review_reject_count, 1,
                     "audit payload MUST carry the round-of-rejection counter \
-                     (the value at admission time, not post-bump)");
+                     (the value at admission time, not post-bump)"
+                );
             }
             _ => unreachable!(),
         }
@@ -10641,12 +11306,15 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_completed_review_rejected_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-completed-clean",
                 /*review_count*/ 0,
-                /*max_review*/  Some(3),
+                /*max_review*/ Some(3),
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-completed-clean", 1);
         let err = handle_retry_sub_task(
@@ -10655,19 +11323,26 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err(
+        )
+        .await
+        .expect_err(
             "retry from clean Completed (review_reject_count = 0) \
              MUST be rejected — Option A only relaxes the precondition \
              when a Reviewer has actually rejected the round",
         );
-        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::InvalidRequest,
             "wire surface: FAIL_INVALID_REQUEST (the same code as \
              a retry against an Active or PendingActivation prior row \
              — Option A is strictly additive, never widens the \
-             coarse code set)");
+             coarse code set)"
+        );
 
         assert_eq!(
-            read_activations(store.clone(), "exe-completed-clean").await.len(),
+            read_activations(store.clone(), "exe-completed-clean")
+                .await
+                .len(),
             1,
             "rejected retry MUST NOT insert a new activation row",
         );
@@ -10722,12 +11397,15 @@ mod tests {
         let prior_activation_id = tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_pending_activation_after_retry_admit_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-pending-retry",
                 /*review_count*/ 1,
-                /*max_review*/  Some(3),
+                /*max_review*/ Some(3),
             )
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-pending-retry", 1);
         let err = handle_retry_sub_task(
@@ -10736,7 +11414,9 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err(
+        )
+        .await
+        .expect_err(
             "iter54 (INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01): \
              PendingActivation + review_reject_count > 0 MUST be \
              rejected so the KSB retry_admissible projection lines \
@@ -10744,25 +11424,33 @@ mod tests {
              LLM (call activate_subtask against the existing pending \
              row, not another retry_subtask)",
         );
-        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::InvalidRequest,
             "wire surface: FAIL_INVALID_REQUEST (the same coarse code \
              as every other NotRetryable rejection — iter54 narrows \
-             the admit-set, never widens the coarse code set)");
+             the admit-set, never widens the coarse code set)"
+        );
 
-        let activations = read_activations(
-            store.clone(), "exe-pending-retry",
-        ).await;
-        assert_eq!(activations.len(), 1,
+        let activations = read_activations(store.clone(), "exe-pending-retry").await;
+        assert_eq!(
+            activations.len(),
+            1,
             "iter54 rejection MUST NOT insert a new activation row \
              — the prior PendingActivation row IS the retry; the \
-             orchestrator must call activate_subtask against it");
+             orchestrator must call activate_subtask against it"
+        );
         assert_eq!(activations[0].0, prior_activation_id);
-        assert_eq!(activations[0].1, "PendingActivation",
-            "prior row state MUST remain PendingActivation, untouched");
-        assert_eq!(activations[0].4, 1,
+        assert_eq!(
+            activations[0].1, "PendingActivation",
+            "prior row state MUST remain PendingActivation, untouched"
+        );
+        assert_eq!(
+            activations[0].4, 1,
             "prior row's review_reject_count MUST remain 1 \
              (handle_retry_sub_task neither bumps nor resets on a \
-             rejection)");
+             rejection)"
+        );
 
         // Audit silence: the rejection path must NOT emit
         // `ExecutorRespawnFromReviewRejection` (that's the admission
@@ -10820,12 +11508,15 @@ mod tests {
         tokio::task::spawn_blocking(move || {
             seed_orchestrator_session(&store_for_seed);
             seed_pending_activation_after_retry_admit_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-pending-clean",
                 /*review_count*/ 0,
-                /*max_review*/  Some(3),
+                /*max_review*/ Some(3),
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-pending-clean", 1);
         let err = handle_retry_sub_task(
@@ -10834,20 +11525,27 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err(
+        )
+        .await
+        .expect_err(
             "retry from clean PendingActivation \
              (review_reject_count = 0) MUST be rejected — the \
              iter48 extension only relaxes the precondition when \
              a Reviewer has actually rejected the trajectory",
         );
-        assert_eq!(err.0, PlannerErrorCode::InvalidRequest,
+        assert_eq!(
+            err.0,
+            PlannerErrorCode::InvalidRequest,
             "wire surface: FAIL_INVALID_REQUEST (the same code as \
              a retry against a brand-new round-1 PendingActivation \
              — the iter48 extension is strictly additive, never \
-             widens the coarse code set)");
+             widens the coarse code set)"
+        );
 
         assert_eq!(
-            read_activations(store.clone(), "exe-pending-clean").await.len(),
+            read_activations(store.clone(), "exe-pending-clean")
+                .await
+                .len(),
             1,
             "rejected retry MUST NOT insert a new activation row",
         );
@@ -10871,29 +11569,41 @@ mod tests {
         let registry_for_seed = registry.clone();
         tokio::task::spawn_blocking(move || {
             seed_completed_review_rejected_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
-                "exe-bump", /*review*/ 0, /*max_review*/ Some(3),
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-bump",
+                /*review*/ 0,
+                /*max_review*/ Some(3),
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let store_for_bump = store.clone();
         let affected = tokio::task::spawn_blocking(move || {
-            increment_executor_review_reject_count(
-                "exe-bump", store_for_bump.as_ref(),
-            )
-        }).await.unwrap().expect("bump SQL must succeed");
-        assert_eq!(affected, 1,
+            increment_executor_review_reject_count("exe-bump", store_for_bump.as_ref())
+        })
+        .await
+        .unwrap()
+        .expect("bump SQL must succeed");
+        assert_eq!(
+            affected, 1,
             "the MOST-RECENT activation row (Completed with non-NULL \
              terminated_at) MUST be the bump target — the pre-fix \
-             `terminated_at IS NULL` filter would have returned 0");
+             `terminated_at IS NULL` filter would have returned 0"
+        );
 
         let activations = read_activations(store.clone(), "exe-bump").await;
         assert_eq!(activations.len(), 1);
-        assert_eq!(activations[0].1, "Completed",
+        assert_eq!(
+            activations[0].1, "Completed",
             "the bump MUST NOT mutate activation_state — only the \
-             counter column moves (Option A: forward-only FSM)");
-        assert_eq!(activations[0].4, 1,
-            "review_reject_count MUST be 1 after the bump");
+             counter column moves (Option A: forward-only FSM)"
+        );
+        assert_eq!(
+            activations[0].4, 1,
+            "review_reject_count MUST be 1 after the bump"
+        );
 
         // Idempotency-of-shape check: a second bump (representing
         // a second round of rejection on the same activation —
@@ -10901,15 +11611,13 @@ mod tests {
         // by exactly 1 more.
         let store_for_bump2 = store.clone();
         let affected2 = tokio::task::spawn_blocking(move || {
-            increment_executor_review_reject_count(
-                "exe-bump", store_for_bump2.as_ref(),
-            )
-        }).await.unwrap().expect("second bump SQL must succeed");
+            increment_executor_review_reject_count("exe-bump", store_for_bump2.as_ref())
+        })
+        .await
+        .unwrap()
+        .expect("second bump SQL must succeed");
         assert_eq!(affected2, 1);
-        assert_eq!(
-            read_activations(store.clone(), "exe-bump").await[0].4,
-            2,
-        );
+        assert_eq!(read_activations(store.clone(), "exe-bump").await[0].4, 2,);
     }
 
     /// Counter-no-op regression guard — multi-activation variant.
@@ -10928,10 +11636,11 @@ mod tests {
         let registry_for_seed = registry.clone();
         let (round1_id, round2_id) = tokio::task::spawn_blocking(move || {
             let r1 = seed_completed_review_rejected_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-two-rounds",
                 /*review_count*/ 1, // round-1 already rejected
-                /*max_review*/  Some(5),
+                /*max_review*/ Some(5),
             );
             // Manually insert a round-2 PendingActivation row with
             // a strictly-later `created_at` so the SELECT-by-
@@ -10952,29 +11661,40 @@ mod tests {
                              0, 1, ?2, NULL, NULL)"
                 ),
                 rusqlite::params![&r2, now],
-            ).unwrap();
+            )
+            .unwrap();
             drop(conn);
             (r1, r2)
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let store_for_bump = store.clone();
         tokio::task::spawn_blocking(move || {
-            increment_executor_review_reject_count(
-                "exe-two-rounds", store_for_bump.as_ref(),
-            )
-        }).await.unwrap().expect("bump SQL must succeed");
+            increment_executor_review_reject_count("exe-two-rounds", store_for_bump.as_ref())
+        })
+        .await
+        .unwrap()
+        .expect("bump SQL must succeed");
 
         let activations = read_activations(store.clone(), "exe-two-rounds").await;
-        let by_id: std::collections::HashMap<_, _> = activations.into_iter()
+        let by_id: std::collections::HashMap<_, _> = activations
+            .into_iter()
             .map(|(id, state, _sess, _crash, rev)| (id, (state, rev)))
             .collect();
-        assert_eq!(by_id.get(&round1_id).unwrap().1, 1,
+        assert_eq!(
+            by_id.get(&round1_id).unwrap().1,
+            1,
             "round-1 Completed row's counter MUST stay 1 (historical \
-             round; never re-bumped by a subsequent round's rejection)");
-        assert_eq!(by_id.get(&round2_id).unwrap().1, 2,
+             round; never re-bumped by a subsequent round's rejection)"
+        );
+        assert_eq!(
+            by_id.get(&round2_id).unwrap().1,
+            2,
             "round-2 PendingActivation row's counter MUST be bumped \
              from 1 (carried forward at admission) to 2 (this round's \
-             rejection) — the per-round counter semantic");
+             rejection) — the per-round counter semantic"
+        );
     }
 
     /// Explicit `Some(0)` ceiling: operator says "no retries
@@ -10993,13 +11713,18 @@ mod tests {
             // hide this; pinning the explicit zero confirms the
             // `Option` semantics carry through to the handler.
             seed_failed_executor_for_retry(
-                &store_for_seed, &registry_for_seed,
+                &store_for_seed,
+                &registry_for_seed,
                 "exe-zero-ceiling",
-                /*crash*/ 0, /*review*/ 0,
-                /*max_crash*/ Some(0), /*max_review*/ Some(0),
+                /*crash*/ 0,
+                /*review*/ 0,
+                /*max_crash*/ Some(0),
+                /*max_review*/ Some(0),
                 /*prior_session*/ None,
             );
-        }).await.unwrap();
+        })
+        .await
+        .unwrap();
 
         let req = make_retry_request("exe-zero-ceiling", 1);
         let err = handle_retry_sub_task(
@@ -11008,7 +11733,9 @@ mod tests {
             dummy_session_id(),
             1,
             &ctx,
-        ).await.expect_err("explicit zero ceiling must reject every retry");
+        )
+        .await
+        .expect_err("explicit zero ceiling must reject every retry");
         assert_eq!(err.0, PlannerErrorCode::InvalidRequest);
     }
 
@@ -11060,10 +11787,10 @@ mod tests {
     #[test]
     fn inv_kernel_dag_authority_01_activate_subtask_rejects_unsatisfied_predecessor() {
         let initiatives = raxis_store::Table::Initiatives.as_str();
-        let tasks       = raxis_store::Table::Tasks.as_str();
-        let edges       = raxis_store::Table::TaskDagEdges.as_str();
+        let tasks = raxis_store::Table::Tasks.as_str();
+        let edges = raxis_store::Table::TaskDagEdges.as_str();
 
-        let disk          = DiskStore::new();
+        let disk = DiskStore::new();
         let initiative_id = "init-dag-authority-01";
 
         // ── Seed: 1 initiative + 2 tasks (both Admitted) + edge A→B ──
@@ -11077,7 +11804,8 @@ mod tests {
                      VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
                 ),
                 rusqlite::params![initiative_id],
-            ).unwrap();
+            )
+            .unwrap();
             for tid in ["task-A", "task-B"] {
                 g.execute(
                     &format!(
@@ -11087,7 +11815,8 @@ mod tests {
                          VALUES (?1, ?2, 'lane-0', 'Admitted', 'op-0', 0, 100, 100)"
                     ),
                     rusqlite::params![tid, initiative_id],
-                ).unwrap();
+                )
+                .unwrap();
             }
             g.execute(
                 &format!(
@@ -11097,13 +11826,14 @@ mod tests {
                      VALUES (?1, 'task-A', 'task-B', 0)"
                 ),
                 rusqlite::params![initiative_id],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         // ── Phase 1: A=Admitted ⇒ B's predecessor query surfaces A. ──
         {
             let mut g = disk.store().lock_sync();
-            let tx    = g.transaction().unwrap();
+            let tx = g.transaction().unwrap();
             let missing = missing_predecessors_for_activation(&tx, "task-B")
                 .expect("predecessor query (A=Admitted)");
             assert_eq!(
@@ -11120,15 +11850,14 @@ mod tests {
         {
             let g = disk.store().lock_sync();
             g.execute(
-                &format!(
-                    "UPDATE {tasks} SET state = 'Completed' WHERE task_id = 'task-A'"
-                ),
+                &format!("UPDATE {tasks} SET state = 'Completed' WHERE task_id = 'task-A'"),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
         }
         {
             let mut g = disk.store().lock_sync();
-            let tx    = g.transaction().unwrap();
+            let tx = g.transaction().unwrap();
             let missing = missing_predecessors_for_activation(&tx, "task-B")
                 .expect("predecessor query (A=Completed)");
             assert!(
@@ -11148,10 +11877,10 @@ mod tests {
     #[test]
     fn inv_kernel_dag_authority_01_reports_every_unmet_predecessor() {
         let initiatives = raxis_store::Table::Initiatives.as_str();
-        let tasks       = raxis_store::Table::Tasks.as_str();
-        let edges       = raxis_store::Table::TaskDagEdges.as_str();
+        let tasks = raxis_store::Table::Tasks.as_str();
+        let edges = raxis_store::Table::TaskDagEdges.as_str();
 
-        let disk          = DiskStore::new();
+        let disk = DiskStore::new();
         let initiative_id = "init-dag-authority-fan-in";
 
         {
@@ -11164,7 +11893,8 @@ mod tests {
                      VALUES (?1, 'Executing', '{{}}', 'deadbeef', 100, 0)"
                 ),
                 rusqlite::params![initiative_id],
-            ).unwrap();
+            )
+            .unwrap();
             // A=Completed, B=Running, C=Admitted; successor D depends
             // on all three. Predecessor query for D MUST surface B
             // and C (the two non-Completed predecessors) and MUST
@@ -11183,7 +11913,8 @@ mod tests {
                          VALUES (?1, ?2, 'lane-0', ?3, 'op-0', 0, 100, 100)"
                     ),
                     rusqlite::params![tid, initiative_id, state],
-                ).unwrap();
+                )
+                .unwrap();
             }
             for pred in ["task-A", "task-B", "task-C"] {
                 g.execute(
@@ -11194,14 +11925,15 @@ mod tests {
                          VALUES (?1, ?2, 'task-D', 0)"
                     ),
                     rusqlite::params![initiative_id, pred],
-                ).unwrap();
+                )
+                .unwrap();
             }
         }
 
         let mut g = disk.store().lock_sync();
-        let tx    = g.transaction().unwrap();
-        let mut missing = missing_predecessors_for_activation(&tx, "task-D")
-            .expect("predecessor query");
+        let tx = g.transaction().unwrap();
+        let mut missing =
+            missing_predecessors_for_activation(&tx, "task-D").expect("predecessor query");
         // SQLite row order is `task_dag_edges` insertion order in
         // practice but is not guaranteed by the spec; sort so the
         // assertion is order-independent.
@@ -11218,5 +11950,4 @@ mod tests {
              record (A=Completed must NOT appear)",
         );
     }
-
 }

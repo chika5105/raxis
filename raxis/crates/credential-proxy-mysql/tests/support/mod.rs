@@ -196,10 +196,19 @@ async fn serve_one(
 async fn write_response(s: &mut TcpStream, resp: FakeResponse) -> std::io::Result<()> {
     match resp {
         FakeResponse::Ok { affected_rows } => {
-            s.write_all(&frame_packet(&build_ok_packet(affected_rows), 1)).await?;
+            s.write_all(&frame_packet(&build_ok_packet(affected_rows), 1))
+                .await?;
         }
-        FakeResponse::Err { code, sqlstate, message } => {
-            s.write_all(&frame_packet(&build_err_packet(code, &sqlstate, &message), 1)).await?;
+        FakeResponse::Err {
+            code,
+            sqlstate,
+            message,
+        } => {
+            s.write_all(&frame_packet(
+                &build_err_packet(code, &sqlstate, &message),
+                1,
+            ))
+            .await?;
         }
         FakeResponse::Rows { columns, rows } => {
             // ResultSetHeader: lenenc int = column count.
@@ -285,7 +294,7 @@ fn build_handshake_v10(scramble: &[u8; 20]) -> Vec<u8> {
     p.extend_from_slice(&1u32.to_le_bytes()); // thread_id
     p.extend_from_slice(&scramble[..8]); // scramble part 1
     p.push(0); // filler
-    // Capabilities (lower 16): PROTOCOL_41 + SECURE_CONNECTION + PLUGIN_AUTH.
+               // Capabilities (lower 16): PROTOCOL_41 + SECURE_CONNECTION + PLUGIN_AUTH.
     let cap_lower: u16 = (1 << 9) | (1 << 15) | 0;
     p.extend_from_slice(&cap_lower.to_le_bytes());
     p.push(0x2d); // charset utf8mb4
@@ -324,7 +333,11 @@ fn build_err_packet(code: u16, sqlstate: &str, message: &str) -> Vec<u8> {
     p.push(0xff);
     p.extend_from_slice(&code.to_le_bytes());
     p.push(b'#');
-    let ss = if sqlstate.len() == 5 { sqlstate.as_bytes() } else { b"HY000" };
+    let ss = if sqlstate.len() == 5 {
+        sqlstate.as_bytes()
+    } else {
+        b"HY000"
+    };
     p.extend_from_slice(ss);
     p.extend_from_slice(message.as_bytes());
     p
@@ -333,9 +346,9 @@ fn build_err_packet(code: u16, sqlstate: &str, message: &str) -> Vec<u8> {
 fn build_column_def(name: &str) -> Vec<u8> {
     let mut p = Vec::with_capacity(64 + name.len());
     put_lenenc_string(&mut p, b"def"); // catalog
-    put_lenenc_string(&mut p, b"");    // schema
-    put_lenenc_string(&mut p, b"");    // table
-    put_lenenc_string(&mut p, b"");    // org_table
+    put_lenenc_string(&mut p, b""); // schema
+    put_lenenc_string(&mut p, b""); // table
+    put_lenenc_string(&mut p, b""); // org_table
     put_lenenc_string(&mut p, name.as_bytes()); // name
     put_lenenc_string(&mut p, name.as_bytes()); // org_name
     p.push(0x0c); // length of fixed-length fields
@@ -349,7 +362,13 @@ fn build_column_def(name: &str) -> Vec<u8> {
 }
 
 fn build_text_row(values: &[Option<Vec<u8>>]) -> Vec<u8> {
-    let mut p = Vec::with_capacity(values.iter().map(|v| v.as_ref().map(|b| b.len()).unwrap_or(1)).sum::<usize>() + 16);
+    let mut p = Vec::with_capacity(
+        values
+            .iter()
+            .map(|v| v.as_ref().map(|b| b.len()).unwrap_or(1))
+            .sum::<usize>()
+            + 16,
+    );
     for v in values {
         match v {
             Some(bytes) => put_lenenc_string(&mut p, bytes),
@@ -384,14 +403,16 @@ fn parse_handshake_response_41(p: &[u8]) -> ParsedHandshakeResponse {
     // CLIENT_PLUGIN_AUTH_LENENC_CLIENT_DATA in the proxy's caps).
     if i >= p.len() {
         return ParsedHandshakeResponse {
-            user, ..Default::default()
+            user,
+            ..Default::default()
         };
     }
     let auth_len = p[i] as usize;
     i += 1;
     if i + auth_len > p.len() {
         return ParsedHandshakeResponse {
-            user, ..Default::default()
+            user,
+            ..Default::default()
         };
     }
     let auth_response = p[i..i + auth_len].to_vec();

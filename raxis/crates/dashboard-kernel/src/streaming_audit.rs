@@ -46,8 +46,8 @@
 
 use std::sync::Arc;
 
-use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink};
 use raxis_audit_tools::writer::AuditWriterError;
+use raxis_audit_tools::{AuditEvent, AuditEventKind, AuditSink};
 use raxis_dashboard::stream::StreamEvent;
 
 use crate::stream_capture::SessionStreamCapture;
@@ -59,7 +59,7 @@ use crate::stream_capture::SessionStreamCapture;
 /// resulting `Arc<dyn AuditSink>` everywhere the kernel
 /// expects an audit sink.
 pub struct StreamingAuditSink {
-    inner:   Arc<dyn AuditSink>,
+    inner: Arc<dyn AuditSink>,
     capture: Arc<SessionStreamCapture>,
 }
 
@@ -92,11 +92,7 @@ impl AuditSink for StreamingAuditSink {
 /// as a single-line warning) — the audit chain already
 /// captured the event durably, so dropping a live mirror only
 /// degrades the dashboard's freshness, not correctness.
-fn mirror_to_capture(
-    capture: &SessionStreamCapture,
-    session_id: &str,
-    event: &AuditEvent,
-) {
+fn mirror_to_capture(capture: &SessionStreamCapture, session_id: &str, event: &AuditEvent) {
     // Envelope shape mirrored to the FE matches
     // `dashboard-fe/src/types/api.ts::StreamEventEnvelope`:
     //   { at_ms, kind, payload: { seq, event_id, payload,
@@ -109,7 +105,7 @@ fn mirror_to_capture(
         at_ms: u128::from(event.emitted_at.max(0) as u64)
             .saturating_mul(1_000)
             .min(u128::from(u64::MAX)) as u64,
-        kind:  event.event_kind.clone(),
+        kind: event.event_kind.clone(),
         payload: serde_json::json!({
             "seq":           event.seq,
             "event_id":      event.event_id.to_string(),
@@ -135,11 +131,9 @@ mod tests {
     #[test]
     fn mirror_pushes_into_capture_when_session_id_present() {
         let tmp = tempfile::tempdir().unwrap();
-        let capture = SessionStreamCapture::new(
-            tmp.path(),
-            crate::stream_capture::CaptureConfig::default(),
-        )
-        .unwrap();
+        let capture =
+            SessionStreamCapture::new(tmp.path(), crate::stream_capture::CaptureConfig::default())
+                .unwrap();
         // Pre-allocate the session and grab a subscription so
         // we can observe the mirror.
         capture.ensure_session("sess-mirror").unwrap();
@@ -149,7 +143,9 @@ mod tests {
 
         let event = wrapped
             .emit(
-                AuditEventKind::KernelStopped { reason: "test".into() },
+                AuditEventKind::KernelStopped {
+                    reason: "test".into(),
+                },
                 Some("sess-mirror"),
                 None,
                 None,
@@ -162,8 +158,7 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().unwrap();
         let received = rt
             .block_on(async {
-                tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv())
-                    .await
+                tokio::time::timeout(std::time::Duration::from_secs(1), sub.recv()).await
             })
             .expect("recv timed out")
             .expect("recv error");
@@ -179,19 +174,17 @@ mod tests {
     #[test]
     fn no_mirror_when_session_id_is_none() {
         let tmp = tempfile::tempdir().unwrap();
-        let capture = SessionStreamCapture::new(
-            tmp.path(),
-            crate::stream_capture::CaptureConfig::default(),
-        )
-        .unwrap();
+        let capture =
+            SessionStreamCapture::new(tmp.path(), crate::stream_capture::CaptureConfig::default())
+                .unwrap();
         let inner: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
         let wrapped = StreamingAuditSink::new(inner, Arc::clone(&capture));
 
         wrapped
             .emit(
                 AuditEventKind::KernelStarted {
-                    data_dir:       "/tmp/x".into(),
-                    policy_epoch:   1,
+                    data_dir: "/tmp/x".into(),
+                    policy_epoch: 1,
                     schema_version: 1,
                 },
                 None,
@@ -211,31 +204,31 @@ mod tests {
     #[test]
     fn envelope_carries_seq_event_id_and_payload() {
         let evt = AuditEvent {
-            seq:           42,
+            seq: 42,
             // Round-trip a fixed UUID through the audit-tools'
             // own `Uuid` re-export so this test doesn't pull
             // in `uuid` as a direct dev-dep.
-            event_id:      serde_json::from_str::<AuditEvent>(
+            event_id: serde_json::from_str::<AuditEvent>(
                 "{\"seq\":0,\"event_id\":\"00000000-0000-0000-0000-000000000000\",\
                  \"event_kind\":\"X\",\"session_id\":null,\"task_id\":null,\
                  \"initiative_id\":null,\"payload\":null,\"emitted_at\":0,\
                  \"prev_sha256\":\"00000000000000000000000000000000000000000000000000000000000000\
-00\"}"
-            ).unwrap().event_id,
-            event_kind:    "TestKind".into(),
-            session_id:    Some("sess".into()),
-            task_id:       Some("task-1".into()),
+00\"}",
+            )
+            .unwrap()
+            .event_id,
+            event_kind: "TestKind".into(),
+            session_id: Some("sess".into()),
+            task_id: Some("task-1".into()),
             initiative_id: Some("init-1".into()),
-            payload:       serde_json::json!({"hello": "world"}),
-            emitted_at:    1_700_000_000,
-            prev_sha256:   "0".repeat(64),
+            payload: serde_json::json!({"hello": "world"}),
+            emitted_at: 1_700_000_000,
+            prev_sha256: "0".repeat(64),
         };
         let tmp = tempfile::tempdir().unwrap();
-        let capture = SessionStreamCapture::new(
-            tmp.path(),
-            crate::stream_capture::CaptureConfig::default(),
-        )
-        .unwrap();
+        let capture =
+            SessionStreamCapture::new(tmp.path(), crate::stream_capture::CaptureConfig::default())
+                .unwrap();
         capture.ensure_session("sess").unwrap();
         mirror_to_capture(&capture, "sess", &evt);
         let tail = capture.tail("sess", 4);

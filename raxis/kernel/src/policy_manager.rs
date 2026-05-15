@@ -39,8 +39,8 @@ use crate::prompt::EpochBinding;
 // strings — `DelegationStatus::*.as_sql_str()` flows through these queries
 // so any rename in `raxis-types` is caught at compile time, not at runtime.
 const POLICY_EPOCH_HISTORY: &str = Table::PolicyEpochHistory.as_str();
-const DELEGATIONS:          &str = Table::Delegations.as_str();
-const SESSIONS:             &str = Table::Sessions.as_str();
+const DELEGATIONS: &str = Table::Delegations.as_str();
+const SESSIONS: &str = Table::Sessions.as_str();
 
 // ---------------------------------------------------------------------------
 // PolicyError
@@ -101,15 +101,15 @@ impl PolicyError {
     /// these to render operator-friendly messages.
     pub fn error_code(&self) -> &'static str {
         match self {
-            PolicyError::SignatureInvalid { .. }            => "FAIL_POLICY_SIGNATURE_INVALID",
-            PolicyError::EpochReplay { .. }                 => "FAIL_POLICY_EPOCH_REPLAY",
-            PolicyError::MalformedArtifact { .. }           => "FAIL_POLICY_MALFORMED",
-            PolicyError::PathOutsideDataDir { .. }          => "FAIL_POLICY_PATH_OUTSIDE_DATA_DIR",
+            PolicyError::SignatureInvalid { .. } => "FAIL_POLICY_SIGNATURE_INVALID",
+            PolicyError::EpochReplay { .. } => "FAIL_POLICY_EPOCH_REPLAY",
+            PolicyError::MalformedArtifact { .. } => "FAIL_POLICY_MALFORMED",
+            PolicyError::PathOutsideDataDir { .. } => "FAIL_POLICY_PATH_OUTSIDE_DATA_DIR",
             PolicyError::PolicyArtifactAlreadyInstalled { .. } => {
                 "FAIL_POLICY_ARTIFACT_ALREADY_INSTALLED"
             }
-            PolicyError::StoreWriteFailed { .. }            => "FAIL_POLICY_STORE_WRITE",
-            PolicyError::ArtifactReadFailed { .. }          => "FAIL_POLICY_ARTIFACT_READ",
+            PolicyError::StoreWriteFailed { .. } => "FAIL_POLICY_STORE_WRITE",
+            PolicyError::ArtifactReadFailed { .. } => "FAIL_POLICY_ARTIFACT_READ",
         }
     }
 }
@@ -205,9 +205,9 @@ pub fn install_genesis_policy_epoch(
 /// of those bytes.
 #[derive(Debug)]
 pub struct VerifiedPolicyArtifact {
-    pub bundle:       PolicyBundle,
-    pub raw_bytes:    Vec<u8>,
-    pub sha256_hex:   String,
+    pub bundle: PolicyBundle,
+    pub raw_bytes: Vec<u8>,
+    pub sha256_hex: String,
 }
 
 /// Read the signed policy artifact at `policy_path`, verify the
@@ -228,9 +228,9 @@ pub struct VerifiedPolicyArtifact {
 /// - new epoch ≤ current       → `EpochReplay`
 pub fn load_and_verify(
     policy_path: &Path,
-    sig_path:    &Path,
-    registry:    &KeyRegistry,
-    store:       &Store,
+    sig_path: &Path,
+    registry: &KeyRegistry,
+    store: &Store,
 ) -> Result<VerifiedPolicyArtifact, PolicyError> {
     // Read the policy artifact bytes. Hash + parse run on the same
     // byte content so a TOCTOU between the two reads is impossible.
@@ -284,11 +284,11 @@ pub fn load_and_verify(
     // operator-signed approvals (escalations, plan approvals) use a
     // different key class entirely.
     let authority_vk = authority_verifying_key(registry);
-    raxis_crypto::verify_ed25519(&authority_vk.to_bytes(), &raw_bytes, &sig_bytes).map_err(|e| {
-        PolicyError::SignatureInvalid {
+    raxis_crypto::verify_ed25519(&authority_vk.to_bytes(), &raw_bytes, &sig_bytes).map_err(
+        |e| PolicyError::SignatureInvalid {
             reason: format!("Ed25519 verify failed: {e}"),
-        }
-    })?;
+        },
+    )?;
 
     // Replay protection: the artifact epoch must be strictly greater
     // than the current `MAX(epoch_id)` in `policy_epoch_history`. Genesis
@@ -299,7 +299,7 @@ pub fn load_and_verify(
     if new_epoch <= current_epoch {
         return Err(PolicyError::EpochReplay {
             attempted: new_epoch,
-            current:   current_epoch,
+            current: current_epoch,
         });
     }
 
@@ -319,12 +319,12 @@ pub fn load_and_verify(
 /// (sweep counts, artifact identity).
 #[derive(Debug, Clone)]
 pub struct AdvanceOutcome {
-    pub new_epoch_id:               u64,
-    pub policy_sha256:              String,
-    pub signed_by_authority:        String,
+    pub new_epoch_id: u64,
+    pub policy_sha256: String,
+    pub signed_by_authority: String,
     pub n_delegations_marked_stale: u64,
-    pub n_sessions_invalidated:     u64,
-    pub advanced_at_unix_secs:      i64,
+    pub n_sessions_invalidated: u64,
+    pub advanced_at_unix_secs: i64,
 }
 
 /// Advance the kernel's policy epoch in-process, in four phases per
@@ -372,23 +372,26 @@ pub struct AdvanceOutcome {
 /// success/failure does not affect the return value).
 #[allow(clippy::too_many_arguments)]
 pub fn advance_epoch(
-    policy_path:    &Path,
-    sig_path:       &Path,
-    triggered_by:   &str,
-    registry:       &KeyRegistry,
-    policy_swap:    &Arc<ArcSwap<PolicyBundle>>,
-    store:          &Store,
-    audit:          &Arc<dyn AuditSink>,
-    epoch_binding:  &EpochBinding,
+    policy_path: &Path,
+    sig_path: &Path,
+    triggered_by: &str,
+    registry: &KeyRegistry,
+    policy_swap: &Arc<ArcSwap<PolicyBundle>>,
+    store: &Store,
+    audit: &Arc<dyn AuditSink>,
+    epoch_binding: &EpochBinding,
     // V2_GAPS §C5 — content-addressed artifact store. `None` for
     // tests that don't exercise the persistent on-disk store; the
     // production callsite always passes `Some(&ctx.artifact_store)`.
     artifact_store: Option<&raxis_artifact_store::ArtifactStore>,
 ) -> Result<AdvanceOutcome, PolicyError> {
     // ── Phase 0: verification (cold, read-only) ──────────────────────
-    let VerifiedPolicyArtifact { bundle: new_bundle, raw_bytes, sha256_hex } =
-        load_and_verify(policy_path, sig_path, registry, store)?;
-    let new_epoch_id        = new_bundle.epoch();
+    let VerifiedPolicyArtifact {
+        bundle: new_bundle,
+        raw_bytes,
+        sha256_hex,
+    } = load_and_verify(policy_path, sig_path, registry, store)?;
+    let new_epoch_id = new_bundle.epoch();
 
     // ── Phase 0.5: content-address the verified policy bytes ─────────
     // V2_GAPS §C5 — write the freshly-verified policy artifact to
@@ -404,8 +407,11 @@ pub fn advance_epoch(
     if let Some(astore) = artifact_store {
         match astore.write(raxis_artifact_store::Category::Policy, &raw_bytes) {
             Ok((written_key, _)) => {
-                debug_assert_eq!(written_key.as_hex(), sha256_hex,
-                    "ArtifactStore::write must hash to the same SHA-256 as load_and_verify");
+                debug_assert_eq!(
+                    written_key.as_hex(),
+                    sha256_hex,
+                    "ArtifactStore::write must hash to the same SHA-256 as load_and_verify"
+                );
             }
             Err(e) => {
                 eprintln!(
@@ -441,10 +447,9 @@ pub fn advance_epoch(
         for op in new_bundle.operators() {
             match hex::decode(&op.pubkey_hex) {
                 Ok(pubkey_bytes) => {
-                    if let Err(e) = astore.write(
-                        raxis_artifact_store::Category::Keys,
-                        &pubkey_bytes,
-                    ) {
+                    if let Err(e) =
+                        astore.write(raxis_artifact_store::Category::Keys, &pubkey_bytes)
+                    {
                         eprintln!(
                             "{{\"level\":\"warn\",\"event\":\"OperatorPubkeyArtifactWriteFailed\",\
                              \"fingerprint\":\"{}\",\"reason\":\"{e}\"}}",
@@ -462,9 +467,8 @@ pub fn advance_epoch(
             }
         }
     }
-    let signed_by_authority = raxis_genesis_tools::pubkey_fingerprint(
-        authority_verifying_key(registry).as_bytes(),
-    );
+    let signed_by_authority =
+        raxis_genesis_tools::pubkey_fingerprint(authority_verifying_key(registry).as_bytes());
     let advanced_at_unix_secs = unix_now_secs() as i64;
 
     // ── Phase 1: SQL transaction ─────────────────────────────────────
@@ -483,7 +487,7 @@ pub fn advance_epoch(
 
         // Step 1: delegation sweep. State strings sourced via
         // `DelegationStatus::*.as_sql_str()` per INV-STORE-03.
-        let stale_state  = DelegationStatus::StaleOnNextUse
+        let stale_state = DelegationStatus::StaleOnNextUse
             .as_sql_str()
             .expect("StaleOnNextUse is a stored variant");
         let active_state = DelegationStatus::Active
@@ -491,9 +495,7 @@ pub fn advance_epoch(
             .expect("Active is a stored variant");
         let n_delegations = tx
             .execute(
-                &format!(
-                    "UPDATE {DELEGATIONS} SET status = ?1 WHERE status = ?2"
-                ),
+                &format!("UPDATE {DELEGATIONS} SET status = ?1 WHERE status = ?2"),
                 rusqlite::params![stale_state, active_state],
             )
             .map_err(|e| PolicyError::StoreWriteFailed {
@@ -628,18 +630,19 @@ pub fn advance_epoch(
     // `None` only if the operator removed themselves in this
     // rotation (legal — an emergency cert can rotate to a bundle
     // that no longer contains the rotating fingerprint).
-    let triggered_by_display_name = new_bundle
-        .operator_display_name(triggered_by);
+    let triggered_by_display_name = new_bundle.operator_display_name(triggered_by);
     if let Err(e) = audit.emit(
         AuditEventKind::PolicyEpochAdvanced {
             new_epoch_id,
-            policy_sha256:           sha256_hex.clone(),
-            triggered_by:            triggered_by.to_owned(),
+            policy_sha256: sha256_hex.clone(),
+            triggered_by: triggered_by.to_owned(),
             delegations_marked_stale: n_delegations_marked_stale,
-            sessions_invalidated:    n_sessions_invalidated,
+            sessions_invalidated: n_sessions_invalidated,
             triggered_by_display_name,
         },
-        None, None, None,
+        None,
+        None,
+        None,
     ) {
         eprintln!(
             "{{\"level\":\"error\",\"event\":\"PolicyEpochAdvanced\",\
@@ -671,7 +674,10 @@ pub fn advance_epoch(
     // the pre-advance state.
     let prev_bundle_arc = policy_swap.load_full();
     cert_audit_emit::emit_cert_chain_mirror(
-        audit.as_ref(), &new_bundle, Some(&*prev_bundle_arc), new_epoch_id,
+        audit.as_ref(),
+        &new_bundle,
+        Some(&*prev_bundle_arc),
+        new_epoch_id,
     );
 
     // ── Phase 1.5d: implicit-provider-egress grant audit-chain mirror.
@@ -723,18 +729,15 @@ pub fn advance_epoch(
 /// The audit-after-commit ordering means the SQL transaction has
 /// already landed; failing the epoch advance now would leave the
 /// kernel running on an out-of-date in-memory bundle.
-pub fn emit_default_provider_egress_applied(
-    audit:  &dyn AuditSink,
-    bundle: &PolicyBundle,
-) {
+pub fn emit_default_provider_egress_applied(audit: &dyn AuditSink, bundle: &PolicyBundle) {
     let policy_epoch = bundle.epoch();
     for grant in bundle.default_provider_egress_grants() {
         if let Err(e) = audit.emit(
             AuditEventKind::DefaultProviderEgressApplied {
                 policy_epoch,
-                provider_id:   grant.provider_id.clone(),
+                provider_id: grant.provider_id.clone(),
                 provider_kind: grant.provider_kind.clone(),
-                fqdn:          grant.fqdn.clone(),
+                fqdn: grant.fqdn.clone(),
             },
             None,
             None,
@@ -802,9 +805,9 @@ mod cert_audit_emit {
     /// fingerprint is the same string as the current one — but its
     /// presence vs absence is the operator-meaningful signal.)
     pub(super) fn emit_cert_chain_mirror(
-        audit:        &dyn AuditSink,
-        bundle:       &PolicyBundle,
-        prev_bundle:  Option<&PolicyBundle>,
+        audit: &dyn AuditSink,
+        bundle: &PolicyBundle,
+        prev_bundle: Option<&PolicyBundle>,
         new_epoch_id: u64,
     ) {
         // 1. One `OperatorCertInstalled` per operator entry, matching
@@ -823,7 +826,8 @@ mod cert_audit_emit {
             // two are equivalent here but `pubkey_hex` is the value
             // the policy.toml carries verbatim.
             let previous_fingerprint = prev_bundle.and_then(|prev| {
-                let prior = prev.operators()
+                let prior = prev
+                    .operators()
                     .iter()
                     .find(|e| e.pubkey_hex.eq_ignore_ascii_case(&entry.pubkey_hex))?;
                 if prior.cert.self_sig_hex != cert.self_sig_hex {
@@ -832,17 +836,21 @@ mod cert_audit_emit {
                     None
                 }
             });
-            try_emit(audit, AuditEventKind::OperatorCertInstalled {
-                pubkey_fingerprint:     entry.pubkey_fingerprint.clone(),
-                epoch_id:               new_epoch_id,
-                cert_kind:              cert.kind.as_str().to_owned(),
-                display_name:           cert.display_name.clone(),
-                not_before:             cert.not_before,
-                not_after:              cert.not_after,
-                permitted_ops:          cert.permitted_ops.clone(),
-                force_misconfig_bypass: entry.force_misconfig_bypass,
-                previous_fingerprint,
-            }, "OperatorCertInstalled");
+            try_emit(
+                audit,
+                AuditEventKind::OperatorCertInstalled {
+                    pubkey_fingerprint: entry.pubkey_fingerprint.clone(),
+                    epoch_id: new_epoch_id,
+                    cert_kind: cert.kind.as_str().to_owned(),
+                    display_name: cert.display_name.clone(),
+                    not_before: cert.not_before,
+                    not_after: cert.not_after,
+                    permitted_ops: cert.permitted_ops.clone(),
+                    force_misconfig_bypass: entry.force_misconfig_bypass,
+                    previous_fingerprint,
+                },
+                "OperatorCertInstalled",
+            );
         }
 
         // 2. One `OperatorCertMisconfigBypassed` per operator entry that
@@ -853,13 +861,17 @@ mod cert_audit_emit {
         //    when `force_misconfig_bypass = true` AND the entry
         //    surfaced violations.
         for bypass in bundle.bypassed_cert_misconfigs() {
-            try_emit(audit, AuditEventKind::OperatorCertMisconfigBypassed {
-                pubkey_fingerprint: bypass.operator_fingerprint.clone(),
-                epoch_id:           new_epoch_id,
-                cert_kind:          bypass.kind.as_str().to_owned(),
-                display_name:       bypass.display_name.clone(),
-                violations:         bypass.violations.clone(),
-            }, "OperatorCertMisconfigBypassed");
+            try_emit(
+                audit,
+                AuditEventKind::OperatorCertMisconfigBypassed {
+                    pubkey_fingerprint: bypass.operator_fingerprint.clone(),
+                    epoch_id: new_epoch_id,
+                    cert_kind: bypass.kind.as_str().to_owned(),
+                    display_name: bypass.display_name.clone(),
+                    violations: bypass.violations.clone(),
+                },
+                "OperatorCertMisconfigBypassed",
+            );
         }
     }
 
@@ -891,15 +903,12 @@ pub(crate) fn canonicalize_under_data_dir(
     path: &Path,
     data_dir: &Path,
 ) -> Result<PathBuf, PolicyError> {
-    let canon_data_dir = std::fs::canonicalize(data_dir).map_err(|e| {
-        PolicyError::ArtifactReadFailed {
+    let canon_data_dir =
+        std::fs::canonicalize(data_dir).map_err(|e| PolicyError::ArtifactReadFailed {
             reason: format!("canonicalize data_dir {data_dir:?} failed: {e}"),
-        }
-    })?;
-    let canon_path = std::fs::canonicalize(path).map_err(|e| {
-        PolicyError::ArtifactReadFailed {
-            reason: format!("canonicalize path {path:?} failed: {e}"),
-        }
+        })?;
+    let canon_path = std::fs::canonicalize(path).map_err(|e| PolicyError::ArtifactReadFailed {
+        reason: format!("canonicalize path {path:?} failed: {e}"),
     })?;
     if !canon_path.starts_with(&canon_data_dir) {
         return Err(PolicyError::PathOutsideDataDir {
@@ -960,14 +969,9 @@ mod tests {
         // INSERT but before returning.
         let store = open_mem_store();
         let bundle = empty_bundle_for_genesis_test();
-        install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000, &bundle,
-        )
-        .unwrap();
-        install_genesis_policy_epoch(
-            &store, "abc123", "fp", 1_700_000_000, &bundle,
-        )
-        .expect("second install must be a no-op");
+        install_genesis_policy_epoch(&store, "abc123", "fp", 1_700_000_000, &bundle).unwrap();
+        install_genesis_policy_epoch(&store, "abc123", "fp", 1_700_000_000, &bundle)
+            .expect("second install must be a no-op");
         assert_eq!(read_current_epoch(&store).unwrap(), 1);
     }
 
@@ -976,7 +980,11 @@ mod tests {
         let store = open_mem_store();
         let bundle = empty_bundle_for_genesis_test();
         install_genesis_policy_epoch(
-            &store, "deadc0de", "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1", 1_700_000_001, &bundle,
+            &store,
+            "deadc0de",
+            "f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1f1",
+            1_700_000_001,
+            &bundle,
         )
         .unwrap();
         let conn = store.lock_sync();
@@ -1001,7 +1009,10 @@ mod tests {
         let data_dir = tempfile::tempdir().expect("data_dir");
         let outside = tempfile::NamedTempFile::new().expect("outside tempfile");
         let result = canonicalize_under_data_dir(outside.path(), data_dir.path());
-        assert!(matches!(result, Err(PolicyError::PathOutsideDataDir { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::PathOutsideDataDir { .. })
+        ));
     }
 
     #[test]
@@ -1043,14 +1054,14 @@ mod tests {
     /// authority pubkey, sign it, and write both files into `data_dir/policy/`.
     /// Returns `(policy_path, sig_path)`.
     fn write_signed_policy_artifact(
-        data_dir:     &Path,
-        epoch:        u64,
+        data_dir: &Path,
+        epoch: u64,
         authority_sk: &SigningKey,
     ) -> (PathBuf, PathBuf) {
         let policy_dir = data_dir.join("policy");
         std::fs::create_dir_all(&policy_dir).unwrap();
         let policy_path = policy_dir.join(format!("policy.epoch-{epoch}.toml"));
-        let sig_path    = policy_dir.join(format!("policy.epoch-{epoch}.sig"));
+        let sig_path = policy_dir.join(format!("policy.epoch-{epoch}.sig"));
 
         let auth_hex = hex::encode(authority_sk.verifying_key().to_bytes());
         let qual_hex = "b".repeat(64);
@@ -1172,8 +1183,10 @@ mod tests {
         let other_sk = SigningKey::from_bytes(&[0x99u8; 32]);
         let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 2, &other_sk);
         let result = load_and_verify(&policy_path, &sig_path, &registry, &store);
-        assert!(matches!(result, Err(PolicyError::SignatureInvalid { .. })),
-            "expected SignatureInvalid, got {result:?}");
+        assert!(
+            matches!(result, Err(PolicyError::SignatureInvalid { .. })),
+            "expected SignatureInvalid, got {result:?}"
+        );
     }
 
     #[test]
@@ -1207,8 +1220,16 @@ mod tests {
         // be rejected as a replay.
         let (policy_path, sig_path) = write_signed_policy_artifact(tmp.path(), 1, &sk);
         let result = load_and_verify(&policy_path, &sig_path, &registry, &store);
-        assert!(matches!(result, Err(PolicyError::EpochReplay { attempted: 1, current: 1 })),
-            "expected EpochReplay {{1, 1}}, got {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(PolicyError::EpochReplay {
+                    attempted: 1,
+                    current: 1
+                })
+            ),
+            "expected EpochReplay {{1, 1}}, got {result:?}"
+        );
     }
 
     #[test]
@@ -1220,7 +1241,10 @@ mod tests {
             &registry,
             &store,
         );
-        assert!(matches!(result, Err(PolicyError::ArtifactReadFailed { .. })));
+        assert!(matches!(
+            result,
+            Err(PolicyError::ArtifactReadFailed { .. })
+        ));
     }
 
     // ── advance_epoch happy path ──────────────────────────────────────
@@ -1233,9 +1257,17 @@ mod tests {
 
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
-            &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit, &binding, None,
-        ).unwrap();
+            &policy_path,
+            &sig_path,
+            "op-prime",
+            &registry,
+            &swap,
+            &store,
+            &audit,
+            &binding,
+            None,
+        )
+        .unwrap();
 
         assert_eq!(outcome.new_epoch_id, 2);
         assert_eq!(outcome.n_delegations_marked_stale, 0);
@@ -1251,8 +1283,10 @@ mod tests {
 
         // Audit event emitted.
         let kinds = sink.event_kinds();
-        assert!(kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
-            "expected PolicyEpochAdvanced in {kinds:?}");
+        assert!(
+            kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            "expected PolicyEpochAdvanced in {kinds:?}"
+        );
     }
 
     /// Pin the cert audit-chain mirror for the cert-bound operator
@@ -1274,19 +1308,40 @@ mod tests {
 
         let binding = EpochBinding::new();
         advance_epoch(
-            &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit, &binding, None,
-        ).unwrap();
+            &policy_path,
+            &sig_path,
+            "op-prime",
+            &registry,
+            &swap,
+            &store,
+            &audit,
+            &binding,
+            None,
+        )
+        .unwrap();
 
         let kinds = sink.event_kinds();
-        let n_installed= kinds.iter().filter(|k| **k == "OperatorCertInstalled").count();
-        let n_bypass   = kinds.iter().filter(|k| **k == "OperatorCertMisconfigBypassed").count();
-        assert_eq!(n_installed, 1, "expected exactly one OperatorCertInstalled (one cert-bound entry); kinds={kinds:?}");
-        assert_eq!(n_bypass,    0, "no bypass entries in fixture; kinds={kinds:?}");
+        let n_installed = kinds
+            .iter()
+            .filter(|k| **k == "OperatorCertInstalled")
+            .count();
+        let n_bypass = kinds
+            .iter()
+            .filter(|k| **k == "OperatorCertMisconfigBypassed")
+            .count();
+        assert_eq!(
+            n_installed, 1,
+            "expected exactly one OperatorCertInstalled (one cert-bound entry); kinds={kinds:?}"
+        );
+        assert_eq!(n_bypass, 0, "no bypass entries in fixture; kinds={kinds:?}");
         // Sanity: the deleted OperatorCertLegacyEntryDetected MUST
         // never appear in any kernel emit path again.
-        assert!(!kinds.iter().any(|k| *k == "OperatorCertLegacyEntryDetected"),
-            "deleted variant must never be emitted; kinds={kinds:?}");
+        assert!(
+            !kinds
+                .iter()
+                .any(|k| *k == "OperatorCertLegacyEntryDetected"),
+            "deleted variant must never be emitted; kinds={kinds:?}"
+        );
     }
 
     #[test]
@@ -1297,7 +1352,7 @@ mod tests {
         // Active flip.
         let (registry, sk, store, swap, audit, _sink) = boot_state();
         let active_state = DelegationStatus::Active.as_sql_str().unwrap();
-        let stale_state  = DelegationStatus::StaleOnNextUse.as_sql_str().unwrap();
+        let stale_state = DelegationStatus::StaleOnNextUse.as_sql_str().unwrap();
         {
             let conn = store.lock_sync();
             // Seed a session row so the delegations FK resolves.
@@ -1311,7 +1366,8 @@ mod tests {
                      VALUES ('s1', 'planner', 'tok1', 'lin1', 10, 0, 1, 9999999999)"
                 ),
                 [],
-            ).unwrap();
+            )
+            .unwrap();
             // The delegations CHECK constraint allows
             // ('Active', 'StaleOnNextUse', 'RenewalRequired') — the
             // schema does NOT have 'Revoked' as a status. Use
@@ -1328,7 +1384,8 @@ mod tests {
                                1, 9999999, ?1, X'00')"
                 ),
                 rusqlite::params![active_state],
-            ).unwrap();
+            )
+            .unwrap();
             conn.execute(
                 &format!(
                     "INSERT INTO {DELEGATIONS} (
@@ -1339,7 +1396,8 @@ mod tests {
                                1, 9999999, ?1, X'00')"
                 ),
                 rusqlite::params![stale_state],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1347,7 +1405,8 @@ mod tests {
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
             &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(outcome.n_delegations_marked_stale, 1);
 
         // Verify the actual rows. The Active row flipped to
@@ -1357,13 +1416,15 @@ mod tests {
         let active_status: String = conn
             .query_row(
                 &format!("SELECT status FROM {DELEGATIONS} WHERE delegation_id = 'd1'"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
         let stale_status: String = conn
             .query_row(
                 &format!("SELECT status FROM {DELEGATIONS} WHERE delegation_id = 'd2'"),
-                [], |r| r.get(0),
+                [],
+                |r| r.get(0),
             )
             .unwrap();
         assert_eq!(active_status, stale_state);
@@ -1381,8 +1442,8 @@ mod tests {
         use raxis_types::SessionId;
         let (registry, sk, store, swap, audit, _sink) = boot_state();
         let s_alpha = SessionId::new_v4();
-        let s_beta  = SessionId::new_v4();
-        let s_gone  = SessionId::new_v4();
+        let s_beta = SessionId::new_v4();
+        let s_gone = SessionId::new_v4();
         {
             let conn = store.lock_sync();
             // Two active sessions (revoked_at IS NULL, expires_at far
@@ -1407,7 +1468,8 @@ mod tests {
                      VALUES (?1, 'planner', ?2, 'lin', 10, 0, 1, 9999999999, 100)"
                 ),
                 rusqlite::params![s_gone.as_str(), format!("tok-{}", s_gone.as_str())],
-            ).unwrap();
+            )
+            .unwrap();
         }
 
         let tmp = tempfile::tempdir().unwrap();
@@ -1415,17 +1477,26 @@ mod tests {
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
             &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
-        ).unwrap();
+        )
+        .unwrap();
 
-        assert_eq!(outcome.n_sessions_invalidated, 2,
+        assert_eq!(
+            outcome.n_sessions_invalidated, 2,
             "expected exactly 2 active sessions to be invalidated; got {}",
-            outcome.n_sessions_invalidated);
-        assert!(!binding.session_prompt_valid(&s_alpha),
-            "alpha must be invalidated after epoch advance");
-        assert!(!binding.session_prompt_valid(&s_beta),
-            "beta must be invalidated after epoch advance");
-        assert!(binding.session_prompt_valid(&s_gone),
-            "the revoked session must NOT appear in the invalidated set");
+            outcome.n_sessions_invalidated
+        );
+        assert!(
+            !binding.session_prompt_valid(&s_alpha),
+            "alpha must be invalidated after epoch advance"
+        );
+        assert!(
+            !binding.session_prompt_valid(&s_beta),
+            "beta must be invalidated after epoch advance"
+        );
+        assert!(
+            binding.session_prompt_valid(&s_gone),
+            "the revoked session must NOT appear in the invalidated set"
+        );
     }
 
     // ── advance_epoch failure paths ───────────────────────────────────
@@ -1445,7 +1516,10 @@ mod tests {
         assert_ne!(swap.load().epoch(), 1, "stub bundle epoch is not 1");
         // No audit emit on failed Phase 0 — the dispatcher writes
         // PolicyAdvanceRejected outside this function.
-        assert!(sink.event_kinds().iter().all(|k| *k != "PolicyEpochAdvanced"));
+        assert!(sink
+            .event_kinds()
+            .iter()
+            .all(|k| *k != "PolicyEpochAdvanced"));
     }
 
     #[test]
@@ -1499,9 +1573,7 @@ mod tests {
             // the next INSERT trips on UNIQUE(policy_sha256), not
             // UNIQUE(epoch_id).
             conn.execute(
-                &format!(
-                    "UPDATE {POLICY_EPOCH_HISTORY} SET policy_sha256 = ?1 WHERE epoch_id = 1"
-                ),
+                &format!("UPDATE {POLICY_EPOCH_HISTORY} SET policy_sha256 = ?1 WHERE epoch_id = 1"),
                 [&sha],
             )
             .unwrap();
@@ -1510,8 +1582,13 @@ mod tests {
         let result = advance_epoch(
             &pp, &sp, "op-prime", &registry, &swap, &store, &audit, &binding, None,
         );
-        assert!(matches!(result, Err(PolicyError::PolicyArtifactAlreadyInstalled { .. })),
-            "expected PolicyArtifactAlreadyInstalled, got {result:?}");
+        assert!(
+            matches!(
+                result,
+                Err(PolicyError::PolicyArtifactAlreadyInstalled { .. })
+            ),
+            "expected PolicyArtifactAlreadyInstalled, got {result:?}"
+        );
     }
 
     #[test]
@@ -1523,7 +1600,11 @@ mod tests {
             "FAIL_POLICY_SIGNATURE_INVALID",
         );
         assert_eq!(
-            PolicyError::EpochReplay { attempted: 1, current: 2 }.error_code(),
+            PolicyError::EpochReplay {
+                attempted: 1,
+                current: 2
+            }
+            .error_code(),
             "FAIL_POLICY_EPOCH_REPLAY",
         );
         assert_eq!(
@@ -1567,10 +1648,17 @@ mod tests {
 
         let binding = EpochBinding::new();
         let outcome = advance_epoch(
-            &policy_path, &sig_path, "op-prime",
-            &registry, &swap, &store, &audit, &binding,
+            &policy_path,
+            &sig_path,
+            "op-prime",
+            &registry,
+            &swap,
+            &store,
+            &audit,
+            &binding,
             Some(&astore),
-        ).unwrap();
+        )
+        .unwrap();
 
         // The artifact key must equal the audit-event sha256.
         let key = raxis_artifact_store::ArtifactKey::parse_hex(&outcome.policy_sha256)
@@ -1587,9 +1675,8 @@ mod tests {
         assert_eq!(read, std::fs::read(&policy_path).unwrap());
 
         // Signature companion equals the on-disk sig file.
-        let sig_path_in_store = astore.companion_path(
-            raxis_artifact_store::Category::Policy, &key, "sig",
-        );
+        let sig_path_in_store =
+            astore.companion_path(raxis_artifact_store::Category::Policy, &key, "sig");
         let sig_bytes = std::fs::read(&sig_path_in_store).expect(".sig companion must exist");
         assert_eq!(sig_bytes, std::fs::read(&sig_path).unwrap());
     }

@@ -96,13 +96,13 @@ use thiserror::Error;
 
 use raxis_types::TaskId;
 
+use crate::bedrock_client::BedrockClient;
 use crate::dispatch::{DispatchConfig, DispatchError, DispatchLoop, DispatchOutcome};
+use crate::gemini_client::GeminiClient;
 use crate::intent::{
     executor_terminal_tool_to_intent_kind, orchestrator_terminal_tool_to_intent_kind,
     reviewer_terminal_tool_to_intent_kind, IntentSubmitter, SubmitError,
 };
-use crate::bedrock_client::BedrockClient;
-use crate::gemini_client::GeminiClient;
 use crate::model::{AnthropicClient, ModelClient};
 use crate::openai_client::OpenAiClient;
 use crate::provider_model::{
@@ -133,8 +133,7 @@ use crate::{BootArgs, BootEnv, Role};
 /// planner-core driver (reader) stay in lock-step on the same set
 /// of names.
 pub use raxis_types::planner_env::{
-    PLANNER_SIDECAR_ENDPOINT_ENV, PLANNER_SIDECAR_HMAC_SECRET_ENV,
-    PLANNER_SIDECAR_PROVIDER_ID_ENV,
+    PLANNER_SIDECAR_ENDPOINT_ENV, PLANNER_SIDECAR_HMAC_SECRET_ENV, PLANNER_SIDECAR_PROVIDER_ID_ENV,
 };
 
 /// Default workspace mount point — matches what the
@@ -395,7 +394,7 @@ where
     // exactly what the env-contract defends against.
     let task_prompt = match read_task_prompt(&f) {
         Some(p) => p,
-        None    => return Ok(DriverOutcome::Scaffold),
+        None => return Ok(DriverOutcome::Scaffold),
     };
 
     // Resolve the kernel transport config from the same env-reader
@@ -404,8 +403,8 @@ where
     // three substrates the kernel ships. `NotConfigured` from
     // `from_env_fn` maps to `KernelSocketMissing` so existing
     // callers' error handling stays compatible.
-    let transport_cfg = KernelTransportConfig::from_env_fn(&f)
-        .map_err(|_| DriverError::KernelSocketMissing)?;
+    let transport_cfg =
+        KernelTransportConfig::from_env_fn(&f).map_err(|_| DriverError::KernelSocketMissing)?;
     let workspace = var("RAXIS_WORKSPACE_PATH")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from(DEFAULT_WORKSPACE_PATH));
@@ -414,8 +413,8 @@ where
     // field drives the multi-provider router below; the `name` field
     // is what gets stamped into every `MessageRequest::model`.
     let known_model = resolve_model_from_env_fn(&f)?;
-    let model_id    = known_model.name.to_owned();
-    let provider    = known_model.provider;
+    let model_id = known_model.name.to_owned();
+    let provider = known_model.provider;
 
     // Base URL precedence: explicit operator override
     // (`RAXIS_PLANNER_BASE_URL`) wins for every provider. Otherwise
@@ -426,7 +425,7 @@ where
     // construction path below validates that).
     let base_url = match var("RAXIS_PLANNER_BASE_URL") {
         Some(u) => u,
-        None    => provider.default_base_url().to_owned(),
+        None => provider.default_base_url().to_owned(),
     };
     if provider != ProviderId::Sidecar
         && !(base_url.starts_with("http://") || base_url.starts_with("https://"))
@@ -444,9 +443,9 @@ where
     // per-session token caps. Absent / unparseable → `None`, which
     // leaves the corresponding `DispatchConfig` ceiling uncapped
     // (matches today's behaviour for unmigrated policies).
-    let max_tokens_input_total  = parse_u64_env(&f, PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV);
+    let max_tokens_input_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV);
     let max_tokens_output_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV);
-    let max_tokens_total        = parse_u64_env(&f, PLANNER_MAX_TOKENS_TOTAL_ENV);
+    let max_tokens_total = parse_u64_env(&f, PLANNER_MAX_TOKENS_TOTAL_ENV);
 
     // V2 `v2_extended_gaps.md §2.4` — read the kernel-stamped KSB
     // snapshot.
@@ -478,8 +477,7 @@ where
     //    model's HttpFetch can share the connection (required for
     //    `VsockListen` substrates where the guest's listener accepts
     //    exactly one host-side connection).
-    let transport: Arc<dyn KernelTransport> =
-        crate::transport::connect(&transport_cfg).await?;
+    let transport: Arc<dyn KernelTransport> = crate::transport::connect(&transport_cfg).await?;
 
     // ── Choose HTTP transport based on the kernel transport variant.
     //
@@ -515,13 +513,12 @@ where
     //    through identically for every provider — the planner never
     //    holds a credential, the gateway injects per
     //    `peripherals.md §3.2`.
-    let model: Arc<dyn ModelClient> =
-        build_model_client(known_model, &base_url, &http_fetch, &f)?;
+    let model: Arc<dyn ModelClient> = build_model_client(known_model, &base_url, &http_fetch, &f)?;
 
     let token_caps = TokenCaps {
-        input_total:  max_tokens_input_total,
+        input_total: max_tokens_input_total,
         output_total: max_tokens_output_total,
-        total:        max_tokens_total,
+        total: max_tokens_total,
     };
     run_role_session_with_connected_transport(
         role,
@@ -548,13 +545,13 @@ where
 pub struct TokenCaps {
     /// Cumulative input-token cap across the session
     /// (`DispatchConfig::max_tokens_input_total`).
-    pub input_total:  Option<u64>,
+    pub input_total: Option<u64>,
     /// Cumulative output-token cap across the session
     /// (`DispatchConfig::max_tokens_output_total`).
     pub output_total: Option<u64>,
     /// Cumulative combined-token cap across the session
     /// (`DispatchConfig::max_tokens_total`).
-    pub total:        Option<u64>,
+    pub total: Option<u64>,
 }
 
 /// **`v2_extended_gaps.md §C5` — multi-provider model client
@@ -588,9 +585,9 @@ pub struct TokenCaps {
 ///   §9A.7A` for the threat-model rationale.
 fn build_model_client<F>(
     known_model: &KnownModel,
-    base_url:    &str,
-    http_fetch:  &Arc<dyn crate::http_fetch::HttpFetch>,
-    f:           &F,
+    base_url: &str,
+    http_fetch: &Arc<dyn crate::http_fetch::HttpFetch>,
+    f: &F,
 ) -> Result<Arc<dyn ModelClient>, DriverError>
 where
     F: Fn(&str) -> Option<String>,
@@ -614,15 +611,18 @@ where
             Arc::clone(http_fetch),
         )),
         ProviderId::Sidecar => {
-            let endpoint = var(PLANNER_SIDECAR_ENDPOINT_ENV).ok_or(
-                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_ENDPOINT_ENV },
-            )?;
-            let provider_id = var(PLANNER_SIDECAR_PROVIDER_ID_ENV).ok_or(
-                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_PROVIDER_ID_ENV },
-            )?;
-            let secret_hex = var(PLANNER_SIDECAR_HMAC_SECRET_ENV).ok_or(
-                DriverError::SidecarEnvMissing { var: PLANNER_SIDECAR_HMAC_SECRET_ENV },
-            )?;
+            let endpoint =
+                var(PLANNER_SIDECAR_ENDPOINT_ENV).ok_or(DriverError::SidecarEnvMissing {
+                    var: PLANNER_SIDECAR_ENDPOINT_ENV,
+                })?;
+            let provider_id =
+                var(PLANNER_SIDECAR_PROVIDER_ID_ENV).ok_or(DriverError::SidecarEnvMissing {
+                    var: PLANNER_SIDECAR_PROVIDER_ID_ENV,
+                })?;
+            let secret_hex =
+                var(PLANNER_SIDECAR_HMAC_SECRET_ENV).ok_or(DriverError::SidecarEnvMissing {
+                    var: PLANNER_SIDECAR_HMAC_SECRET_ENV,
+                })?;
             Arc::new(SidecarModelClient::with_http_fetch(
                 endpoint,
                 provider_id,
@@ -807,8 +807,7 @@ pub async fn run_role_session_with_model(
     model: Arc<dyn ModelClient>,
     ksb_snapshot: Option<raxis_ksb::KsbSnapshot>,
 ) -> Result<DriverOutcome, DriverError> {
-    let transport: Arc<dyn KernelTransport> =
-        crate::transport::connect(&transport_cfg).await?;
+    let transport: Arc<dyn KernelTransport> = crate::transport::connect(&transport_cfg).await?;
     run_role_session_with_connected_transport(
         role,
         args,
@@ -867,13 +866,13 @@ pub async fn run_role_session_with_connected_transport(
         .clone()
         .unwrap_or_else(|| args.initiative_id.clone());
     let task_id = TaskId::parse(&task_id_owned).map_err(|e| {
-        DriverError::InvalidTaskId(format!(
-            "task id `{task_id_owned}` failed validation: {e}"
-        ))
+        DriverError::InvalidTaskId(format!("task id `{task_id_owned}` failed validation: {e}"))
     })?;
-    let submitter = Arc::new(
-        IntentSubmitter::new(Arc::clone(&transport), env.session_token.clone(), task_id),
-    );
+    let submitter = Arc::new(IntentSubmitter::new(
+        Arc::clone(&transport),
+        env.session_token.clone(),
+        task_id,
+    ));
 
     // ── Step 2: build per-role registry + terminal tool list. ───────
     let (registry, terminal_tools) = build_role(role, Arc::clone(&submitter));
@@ -887,9 +886,9 @@ pub async fn run_role_session_with_connected_transport(
     // into the dispatch config. The dispatch loop already enforces
     // these via `check_ceilings` → `DispatchOutcome::TokensExceeded`;
     // we just thread the kernel-stamped values through.
-    config.max_tokens_input_total  = token_caps.input_total;
+    config.max_tokens_input_total = token_caps.input_total;
     config.max_tokens_output_total = token_caps.output_total;
-    config.max_tokens_total        = token_caps.total;
+    config.max_tokens_total = token_caps.total;
     let ctx = ToolContext::for_workspace(workspace);
     let mut loop_ = DispatchLoop::new(model, Arc::clone(&registry), config, ctx)
         .with_terminal_tools(terminal_tools.clone());
@@ -911,9 +910,8 @@ pub async fn run_role_session_with_connected_transport(
     //    output are coherent byte-for-byte for the same image +
     //    session env.
     let capability_manifest = crate::vm_capabilities::cached_capabilities();
-    let capability_hint     = crate::vm_capabilities::build_capability_hint(
-        capability_manifest.as_ref(),
-    );
+    let capability_hint =
+        crate::vm_capabilities::build_capability_hint(capability_manifest.as_ref());
     let role_nnsp_raw = render_system_prompt_for_role(role, &args);
     let role_nnsp = format!("{role_nnsp_raw}\n\n{capability_hint}");
     let system_prompt = match ksb_snapshot.as_ref() {
@@ -942,16 +940,19 @@ pub async fn run_role_session_with_connected_transport(
     // time, which matches the `EstimateCost` upper-bound contract.
     let (cum_in, cum_out) = outcome.cumulative_tokens();
     submitter.report_tokens(raxis_types::TokensReport {
-        input_tokens:          cum_in,
-        output_tokens:         cum_out,
-        cache_read_tokens:     0,
+        input_tokens: cum_in,
+        output_tokens: cum_out,
+        cache_read_tokens: 0,
         cache_creation_tokens: 0,
-        provider_id:           String::new(),
+        provider_id: String::new(),
     });
 
     let driver_outcome = match outcome {
         DispatchOutcome::TerminalTool {
-            tool_name, input, output: _, ..
+            tool_name,
+            input,
+            output: _,
+            ..
         } => {
             submit_terminal(role, submitter.as_ref(), &tool_name, &input).await?;
             DriverOutcome::Completed { tool_name }
@@ -960,9 +961,9 @@ pub async fn run_role_session_with_connected_transport(
         DispatchOutcome::MaxTurnsExceeded { turns, .. } => {
             DriverOutcome::MaxTurnsExceeded { turns }
         }
-        DispatchOutcome::TokensExceeded {
-            which, ceiling, ..
-        } => DriverOutcome::TokensExceeded { which, ceiling },
+        DispatchOutcome::TokensExceeded { which, ceiling, .. } => {
+            DriverOutcome::TokensExceeded { which, ceiling }
+        }
     };
 
     // `INV-FAILURE-REASON-CONCRETE-01` — emit a structured exit
@@ -1014,7 +1015,7 @@ pub async fn run_role_session_with_connected_transport(
 /// the operator can tell whether the cap is the bound to raise
 /// or whether something else is racing.
 pub fn driver_outcome_to_exit_outcome(
-    outcome:   &DriverOutcome,
+    outcome: &DriverOutcome,
     max_turns: u32,
 ) -> raxis_types::PlannerExitOutcome {
     use raxis_types::PlannerExitOutcome;
@@ -1033,9 +1034,10 @@ pub fn driver_outcome_to_exit_outcome(
             // `DriverOutcome::Idle::final_text`.
             final_text_len: final_text.len().min(u32::MAX as usize) as u32,
         },
-        DriverOutcome::MaxTurnsExceeded { turns } => {
-            PlannerExitOutcome::MaxTurnsReached { used: *turns, limit: max_turns }
-        }
+        DriverOutcome::MaxTurnsExceeded { turns } => PlannerExitOutcome::MaxTurnsReached {
+            used: *turns,
+            limit: max_turns,
+        },
         DriverOutcome::TokensExceeded { which, ceiling } => {
             // Cumulative-used count is preserved on the
             // `DispatchOutcome::TokensExceeded` variant in
@@ -1055,7 +1057,7 @@ pub fn driver_outcome_to_exit_outcome(
             // ceiling tripped, so cumulative ≥ ceiling).
             PlannerExitOutcome::MaxTokensReached {
                 which: (*which).to_string(),
-                used:  *ceiling,
+                used: *ceiling,
                 limit: *ceiling,
             }
         }
@@ -1079,24 +1081,28 @@ pub fn driver_outcome_to_exit_outcome(
 /// Reviewer NEVER receives `structured_output` or `sleep`
 /// (INV-PLANNER-HARNESS-02 / R-5 — bounded capabilities).
 fn build_role(
-    role:      Role,
+    role: Role,
     submitter: Arc<crate::intent::IntentSubmitter>,
 ) -> (ToolRegistry, Vec<&'static str>) {
     use raxis_types::planner_env::{
         PLANNER_MAX_SLEEP_CUMULATIVE_ENV, PLANNER_MAX_SLEEP_PER_CALL_ENV,
     };
     let sleep_caps = match (
-        std::env::var(PLANNER_MAX_SLEEP_PER_CALL_ENV).ok().and_then(|s| s.parse::<u32>().ok()),
-        std::env::var(PLANNER_MAX_SLEEP_CUMULATIVE_ENV).ok().and_then(|s| s.parse::<u32>().ok()),
+        std::env::var(PLANNER_MAX_SLEEP_PER_CALL_ENV)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok()),
+        std::env::var(PLANNER_MAX_SLEEP_CUMULATIVE_ENV)
+            .ok()
+            .and_then(|s| s.parse::<u32>().ok()),
     ) {
         (Some(per), Some(cum)) if per > 0 && cum >= per => Some((per, cum)),
-        _                                               => None,
+        _ => None,
     };
     match role {
         Role::Executor => (
             match sleep_caps {
                 Some((per, cum)) => build_executor_registry_full(per, cum, submitter),
-                None             => {
+                None => {
                     let mut r = build_executor_registry();
                     r.register(Arc::new(StructuredOutputTool::new(submitter)));
                     r
@@ -1108,7 +1114,7 @@ fn build_role(
         Role::Orchestrator => (
             match sleep_caps {
                 Some((per, cum)) => build_orchestrator_registry_full(per, cum, submitter),
-                None             => {
+                None => {
                     let mut r = build_orchestrator_registry();
                     r.register(Arc::new(StructuredOutputTool::new(submitter)));
                     r
@@ -1127,7 +1133,8 @@ fn build_role(
 /// (V3, V2_GAPS §12.1) lands.
 fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
     let role_blurb = match role {
-        Role::Executor => "You are the RAXIS executor agent for task `{TASK}` of \
+        Role::Executor => {
+            "You are the RAXIS executor agent for task `{TASK}` of \
                           initiative `{INIT}`. Make code changes that satisfy the \
                           task description (use `edit_file`, `bash`, `git_commit`, \
                           etc.), then call ONE of these terminal tools to end \
@@ -1192,8 +1199,10 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           `task_complete` over speculative further \
                           investigation, and if you have used >90% you should \
                           call `report_failure` with a clear handoff note \
-                          rather than risk being cut off mid-tool-call.",
-        Role::Reviewer => "You are the RAXIS reviewer for task `{TASK}` of \
+                          rather than risk being cut off mid-tool-call."
+        }
+        Role::Reviewer => {
+            "You are the RAXIS reviewer for task `{TASK}` of \
                           initiative `{INIT}`. Read the executor's commit \
                           (via `read_file` / `grep_search`) and evaluate it \
                           against the task description, then call the terminal \
@@ -1219,8 +1228,10 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                           rather than letting the dispatch loop time out \
                           (which records as Idle, not as a terminal verdict, \
                           and forces the orchestrator to retry the executor \
-                          unnecessarily).",
-        Role::Orchestrator => "You are the RAXIS orchestrator for initiative \
+                          unnecessarily)."
+        }
+        Role::Orchestrator => {
+            "You are the RAXIS orchestrator for initiative \
                               `{INIT}`. Your job is to drive the task DAG to \
                               completion by calling the right terminal tool \
                               on every turn:\n\
@@ -1467,7 +1478,8 @@ fn render_system_prompt_for_role(role: Role, args: &BootArgs) -> String {
                               `integration_merge` if any executor row is \
                               eligible. The `planner_max_turns` budget is \
                               the LIVENESS bound — independent from the \
-                              token caps which are the cost-side bound.",
+                              token caps which are the cost-side bound."
+        }
     };
     let task_repr = args.task_id.as_deref().unwrap_or("(no task id)");
     role_blurb
@@ -1517,18 +1529,14 @@ async fn submit_terminal(
         IntentKind::ActivateSubTask => {
             let id = pick_str(input, "subtask_task_id").unwrap_or_default();
             let parsed = TaskId::parse(&id).map_err(|e| {
-                DriverError::InvalidTaskId(format!(
-                    "subtask_task_id `{id}` failed validation: {e}"
-                ))
+                DriverError::InvalidTaskId(format!("subtask_task_id `{id}` failed validation: {e}"))
             })?;
             submitter.submit_activate_subtask(parsed).await?;
         }
         IntentKind::RetrySubTask => {
             let id = pick_str(input, "subtask_task_id").unwrap_or_default();
             let parsed = TaskId::parse(&id).map_err(|e| {
-                DriverError::InvalidTaskId(format!(
-                    "subtask_task_id `{id}` failed validation: {e}"
-                ))
+                DriverError::InvalidTaskId(format!("subtask_task_id `{id}` failed validation: {e}"))
             })?;
             submitter.submit_retry_subtask(parsed).await?;
         }
@@ -1593,7 +1601,9 @@ mod tests {
 
     #[test]
     fn exit_outcome_for_completed_clean_completion() {
-        let d = DriverOutcome::Completed { tool_name: "task_complete".to_string() };
+        let d = DriverOutcome::Completed {
+            tool_name: "task_complete".to_string(),
+        };
         let o = driver_outcome_to_exit_outcome(&d, 60);
         assert_eq!(
             o,
@@ -1610,33 +1620,45 @@ mod tests {
         let o = driver_outcome_to_exit_outcome(&d, 60);
         assert_eq!(
             o,
-            raxis_types::PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 },
+            raxis_types::PlannerExitOutcome::MaxTurnsReached {
+                used: 60,
+                limit: 60
+            },
         );
-        let r = o.format_concrete_reason("executor").expect("non-clean variant returns Some");
+        let r = o
+            .format_concrete_reason("executor")
+            .expect("non-clean variant returns Some");
         assert!(r.contains("max_turns"));
         assert!(r.contains("60 used / 60 limit"));
     }
 
     #[test]
     fn exit_outcome_for_tokens_exceeded() {
-        let d = DriverOutcome::TokensExceeded { which: "input", ceiling: 100_000 };
+        let d = DriverOutcome::TokensExceeded {
+            which: "input",
+            ceiling: 100_000,
+        };
         let o = driver_outcome_to_exit_outcome(&d, 60);
         assert_eq!(
             o,
             raxis_types::PlannerExitOutcome::MaxTokensReached {
                 which: "input".to_string(),
-                used:  100_000,
+                used: 100_000,
                 limit: 100_000,
             },
         );
-        let r = o.format_concrete_reason("reviewer").expect("non-clean variant returns Some");
+        let r = o
+            .format_concrete_reason("reviewer")
+            .expect("non-clean variant returns Some");
         assert!(r.contains("max_tokens"));
         assert!(r.contains("input"));
     }
 
     #[test]
     fn exit_outcome_for_idle() {
-        let d = DriverOutcome::Idle { final_text: "I think we're done.".to_string() };
+        let d = DriverOutcome::Idle {
+            final_text: "I think we're done.".to_string(),
+        };
         let o = driver_outcome_to_exit_outcome(&d, 60);
         match o {
             raxis_types::PlannerExitOutcome::IdleNoTerminalIntent { final_text_len } => {
@@ -1685,7 +1707,7 @@ mod tests {
     #[derive(Debug)]
     struct RecordingFetch {
         last_url: tokio::sync::Mutex<Option<String>>,
-        body:     Vec<u8>,
+        body: Vec<u8>,
     }
 
     impl RecordingFetch {
@@ -1702,15 +1724,13 @@ mod tests {
         async fn fetch<'a>(
             &self,
             req: crate::http_fetch::HttpFetchRequest<'a>,
-        ) -> Result<
-            crate::http_fetch::HttpFetchResponse,
-            crate::http_fetch::HttpFetchError,
-        > {
+        ) -> Result<crate::http_fetch::HttpFetchResponse, crate::http_fetch::HttpFetchError>
+        {
             *self.last_url.lock().await = Some(req.url.to_owned());
             Ok(crate::http_fetch::HttpFetchResponse {
-                status:  200,
+                status: 200,
                 headers: vec![],
-                body:    self.body.clone(),
+                body: self.body.clone(),
             })
         }
     }
@@ -1746,13 +1766,12 @@ mod tests {
             "id":"m_test","model":"fixture-model","role":"assistant",
             "content":[],"stop_reason":"end_turn",
             "usage":{"input_tokens":1,"output_tokens":1}
-        }"#.to_vec();
+        }"#
+        .to_vec();
         let rec = Arc::new(RecordingFetch::new(body));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
         let m = known("claude-sonnet-4-5-20250929");
-        let client = build_model_client(
-            m, "https://api.anthropic.com", &fetch, &|_| None,
-        ).unwrap();
+        let client = build_model_client(m, "https://api.anthropic.com", &fetch, &|_| None).unwrap();
         let url = url_dialled_by(client, rec).await;
         assert_eq!(url, "https://api.anthropic.com/v1/messages");
     }
@@ -1773,8 +1792,12 @@ mod tests {
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
         let m = known("gemini-2.5-pro");
         let client = build_model_client(
-            m, "https://generativelanguage.googleapis.com", &fetch, &|_| None,
-        ).unwrap();
+            m,
+            "https://generativelanguage.googleapis.com",
+            &fetch,
+            &|_| None,
+        )
+        .unwrap();
         let url = url_dialled_by(client, rec).await;
         // Gemini's URL embeds the model id in the path:
         //   /v1beta/models/<model>:generateContent
@@ -1791,8 +1814,12 @@ mod tests {
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
         let m = known("anthropic.claude-3-5-sonnet-20241022-v2:0");
         let client = build_model_client(
-            m, "https://bedrock-runtime.us-east-1.amazonaws.com", &fetch, &|_| None,
-        ).unwrap();
+            m,
+            "https://bedrock-runtime.us-east-1.amazonaws.com",
+            &fetch,
+            &|_| None,
+        )
+        .unwrap();
         let url = url_dialled_by(client, rec).await;
         // Bedrock URL: <base>/model/<model>/invoke
         assert_eq!(
@@ -1824,9 +1851,9 @@ mod tests {
         // wire those per-deployment), but the router must accept
         // any `KnownModel` whose `provider == Sidecar`.
         let m = crate::provider_model::KnownModel {
-            name:           "sidecar-fixture",
-            provider:       crate::provider_model::ProviderId::Sidecar,
-            deprecated:     None,
+            name: "sidecar-fixture",
+            provider: crate::provider_model::ProviderId::Sidecar,
+            deprecated: None,
             context_window: Some(8_000),
         };
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
@@ -1840,16 +1867,16 @@ mod tests {
     #[test]
     fn build_model_client_sidecar_requires_provider_id_env() {
         let m = crate::provider_model::KnownModel {
-            name:           "sidecar-fixture",
-            provider:       crate::provider_model::ProviderId::Sidecar,
-            deprecated:     None,
+            name: "sidecar-fixture",
+            provider: crate::provider_model::ProviderId::Sidecar,
+            deprecated: None,
             context_window: Some(8_000),
         };
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec;
         let env = |k: &str| match k {
             "RAXIS_PLANNER_SIDECAR_ENDPOINT" => Some("https://sidecar.test".to_owned()),
-            _                                => None,
+            _ => None,
         };
         assert_sidecar_env_missing(
             build_model_client(&m, "", &fetch, &env),
@@ -1860,17 +1887,17 @@ mod tests {
     #[test]
     fn build_model_client_sidecar_requires_hmac_secret_env() {
         let m = crate::provider_model::KnownModel {
-            name:           "sidecar-fixture",
-            provider:       crate::provider_model::ProviderId::Sidecar,
-            deprecated:     None,
+            name: "sidecar-fixture",
+            provider: crate::provider_model::ProviderId::Sidecar,
+            deprecated: None,
             context_window: Some(8_000),
         };
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec;
         let env = |k: &str| match k {
-            "RAXIS_PLANNER_SIDECAR_ENDPOINT"    => Some("https://sidecar.test".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT" => Some("https://sidecar.test".to_owned()),
             "RAXIS_PLANNER_SIDECAR_PROVIDER_ID" => Some("custom-llm".to_owned()),
-            _                                   => None,
+            _ => None,
         };
         assert_sidecar_env_missing(
             build_model_client(&m, "", &fetch, &env),
@@ -1881,22 +1908,21 @@ mod tests {
     #[tokio::test]
     async fn build_model_client_sidecar_succeeds_with_full_env_and_dialles_endpoint() {
         let m = crate::provider_model::KnownModel {
-            name:           "sidecar-fixture",
-            provider:       crate::provider_model::ProviderId::Sidecar,
-            deprecated:     None,
+            name: "sidecar-fixture",
+            provider: crate::provider_model::ProviderId::Sidecar,
+            deprecated: None,
             context_window: Some(8_000),
         };
         let rec = Arc::new(RecordingFetch::new(b"{}".to_vec()));
         let fetch: Arc<dyn crate::http_fetch::HttpFetch> = rec.clone();
         // 32-byte hex secret (64 hex chars) — well above the
         // `SidecarConstructError::SecretTooShort` floor (16 bytes).
-        let secret =
-            "0000000000000000000000000000000000000000000000000000000000000000";
+        let secret = "0000000000000000000000000000000000000000000000000000000000000000";
         let env = |k: &str| match k {
-            "RAXIS_PLANNER_SIDECAR_ENDPOINT"      => Some("https://sidecar.test".to_owned()),
-            "RAXIS_PLANNER_SIDECAR_PROVIDER_ID"   => Some("custom-llm".to_owned()),
-            "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"   => Some(secret.to_owned()),
-            _                                     => None,
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT" => Some("https://sidecar.test".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_PROVIDER_ID" => Some("custom-llm".to_owned()),
+            "RAXIS_PLANNER_SIDECAR_HMAC_SECRET" => Some(secret.to_owned()),
+            _ => None,
         };
         let client = build_model_client(&m, "", &fetch, &env).unwrap();
         let url = url_dialled_by(client, rec).await;
@@ -1914,8 +1940,10 @@ mod tests {
         assert!(reg.get("bash").is_some());
         // V2 §3.2 — structured_output is now part of the executor
         // tool surface.
-        assert!(reg.get("structured_output").is_some(),
-            "executor MUST have structured_output (V2 §3.2)");
+        assert!(
+            reg.get("structured_output").is_some(),
+            "executor MUST have structured_output (V2 §3.2)"
+        );
         assert!(terminals.contains(&"task_complete"));
         assert!(terminals.contains(&"report_failure"));
         assert!(terminals.contains(&"single_commit"));
@@ -1930,8 +1958,10 @@ mod tests {
         assert!(reg.get("bash").is_none());
         assert!(reg.get("git_commit").is_none());
         // V2 §3.2 — reviewer NEVER receives structured_output (R-5).
-        assert!(reg.get("structured_output").is_none(),
-            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)");
+        assert!(
+            reg.get("structured_output").is_none(),
+            "reviewer MUST NOT have structured_output (V2 §3.2 R-5)"
+        );
         // Read-only tools present:
         assert!(reg.get("read_file").is_some());
         assert!(reg.get("grep_search").is_some());
@@ -1944,8 +1974,10 @@ mod tests {
         let (reg, terminals) = build_role(Role::Orchestrator, stub_submitter());
         assert!(reg.get("read_file").is_some());
         // V2 §3.2 — orchestrator also gets structured_output.
-        assert!(reg.get("structured_output").is_some(),
-            "orchestrator MUST have structured_output (V2 §3.2)");
+        assert!(
+            reg.get("structured_output").is_some(),
+            "orchestrator MUST have structured_output (V2 §3.2)"
+        );
         assert_eq!(
             terminals,
             vec!["integration_merge", "activate_subtask", "retry_subtask"]
@@ -2004,28 +2036,41 @@ mod tests {
             task_id: None,
         };
         let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
-        assert!(prompt.contains("aggregate="),
-            "orchestrator NNSP MUST cite the `aggregate=` field by name");
-        assert!(prompt.contains("aggregate=AtLeastOneRejected"),
+        assert!(
+            prompt.contains("aggregate="),
+            "orchestrator NNSP MUST cite the `aggregate=` field by name"
+        );
+        assert!(
+            prompt.contains("aggregate=AtLeastOneRejected"),
             "orchestrator NNSP MUST direct the model on \
-             `aggregate=AtLeastOneRejected` rows");
-        assert!(prompt.contains("aggregate=Pending"),
+             `aggregate=AtLeastOneRejected` rows"
+        );
+        assert!(
+            prompt.contains("aggregate=Pending"),
             "orchestrator NNSP MUST forbid retry while \
              `aggregate=Pending` (sibling reviewer still owes a \
-             vote — premature retry race per iter42)");
-        assert!(prompt.contains("aggregate=AllPassed"),
+             vote — premature retry race per iter42)"
+        );
+        assert!(
+            prompt.contains("aggregate=AllPassed"),
             "orchestrator NNSP MUST gate `integration_merge` on \
-             `aggregate=AllPassed` for every executor row");
-        assert!(prompt.contains("reviewer_verdicts="),
+             `aggregate=AllPassed` for every executor row"
+        );
+        assert!(
+            prompt.contains("reviewer_verdicts="),
             "orchestrator NNSP SHOULD still cite the \
              `reviewer_verdicts=` block as the forensic source \
-             for per-Reviewer critique text");
-        assert!(prompt.contains("retry_subtask"),
+             for per-Reviewer critique text"
+        );
+        assert!(
+            prompt.contains("retry_subtask"),
             "orchestrator NNSP MUST direct `retry_subtask` on \
-             aggregator-terminal rejection");
-        assert!(prompt.contains("max_rounds")
-                || prompt.contains("MAX_REVIEW_ROUNDS"),
-            "orchestrator NNSP MUST acknowledge the `max_rounds` ceiling");
+             aggregator-terminal rejection"
+        );
+        assert!(
+            prompt.contains("max_rounds") || prompt.contains("MAX_REVIEW_ROUNDS"),
+            "orchestrator NNSP MUST acknowledge the `max_rounds` ceiling"
+        );
     }
 
     /// Regression test for the `iter42` respawn loop: the
@@ -2045,8 +2090,10 @@ mod tests {
         };
         let prompt = render_system_prompt_for_role(Role::Orchestrator, &args);
         assert!(
-            prompt.contains("NEVER call `retry_subtask` while \
-                            `aggregate=Pending`"),
+            prompt.contains(
+                "NEVER call `retry_subtask` while \
+                            `aggregate=Pending`"
+            ),
             "orchestrator NNSP MUST explicitly forbid \
              `retry_subtask` while `aggregate=Pending` per \
              iter42 regression; got prompt: {prompt}",
@@ -2092,8 +2139,7 @@ mod tests {
              got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("activate_subtask")
-                && prompt.contains("PendingActivation"),
+            prompt.contains("activate_subtask") && prompt.contains("PendingActivation"),
             "orchestrator NNSP MUST direct `activate_subtask` (NOT \
              `retry_subtask`) when capabilities reports \
              `retry_admissible=false` with \
@@ -2144,8 +2190,10 @@ mod tests {
              form (and what it implies); got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("NEVER activate a row whose \
-                            `preds_ready=false`"),
+            prompt.contains(
+                "NEVER activate a row whose \
+                            `preds_ready=false`"
+            ),
             "orchestrator NNSP MUST contain a categorical \
              prohibition against activating rows with \
              `preds_ready=false` per iter50 regression; \
@@ -2207,8 +2255,10 @@ mod tests {
              got prompt: {prompt}",
         );
         assert!(
-            prompt.contains("DO NOT activate any \
-                            pending task"),
+            prompt.contains(
+                "DO NOT activate any \
+                            pending task"
+            ),
             "orchestrator NNSP MUST contain a categorical \
              prohibition against activating pending tasks while a \
              review-rejected executor awaits retry (iter50 \
@@ -2276,27 +2326,25 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock_path = dir.path().join("planner.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
-        tokio::spawn(async move {
-            while let Ok((_s, _)) = listener.accept().await {}
-        });
+        tokio::spawn(async move { while let Ok((_s, _)) = listener.accept().await {} });
 
         let snap = KsbSnapshot {
-            version:                       raxis_ksb::KSB_SCHEMA_VERSION,
-            initiative_id:                 "init-FOLD".to_owned(),
-            task_id:                       Some("task-FOLD".to_owned()),
-            role:                          "executor".to_owned(),
-            evaluation_sha:                "eval-sha-fold".to_owned(),
-            path_allowlist:                vec!["src/fold.rs".to_owned()],
-            token_budget_remaining:        77_777,
-            wallclock_budget_remaining_s:  333,
-            dag_rows:                      vec![],
-            task_description:              "fold-test description".to_owned(),
-            target_ref:                    "refs/heads/feature/fold".to_owned(),
-            base_sha:                      String::new(),
-            reviewer_verdicts:             vec![],
-            pending_escalations:           vec![],
-            credential_ports:              vec![],
-            capabilities:                  None,
+            version: raxis_ksb::KSB_SCHEMA_VERSION,
+            initiative_id: "init-FOLD".to_owned(),
+            task_id: Some("task-FOLD".to_owned()),
+            role: "executor".to_owned(),
+            evaluation_sha: "eval-sha-fold".to_owned(),
+            path_allowlist: vec!["src/fold.rs".to_owned()],
+            token_budget_remaining: 77_777,
+            wallclock_budget_remaining_s: 333,
+            dag_rows: vec![],
+            task_description: "fold-test description".to_owned(),
+            target_ref: "refs/heads/feature/fold".to_owned(),
+            base_sha: String::new(),
+            reviewer_verdicts: vec![],
+            pending_escalations: vec![],
+            credential_ports: vec![],
+            capabilities: None,
         };
 
         let _ = run_role_session_with_model(
@@ -2305,9 +2353,13 @@ mod tests {
                 initiative_id: "init-FOLD".to_owned(),
                 task_id: Some("task-FOLD".to_owned()),
             },
-            BootEnv { session_token: "tok".to_owned() },
+            BootEnv {
+                session_token: "tok".to_owned(),
+            },
             "fold prompt".to_owned(),
-            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
+            KernelTransportConfig::Uds {
+                socket_path: sock_path.clone(),
+            },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -2322,32 +2374,52 @@ mod tests {
         let seen = model_for_inspect.seen.lock().await;
         let last = seen.last().expect("model received a request");
         let sys = last.system.as_deref().expect("system prompt populated");
-        assert!(sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
-            "system prompt MUST carry the KSB open delimiter; got: {sys}");
-        assert!(sys.contains(raxis_ksb::KSB_DELIMITER_CLOSE),
-            "system prompt MUST carry the KSB close delimiter; got: {sys}");
-        assert!(sys.contains("initiative_id=init-FOLD"),
-            "KSB block MUST stamp initiative_id verbatim; got: {sys}");
-        assert!(sys.contains("task_id=task-FOLD"),
-            "KSB block MUST stamp task_id verbatim; got: {sys}");
-        assert!(sys.contains("target_ref=refs/heads/feature/fold"),
-            "KSB block MUST stamp resolved target_ref; got: {sys}");
-        assert!(sys.contains("- src/fold.rs"),
-            "KSB block MUST stamp the per-task path allowlist; got: {sys}");
-        assert!(sys.contains("token_budget_remaining=77777"),
-            "KSB block MUST stamp the budget; got: {sys}");
-        assert!(sys.contains("fold-test description"),
-            "KSB block MUST stamp the task_description; got: {sys}");
+        assert!(
+            sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
+            "system prompt MUST carry the KSB open delimiter; got: {sys}"
+        );
+        assert!(
+            sys.contains(raxis_ksb::KSB_DELIMITER_CLOSE),
+            "system prompt MUST carry the KSB close delimiter; got: {sys}"
+        );
+        assert!(
+            sys.contains("initiative_id=init-FOLD"),
+            "KSB block MUST stamp initiative_id verbatim; got: {sys}"
+        );
+        assert!(
+            sys.contains("task_id=task-FOLD"),
+            "KSB block MUST stamp task_id verbatim; got: {sys}"
+        );
+        assert!(
+            sys.contains("target_ref=refs/heads/feature/fold"),
+            "KSB block MUST stamp resolved target_ref; got: {sys}"
+        );
+        assert!(
+            sys.contains("- src/fold.rs"),
+            "KSB block MUST stamp the per-task path allowlist; got: {sys}"
+        );
+        assert!(
+            sys.contains("token_budget_remaining=77777"),
+            "KSB block MUST stamp the budget; got: {sys}"
+        );
+        assert!(
+            sys.contains("fold-test description"),
+            "KSB block MUST stamp the task_description; got: {sys}"
+        );
         // V2 `INV-EXEC-DISCOVERY-01` — the assembled system
         // prompt MUST also carry the capability-hint section so
         // the LLM's first turn knows what the VM has
         // pre-installed without trial-and-error `pip install`.
-        assert!(sys.contains("## VM Environment"),
+        assert!(
+            sys.contains("## VM Environment"),
             "system prompt MUST carry the `## VM Environment` \
-             capability hint header; got: {sys}");
-        assert!(sys.contains("No outbound network"),
+             capability hint header; got: {sys}"
+        );
+        assert!(
+            sys.contains("No outbound network"),
             "capability hint MUST warn the LLM that egress is \
-             gated and `pip install` will fail; got: {sys}");
+             gated and `pip install` will fail; got: {sys}"
+        );
     }
 
     /// V2 `v2_extended_gaps.md §2.4` — when no KSB snapshot is
@@ -2378,9 +2450,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let sock_path = dir.path().join("planner.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
-        tokio::spawn(async move {
-            while let Ok((_s, _)) = listener.accept().await {}
-        });
+        tokio::spawn(async move { while let Ok((_s, _)) = listener.accept().await {} });
 
         let _ = run_role_session_with_model(
             Role::Executor,
@@ -2388,9 +2458,13 @@ mod tests {
                 initiative_id: "init-NO-KSB".to_owned(),
                 task_id: Some("task-NO-KSB".to_owned()),
             },
-            BootEnv { session_token: "tok".to_owned() },
+            BootEnv {
+                session_token: "tok".to_owned(),
+            },
             "no-ksb prompt".to_owned(),
-            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
+            KernelTransportConfig::Uds {
+                socket_path: sock_path.clone(),
+            },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -2405,8 +2479,10 @@ mod tests {
         let seen = model_for_inspect.seen.lock().await;
         let last = seen.last().expect("model received a request");
         let sys = last.system.as_deref().unwrap_or("");
-        assert!(!sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
-            "without a snapshot, system prompt MUST NOT contain KSB delimiters; got: {sys}");
+        assert!(
+            !sys.contains(raxis_ksb::KSB_DELIMITER_OPEN),
+            "without a snapshot, system prompt MUST NOT contain KSB delimiters; got: {sys}"
+        );
     }
 
     /// Driver returns `Scaffold` when `RAXIS_PLANNER_TASK_PROMPT`
@@ -2424,10 +2500,9 @@ mod tests {
             initiative_id: "init-A".to_owned(),
             task_id: Some("task-1".to_owned()),
         };
-        let outcome =
-            run_role_session_with_env_fn(Role::Executor, args, env, |_| None)
-                .await
-                .unwrap();
+        let outcome = run_role_session_with_env_fn(Role::Executor, args, env, |_| None)
+            .await
+            .unwrap();
         assert!(matches!(outcome, DriverOutcome::Scaffold));
     }
 
@@ -2443,7 +2518,7 @@ mod tests {
         let path_string = prompt_path.display().to_string();
         let env_fn = |k: &str| match k {
             "RAXIS_PLANNER_TASK_PROMPT_PATH" => Some(path_string.clone()),
-            "RAXIS_PLANNER_TASK_PROMPT"      => Some("FROM_INLINE_ENV".to_owned()),
+            "RAXIS_PLANNER_TASK_PROMPT" => Some("FROM_INLINE_ENV".to_owned()),
             _ => None,
         };
         let got = read_task_prompt(&env_fn).expect("sidecar channel resolves");
@@ -2497,8 +2572,9 @@ mod tests {
     #[test]
     fn read_task_prompt_returns_none_for_missing_sidecar_file() {
         let env_fn = |k: &str| match k {
-            "RAXIS_PLANNER_TASK_PROMPT_PATH" =>
-                Some("/nonexistent/path/to/raxis-meta/task-prompt.txt".to_owned()),
+            "RAXIS_PLANNER_TASK_PROMPT_PATH" => {
+                Some("/nonexistent/path/to/raxis-meta/task-prompt.txt".to_owned())
+            }
             _ => None,
         };
         assert!(read_task_prompt(&env_fn).is_none());
@@ -2553,7 +2629,9 @@ mod tests {
                 session_token: "tok".to_owned(),
             },
             "Please run a review.".to_owned(),
-            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
+            KernelTransportConfig::Uds {
+                socket_path: sock_path.clone(),
+            },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
@@ -2578,9 +2656,9 @@ mod tests {
     #[tokio::test]
     async fn run_role_session_rejects_base_url_without_scheme() {
         let env_fn = |k: &str| match k {
-            "RAXIS_PLANNER_TASK_PROMPT"   => Some("do something".to_owned()),
+            "RAXIS_PLANNER_TASK_PROMPT" => Some("do something".to_owned()),
             "RAXIS_KERNEL_PLANNER_SOCKET" => Some("/tmp/nope.sock".to_owned()),
-            "RAXIS_PLANNER_BASE_URL"      => Some("ftp://api.anthropic.com".to_owned()),
+            "RAXIS_PLANNER_BASE_URL" => Some("ftp://api.anthropic.com".to_owned()),
             _ => None,
         };
         let res = run_role_session_with_env_fn(
@@ -2605,12 +2683,24 @@ mod tests {
     /// dispatch loop uncapped, not crash with a "missing env" error.
     #[test]
     fn parse_u64_env_returns_none_for_absent_and_garbage() {
-        let absent  = |_: &str| None;
-        let garbage = |k: &str| if k == "X" { Some("not-a-number".to_owned()) } else { None };
-        let valid   = |k: &str| if k == "X" { Some("12345".to_owned()) } else { None };
-        assert_eq!(parse_u64_env(&absent,  "X"), None);
+        let absent = |_: &str| None;
+        let garbage = |k: &str| {
+            if k == "X" {
+                Some("not-a-number".to_owned())
+            } else {
+                None
+            }
+        };
+        let valid = |k: &str| {
+            if k == "X" {
+                Some("12345".to_owned())
+            } else {
+                None
+            }
+        };
+        assert_eq!(parse_u64_env(&absent, "X"), None);
         assert_eq!(parse_u64_env(&garbage, "X"), None);
-        assert_eq!(parse_u64_env(&valid,   "X"), Some(12345));
+        assert_eq!(parse_u64_env(&valid, "X"), Some(12345));
     }
 
     /// V2 `v2_extended_gaps.md §2.5` — when the kernel stamps a
@@ -2630,22 +2720,22 @@ mod tests {
             kind: "message".to_owned(),
             role: "assistant".to_owned(),
             model: "mock".to_owned(),
-            content: vec![ContentBlock::Text { text: "ack".to_owned() }],
+            content: vec![ContentBlock::Text {
+                text: "ack".to_owned(),
+            }],
             stop_reason: Some("end_turn".to_owned()),
             usage: Usage {
-                input_tokens:                100,
-                output_tokens:               1,
+                input_tokens: 100,
+                output_tokens: 1,
                 cache_creation_input_tokens: 0,
-                cache_read_input_tokens:     0,
+                cache_read_input_tokens: 0,
             },
         }]));
 
         let dir = tempfile::tempdir().unwrap();
         let sock_path = dir.path().join("planner.sock");
         let listener = tokio::net::UnixListener::bind(&sock_path).unwrap();
-        tokio::spawn(async move {
-            while let Ok((_s, _)) = listener.accept().await {}
-        });
+        tokio::spawn(async move { while let Ok((_s, _)) = listener.accept().await {} });
 
         let outcome = run_role_session_with_model(
             Role::Reviewer,
@@ -2653,16 +2743,24 @@ mod tests {
                 initiative_id: "init-CAP".to_owned(),
                 task_id: Some("task-CAP".to_owned()),
             },
-            BootEnv { session_token: "tok".to_owned() },
+            BootEnv {
+                session_token: "tok".to_owned(),
+            },
             "review please".to_owned(),
-            KernelTransportConfig::Uds { socket_path: sock_path.clone() },
+            KernelTransportConfig::Uds {
+                socket_path: sock_path.clone(),
+            },
             dir.path().to_path_buf(),
             "mock".to_owned(),
             5,
             512,
             // Input cap of 50 < the 100 the model reports, so the
             // post-turn ceiling check fires.
-            TokenCaps { input_total: Some(50), output_total: None, total: None },
+            TokenCaps {
+                input_total: Some(50),
+                output_total: None,
+                total: None,
+            },
             model as Arc<dyn ModelClient>,
             None,
         )
@@ -2671,8 +2769,10 @@ mod tests {
 
         match outcome {
             DriverOutcome::TokensExceeded { which, ceiling } => {
-                assert_eq!(which, "input",
-                    "input cap must trip first when only the input cap is configured");
+                assert_eq!(
+                    which, "input",
+                    "input cap must trip first when only the input cap is configured"
+                );
                 assert_eq!(ceiling, 50, "ceiling MUST be the cap we set");
             }
             other => panic!("expected TokensExceeded, got {other:?}"),

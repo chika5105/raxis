@@ -25,9 +25,7 @@ use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName,
-};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialError, CredentialName};
 use raxis_credentials_file::FileCredentialBackend;
 use thiserror::Error;
 
@@ -90,10 +88,7 @@ pub enum PolicyViewError {
         source: toml::de::Error,
     },
     #[error("provider {provider_id:?}: credentials file {path} api_key is empty")]
-    CredentialsEmpty {
-        provider_id: String,
-        path: PathBuf,
-    },
+    CredentialsEmpty { provider_id: String, path: PathBuf },
 }
 
 /// Read the full policy view from disk using the **default**
@@ -128,8 +123,8 @@ pub fn load_policy_view_with_credential_backend(
     backend: &Arc<dyn CredentialBackend>,
 ) -> Result<PolicyView, PolicyViewError> {
     let policy_path = data_dir.join("policy/policy.toml");
-    let (bundle, _bytes, _sha) = raxis_policy::load_policy(&policy_path)
-        .map_err(|e| PolicyViewError::PolicyLoad {
+    let (bundle, _bytes, _sha) =
+        raxis_policy::load_policy(&policy_path).map_err(|e| PolicyViewError::PolicyLoad {
             path: policy_path.clone(),
             source: e,
         })?;
@@ -139,31 +134,28 @@ pub fn load_policy_view_with_credential_backend(
     for entry in bundle.providers() {
         let path = providers_dir.join(&entry.credentials_file);
         let cred_name = credentials_filename_to_name(&entry.credentials_file);
-        let creds = resolve_provider_credentials_via_backend(
-            backend,
-            &cred_name,
-            &entry.provider_id,
-        )
-        .map_err(|e| match e {
-            ProviderResolveError::Backend(src) => PolicyViewError::CredentialsBackend {
-                provider_id: entry.provider_id.clone(),
-                source: src,
-            },
-            ProviderResolveError::Parse(parse) => PolicyViewError::CredentialsParse {
-                provider_id: entry.provider_id.clone(),
-                path: path.clone(),
-                source: parse,
-            },
-            ProviderResolveError::EmptyApiKey => PolicyViewError::CredentialsEmpty {
-                provider_id: entry.provider_id.clone(),
-                path: path.clone(),
-            },
-            ProviderResolveError::NotUtf8(io) => PolicyViewError::CredentialsRead {
-                provider_id: entry.provider_id.clone(),
-                path: path.clone(),
-                source: io,
-            },
-        })?;
+        let creds =
+            resolve_provider_credentials_via_backend(backend, &cred_name, &entry.provider_id)
+                .map_err(|e| match e {
+                    ProviderResolveError::Backend(src) => PolicyViewError::CredentialsBackend {
+                        provider_id: entry.provider_id.clone(),
+                        source: src,
+                    },
+                    ProviderResolveError::Parse(parse) => PolicyViewError::CredentialsParse {
+                        provider_id: entry.provider_id.clone(),
+                        path: path.clone(),
+                        source: parse,
+                    },
+                    ProviderResolveError::EmptyApiKey => PolicyViewError::CredentialsEmpty {
+                        provider_id: entry.provider_id.clone(),
+                        path: path.clone(),
+                    },
+                    ProviderResolveError::NotUtf8(io) => PolicyViewError::CredentialsRead {
+                        provider_id: entry.provider_id.clone(),
+                        path: path.clone(),
+                        source: io,
+                    },
+                })?;
         providers.insert(
             entry.provider_id.clone(),
             ProviderEntryView {
@@ -221,10 +213,7 @@ fn resolve_provider_credentials_via_backend(
     provider_id: &str,
 ) -> Result<ProviderCredentials, ProviderResolveError> {
     let value = backend
-        .resolve(
-            name,
-            ConsumerIdentity::new("gateway", provider_id),
-        )
+        .resolve(name, ConsumerIdentity::new("gateway", provider_id))
         .map_err(ProviderResolveError::Backend)?;
     let text = value.as_utf8().ok_or_else(|| {
         ProviderResolveError::NotUtf8(std::io::Error::new(
@@ -232,8 +221,7 @@ fn resolve_provider_credentials_via_backend(
             "credentials file is not valid UTF-8",
         ))
     })?;
-    let creds: ProviderCredentials =
-        toml::from_str(&text).map_err(ProviderResolveError::Parse)?;
+    let creds: ProviderCredentials = toml::from_str(&text).map_err(ProviderResolveError::Parse)?;
     if creds.api_key.is_empty() {
         return Err(ProviderResolveError::EmptyApiKey);
     }
@@ -267,8 +255,7 @@ fn load_provider_credentials_inner(
             format!("credentials file is not valid UTF-8: {e}"),
         ))
     })?;
-    let creds: ProviderCredentials =
-        toml::from_str(s).map_err(CredentialsLoadError::Parse)?;
+    let creds: ProviderCredentials = toml::from_str(s).map_err(CredentialsLoadError::Parse)?;
     if creds.api_key.is_empty() {
         return Err(CredentialsLoadError::Empty);
     }
@@ -288,10 +275,9 @@ pub fn load_provider_credentials(
             std::io::ErrorKind::InvalidData,
             format!("toml parse: {parse}"),
         ),
-        CredentialsLoadError::Empty => std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "api_key is empty",
-        ),
+        CredentialsLoadError::Empty => {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, "api_key is empty")
+        }
     })
 }
 
@@ -417,15 +403,24 @@ auth_prefix = ""
 
     #[test]
     fn extract_host_basic_https() {
-        assert_eq!(extract_host("https://api.anthropic.com/v1/messages"), Some("api.anthropic.com".to_owned()));
+        assert_eq!(
+            extract_host("https://api.anthropic.com/v1/messages"),
+            Some("api.anthropic.com".to_owned())
+        );
     }
     #[test]
     fn extract_host_with_port() {
-        assert_eq!(extract_host("http://localhost:8080/foo"), Some("localhost".to_owned()));
+        assert_eq!(
+            extract_host("http://localhost:8080/foo"),
+            Some("localhost".to_owned())
+        );
     }
     #[test]
     fn extract_host_no_path() {
-        assert_eq!(extract_host("https://api.example.com"), Some("api.example.com".to_owned()));
+        assert_eq!(
+            extract_host("https://api.example.com"),
+            Some("api.example.com".to_owned())
+        );
     }
     #[test]
     fn extract_host_rejects_no_scheme() {
@@ -446,10 +441,14 @@ auth_prefix = ""
     fn glob_match_star_dot_suffix() {
         assert!(glob_match("*.example.com", "api.example.com"));
         assert!(glob_match("*.example.com", "deep.api.example.com"));
-        assert!(glob_match("*.example.com", "example.com"),
-            "*.example.com must also match the bare suffix per common convention");
-        assert!(!glob_match("*.example.com", "evil-example.com"),
-            "byte-prefix must not match");
+        assert!(
+            glob_match("*.example.com", "example.com"),
+            "*.example.com must also match the bare suffix per common convention"
+        );
+        assert!(
+            !glob_match("*.example.com", "evil-example.com"),
+            "byte-prefix must not match"
+        );
     }
     #[test]
     fn glob_match_exact_pattern() {

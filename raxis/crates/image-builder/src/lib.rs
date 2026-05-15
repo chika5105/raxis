@@ -44,8 +44,8 @@
 
 use ed25519_dalek::{Signer, SigningKey};
 use raxis_image_manifest::{
-    fingerprint_signing_key, sha256_file_hex, BuildEnv, ImageFormat, ImageManifest,
-    ManifestError, ManifestFile, Role, SCHEMA_VERSION,
+    fingerprint_signing_key, sha256_file_hex, BuildEnv, ImageFormat, ImageManifest, ManifestError,
+    ManifestFile, Role, SCHEMA_VERSION,
 };
 use std::path::{Path, PathBuf};
 
@@ -59,24 +59,24 @@ pub const INPUT_MANIFEST_NAME: &str = "manifest.toml";
 #[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
 pub struct BuildInputs {
     /// Which canonical image this directory builds.
-    pub role:           Role,
+    pub role: Role,
     /// Kernel version this image is paired with.
     pub kernel_version: String,
     /// `SOURCE_DATE_EPOCH` for tar/erofs determinism.
     pub source_date_epoch: u64,
     /// Pinned mkfs.erofs version.
-    pub erofs_version:  String,
+    pub erofs_version: String,
     /// Pinned tar implementation version.
-    pub tar_version:    String,
+    pub tar_version: String,
     /// Pinned zstd version.
-    pub zstd_version:   String,
+    pub zstd_version: String,
     /// Rootfs on-disk shape this build emits. Defaults via
     /// `default_image_format` to `RootfsErofs` so existing
     /// `images/<role>/manifest.toml` files keep building unchanged
     /// (the dev-host pipeline overrides this to
     /// `RootfsInitramfsCpio`).
     #[serde(default = "default_image_format")]
-    pub image_format:   ImageFormat,
+    pub image_format: ImageFormat,
 }
 
 /// Default `image_format` for `BuildInputs` when the field is absent
@@ -113,7 +113,7 @@ pub enum BuildError {
     #[error("inputs manifest at {path} is malformed: {reason}")]
     InputsParse {
         /// The path.
-        path:   String,
+        path: String,
         /// Underlying parse error (already a String for portability).
         reason: String,
     },
@@ -122,7 +122,7 @@ pub enum BuildError {
     #[error("builder io at {path}: {source}")]
     Io {
         /// What we were reading.
-        path:   String,
+        path: String,
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,
@@ -131,7 +131,10 @@ pub enum BuildError {
 
 impl BuildError {
     fn io(path: impl Into<String>, e: std::io::Error) -> Self {
-        BuildError::Io { path: path.into(), source: e }
+        BuildError::Io {
+            path: path.into(),
+            source: e,
+        }
     }
 }
 
@@ -156,18 +159,12 @@ pub fn enumerate_rootfs(rootfs_dir: &Path) -> Result<Vec<ManifestFile>, BuildErr
     Ok(files)
 }
 
-fn walk(
-    root: &Path,
-    cur:  &Path,
-    out:  &mut Vec<ManifestFile>,
-) -> Result<(), BuildError> {
+fn walk(root: &Path, cur: &Path, out: &mut Vec<ManifestFile>) -> Result<(), BuildError> {
     use std::os::unix::fs::PermissionsExt;
 
-    let entries = std::fs::read_dir(cur).map_err(|e| BuildError::io(cur.display().to_string(), e))?;
-    let mut sorted: Vec<_> = entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .collect();
+    let entries =
+        std::fs::read_dir(cur).map_err(|e| BuildError::io(cur.display().to_string(), e))?;
+    let mut sorted: Vec<_> = entries.filter_map(|e| e.ok()).map(|e| e.path()).collect();
     sorted.sort();
     for path in sorted {
         let meta = std::fs::symlink_metadata(&path)
@@ -190,7 +187,8 @@ fn walk(
                 path: format!("{} (not a regular file or directory)", path.display()),
             });
         }
-        let rel = path.strip_prefix(root)
+        let rel = path
+            .strip_prefix(root)
             .map_err(|_| BuildError::SourceUnusable {
                 path: path.display().to_string(),
             })?;
@@ -198,7 +196,7 @@ fn walk(
         let (sha, size) = sha256_file_hex(&path)?;
         let mode = meta.permissions().mode() & 0o7777;
         out.push(ManifestFile {
-            path:   rel_str,
+            path: rel_str,
             sha256: sha,
             size,
             mode,
@@ -218,27 +216,27 @@ fn walk(
 /// any manifest whose `image_artefact_sha256` does not match the
 /// streamed-from-disk digest of the on-disk .img.
 pub fn assemble_manifest(
-    inputs:                    &BuildInputs,
-    files:                     Vec<ManifestFile>,
-    signing_key_fp_hex:        String,
+    inputs: &BuildInputs,
+    files: Vec<ManifestFile>,
+    signing_key_fp_hex: String,
     image_artefact_sha256_hex: String,
 ) -> Result<ImageManifest, BuildError> {
     let mut m = ImageManifest {
-        schema_version:        SCHEMA_VERSION,
-        role:                  inputs.role,
-        kernel_version:        inputs.kernel_version.clone(),
-        bundle_hash:           String::new(),
+        schema_version: SCHEMA_VERSION,
+        role: inputs.role,
+        kernel_version: inputs.kernel_version.clone(),
+        bundle_hash: String::new(),
         image_artefact_sha256: image_artefact_sha256_hex,
-        image_format:          inputs.image_format,
+        image_format: inputs.image_format,
         build_env: BuildEnv {
             source_date_epoch: inputs.source_date_epoch,
-            erofs_version:     inputs.erofs_version.clone(),
-            tar_version:       inputs.tar_version.clone(),
-            zstd_version:      inputs.zstd_version.clone(),
+            erofs_version: inputs.erofs_version.clone(),
+            tar_version: inputs.tar_version.clone(),
+            zstd_version: inputs.zstd_version.clone(),
         },
         files,
         signing_key_fp: signing_key_fp_hex,
-        signature:      "0".repeat(128),
+        signature: "0".repeat(128),
     };
     let bh = m.recompute_bundle_hash()?;
     m.bundle_hash = hex::encode(bh);
@@ -258,10 +256,7 @@ pub fn compute_artefact_digest_hex(path: &Path) -> Result<String, BuildError> {
 /// a manifest that was signed by the same key over the same hash
 /// yields a manifest that still verifies (Ed25519 signatures are
 /// deterministic).
-pub fn sign_manifest(
-    manifest: &mut ImageManifest,
-    key:      &SigningKey,
-) -> Result<(), BuildError> {
+pub fn sign_manifest(manifest: &mut ImageManifest, key: &SigningKey) -> Result<(), BuildError> {
     let bh = manifest.bundle_hash_bytes()?;
     let sig = key.sign(&bh);
     manifest.signature = hex::encode(sig.to_bytes());
@@ -276,10 +271,10 @@ pub fn sign_manifest(
 /// packed `<role>-<kernel_version>.img` blob; pass a fixture string
 /// in tests that do not produce an .img.
 pub fn build_and_sign(
-    inputs:                    &BuildInputs,
-    rootfs_dir:                &Path,
+    inputs: &BuildInputs,
+    rootfs_dir: &Path,
     image_artefact_sha256_hex: String,
-    signing_key:               &SigningKey,
+    signing_key: &SigningKey,
 ) -> Result<ImageManifest, BuildError> {
     let files = enumerate_rootfs(rootfs_dir)?;
     let mut m = assemble_manifest(
@@ -294,10 +289,10 @@ pub fn build_and_sign(
 
 /// Read `inputs.toml` from disk.
 pub fn read_inputs(path: &Path) -> Result<BuildInputs, BuildError> {
-    let s = std::fs::read_to_string(path)
-        .map_err(|e| BuildError::io(path.display().to_string(), e))?;
+    let s =
+        std::fs::read_to_string(path).map_err(|e| BuildError::io(path.display().to_string(), e))?;
     toml::from_str(&s).map_err(|e| BuildError::InputsParse {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         reason: e.to_string(),
     })
 }
@@ -313,23 +308,25 @@ pub fn read_inputs(path: &Path) -> Result<BuildInputs, BuildError> {
 /// optimisation. The kernel verifies the manifest at boot, the
 /// mounted rootfs is verified by `verity` at runtime.
 pub fn erofs_assemble(
-    rootfs_dir:        &Path,
-    out_blob:          &Path,
+    rootfs_dir: &Path,
+    out_blob: &Path,
     source_date_epoch: u64,
 ) -> Result<Option<PathBuf>, BuildError> {
     if !command_exists("mkfs.erofs") {
         return Ok(None);
     }
     let status = std::process::Command::new("mkfs.erofs")
-        .arg("-z").arg("zstd")
-        .arg("-T").arg(source_date_epoch.to_string())
+        .arg("-z")
+        .arg("zstd")
+        .arg("-T")
+        .arg(source_date_epoch.to_string())
         .arg(out_blob)
         .arg(rootfs_dir)
         .status()
         .map_err(|e| BuildError::io(format!("mkfs.erofs spawn"), e))?;
     if !status.success() {
         return Err(BuildError::Io {
-            path:   out_blob.display().to_string(),
+            path: out_blob.display().to_string(),
             source: std::io::Error::other(format!("mkfs.erofs failed: {status}")),
         });
     }
@@ -374,13 +371,13 @@ mod tests {
 
     fn build_inputs() -> BuildInputs {
         BuildInputs {
-            role:              Role::Reviewer,
-            kernel_version:    "0.1.0".to_owned(),
+            role: Role::Reviewer,
+            kernel_version: "0.1.0".to_owned(),
             source_date_epoch: 1700000000,
-            erofs_version:     "1.7.1".to_owned(),
-            tar_version:       "1.34".to_owned(),
-            zstd_version:      "1.5.5".to_owned(),
-            image_format:      ImageFormat::RootfsErofs,
+            erofs_version: "1.7.1".to_owned(),
+            tar_version: "1.34".to_owned(),
+            zstd_version: "1.5.5".to_owned(),
+            image_format: ImageFormat::RootfsErofs,
         }
     }
 
@@ -390,13 +387,16 @@ mod tests {
         let root = tmp.path().to_owned();
         write_file(&root, "init", b"#!/init\n", 0o755);
         write_file(&root, "usr/bin/sh", b"sh\n", 0o755);
-        write_file(&root, "etc/conf",   b"k=v\n", 0o644);
+        write_file(&root, "etc/conf", b"k=v\n", 0o644);
 
         let files = enumerate_rootfs(&root).unwrap();
         let paths: Vec<_> = files.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(paths, vec!["etc/conf", "init", "usr/bin/sh"]);
         assert_eq!(files.iter().find(|f| f.path == "init").unwrap().mode, 0o755);
-        assert_eq!(files.iter().find(|f| f.path == "etc/conf").unwrap().mode, 0o644);
+        assert_eq!(
+            files.iter().find(|f| f.path == "etc/conf").unwrap().mode,
+            0o644
+        );
     }
 
     /// Determinism: rebuild the same rootfs twice; bundle hash and
@@ -407,7 +407,7 @@ mod tests {
     fn build_and_sign_is_byte_deterministic_for_identical_rootfs() {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path().to_owned();
-        write_file(&root, "init",      b"raxis-init", 0o755);
+        write_file(&root, "init", b"raxis-init", 0o755);
         write_file(&root, "raxis-planner", b"FAKE_BIN_BYTES", 0o755);
 
         let key = gen_key();
@@ -416,10 +416,14 @@ mod tests {
         let m1 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
         let m2 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
 
-        assert_eq!(m1.bundle_hash, m2.bundle_hash,
-            "bundle_hash must be reproducible for identical rootfs");
-        assert_eq!(m1.signature, m2.signature,
-            "Ed25519 signatures over identical messages must be byte-equal");
+        assert_eq!(
+            m1.bundle_hash, m2.bundle_hash,
+            "bundle_hash must be reproducible for identical rootfs"
+        );
+        assert_eq!(
+            m1.signature, m2.signature,
+            "Ed25519 signatures over identical messages must be byte-equal"
+        );
         assert_eq!(m1.files.len(), m2.files.len());
     }
 
@@ -456,10 +460,14 @@ mod tests {
         let m1 = build_and_sign(&inputs, &root, "1".repeat(64), &key).unwrap();
         let m2 = build_and_sign(&inputs, &root, "2".repeat(64), &key).unwrap();
 
-        assert_ne!(m1.bundle_hash, m2.bundle_hash,
-            "bundle_hash must change when image_artefact_sha256 changes");
-        assert_ne!(m1.signature, m2.signature,
-            "signature must change when bundle_hash changes");
+        assert_ne!(
+            m1.bundle_hash, m2.bundle_hash,
+            "bundle_hash must change when image_artefact_sha256 changes"
+        );
+        assert_ne!(
+            m1.signature, m2.signature,
+            "signature must change when bundle_hash changes"
+        );
     }
 
     /// Manifest produced by the builder verifies against the
@@ -472,8 +480,8 @@ mod tests {
         write_file(&root, "init", b"hello", 0o755);
 
         let key = gen_key();
-        let vk  = key.verifying_key();
-        let m   = build_and_sign(&build_inputs(), &root, "1".repeat(64), &key).unwrap();
+        let vk = key.verifying_key();
+        let m = build_and_sign(&build_inputs(), &root, "1".repeat(64), &key).unwrap();
         raxis_image_manifest::verify(&m, &vk)
             .expect("freshly built+signed manifest must verify against the matching VK");
     }

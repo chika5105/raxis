@@ -58,12 +58,10 @@ use crate::GlobalFlags;
 pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let opts = parse_args(args)?;
 
-    let (left, _, left_sha) = load_policy(&opts.left).map_err(|e| {
-        CliError::Policy(format!("load left {:?}: {e}", opts.left))
-    })?;
-    let (right, _, right_sha) = load_policy(&opts.right).map_err(|e| {
-        CliError::Policy(format!("load right {:?}: {e}", opts.right))
-    })?;
+    let (left, _, left_sha) = load_policy(&opts.left)
+        .map_err(|e| CliError::Policy(format!("load left {:?}: {e}", opts.left)))?;
+    let (right, _, right_sha) = load_policy(&opts.right)
+        .map_err(|e| CliError::Policy(format!("load right {:?}: {e}", opts.right)))?;
 
     let report = diff_bundles(&left, &right, &left_sha, &right_sha);
 
@@ -84,9 +82,9 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 #[derive(Debug, Clone)]
 struct PolicyDiffOpts {
-    left:  PathBuf,
+    left: PathBuf,
     right: PathBuf,
-    json:  bool,
+    json: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<PolicyDiffOpts, CliError> {
@@ -115,12 +113,13 @@ fn parse_args(args: &[String]) -> Result<PolicyDiffOpts, CliError> {
     if positionals.len() != 2 {
         return Err(CliError::Usage(
             "policy diff requires exactly two positional paths \
-             <left.toml> <right.toml>".to_owned(),
+             <left.toml> <right.toml>"
+                .to_owned(),
         ));
     }
     let mut it = positionals.into_iter();
     Ok(PolicyDiffOpts {
-        left:  it.next().unwrap(),
+        left: it.next().unwrap(),
         right: it.next().unwrap(),
         json,
     })
@@ -149,18 +148,22 @@ fn print_help() {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DiffEntry {
     section: &'static str,
-    kind:    DiffKind,
-    label:   String,
-    detail:  String,
+    kind: DiffKind,
+    label: String,
+    detail: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum DiffKind { Added, Removed, Changed }
+enum DiffKind {
+    Added,
+    Removed,
+    Changed,
+}
 
 impl DiffKind {
     fn token(self) -> &'static str {
         match self {
-            Self::Added   => "added",
+            Self::Added => "added",
             Self::Removed => "removed",
             Self::Changed => "changed",
         }
@@ -173,9 +176,18 @@ struct DiffReport {
 }
 
 impl DiffReport {
-    fn push(&mut self, section: &'static str, kind: DiffKind, label: impl Into<String>, detail: impl Into<String>) {
+    fn push(
+        &mut self,
+        section: &'static str,
+        kind: DiffKind,
+        label: impl Into<String>,
+        detail: impl Into<String>,
+    ) {
         self.entries.push(DiffEntry {
-            section, kind, label: label.into(), detail: detail.into(),
+            section,
+            kind,
+            label: label.into(),
+            detail: detail.into(),
         });
     }
 }
@@ -184,26 +196,38 @@ impl DiffReport {
 // Top-level diff orchestrator
 // ────────────────────────────────────────────────────────────────────
 
-fn diff_bundles(left: &PolicyBundle, right: &PolicyBundle, left_sha: &str, right_sha: &str) -> DiffReport {
+fn diff_bundles(
+    left: &PolicyBundle,
+    right: &PolicyBundle,
+    left_sha: &str,
+    right_sha: &str,
+) -> DiffReport {
     let mut r = DiffReport::default();
 
     if left.epoch() != right.epoch() {
         r.push(
-            "identity", DiffKind::Changed,
+            "identity",
+            DiffKind::Changed,
             "epoch",
             format!("{} → {}", left.epoch(), right.epoch()),
         );
     }
     if left_sha != right_sha {
         r.push(
-            "identity", DiffKind::Changed,
+            "identity",
+            DiffKind::Changed,
             "policy_sha256",
-            format!("{}… → {}…", &left_sha[..16.min(left_sha.len())], &right_sha[..16.min(right_sha.len())]),
+            format!(
+                "{}… → {}…",
+                &left_sha[..16.min(left_sha.len())],
+                &right_sha[..16.min(right_sha.len())]
+            ),
         );
     }
     if left.signed_by() != right.signed_by() {
         r.push(
-            "identity", DiffKind::Changed,
+            "identity",
+            DiffKind::Changed,
             "signed_by",
             format!("{} → {}", left.signed_by(), right.signed_by()),
         );
@@ -249,25 +273,41 @@ fn diff_lanes(r: &mut DiffReport, l: &[LaneEntry], rs: &[LaneEntry]) {
     for (id, lc) in &l_idx {
         let Some(rc) = r_idx.get(id) else { continue };
         if lc.max_concurrent_tasks != rc.max_concurrent_tasks {
-            r.push("lanes", DiffKind::Changed, format!("{id}.max_concurrent_tasks"),
-                format!("{} → {}", lc.max_concurrent_tasks, rc.max_concurrent_tasks));
+            r.push(
+                "lanes",
+                DiffKind::Changed,
+                format!("{id}.max_concurrent_tasks"),
+                format!("{} → {}", lc.max_concurrent_tasks, rc.max_concurrent_tasks),
+            );
         }
         if lc.max_cost_per_epoch != rc.max_cost_per_epoch {
-            r.push("lanes", DiffKind::Changed, format!("{id}.max_cost_per_epoch"),
-                format!("{} → {}", lc.max_cost_per_epoch, rc.max_cost_per_epoch));
+            r.push(
+                "lanes",
+                DiffKind::Changed,
+                format!("{id}.max_cost_per_epoch"),
+                format!("{} → {}", lc.max_cost_per_epoch, rc.max_cost_per_epoch),
+            );
         }
         if lc.priority != rc.priority {
-            r.push("lanes", DiffKind::Changed, format!("{id}.priority"),
-                format!("{} → {}", lc.priority, rc.priority));
+            r.push(
+                "lanes",
+                DiffKind::Changed,
+                format!("{id}.priority"),
+                format!("{} → {}", lc.priority, rc.priority),
+            );
         }
     }
 }
 
 fn diff_operators(r: &mut DiffReport, l: &[OperatorEntry], rs: &[OperatorEntry]) {
-    let l_idx: std::collections::HashMap<&str, &OperatorEntry> =
-        l.iter().map(|e| (e.pubkey_fingerprint.as_str(), e)).collect();
-    let r_idx: std::collections::HashMap<&str, &OperatorEntry> =
-        rs.iter().map(|e| (e.pubkey_fingerprint.as_str(), e)).collect();
+    let l_idx: std::collections::HashMap<&str, &OperatorEntry> = l
+        .iter()
+        .map(|e| (e.pubkey_fingerprint.as_str(), e))
+        .collect();
+    let r_idx: std::collections::HashMap<&str, &OperatorEntry> = rs
+        .iter()
+        .map(|e| (e.pubkey_fingerprint.as_str(), e))
+        .collect();
 
     for fp in r_idx.keys() {
         if !l_idx.contains_key(fp) {
@@ -283,11 +323,12 @@ fn diff_operators(r: &mut DiffReport, l: &[OperatorEntry], rs: &[OperatorEntry])
         let Some(rop) = r_idx.get(fp) else { continue };
         let l_set: BTreeSet<&str> = lop.permitted_ops.iter().map(|s| s.as_str()).collect();
         let r_set: BTreeSet<&str> = rop.permitted_ops.iter().map(|s| s.as_str()).collect();
-        let added: Vec<&&str>   = r_set.difference(&l_set).collect();
+        let added: Vec<&&str> = r_set.difference(&l_set).collect();
         let removed: Vec<&&str> = l_set.difference(&r_set).collect();
         if !added.is_empty() || !removed.is_empty() {
             r.push(
-                "operators", DiffKind::Changed,
+                "operators",
+                DiffKind::Changed,
                 format!("{fp}.permitted_ops"),
                 format!(
                     "+{added:?} -{removed:?}",
@@ -318,20 +359,36 @@ fn diff_gates(r: &mut DiffReport, l: &[GateEntry], rs: &[GateEntry]) {
     for (k, lg) in &l_idx {
         let Some(rg) = r_idx.get(k) else { continue };
         if lg.verifier_command != rg.verifier_command {
-            r.push("gates", DiffKind::Changed, format!("{k}.verifier_command"),
-                format!("{} → {}", lg.verifier_command, rg.verifier_command));
+            r.push(
+                "gates",
+                DiffKind::Changed,
+                format!("{k}.verifier_command"),
+                format!("{} → {}", lg.verifier_command, rg.verifier_command),
+            );
         }
         if lg.max_wall_seconds != rg.max_wall_seconds {
-            r.push("gates", DiffKind::Changed, format!("{k}.max_wall_seconds"),
-                format!("{} → {}", lg.max_wall_seconds, rg.max_wall_seconds));
+            r.push(
+                "gates",
+                DiffKind::Changed,
+                format!("{k}.max_wall_seconds"),
+                format!("{} → {}", lg.max_wall_seconds, rg.max_wall_seconds),
+            );
         }
         if lg.max_memory_bytes != rg.max_memory_bytes {
-            r.push("gates", DiffKind::Changed, format!("{k}.max_memory_bytes"),
-                format!("{} → {}", lg.max_memory_bytes, rg.max_memory_bytes));
+            r.push(
+                "gates",
+                DiffKind::Changed,
+                format!("{k}.max_memory_bytes"),
+                format!("{} → {}", lg.max_memory_bytes, rg.max_memory_bytes),
+            );
         }
         if lg.network_allowed != rg.network_allowed {
-            r.push("gates", DiffKind::Changed, format!("{k}.network_allowed"),
-                format!("{} → {}", lg.network_allowed, rg.network_allowed));
+            r.push(
+                "gates",
+                DiffKind::Changed,
+                format!("{k}.network_allowed"),
+                format!("{} → {}", lg.network_allowed, rg.network_allowed),
+            );
         }
     }
 }
@@ -351,27 +408,56 @@ fn diff_gateway(r: &mut DiffReport, l: Option<&GatewaySection>, rs: Option<&Gate
     match (l, rs) {
         (None, None) => {}
         (Some(_), None) => {
-            r.push("gateway", DiffKind::Removed, "section", "removed (no [gateway] block in right)");
+            r.push(
+                "gateway",
+                DiffKind::Removed,
+                "section",
+                "removed (no [gateway] block in right)",
+            );
         }
         (None, Some(_)) => {
-            r.push("gateway", DiffKind::Added,   "section", "added (no [gateway] block in left)");
+            r.push(
+                "gateway",
+                DiffKind::Added,
+                "section",
+                "added (no [gateway] block in left)",
+            );
         }
         (Some(lg), Some(rg)) => {
             if lg.binary_path != rg.binary_path {
-                r.push("gateway", DiffKind::Changed, "binary_path",
-                    format!("{} → {}", lg.binary_path, rg.binary_path));
+                r.push(
+                    "gateway",
+                    DiffKind::Changed,
+                    "binary_path",
+                    format!("{} → {}", lg.binary_path, rg.binary_path),
+                );
             }
             if lg.spawn_timeout_secs != rg.spawn_timeout_secs {
-                r.push("gateway", DiffKind::Changed, "spawn_timeout_secs",
-                    format!("{} → {}", lg.spawn_timeout_secs, rg.spawn_timeout_secs));
+                r.push(
+                    "gateway",
+                    DiffKind::Changed,
+                    "spawn_timeout_secs",
+                    format!("{} → {}", lg.spawn_timeout_secs, rg.spawn_timeout_secs),
+                );
             }
             if lg.respawn_backoff_ms != rg.respawn_backoff_ms {
-                r.push("gateway", DiffKind::Changed, "respawn_backoff_ms",
-                    format!("{} → {}", lg.respawn_backoff_ms, rg.respawn_backoff_ms));
+                r.push(
+                    "gateway",
+                    DiffKind::Changed,
+                    "respawn_backoff_ms",
+                    format!("{} → {}", lg.respawn_backoff_ms, rg.respawn_backoff_ms),
+                );
             }
             if lg.max_consecutive_respawns != rg.max_consecutive_respawns {
-                r.push("gateway", DiffKind::Changed, "max_consecutive_respawns",
-                    format!("{} → {}", lg.max_consecutive_respawns, rg.max_consecutive_respawns));
+                r.push(
+                    "gateway",
+                    DiffKind::Changed,
+                    "max_consecutive_respawns",
+                    format!(
+                        "{} → {}",
+                        lg.max_consecutive_respawns, rg.max_consecutive_respawns
+                    ),
+                );
             }
         }
     }
@@ -396,24 +482,47 @@ fn diff_providers(r: &mut DiffReport, l: &[ProviderEntry], rs: &[ProviderEntry])
     for (id, lp) in &l_idx {
         let Some(rp) = r_idx.get(id) else { continue };
         if lp.kind != rp.kind {
-            r.push("providers", DiffKind::Changed, format!("{id}.kind"),
-                format!("{} → {}", lp.kind, rp.kind));
+            r.push(
+                "providers",
+                DiffKind::Changed,
+                format!("{id}.kind"),
+                format!("{} → {}", lp.kind, rp.kind),
+            );
         }
         if lp.credentials_file != rp.credentials_file {
-            r.push("providers", DiffKind::Changed, format!("{id}.credentials_file"),
-                format!("{} → {}", lp.credentials_file, rp.credentials_file));
+            r.push(
+                "providers",
+                DiffKind::Changed,
+                format!("{id}.credentials_file"),
+                format!("{} → {}", lp.credentials_file, rp.credentials_file),
+            );
         }
         if lp.inference_timeout_ms != rp.inference_timeout_ms {
-            r.push("providers", DiffKind::Changed, format!("{id}.inference_timeout_ms"),
-                format!("{} → {}", lp.inference_timeout_ms, rp.inference_timeout_ms));
+            r.push(
+                "providers",
+                DiffKind::Changed,
+                format!("{id}.inference_timeout_ms"),
+                format!("{} → {}", lp.inference_timeout_ms, rp.inference_timeout_ms),
+            );
         }
         if lp.data_fetch_timeout_ms != rp.data_fetch_timeout_ms {
-            r.push("providers", DiffKind::Changed, format!("{id}.data_fetch_timeout_ms"),
-                format!("{} → {}", lp.data_fetch_timeout_ms, rp.data_fetch_timeout_ms));
+            r.push(
+                "providers",
+                DiffKind::Changed,
+                format!("{id}.data_fetch_timeout_ms"),
+                format!(
+                    "{} → {}",
+                    lp.data_fetch_timeout_ms, rp.data_fetch_timeout_ms
+                ),
+            );
         }
         if lp.max_response_bytes != rp.max_response_bytes {
-            r.push("providers", DiffKind::Changed, format!("{id}.max_response_bytes"),
-                format!("{} → {}", lp.max_response_bytes, rp.max_response_bytes));
+            r.push(
+                "providers",
+                DiffKind::Changed,
+                format!("{id}.max_response_bytes"),
+                format!("{} → {}", lp.max_response_bytes, rp.max_response_bytes),
+            );
         }
     }
 }
@@ -431,28 +540,48 @@ fn diff_notifications(
         r_chans.iter().map(|c| (c.id.as_str(), c)).collect();
     for id in r_idx.keys() {
         if !l_idx.contains_key(id) {
-            r.push("notifications", DiffKind::Added, format!("channel:{id}"), "");
+            r.push(
+                "notifications",
+                DiffKind::Added,
+                format!("channel:{id}"),
+                "",
+            );
         }
     }
     for id in l_idx.keys() {
         if !r_idx.contains_key(id) {
-            r.push("notifications", DiffKind::Removed, format!("channel:{id}"), "");
+            r.push(
+                "notifications",
+                DiffKind::Removed,
+                format!("channel:{id}"),
+                "",
+            );
         }
     }
     for (id, lc) in &l_idx {
         let Some(rc) = r_idx.get(id) else { continue };
         if lc.kind != rc.kind {
-            r.push("notifications", DiffKind::Changed, format!("channel:{id}.kind"),
-                format!("{:?} → {:?}", lc.kind, rc.kind));
+            r.push(
+                "notifications",
+                DiffKind::Changed,
+                format!("channel:{id}.kind"),
+                format!("{:?} → {:?}", lc.kind, rc.kind),
+            );
         }
         if lc.target != rc.target {
-            r.push("notifications", DiffKind::Changed, format!("channel:{id}.target"),
-                format!("{} → {}", lc.target, rc.target));
+            r.push(
+                "notifications",
+                DiffKind::Changed,
+                format!("channel:{id}.target"),
+                format!("{} → {}", lc.target, rc.target),
+            );
         }
     }
     if l_def != r_def {
         r.push(
-            "notifications", DiffKind::Changed, "default_channels",
+            "notifications",
+            DiffKind::Changed,
+            "default_channels",
             format!("{:?} → {:?}", l_def, r_def),
         );
     }
@@ -473,19 +602,21 @@ fn render_human<W: Write>(out: &mut W, opts: &PolicyDiffOpts, report: &DiffRepor
         let _ = writeln!(out, "  (no semantic differences)");
         return;
     }
-    let _ = writeln!(out, "  {n} change{plural}:",
-        n      = report.entries.len(),
+    let _ = writeln!(
+        out,
+        "  {n} change{plural}:",
+        n = report.entries.len(),
         plural = if report.entries.len() == 1 { "" } else { "s" },
     );
     for e in &report.entries {
         let _ = writeln!(
             out,
             "  [{kind:<7}] {section}::{label}{sep}{detail}",
-            kind    = e.kind.token(),
+            kind = e.kind.token(),
             section = e.section,
-            label   = e.label,
-            sep     = if e.detail.is_empty() { "" } else { "  " },
-            detail  = e.detail,
+            label = e.label,
+            sep = if e.detail.is_empty() { "" } else { "  " },
+            detail = e.detail,
         );
     }
 }
@@ -520,10 +651,10 @@ mod tests {
 
     fn lane(id: &str, max_conc: u32, max_cost: u64) -> LaneEntry {
         LaneEntry {
-            lane_id:              id.to_owned(),
+            lane_id: id.to_owned(),
             max_concurrent_tasks: max_conc,
-            max_cost_per_epoch:   max_cost,
-            priority:             100,
+            max_cost_per_epoch: max_cost,
+            priority: 100,
         }
     }
 
@@ -542,8 +673,9 @@ mod tests {
             "left.toml".to_owned(),
             "right.toml".to_owned(),
             "--json".to_owned(),
-        ]).unwrap();
-        assert_eq!(o.left,  PathBuf::from("left.toml"));
+        ])
+        .unwrap();
+        assert_eq!(o.left, PathBuf::from("left.toml"));
         assert_eq!(o.right, PathBuf::from("right.toml"));
         assert!(o.json);
     }
@@ -574,8 +706,12 @@ mod tests {
             .iter()
             .map(|e| (e.label.as_str(), e.kind))
             .collect();
-        assert!(entries.iter().any(|(l, k)| *l == "c" && *k == DiffKind::Added));
-        assert!(entries.iter().any(|(l, k)| *l == "a" && *k == DiffKind::Removed));
+        assert!(entries
+            .iter()
+            .any(|(l, k)| *l == "c" && *k == DiffKind::Added));
+        assert!(entries
+            .iter()
+            .any(|(l, k)| *l == "a" && *k == DiffKind::Removed));
         // "b" appears in both — must NOT be in the report.
         assert!(!entries.iter().any(|(l, _)| *l == "b"));
     }
@@ -583,12 +719,12 @@ mod tests {
     #[test]
     fn diff_gateway_added_when_only_right_has_section() {
         let g = GatewaySection {
-            binary_path:                     "/bin/raxis-gateway".to_owned(),
-            spawn_timeout_secs:              5,
-            respawn_backoff_ms:              1000,
-            max_consecutive_respawns:        5,
-            planner_max_turns_default:       None,
-            planner_max_turns_step_default:  None,
+            binary_path: "/bin/raxis-gateway".to_owned(),
+            spawn_timeout_secs: 5,
+            respawn_backoff_ms: 1000,
+            max_consecutive_respawns: 5,
+            planner_max_turns_default: None,
+            planner_max_turns_step_default: None,
         };
         let mut report = DiffReport::default();
         diff_gateway(&mut report, None, Some(&g));
@@ -600,20 +736,20 @@ mod tests {
     #[test]
     fn diff_gateway_changed_per_field() {
         let l = GatewaySection {
-            binary_path:                     "/bin/old".to_owned(),
-            spawn_timeout_secs:              5,
-            respawn_backoff_ms:              1000,
-            max_consecutive_respawns:        5,
-            planner_max_turns_default:       None,
-            planner_max_turns_step_default:  None,
+            binary_path: "/bin/old".to_owned(),
+            spawn_timeout_secs: 5,
+            respawn_backoff_ms: 1000,
+            max_consecutive_respawns: 5,
+            planner_max_turns_default: None,
+            planner_max_turns_step_default: None,
         };
         let r = GatewaySection {
-            binary_path:                     "/bin/new".to_owned(),
-            spawn_timeout_secs:              10,
-            respawn_backoff_ms:              1000,
-            max_consecutive_respawns:        5,
-            planner_max_turns_default:       None,
-            planner_max_turns_step_default:  None,
+            binary_path: "/bin/new".to_owned(),
+            spawn_timeout_secs: 10,
+            respawn_backoff_ms: 1000,
+            max_consecutive_respawns: 5,
+            planner_max_turns_default: None,
+            planner_max_turns_step_default: None,
         };
         let mut report = DiffReport::default();
         diff_gateway(&mut report, Some(&l), Some(&r));

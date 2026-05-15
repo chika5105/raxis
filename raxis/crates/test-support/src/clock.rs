@@ -48,7 +48,9 @@ impl FakeClock {
     /// assertions are unambiguous when they fail (e.g. `1_000_000`,
     /// not the current epoch second).
     pub fn at(unix_secs: i64) -> Self {
-        Self { inner: Arc::new(Mutex::new(unix_secs)) }
+        Self {
+            inner: Arc::new(Mutex::new(unix_secs)),
+        }
     }
 
     /// Construct a `FakeClock` pinned to the Unix epoch (`t = 0`).
@@ -99,7 +101,7 @@ impl FakeClock {
         InnerGuard(
             self.inner
                 .lock()
-                .expect("FakeClock mutex poisoned — a previous test panicked while holding it")
+                .expect("FakeClock mutex poisoned — a previous test panicked while holding it"),
         )
     }
 }
@@ -211,8 +213,11 @@ mod tests {
         let dyn_clock: StdArc<dyn Clock> = StdArc::new(fake.clone());
         assert_eq!(dyn_clock.now_unix_secs(), 42);
         fake.set_now(43);
-        assert_eq!(dyn_clock.now_unix_secs(), 43,
-            "Arc<dyn Clock> must observe set_now from the original handle");
+        assert_eq!(
+            dyn_clock.now_unix_secs(),
+            43,
+            "Arc<dyn Clock> must observe set_now from the original handle"
+        );
     }
 
     #[test]

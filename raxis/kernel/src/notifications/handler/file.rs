@@ -25,10 +25,10 @@ use super::super::{summary, DeliveryError};
 /// One JSONL line written by the File handler.
 #[derive(Debug, Serialize)]
 struct FileRecord<'a> {
-    notified_at:   i64,
-    event_kind:    &'a str,
-    event_seq:     u64,
-    payload:       &'a serde_json::Value,
+    notified_at: i64,
+    event_kind: &'a str,
+    event_seq: u64,
+    payload: &'a serde_json::Value,
     human_summary: String,
 }
 
@@ -36,16 +36,16 @@ struct FileRecord<'a> {
 /// failure, returns `DeliveryError::Io(_)` for the dispatcher to
 /// translate into `NotificationDeliveryFailed { reason: "io" }`.
 pub async fn deliver(
-    channel:  &NotificationChannel,
-    event:    &AuditEvent,
+    channel: &NotificationChannel,
+    event: &AuditEvent,
 ) -> Result<(), DeliveryError> {
     let target = resolve_target(channel)?;
 
     let record = FileRecord {
-        notified_at:   raxis_types::unix_now_secs() as i64,
-        event_kind:    &event.event_kind,
-        event_seq:     event.seq,
-        payload:       &event.payload,
+        notified_at: raxis_types::unix_now_secs() as i64,
+        event_kind: &event.event_kind,
+        event_seq: event.seq,
+        payload: &event.payload,
         human_summary: summary::render(event),
     };
     let mut line = serde_json::to_vec(&record).map_err(|e| {
@@ -96,10 +96,10 @@ fn resolve_target(channel: &NotificationChannel) -> Result<PathBuf, DeliveryErro
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
     use raxis_audit_tools::AuditEvent;
     use raxis_policy::NotificationChannel;
     use serde_json::json;
+    use std::path::Path;
     use uuid::Uuid;
 
     fn make_event(kind: &str, seq: u64, payload: serde_json::Value) -> AuditEvent {
@@ -144,17 +144,23 @@ mod tests {
     async fn file_channel_writes_to_target() {
         let tmp = tempfile::tempdir().unwrap();
         let (chan, p) = make_file_channel(&tmp, "audit.jsonl");
-        let event = make_event("EscalationApproved", 7, json!({
-            "escalation_id": "esc-7",
-            "approved_by":   "op",
-        }));
+        let event = make_event(
+            "EscalationApproved",
+            7,
+            json!({
+                "escalation_id": "esc-7",
+                "approved_by":   "op",
+            }),
+        );
 
-        deliver(&chan, &event)
-            .await
-            .expect("write must succeed");
+        deliver(&chan, &event).await.expect("write must succeed");
 
         let records = read_jsonl(&p);
-        assert_eq!(records.len(), 1, "exactly one line written; got {records:?}");
+        assert_eq!(
+            records.len(),
+            1,
+            "exactly one line written; got {records:?}"
+        );
         let r = &records[0];
         assert_eq!(r["event_kind"], "EscalationApproved");
         assert_eq!(r["event_seq"], 7);
@@ -170,12 +176,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let (chan, p) = make_file_channel(&tmp, "seq.jsonl");
         for i in 0..3u64 {
-            let e = make_event("EscalationSubmitted", i, json!({
-                "escalation_id": format!("esc-{i}"),
-                "task_id":       "t",
-                "class":         "CapabilityUpgrade",
-                "lineage_id":    "lin",
-            }));
+            let e = make_event(
+                "EscalationSubmitted",
+                i,
+                json!({
+                    "escalation_id": format!("esc-{i}"),
+                    "task_id":       "t",
+                    "class":         "CapabilityUpgrade",
+                    "lineage_id":    "lin",
+                }),
+            );
             deliver(&chan, &e).await.unwrap();
         }
         let records = read_jsonl(&p);
@@ -248,18 +258,30 @@ mod tests {
         // failing test rather than silently breaking `raxis inbox`.
         let tmp = tempfile::tempdir().unwrap();
         let (chan, p) = make_file_channel(&tmp, "shape.jsonl");
-        let e = make_event("PolicyEpochAdvanced", 99, json!({
-            "new_epoch_id":             5,
-            "policy_sha256":            "a".repeat(64),
-            "triggered_by":             "op",
-            "delegations_marked_stale": 0,
-            "sessions_invalidated":     0,
-        }));
+        let e = make_event(
+            "PolicyEpochAdvanced",
+            99,
+            json!({
+                "new_epoch_id":             5,
+                "policy_sha256":            "a".repeat(64),
+                "triggered_by":             "op",
+                "delegations_marked_stale": 0,
+                "sessions_invalidated":     0,
+            }),
+        );
         deliver(&chan, &e).await.unwrap();
         let r = &read_jsonl(&p)[0];
-        for required in &["notified_at", "event_kind", "event_seq", "payload", "human_summary"] {
-            assert!(r.get(required).is_some(),
-                "JSONL record MUST carry `{required}`; got: {r}");
+        for required in &[
+            "notified_at",
+            "event_kind",
+            "event_seq",
+            "payload",
+            "human_summary",
+        ] {
+            assert!(
+                r.get(required).is_some(),
+                "JSONL record MUST carry `{required}`; got: {r}"
+            );
         }
     }
 }

@@ -51,7 +51,7 @@ impl CertKind {
     /// uses this string).
     pub fn as_str(self) -> &'static str {
         match self {
-            CertKind::Standard          => "Standard",
+            CertKind::Standard => "Standard",
             CertKind::EmergencyRecovery => "EmergencyRecovery",
         }
     }
@@ -61,9 +61,9 @@ impl CertKind {
     /// applying a forward-compat default.
     pub fn parse(s: &str) -> Option<CertKind> {
         match s {
-            "Standard"          => Some(CertKind::Standard),
+            "Standard" => Some(CertKind::Standard),
             "EmergencyRecovery" => Some(CertKind::EmergencyRecovery),
-            _                   => None,
+            _ => None,
         }
     }
 }
@@ -111,7 +111,7 @@ impl RevocationReason {
     /// representation byte-for-byte.
     pub fn as_str(self) -> &'static str {
         match self {
-            RevocationReason::Rotation   => "Rotation",
+            RevocationReason::Rotation => "Rotation",
             RevocationReason::Compromise => "Compromise",
         }
     }
@@ -119,9 +119,9 @@ impl RevocationReason {
     /// Inverse of [`RevocationReason::as_str`].
     pub fn parse(s: &str) -> Option<RevocationReason> {
         match s {
-            "Rotation"   => Some(RevocationReason::Rotation),
+            "Rotation" => Some(RevocationReason::Rotation),
             "Compromise" => Some(RevocationReason::Compromise),
-            _            => None,
+            _ => None,
         }
     }
 }
@@ -153,14 +153,14 @@ impl RevocationReason {
 ///     signing input. Pinned to `"raxis-cert-revocation/v1"`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RevocationRecord {
-    pub subject_pubkey_hex:        String,
-    pub subject_fingerprint:       String,
-    pub reason:                    RevocationReason,
-    pub revoked_at:                i64,
-    pub reference:                 String,
-    pub revoked_by_pubkey_hex:     String,
-    pub revoked_by_signature_hex:  String,
-    pub signing_input_version:     String,
+    pub subject_pubkey_hex: String,
+    pub subject_fingerprint: String,
+    pub reason: RevocationReason,
+    pub revoked_at: i64,
+    pub reference: String,
+    pub revoked_by_pubkey_hex: String,
+    pub revoked_by_signature_hex: String,
+    pub signing_input_version: String,
 }
 
 /// On-disk representation of a single operator certificate.
@@ -188,19 +188,19 @@ pub struct RevocationRecord {
 /// - `self_sig_hex` — 128-char hex of the self-signature.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct OperatorCert {
-    pub kind:                    CertKind,
-    pub display_name:            String,
-    pub pubkey_hex:              String,
-    pub not_before:              i64,
-    pub not_after:               i64,
+    pub kind: CertKind,
+    pub display_name: String,
+    pub pubkey_hex: String,
+    pub not_before: i64,
+    pub not_after: i64,
     pub warn_before_expiry_days: u32,
-    pub grace_period_days:       u32,
-    pub permitted_ops:           Vec<String>,
+    pub grace_period_days: u32,
+    pub permitted_ops: Vec<String>,
     /// Optional. Always serialised; written as an empty string when
     /// absent so the canonical signing input has a stable shape.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub contact_info:            Option<String>,
-    pub self_sig_hex:            String,
+    pub contact_info: Option<String>,
+    pub self_sig_hex: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -217,34 +217,31 @@ mod tests {
 
     fn standard_fixture() -> OperatorCert {
         OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            "Chika".to_owned(),
-            pubkey_hex:              "aa".repeat(32),
-            not_before:              1_700_000_000,
-            not_after:               1_731_536_000,
+            kind: CertKind::Standard,
+            display_name: "Chika".to_owned(),
+            pubkey_hex: "aa".repeat(32),
+            not_before: 1_700_000_000,
+            not_after: 1_731_536_000,
             warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec![
-                "CreateInitiative".to_owned(),
-                "ApprovePlan".to_owned(),
-            ],
-            contact_info:            Some("chika@example.com".to_owned()),
-            self_sig_hex:            "bb".repeat(64),
+            grace_period_days: 7,
+            permitted_ops: vec!["CreateInitiative".to_owned(), "ApprovePlan".to_owned()],
+            contact_info: Some("chika@example.com".to_owned()),
+            self_sig_hex: "bb".repeat(64),
         }
     }
 
     fn emergency_fixture() -> OperatorCert {
         OperatorCert {
-            kind:                    CertKind::EmergencyRecovery,
-            display_name:            "break-glass".to_owned(),
-            pubkey_hex:              "cc".repeat(32),
-            not_before:              0,
-            not_after:               0,
+            kind: CertKind::EmergencyRecovery,
+            display_name: "break-glass".to_owned(),
+            pubkey_hex: "cc".repeat(32),
+            not_before: 0,
+            not_after: 0,
             warn_before_expiry_days: 0,
-            grace_period_days:       0,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            "dd".repeat(64),
+            grace_period_days: 0,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: None,
+            self_sig_hex: "dd".repeat(64),
         }
     }
 
@@ -273,8 +270,10 @@ mod tests {
         let s = toml::to_string(&original).expect("serialise");
         // contact_info is skip_serializing_if=Option::is_none, so it
         // shouldn't appear in the TOML at all.
-        assert!(!s.contains("contact_info"),
-            "contact_info should be omitted when None; got:\n{s}");
+        assert!(
+            !s.contains("contact_info"),
+            "contact_info should be omitted when None; got:\n{s}"
+        );
         let parsed: OperatorCert = toml::from_str(&s).expect("parse");
         assert_eq!(parsed, original);
     }
@@ -284,15 +283,19 @@ mod tests {
     #[test]
     fn cert_kind_serialises_as_pascal_case() {
         let s = toml::to_string(&standard_fixture()).unwrap();
-        assert!(s.contains("kind = \"Standard\""),
-            "kind must serialise as PascalCase; got:\n{s}");
+        assert!(
+            s.contains("kind = \"Standard\""),
+            "kind must serialise as PascalCase; got:\n{s}"
+        );
     }
 
     #[test]
     fn emergency_cert_kind_serialises_as_pascal_case() {
         let s = toml::to_string(&emergency_fixture()).unwrap();
-        assert!(s.contains("kind = \"EmergencyRecovery\""),
-            "kind must serialise as PascalCase; got:\n{s}");
+        assert!(
+            s.contains("kind = \"EmergencyRecovery\""),
+            "kind must serialise as PascalCase; got:\n{s}"
+        );
     }
 
     #[test]
@@ -305,9 +308,12 @@ mod tests {
     #[test]
     fn cert_kind_parse_returns_none_for_unknown() {
         assert_eq!(CertKind::parse("ReadOnly"), None);
-        assert_eq!(CertKind::parse(""),         None);
-        assert_eq!(CertKind::parse("standard"), None,
-            "case-sensitive — parser must not normalise");
+        assert_eq!(CertKind::parse(""), None);
+        assert_eq!(
+            CertKind::parse("standard"),
+            None,
+            "case-sensitive — parser must not normalise"
+        );
     }
 
     // ── unknown-field rejection ─────────────────────────────────────
@@ -323,10 +329,9 @@ mod tests {
     /// update with that change.
     #[test]
     fn extra_unknown_fields_are_tolerated_but_dropped() {
-        let s = toml::to_string(&standard_fixture()).unwrap()
-            + "\nfuture_field = \"ignored\"\n";
-        let parsed: OperatorCert = toml::from_str(&s)
-            .expect("parser must tolerate forward-compat fields today");
+        let s = toml::to_string(&standard_fixture()).unwrap() + "\nfuture_field = \"ignored\"\n";
+        let parsed: OperatorCert =
+            toml::from_str(&s).expect("parser must tolerate forward-compat fields today");
         assert_eq!(parsed, standard_fixture());
     }
 

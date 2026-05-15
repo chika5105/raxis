@@ -21,8 +21,8 @@
 /// readable, just uncoloured).
 pub fn print_boot_banner() {
     const BOLD_WHITE: &str = "\x1b[1;97m";
-    const DIM:        &str = "\x1b[2;37m";
-    const RESET:      &str = "\x1b[0m";
+    const DIM: &str = "\x1b[2;37m";
+    const RESET: &str = "\x1b[0m";
 
     eprintln!(
         "{BOLD_WHITE}R A X I S{RESET}  {DIM}v{}{RESET}",

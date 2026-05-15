@@ -51,8 +51,8 @@ impl CloudProvider {
     /// downstream audit consumers.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::Aws   => "aws",
-            Self::Gcp   => "gcp",
+            Self::Aws => "aws",
+            Self::Gcp => "gcp",
             Self::Azure => "azure",
         }
     }
@@ -74,8 +74,8 @@ impl CloudExchangeKind {
     /// Stable wire string.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::AssumeRole        => "assume_role",
-            Self::JwtBearer         => "jwt_bearer",
+            Self::AssumeRole => "assume_role",
+            Self::JwtBearer => "jwt_bearer",
             Self::ClientCredentials => "client_credentials",
         }
     }
@@ -111,14 +111,14 @@ impl CloudForwardingDenialReason {
     /// Stable wire string.
     pub fn as_str(self) -> &'static str {
         match self {
-            Self::EgressAllowlist   => "egress_allowlist",
+            Self::EgressAllowlist => "egress_allowlist",
             Self::MissingCredential => "missing_credential",
-            Self::Misconfigured     => "misconfigured",
-            Self::Upstream4xx       => "upstream_4xx",
-            Self::Upstream5xx       => "upstream_5xx",
+            Self::Misconfigured => "misconfigured",
+            Self::Upstream4xx => "upstream_4xx",
+            Self::Upstream5xx => "upstream_5xx",
             Self::UpstreamMalformed => "upstream_malformed",
-            Self::Timeout           => "timeout",
-            Self::Network           => "network",
+            Self::Timeout => "timeout",
+            Self::Network => "network",
         }
     }
 }
@@ -137,29 +137,29 @@ impl CloudForwardingDenialReason {
 /// unrecoverable audit failure per `R-7`).
 #[allow(clippy::too_many_arguments)] // Audit shape is normative — see spec §5.1.
 pub fn emit_cloud_credential_forwarded(
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
-    provider:        CloudProvider,
-    exchange_kind:   CloudExchangeKind,
-    upstream:        &CloudUpstreamHost,
-    latency_ms:      u32,
-    status_code:     u16,
-    response_bytes:  u32,
-    request_signed:  bool,
+    provider: CloudProvider,
+    exchange_kind: CloudExchangeKind,
+    upstream: &CloudUpstreamHost,
+    latency_ms: u32,
+    status_code: u16,
+    response_bytes: u32,
+    request_signed: bool,
 ) -> Result<(), String> {
     audit
         .emit(
             AuditEventKind::CloudCredentialForwarded {
-                session_id:                session_id.to_owned(),
-                credential_name:           credential_name.to_owned(),
-                provider:                  provider.as_str().to_owned(),
-                exchange_kind:             exchange_kind.as_str().to_owned(),
-                upstream_endpoint:         upstream.host().to_owned(),
-                outcome:                   "success".to_owned(),
+                session_id: session_id.to_owned(),
+                credential_name: credential_name.to_owned(),
+                provider: provider.as_str().to_owned(),
+                exchange_kind: exchange_kind.as_str().to_owned(),
+                upstream_endpoint: upstream.host().to_owned(),
+                outcome: "success".to_owned(),
                 latency_ms,
                 status_code,
-                redacted_response_size:    response_bytes,
+                redacted_response_size: response_bytes,
                 request_signature_present: request_signed,
             },
             None,
@@ -176,25 +176,25 @@ pub fn emit_cloud_credential_forwarded(
 /// (e.g. timeout / network error / construction refusal).
 #[allow(clippy::too_many_arguments)] // Audit shape is normative — see spec §5.2.
 pub fn emit_cloud_credential_forwarding_denied(
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
-    provider:        CloudProvider,
-    exchange_kind:   CloudExchangeKind,
-    upstream_host:   &str,
-    reason:          CloudForwardingDenialReason,
-    status_code:     u16,
-    latency_ms:      u32,
+    provider: CloudProvider,
+    exchange_kind: CloudExchangeKind,
+    upstream_host: &str,
+    reason: CloudForwardingDenialReason,
+    status_code: u16,
+    latency_ms: u32,
 ) -> Result<(), String> {
     audit
         .emit(
             AuditEventKind::CloudCredentialForwardingDenied {
-                session_id:        session_id.to_owned(),
-                credential_name:   credential_name.to_owned(),
-                provider:          provider.as_str().to_owned(),
-                exchange_kind:     exchange_kind.as_str().to_owned(),
+                session_id: session_id.to_owned(),
+                credential_name: credential_name.to_owned(),
+                provider: provider.as_str().to_owned(),
+                exchange_kind: exchange_kind.as_str().to_owned(),
                 upstream_endpoint: upstream_host.to_owned(),
-                reason:            reason.as_str().to_owned(),
+                reason: reason.as_str().to_owned(),
                 status_code,
                 latency_ms,
             },
@@ -208,21 +208,21 @@ pub fn emit_cloud_credential_forwarding_denied(
 
 /// Emit a `CloudCredentialCacheHit` audit event.
 pub fn emit_cloud_credential_cache_hit(
-    audit:            &Arc<dyn AuditSink>,
-    session_id:       &str,
-    credential_name:  &str,
-    provider:         CloudProvider,
-    exchange_kind:    CloudExchangeKind,
-    age_ms:           u32,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
+    credential_name: &str,
+    provider: CloudProvider,
+    exchange_kind: CloudExchangeKind,
+    age_ms: u32,
     ttl_remaining_ms: u32,
 ) -> Result<(), String> {
     audit
         .emit(
             AuditEventKind::CloudCredentialCacheHit {
-                session_id:      session_id.to_owned(),
+                session_id: session_id.to_owned(),
                 credential_name: credential_name.to_owned(),
-                provider:        provider.as_str().to_owned(),
-                exchange_kind:   exchange_kind.as_str().to_owned(),
+                provider: provider.as_str().to_owned(),
+                exchange_kind: exchange_kind.as_str().to_owned(),
                 age_ms,
                 ttl_remaining_ms,
             },
@@ -236,21 +236,21 @@ pub fn emit_cloud_credential_cache_hit(
 
 /// Emit a `CloudCredentialCacheRefreshed` audit event.
 pub fn emit_cloud_credential_cache_refreshed(
-    audit:           &Arc<dyn AuditSink>,
-    session_id:      &str,
+    audit: &Arc<dyn AuditSink>,
+    session_id: &str,
     credential_name: &str,
-    provider:        CloudProvider,
-    exchange_kind:   CloudExchangeKind,
-    prior_age_ms:    u32,
-    new_ttl_ms:      u32,
+    provider: CloudProvider,
+    exchange_kind: CloudExchangeKind,
+    prior_age_ms: u32,
+    new_ttl_ms: u32,
 ) -> Result<(), String> {
     audit
         .emit(
             AuditEventKind::CloudCredentialCacheRefreshed {
-                session_id:      session_id.to_owned(),
+                session_id: session_id.to_owned(),
                 credential_name: credential_name.to_owned(),
-                provider:        provider.as_str().to_owned(),
-                exchange_kind:   exchange_kind.as_str().to_owned(),
+                provider: provider.as_str().to_owned(),
+                exchange_kind: exchange_kind.as_str().to_owned(),
                 prior_age_ms,
                 new_ttl_ms,
             },
@@ -268,29 +268,41 @@ mod tests {
 
     #[test]
     fn provider_strings_pin() {
-        assert_eq!(CloudProvider::Aws  .as_str(), "aws");
-        assert_eq!(CloudProvider::Gcp  .as_str(), "gcp");
+        assert_eq!(CloudProvider::Aws.as_str(), "aws");
+        assert_eq!(CloudProvider::Gcp.as_str(), "gcp");
         assert_eq!(CloudProvider::Azure.as_str(), "azure");
     }
 
     #[test]
     fn exchange_kind_strings_pin() {
-        assert_eq!(CloudExchangeKind::AssumeRole       .as_str(), "assume_role");
-        assert_eq!(CloudExchangeKind::JwtBearer        .as_str(), "jwt_bearer");
-        assert_eq!(CloudExchangeKind::ClientCredentials.as_str(), "client_credentials");
+        assert_eq!(CloudExchangeKind::AssumeRole.as_str(), "assume_role");
+        assert_eq!(CloudExchangeKind::JwtBearer.as_str(), "jwt_bearer");
+        assert_eq!(
+            CloudExchangeKind::ClientCredentials.as_str(),
+            "client_credentials"
+        );
     }
 
     #[test]
     fn denial_reason_strings_pin() {
         for (r, s) in [
-            (CloudForwardingDenialReason::EgressAllowlist,   "egress_allowlist"),
-            (CloudForwardingDenialReason::MissingCredential, "missing_credential"),
-            (CloudForwardingDenialReason::Misconfigured,     "misconfigured"),
-            (CloudForwardingDenialReason::Upstream4xx,       "upstream_4xx"),
-            (CloudForwardingDenialReason::Upstream5xx,       "upstream_5xx"),
-            (CloudForwardingDenialReason::UpstreamMalformed, "upstream_malformed"),
-            (CloudForwardingDenialReason::Timeout,           "timeout"),
-            (CloudForwardingDenialReason::Network,           "network"),
+            (
+                CloudForwardingDenialReason::EgressAllowlist,
+                "egress_allowlist",
+            ),
+            (
+                CloudForwardingDenialReason::MissingCredential,
+                "missing_credential",
+            ),
+            (CloudForwardingDenialReason::Misconfigured, "misconfigured"),
+            (CloudForwardingDenialReason::Upstream4xx, "upstream_4xx"),
+            (CloudForwardingDenialReason::Upstream5xx, "upstream_5xx"),
+            (
+                CloudForwardingDenialReason::UpstreamMalformed,
+                "upstream_malformed",
+            ),
+            (CloudForwardingDenialReason::Timeout, "timeout"),
+            (CloudForwardingDenialReason::Network, "network"),
         ] {
             assert_eq!(r.as_str(), s);
         }

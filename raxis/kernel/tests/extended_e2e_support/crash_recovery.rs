@@ -55,7 +55,9 @@ pub struct CrashRecoveryWitness {
 impl CrashRecoveryWitness {
     #[must_use]
     pub fn new(in_flight_task_id: &str) -> Self {
-        Self { in_flight_task_id: in_flight_task_id.to_owned() }
+        Self {
+            in_flight_task_id: in_flight_task_id.to_owned(),
+        }
     }
 
     /// Collect every `seq` from the chain that any
@@ -64,9 +66,7 @@ impl CrashRecoveryWitness {
         chain
             .iter()
             .filter_map(|ev| match typed(ev) {
-                Some(AuditEventKind::ReconciliationGap {
-                    missing_seq, ..
-                }) => Some(missing_seq),
+                Some(AuditEventKind::ReconciliationGap { missing_seq, .. }) => Some(missing_seq),
                 _ => None,
             })
             .collect()
@@ -102,10 +102,8 @@ impl CrashRecoveryWitness {
         chain
             .iter()
             .filter_map(|ev| match typed(ev) {
-                Some(AuditEventKind::SessionVmSpawned {
-                    task_id, ..
-                }) if task_id.as_deref()
-                    == Some(self.in_flight_task_id.as_str()) =>
+                Some(AuditEventKind::SessionVmSpawned { task_id, .. })
+                    if task_id.as_deref() == Some(self.in_flight_task_id.as_str()) =>
                 {
                     Some(ev.seq)
                 }
@@ -121,21 +119,16 @@ impl CrashRecoveryWitness {
 
         for ev in chain {
             match typed(ev) {
-                Some(AuditEventKind::ReconciliationGap { .. })
-                    if ev.seq > pre_crash_seq =>
-                {
+                Some(AuditEventKind::ReconciliationGap { .. }) if ev.seq > pre_crash_seq => {
                     return true;
                 }
-                Some(AuditEventKind::TaskBlockedForRecovery {
-                    task_id, ..
-                }) if task_id == self.in_flight_task_id
-                    && ev.seq > pre_crash_seq =>
+                Some(AuditEventKind::TaskBlockedForRecovery { task_id, .. })
+                    if task_id == self.in_flight_task_id && ev.seq > pre_crash_seq =>
                 {
                     return true;
                 }
                 Some(AuditEventKind::SessionVmSpawned { task_id, .. })
-                    if task_id.as_deref()
-                        == Some(self.in_flight_task_id.as_str())
+                    if task_id.as_deref() == Some(self.in_flight_task_id.as_str())
                         && ev.seq > pre_crash_seq =>
                 {
                     return true;
@@ -148,7 +141,9 @@ impl CrashRecoveryWitness {
 }
 
 impl EnforcementWitness for CrashRecoveryWitness {
-    fn name(&self) -> &'static str { "crash-recovery" }
+    fn name(&self) -> &'static str {
+        "crash-recovery"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
         if self.pre_crash_spawn_seq(chain).is_none() {
@@ -162,10 +157,9 @@ impl EnforcementWitness for CrashRecoveryWitness {
 
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
         let pre_crash = self.pre_crash_spawn_seq(chain);
-        let recovery  = self.has_recovery_signal(chain);
-        let gaps      = self.unreconciled_gaps(chain);
-        let reconciled: Vec<u64> =
-            self.reconciled_seqs(chain).into_iter().collect();
+        let recovery = self.has_recovery_signal(chain);
+        let gaps = self.unreconciled_gaps(chain);
+        let reconciled: Vec<u64> = self.reconciled_seqs(chain).into_iter().collect();
         format!(
             "CrashRecovery[{task}]:\n  \
              pre-crash SessionVmSpawned seq: {pre_crash:?}\n  \
@@ -188,58 +182,64 @@ mod tests {
     use raxis_audit_tools::AuditEvent;
     use uuid::Uuid;
 
-    fn ev(
-        seq: u64,
-        kind: AuditEventKind,
-        task_id: Option<&str>,
-    ) -> AuditEvent {
+    fn ev(seq: u64, kind: AuditEventKind, task_id: Option<&str>) -> AuditEvent {
         let event_kind = match &kind {
             AuditEventKind::SessionVmSpawned { .. } => "SessionVmSpawned",
             AuditEventKind::ReconciliationGap { .. } => "ReconciliationGap",
-            AuditEventKind::TaskBlockedForRecovery { .. } => {
-                "TaskBlockedForRecovery"
-            }
+            AuditEventKind::TaskBlockedForRecovery { .. } => "TaskBlockedForRecovery",
             _ => "Other",
         }
         .to_owned();
         AuditEvent {
             seq,
-            event_id:      Uuid::nil(),
+            event_id: Uuid::nil(),
             event_kind,
-            session_id:    None,
-            task_id:       task_id.map(str::to_owned),
+            session_id: None,
+            task_id: task_id.map(str::to_owned),
             initiative_id: None,
-            payload:       serde_json::to_value(&kind).unwrap(),
-            emitted_at:    1700000000 + seq as i64,
-            prev_sha256:   "0".repeat(64),
+            payload: serde_json::to_value(&kind).unwrap(),
+            emitted_at: 1700000000 + seq as i64,
+            prev_sha256: "0".repeat(64),
         }
     }
 
     fn vm_spawn(seq: u64, task_id: &str) -> AuditEvent {
-        ev(seq, AuditEventKind::SessionVmSpawned {
-            session_id:         format!("sess-{task_id}-{seq}"),
-            task_id:            Some(task_id.to_owned()),
-            initiative_id:      "init-realistic".to_owned(),
-            backend_id:         "test-backend".to_owned(),
-            egress_tier:        "Mediated".to_owned(),
-            admission_loopback: "127.0.0.1:0".to_owned(),
-            credential_proxies: 0,
-        }, Some(task_id))
+        ev(
+            seq,
+            AuditEventKind::SessionVmSpawned {
+                session_id: format!("sess-{task_id}-{seq}"),
+                task_id: Some(task_id.to_owned()),
+                initiative_id: "init-realistic".to_owned(),
+                backend_id: "test-backend".to_owned(),
+                egress_tier: "Mediated".to_owned(),
+                admission_loopback: "127.0.0.1:0".to_owned(),
+                credential_proxies: 0,
+            },
+            Some(task_id),
+        )
     }
 
     fn reconciliation_gap(seq: u64, missing_seq: u64) -> AuditEvent {
-        ev(seq, AuditEventKind::ReconciliationGap {
-            missing_seq,
-            reconstructed_event: "PolicyEpochAdvanced".to_owned(),
-            reconstructed:       true,
-        }, None)
+        ev(
+            seq,
+            AuditEventKind::ReconciliationGap {
+                missing_seq,
+                reconstructed_event: "PolicyEpochAdvanced".to_owned(),
+                reconstructed: true,
+            },
+            None,
+        )
     }
 
     fn task_blocked(seq: u64, task_id: &str) -> AuditEvent {
-        ev(seq, AuditEventKind::TaskBlockedForRecovery {
-            task_id:      task_id.to_owned(),
-            block_reason: "MidFlightOnRestart".to_owned(),
-        }, Some(task_id))
+        ev(
+            seq,
+            AuditEventKind::TaskBlockedForRecovery {
+                task_id: task_id.to_owned(),
+                block_reason: "MidFlightOnRestart".to_owned(),
+            },
+            Some(task_id),
+        )
     }
 
     #[test]
@@ -250,30 +250,21 @@ mod tests {
         // contiguity unless a `ReconciliationGap` event accounts
         // for the gap (`unreconciled_seq_gap_fails` pins that
         // negative direction).
-        let chain = vec![
-            vm_spawn(10, "lint-defect"),
-            vm_spawn(11, "lint-defect"),
-        ];
+        let chain = vec![vm_spawn(10, "lint-defect"), vm_spawn(11, "lint-defect")];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));
     }
 
     #[test]
     fn reconciliation_gap_after_spawn_satisfies() {
-        let chain = vec![
-            vm_spawn(5, "lint-defect"),
-            reconciliation_gap(7, 6),
-        ];
+        let chain = vec![vm_spawn(5, "lint-defect"), reconciliation_gap(7, 6)];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));
     }
 
     #[test]
     fn task_blocked_for_recovery_satisfies() {
-        let chain = vec![
-            vm_spawn(5, "lint-defect"),
-            task_blocked(6, "lint-defect"),
-        ];
+        let chain = vec![vm_spawn(5, "lint-defect"), task_blocked(6, "lint-defect")];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));
     }
@@ -281,10 +272,7 @@ mod tests {
     #[test]
     fn missing_pre_crash_spawn_fails() {
         // SessionVmSpawned exists but for a different task.
-        let chain = vec![
-            vm_spawn(5, "other-task"),
-            reconciliation_gap(7, 6),
-        ];
+        let chain = vec![vm_spawn(5, "other-task"), reconciliation_gap(7, 6)];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(!w.satisfied_by(&chain));
     }
@@ -293,10 +281,7 @@ mod tests {
     fn unreconciled_seq_gap_fails() {
         // A 6→8 jump with no ReconciliationGap entry is a real
         // INV-AUDIT-01 violation that the witness must surface.
-        let chain = vec![
-            vm_spawn(5, "lint-defect"),
-            vm_spawn(7, "lint-defect"),
-        ];
+        let chain = vec![vm_spawn(5, "lint-defect"), vm_spawn(7, "lint-defect")];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(!w.satisfied_by(&chain));
         let diag = w.diagnostic(&chain);
@@ -322,10 +307,7 @@ mod tests {
     fn recovery_signal_must_be_strictly_after_pre_crash_spawn() {
         // ReconciliationGap that landed BEFORE the in-flight
         // spawn does NOT count as recovery for THIS spawn.
-        let chain = vec![
-            reconciliation_gap(2, 1),
-            vm_spawn(5, "lint-defect"),
-        ];
+        let chain = vec![reconciliation_gap(2, 1), vm_spawn(5, "lint-defect")];
         let w = CrashRecoveryWitness::new("lint-defect");
         assert!(!w.satisfied_by(&chain));
     }

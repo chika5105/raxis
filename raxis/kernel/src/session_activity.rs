@@ -147,7 +147,7 @@ impl LastIntentOutcome {
     /// muscle memory.
     pub fn as_short_str(&self) -> String {
         match self {
-            Self::Accepted        => "Accepted".to_owned(),
+            Self::Accepted => "Accepted".to_owned(),
             Self::Rejected { error_code } => {
                 format!("Rejected/{error_code}")
             }
@@ -165,11 +165,11 @@ impl LastIntentOutcome {
 #[derive(Debug, Clone)]
 pub struct SessionActivity {
     /// The kind of the last `IntentRequest` the planner dispatched.
-    pub last_intent_kind:    IntentKind,
+    pub last_intent_kind: IntentKind,
     /// The wire `sequence_number` of that request — useful to the
     /// operator as a turn-counter proxy ("planner submitted 7
     /// intents before going quiet").
-    pub last_intent_seq:     u64,
+    pub last_intent_seq: u64,
     /// The kernel's response classification.
     pub last_intent_outcome: LastIntentOutcome,
     /// `unix_now_secs()` at the moment the kernel finished
@@ -179,7 +179,7 @@ pub struct SessionActivity {
     /// [`raxis_types::clock::unix_now_secs`] verbatim (`i64`,
     /// signed-epoch convention) so no cast is required at the
     /// emit site.
-    pub recorded_at_unix:    i64,
+    pub recorded_at_unix: i64,
 }
 
 /// Kernel-wide per-session activity tracker.
@@ -234,7 +234,10 @@ impl SessionActivityTracker {
     /// MaxTurnsExceeded-class exits from boot-failure-class
     /// exits.
     pub fn take(&self, session_id: &str) -> Option<SessionActivity> {
-        self.inner.lock().ok().and_then(|mut g| g.remove(session_id))
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|mut g| g.remove(session_id))
     }
 
     /// Test-only: peek the entry without consuming it. Production
@@ -242,7 +245,10 @@ impl SessionActivityTracker {
     /// same id never inherits a predecessor's activity.
     #[cfg(test)]
     pub fn peek(&self, session_id: &str) -> Option<SessionActivity> {
-        self.inner.lock().ok().and_then(|g| g.get(session_id).cloned())
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(session_id).cloned())
     }
 }
 
@@ -293,11 +299,11 @@ pub fn render_clean_exit_with_activity(role: &str, activity: &SessionActivity) -
          BEFORE the driver's exit-notice emit could fire — \
          cross-correlate with the substrate's SessionVmExited \
          event for the host-side exit code.",
-        role     = role,
-        kind     = activity.last_intent_kind.as_str(),
-        seq      = activity.last_intent_seq,
-        outcome  = activity.last_intent_outcome.as_short_str(),
-        ts       = activity.recorded_at_unix,
+        role = role,
+        kind = activity.last_intent_kind.as_str(),
+        seq = activity.last_intent_seq,
+        outcome = activity.last_intent_outcome.as_short_str(),
+        ts = activity.recorded_at_unix,
     )
 }
 
@@ -352,7 +358,7 @@ mod tests {
     fn act(kind: IntentKind, seq: u64, accepted: bool) -> SessionActivity {
         SessionActivity {
             last_intent_kind: kind,
-            last_intent_seq:  seq,
+            last_intent_seq: seq,
             last_intent_outcome: if accepted {
                 LastIntentOutcome::Accepted
             } else {
@@ -384,11 +390,11 @@ mod tests {
     fn render_clean_exit_with_activity_inlines_kind_seq_outcome() {
         let a = act(IntentKind::StructuredOutput, 7, true);
         let s = render_clean_exit_with_activity("executor", &a);
-        assert!(s.contains("executor"),         "role inlined: {s}");
+        assert!(s.contains("executor"), "role inlined: {s}");
         assert!(s.contains("StructuredOutput"), "kind inlined: {s}");
-        assert!(s.contains("#7"),               "seq inlined:  {s}");
-        assert!(s.contains("Accepted"),         "outcome inlined: {s}");
-        assert!(s.contains("unix=1715694342"),  "timestamp inlined: {s}");
+        assert!(s.contains("#7"), "seq inlined:  {s}");
+        assert!(s.contains("Accepted"), "outcome inlined: {s}");
+        assert!(s.contains("unix=1715694342"), "timestamp inlined: {s}");
         // `INV-FAILURE-REASON-CONCRETE-01` — the multi-option
         // umbrella the iter56 P2 patch left behind must be
         // absent from this fallback as well.

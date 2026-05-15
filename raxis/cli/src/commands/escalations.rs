@@ -76,16 +76,16 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy)]
 struct EscalationsOpts {
     filter: EscalationStatusFilter,
-    limit:  usize,
-    json:   bool,
+    limit: usize,
+    json: bool,
 }
 
 impl Default for EscalationsOpts {
     fn default() -> Self {
         Self {
             filter: EscalationStatusFilter::Pending,
-            limit:  DEFAULT_LIMIT,
-            json:   false,
+            limit: DEFAULT_LIMIT,
+            json: false,
         }
     }
 }
@@ -98,11 +98,11 @@ fn parse_args(args: &[String]) -> Result<EscalationsOpts, CliError> {
             "--json" => opts.json = true,
             "--status" => {
                 i += 1;
-                let raw = args
-                    .get(i)
-                    .ok_or_else(|| CliError::Usage(
+                let raw = args.get(i).ok_or_else(|| {
+                    CliError::Usage(
                         "--status requires one of pending|approved|denied|all".to_owned(),
-                    ))?;
+                    )
+                })?;
                 opts.filter = parse_status(raw)?;
             }
             "--limit" => {
@@ -114,9 +114,7 @@ fn parse_args(args: &[String]) -> Result<EscalationsOpts, CliError> {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if opts.limit == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
             }
             "-h" | "--help" => {
@@ -138,10 +136,10 @@ fn parse_args(args: &[String]) -> Result<EscalationsOpts, CliError> {
 fn parse_status(raw: &str) -> Result<EscalationStatusFilter, CliError> {
     // Case-insensitive: planners and CI tend to lowercase.
     match raw.to_ascii_lowercase().as_str() {
-        "pending"  => Ok(EscalationStatusFilter::Pending),
+        "pending" => Ok(EscalationStatusFilter::Pending),
         "approved" => Ok(EscalationStatusFilter::Approved),
-        "denied"   => Ok(EscalationStatusFilter::Denied),
-        "all"      => Ok(EscalationStatusFilter::All),
+        "denied" => Ok(EscalationStatusFilter::Denied),
+        "all" => Ok(EscalationStatusFilter::All),
         other => Err(CliError::Usage(format!(
             "unknown --status value {other:?} (expected pending|approved|denied|all)"
         ))),
@@ -167,16 +165,12 @@ fn print_help() {
 // Rendering — human
 // ────────────────────────────────────────────────────────────────────
 
-fn render_human<W: Write>(
-    out:    &mut W,
-    filter: EscalationStatusFilter,
-    rows:   &[EscalationRow],
-) {
+fn render_human<W: Write>(out: &mut W, filter: EscalationStatusFilter, rows: &[EscalationRow]) {
     let _ = writeln!(
         out,
         "Escalations (status={status}, {n} row{plural}):",
         status = filter_label(filter),
-        n      = rows.len(),
+        n = rows.len(),
         plural = if rows.len() == 1 { "" } else { "s" },
     );
     if rows.is_empty() {
@@ -190,11 +184,11 @@ fn render_human<W: Write>(
     let _ = writeln!(
         out,
         "  {esc:<26} {status:<10} {class:<22} {task:<24} {age:>6}  justification",
-        esc       = "escalation_id",
-        status    = "status",
-        class     = "class",
-        task      = "task_id",
-        age       = "age",
+        esc = "escalation_id",
+        status = "status",
+        class = "class",
+        task = "task_id",
+        age = "age",
     );
     let now = unix_now_secs();
     for r in rows {
@@ -202,12 +196,12 @@ fn render_human<W: Write>(
         let _ = writeln!(
             out,
             "  {esc:<26} {status:<10} {class:<22} {task:<24} {age:>6}  {just}",
-            esc    = truncate(&r.escalation_id, 26),
+            esc = truncate(&r.escalation_id, 26),
             status = truncate(&r.status, 10),
-            class  = truncate(&r.class, 22),
-            task   = truncate(&r.task_id, 24),
-            age    = format_secs_relative(age),
-            just   = truncate(&r.justification, JUSTIFICATION_TRUNC),
+            class = truncate(&r.class, 22),
+            task = truncate(&r.task_id, 24),
+            age = format_secs_relative(age),
+            just = truncate(&r.justification, JUSTIFICATION_TRUNC),
         );
     }
 }
@@ -216,11 +210,7 @@ fn render_human<W: Write>(
 // Rendering — JSON
 // ────────────────────────────────────────────────────────────────────
 
-fn render_json<W: Write>(
-    out:    &mut W,
-    filter: EscalationStatusFilter,
-    rows:   &[EscalationRow],
-) {
+fn render_json<W: Write>(out: &mut W, filter: EscalationStatusFilter, rows: &[EscalationRow]) {
     let v = serde_json::json!({
         "filter": filter_label(filter),
         "count":  rows.len(),
@@ -250,10 +240,10 @@ fn render_json<W: Write>(
 
 fn filter_label(f: EscalationStatusFilter) -> &'static str {
     match f {
-        EscalationStatusFilter::All      => "all",
-        EscalationStatusFilter::Pending  => "pending",
+        EscalationStatusFilter::All => "all",
+        EscalationStatusFilter::Pending => "pending",
         EscalationStatusFilter::Approved => "approved",
-        EscalationStatusFilter::Denied   => "denied",
+        EscalationStatusFilter::Denied => "denied",
     }
 }
 
@@ -275,10 +265,18 @@ fn unix_now_secs() -> u64 {
 }
 
 fn format_secs_relative(secs: u64) -> String {
-    if secs == 0                 { return "0s".to_owned(); }
-    if secs < 60                 { return format!("{secs}s"); }
-    if secs < 60 * 60            { return format!("{}m", secs / 60); }
-    if secs < 24 * 60 * 60       { return format!("{}h", secs / 3600); }
+    if secs == 0 {
+        return "0s".to_owned();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 60 * 60 {
+        return format!("{}m", secs / 60);
+    }
+    if secs < 24 * 60 * 60 {
+        return format!("{}h", secs / 3600);
+    }
     format!("{}d", secs / 86_400)
 }
 
@@ -292,18 +290,18 @@ mod tests {
 
     fn sample_row(id: &str, status: &str) -> EscalationRow {
         EscalationRow {
-            escalation_id:    id.to_owned(),
-            session_id:       "sess-1".to_owned(),
-            task_id:          "task-1".to_owned(),
-            lineage_id:       "lin-1".to_owned(),
-            initiative_id:    "init-1".to_owned(),
-            class:            "CapabilityUpgrade".to_owned(),
-            justification:    "needs WriteFiles for migration".to_owned(),
-            idempotency_key:  "idem-1".to_owned(),
-            status:           status.to_owned(),
-            created_at:       unix_now_secs().saturating_sub(45),
-            timeout_at:       unix_now_secs() + 3_600,
-            resolved_at:      None,
+            escalation_id: id.to_owned(),
+            session_id: "sess-1".to_owned(),
+            task_id: "task-1".to_owned(),
+            lineage_id: "lin-1".to_owned(),
+            initiative_id: "init-1".to_owned(),
+            class: "CapabilityUpgrade".to_owned(),
+            justification: "needs WriteFiles for migration".to_owned(),
+            idempotency_key: "idem-1".to_owned(),
+            status: status.to_owned(),
+            created_at: unix_now_secs().saturating_sub(45),
+            timeout_at: unix_now_secs() + 3_600,
+            resolved_at: None,
             resolution_notes: None,
         }
     }
@@ -319,36 +317,26 @@ mod tests {
     #[test]
     fn parse_args_accepts_each_status_value_case_insensitively() {
         for (raw, want) in [
-            ("pending",  EscalationStatusFilter::Pending),
-            ("PENDING",  EscalationStatusFilter::Pending),
+            ("pending", EscalationStatusFilter::Pending),
+            ("PENDING", EscalationStatusFilter::Pending),
             ("approved", EscalationStatusFilter::Approved),
-            ("denied",   EscalationStatusFilter::Denied),
-            ("all",      EscalationStatusFilter::All),
+            ("denied", EscalationStatusFilter::Denied),
+            ("all", EscalationStatusFilter::All),
         ] {
-            let o = parse_args(&[
-                "--status".to_owned(),
-                raw.to_owned(),
-            ])
-            .unwrap();
+            let o = parse_args(&["--status".to_owned(), raw.to_owned()]).unwrap();
             assert_eq!(o.filter, want, "raw={raw:?}");
         }
     }
 
     #[test]
     fn parse_args_rejects_unknown_status() {
-        let err = parse_args(&[
-            "--status".to_owned(),
-            "bogus".to_owned(),
-        ]).unwrap_err();
+        let err = parse_args(&["--status".to_owned(), "bogus".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]
     fn parse_args_rejects_zero_limit() {
-        let err = parse_args(&[
-            "--limit".to_owned(),
-            "0".to_owned(),
-        ]).unwrap_err();
+        let err = parse_args(&["--limit".to_owned(), "0".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -370,7 +358,10 @@ mod tests {
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("esc-1"), "got: {s}");
         assert!(s.contains("Pending"), "got: {s}");
-        assert!(s.contains('…'), "long justification must be ellipsised: {s}");
+        assert!(
+            s.contains('…'),
+            "long justification must be ellipsised: {s}"
+        );
         // The truncation must keep the line ≤ ~140 chars worst-case.
         for line in s.lines() {
             assert!(line.len() <= 200, "line too wide: {line:?}");

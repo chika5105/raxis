@@ -79,7 +79,7 @@ pub const PLANNER_KSB_ENV: &str = "RAXIS_PLANNER_KSB";
 /// kernel revisions inherited the value from the parent process env;
 /// the explicit stamp closes that drift channel so a per-task
 /// override is mechanically guaranteed.
-pub const PLANNER_MAX_TURNS_ENV:               &str = "RAXIS_PLANNER_MAX_TURNS";
+pub const PLANNER_MAX_TURNS_ENV: &str = "RAXIS_PLANNER_MAX_TURNS";
 
 /// V2 `v2_extended_gaps.md §2.5` — per-session cumulative *input*
 /// token cap. Kernel stamps from
@@ -87,7 +87,7 @@ pub const PLANNER_MAX_TURNS_ENV:               &str = "RAXIS_PLANNER_MAX_TURNS";
 /// operator declared it; absent ⇒ uncapped on this axis.
 /// In-VM dispatch loop folds into
 /// `DispatchConfig::max_tokens_input_total`.
-pub const PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV:  &str = "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL";
+pub const PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV: &str = "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL";
 
 /// V2 `v2_extended_gaps.md §2.5` — per-session cumulative *output*
 /// token cap. Kernel stamps from
@@ -97,20 +97,20 @@ pub const PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV: &str = "RAXIS_PLANNER_MAX_TOKENS_
 /// V2 `v2_extended_gaps.md §2.5` — per-session cumulative
 /// *combined* (input + output) token cap. Kernel stamps from
 /// `policy.budget.token_caps.max_total_tokens_per_session`.
-pub const PLANNER_MAX_TOKENS_TOTAL_ENV:        &str = "RAXIS_PLANNER_MAX_TOKENS_TOTAL";
+pub const PLANNER_MAX_TOKENS_TOTAL_ENV: &str = "RAXIS_PLANNER_MAX_TOKENS_TOTAL";
 
 /// V2 `v2_extended_gaps.md §3.1` — per-call ceiling for the `sleep`
 /// planner tool. Kernel stamps from
 /// `policy.budget.sleep_caps.max_seconds_per_call`. Absent ⇒ tool
 /// is registered as `SleepTool::disabled()` and refuses every
 /// invocation with `FAIL_SLEEP_DISABLED`.
-pub const PLANNER_MAX_SLEEP_PER_CALL_ENV:      &str = "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL";
+pub const PLANNER_MAX_SLEEP_PER_CALL_ENV: &str = "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL";
 
 /// V2 `v2_extended_gaps.md §3.1` — cumulative ceiling across the
 /// session for the `sleep` planner tool. Kernel stamps from
 /// `policy.budget.sleep_caps.max_cumulative_seconds`. MUST be ≥
 /// `PLANNER_MAX_SLEEP_PER_CALL_ENV` (validated at policy load time).
-pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV:    &str = "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS";
+pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV: &str = "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS";
 
 /// V2_GAPS §C5 + `extensibility-traits.md §9A.5` — base URL of the
 /// operator-run sidecar process when the resolved model maps to a
@@ -118,20 +118,20 @@ pub const PLANNER_MAX_SLEEP_CUMULATIVE_ENV:    &str = "RAXIS_PLANNER_MAX_CUMULAT
 /// stamps verbatim from `ProviderEntry::sidecar_endpoint`. Empty
 /// or absent ⇒ planner refuses to boot a sidecar provider with
 /// `DriverError::SidecarEnvMissing`.
-pub const PLANNER_SIDECAR_ENDPOINT_ENV:        &str = "RAXIS_PLANNER_SIDECAR_ENDPOINT";
+pub const PLANNER_SIDECAR_ENDPOINT_ENV: &str = "RAXIS_PLANNER_SIDECAR_ENDPOINT";
 
 /// V2_GAPS §C5 — logical sidecar provider id (matches the policy
 /// `[[providers]] provider_id` row). The sidecar HMAC handshake
 /// stamps this value into the request body so the sidecar can
 /// disambiguate per-deployment routing keys.
-pub const PLANNER_SIDECAR_PROVIDER_ID_ENV:     &str = "RAXIS_PLANNER_SIDECAR_PROVIDER_ID";
+pub const PLANNER_SIDECAR_PROVIDER_ID_ENV: &str = "RAXIS_PLANNER_SIDECAR_PROVIDER_ID";
 
 /// V2_GAPS §C5 + `extensibility-traits.md §9A.7A` — 32-byte HMAC
 /// shared secret in lowercase hex (64 chars). Kernel stamps from
 /// `ProviderEntry::sidecar_hmac_secret`. **Operator MUST rotate
 /// per-spawn** (the kernel mints fresh material each time so a
 /// compromised planner cannot replay across spawns). NEVER logged.
-pub const PLANNER_SIDECAR_HMAC_SECRET_ENV:     &str = "RAXIS_PLANNER_SIDECAR_HMAC_SECRET";
+pub const PLANNER_SIDECAR_HMAC_SECRET_ENV: &str = "RAXIS_PLANNER_SIDECAR_HMAC_SECRET";
 
 #[cfg(test)]
 mod tests {
@@ -145,22 +145,44 @@ mod tests {
     /// 2.5, 3.1`) and the planner-core mirror constants in lockstep.
     #[test]
     fn env_names_are_stable_wire() {
-        assert_eq!(PLANNER_TASK_PROMPT_ENV,            "RAXIS_PLANNER_TASK_PROMPT");
-        assert_eq!(PLANNER_TASK_PROMPT_PATH_ENV,       "RAXIS_PLANNER_TASK_PROMPT_PATH");
-        assert_eq!(PLANNER_KSB_ENV,                    "RAXIS_PLANNER_KSB");
-        assert_eq!(PLANNER_MAX_TURNS_ENV,              "RAXIS_PLANNER_MAX_TURNS");
-        assert_eq!(PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV, "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL");
-        assert_eq!(PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,"RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL");
-        assert_eq!(PLANNER_MAX_TOKENS_TOTAL_ENV,       "RAXIS_PLANNER_MAX_TOKENS_TOTAL");
-        assert_eq!(PLANNER_MAX_SLEEP_PER_CALL_ENV,
-                   "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL");
-        assert_eq!(PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
-                   "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS");
-        assert_eq!(PLANNER_SIDECAR_ENDPOINT_ENV,
-                   "RAXIS_PLANNER_SIDECAR_ENDPOINT");
-        assert_eq!(PLANNER_SIDECAR_PROVIDER_ID_ENV,
-                   "RAXIS_PLANNER_SIDECAR_PROVIDER_ID");
-        assert_eq!(PLANNER_SIDECAR_HMAC_SECRET_ENV,
-                   "RAXIS_PLANNER_SIDECAR_HMAC_SECRET");
+        assert_eq!(PLANNER_TASK_PROMPT_ENV, "RAXIS_PLANNER_TASK_PROMPT");
+        assert_eq!(
+            PLANNER_TASK_PROMPT_PATH_ENV,
+            "RAXIS_PLANNER_TASK_PROMPT_PATH"
+        );
+        assert_eq!(PLANNER_KSB_ENV, "RAXIS_PLANNER_KSB");
+        assert_eq!(PLANNER_MAX_TURNS_ENV, "RAXIS_PLANNER_MAX_TURNS");
+        assert_eq!(
+            PLANNER_MAX_TOKENS_INPUT_TOTAL_ENV,
+            "RAXIS_PLANNER_MAX_TOKENS_INPUT_TOTAL"
+        );
+        assert_eq!(
+            PLANNER_MAX_TOKENS_OUTPUT_TOTAL_ENV,
+            "RAXIS_PLANNER_MAX_TOKENS_OUTPUT_TOTAL"
+        );
+        assert_eq!(
+            PLANNER_MAX_TOKENS_TOTAL_ENV,
+            "RAXIS_PLANNER_MAX_TOKENS_TOTAL"
+        );
+        assert_eq!(
+            PLANNER_MAX_SLEEP_PER_CALL_ENV,
+            "RAXIS_PLANNER_MAX_SLEEP_SECONDS_PER_CALL"
+        );
+        assert_eq!(
+            PLANNER_MAX_SLEEP_CUMULATIVE_ENV,
+            "RAXIS_PLANNER_MAX_CUMULATIVE_SLEEP_SECONDS"
+        );
+        assert_eq!(
+            PLANNER_SIDECAR_ENDPOINT_ENV,
+            "RAXIS_PLANNER_SIDECAR_ENDPOINT"
+        );
+        assert_eq!(
+            PLANNER_SIDECAR_PROVIDER_ID_ENV,
+            "RAXIS_PLANNER_SIDECAR_PROVIDER_ID"
+        );
+        assert_eq!(
+            PLANNER_SIDECAR_HMAC_SECRET_ENV,
+            "RAXIS_PLANNER_SIDECAR_HMAC_SECRET"
+        );
     }
 }

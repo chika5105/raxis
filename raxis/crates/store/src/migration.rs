@@ -148,9 +148,7 @@ fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
         |row| row.get::<_, i64>(0),
     ) {
         Ok(v) => Ok(v),
-        Err(rusqlite::Error::SqliteFailure(_, Some(msg)))
-            if msg.contains("no such table") =>
-        {
+        Err(rusqlite::Error::SqliteFailure(_, Some(msg))) if msg.contains("no such table") => {
             // Fresh DB — schema_version not yet created. This is the ONLY
             // condition under which "no version row" is acceptable.
             Ok(0)
@@ -183,9 +181,8 @@ fn read_current_version(conn: &Connection) -> Result<i64, StoreError> {
 
 fn apply_migration_1(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_1_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 1 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 1 failed: {e}")))
 }
 
 /// Render an `IN ('A','B','C')` value list from a slice of `as_sql_str()`
@@ -226,38 +223,40 @@ fn check_in_clause<E: Copy>(variants: &[E], to_sql: impl Fn(E) -> &'static str) 
 /// (kernel-store.md §2.5.1 INV-STORE-03).
 pub fn render_migration_1_ddl() -> String {
     // ── Table-name substitutions (Table::X is the authoritative registry) ──
-    let schema_version              = Table::SchemaVersion.as_str();
-    let initiatives                 = Table::Initiatives.as_str();
-    let signed_plan_artifacts       = Table::SignedPlanArtifacts.as_str();
-    let sessions                    = Table::Sessions.as_str();
-    let tasks                       = Table::Tasks.as_str();
-    let task_dag_edges              = Table::TaskDagEdges.as_str();
-    let delegations                 = Table::Delegations.as_str();
-    let escalations                 = Table::Escalations.as_str();
-    let approval_tokens             = Table::ApprovalTokens.as_str();
-    let approval_proofs             = Table::ApprovalProofs.as_str();
-    let approval_token_nonces       = Table::ApprovalTokenNonces.as_str();
-    let verifier_run_tokens         = Table::VerifierRunTokens.as_str();
-    let witness_records             = Table::WitnessRecords.as_str();
-    let lane_budget_reservations    = Table::LaneBudgetReservations.as_str();
-    let lineage_rate_limits         = Table::LineageRateLimits.as_str();
-    let nonce_cache                 = Table::NonceCache.as_str();
-    let task_intent_ranges          = Table::TaskIntentRanges.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let signed_plan_artifacts = Table::SignedPlanArtifacts.as_str();
+    let sessions = Table::Sessions.as_str();
+    let tasks = Table::Tasks.as_str();
+    let task_dag_edges = Table::TaskDagEdges.as_str();
+    let delegations = Table::Delegations.as_str();
+    let escalations = Table::Escalations.as_str();
+    let approval_tokens = Table::ApprovalTokens.as_str();
+    let approval_proofs = Table::ApprovalProofs.as_str();
+    let approval_token_nonces = Table::ApprovalTokenNonces.as_str();
+    let verifier_run_tokens = Table::VerifierRunTokens.as_str();
+    let witness_records = Table::WitnessRecords.as_str();
+    let lane_budget_reservations = Table::LaneBudgetReservations.as_str();
+    let lineage_rate_limits = Table::LineageRateLimits.as_str();
+    let nonce_cache = Table::NonceCache.as_str();
+    let task_intent_ranges = Table::TaskIntentRanges.as_str();
     let task_exported_path_snapshots = Table::TaskExportedPathSnapshots.as_str();
-    let policy_epoch_history        = Table::PolicyEpochHistory.as_str();
+    let policy_epoch_history = Table::PolicyEpochHistory.as_str();
 
     // ── CHECK-constraint enum substitutions (raxis_types is authoritative) ─
-    let initiative_state_check = check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str);
-    let task_state_check       = check_in_clause(&TaskState::ALL,       TaskState::as_sql_str);
-    let escalation_status_check = check_in_clause(&EscalationStatus::ALL, EscalationStatus::as_sql_str);
-    let witness_result_class_check = check_in_clause(&WitnessResultClass::ALL, WitnessResultClass::as_sql_str);
+    let initiative_state_check =
+        check_in_clause(&InitiativeState::ALL, InitiativeState::as_sql_str);
+    let task_state_check = check_in_clause(&TaskState::ALL, TaskState::as_sql_str);
+    let escalation_status_check =
+        check_in_clause(&EscalationStatus::ALL, EscalationStatus::as_sql_str);
+    let witness_result_class_check =
+        check_in_clause(&WitnessResultClass::ALL, WitnessResultClass::as_sql_str);
     // `DelegationStatus::STORED` carries the subset that actually appears
     // at-rest (kernel-store.md §2.5.1 Table 7); the runtime-derived
     // `Expired` and synthetic `NotGranted` do NOT belong in the CHECK.
-    let delegation_status_check = check_in_clause(
-        &DelegationStatus::STORED,
-        |s| DelegationStatus::as_sql_str(s).expect("STORED variants must serialise"),
-    );
+    let delegation_status_check = check_in_clause(&DelegationStatus::STORED, |s| {
+        DelegationStatus::as_sql_str(s).expect("STORED variants must serialise")
+    });
 
     // ── DEFAULT-clause enum substitutions (newly-inserted-row state) ──────
     // The DDL `DEFAULT '...'` clauses on `delegations.status` and
@@ -647,9 +646,8 @@ COMMIT;
 
 fn apply_migration_2(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_2_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 2 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 2 failed: {e}")))
 }
 
 /// The complete migration-2 DDL — adds `operator_certificates` plus
@@ -657,8 +655,8 @@ fn apply_migration_2(conn: &Connection) -> Result<(), StoreError> {
 /// no raw table-name literals.
 pub fn render_migration_2_ddl() -> String {
     let operator_certificates = Table::OperatorCertificates.as_str();
-    let policy_epoch_history  = Table::PolicyEpochHistory.as_str();
-    let schema_version        = Table::SchemaVersion.as_str();
+    let policy_epoch_history = Table::PolicyEpochHistory.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -762,9 +760,8 @@ COMMIT;
 
 fn apply_migration_3(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_3_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 3 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 3 failed: {e}")))
 }
 
 /// The complete migration-3 DDL — adds `initiative_quarantines` and
@@ -774,9 +771,9 @@ fn apply_migration_3(conn: &Connection) -> Result<(), StoreError> {
 /// literals.
 pub fn render_migration_3_ddl() -> String {
     let initiative_quarantines = Table::InitiativeQuarantines.as_str();
-    let initiatives            = Table::Initiatives.as_str();
-    let signed_plan_artifacts  = Table::SignedPlanArtifacts.as_str();
-    let schema_version         = Table::SchemaVersion.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let signed_plan_artifacts = Table::SignedPlanArtifacts.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -888,9 +885,8 @@ COMMIT;
 
 fn apply_migration_4(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_4_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 4 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 4 failed: {e}")))
 }
 
 /// The complete migration-4 DDL — one new index, identical column
@@ -898,7 +894,7 @@ fn apply_migration_4(conn: &Connection) -> Result<(), StoreError> {
 /// contract as earlier migrations: no raw table-name literals.
 pub fn render_migration_4_ddl() -> String {
     let initiative_quarantines = Table::InitiativeQuarantines.as_str();
-    let schema_version         = Table::SchemaVersion.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -961,9 +957,8 @@ COMMIT;
 
 fn apply_migration_5(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_5_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 5 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 5 failed: {e}")))
 }
 
 /// The complete migration-5 DDL. Same INV-STORE-03 contract as earlier
@@ -971,16 +966,18 @@ fn apply_migration_5(conn: &Connection) -> Result<(), StoreError> {
 /// .as_str()` and every CHECK-constraint enum list is rendered through
 /// `check_in_clause` over the corresponding `raxis_types` enum.
 pub fn render_migration_5_ddl() -> String {
-    let sessions             = Table::Sessions.as_str();
-    let tasks                = Table::Tasks.as_str();
-    let initiatives          = Table::Initiatives.as_str();
-    let subtask_activations  = Table::SubtaskActivations.as_str();
-    let schema_version       = Table::SchemaVersion.as_str();
+    let sessions = Table::Sessions.as_str();
+    let tasks = Table::Tasks.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let subtask_activations = Table::SubtaskActivations.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     let session_agent_type_check =
         check_in_clause(&SessionAgentType::ALL, SessionAgentType::as_sql_str);
-    let activation_state_check =
-        check_in_clause(&SubtaskActivationState::ALL, SubtaskActivationState::as_sql_str);
+    let activation_state_check = check_in_clause(
+        &SubtaskActivationState::ALL,
+        SubtaskActivationState::as_sql_str,
+    );
 
     format!(
         "
@@ -1164,15 +1161,14 @@ COMMIT;
 
 fn apply_migration_6(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_6_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 6 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 6 failed: {e}")))
 }
 
 /// The complete migration-6 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`.
 pub fn render_migration_6_ddl() -> String {
-    let tasks          = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -1229,19 +1225,17 @@ COMMIT;
 
 fn apply_migration_7(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_7_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 7 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 7 failed: {e}")))
 }
 
 /// The complete migration-7 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `ReviewVerdict` enum.
 pub fn render_migration_7_ddl() -> String {
-    let tasks          = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
-    let review_verdict_check =
-        check_in_clause(&ReviewVerdict::ALL, ReviewVerdict::as_sql_str);
+    let review_verdict_check = check_in_clause(&ReviewVerdict::ALL, ReviewVerdict::as_sql_str);
 
     format!(
         "
@@ -1307,22 +1301,23 @@ COMMIT;
 
 fn apply_migration_8(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_8_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 8 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 8 failed: {e}")))
 }
 
 /// The complete migration-8 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `PlanBundleNonceOutcome` enum.
 pub fn render_migration_8_ddl() -> String {
-    let initiatives              = Table::Initiatives.as_str();
-    let plan_bundles             = Table::PlanBundles.as_str();
-    let plan_bundle_artifacts    = Table::PlanBundleArtifacts.as_str();
-    let plan_bundle_nonces_seen  = Table::PlanBundleNoncesSeen.as_str();
-    let schema_version           = Table::SchemaVersion.as_str();
-    let outcome_check =
-        check_in_clause(&PlanBundleNonceOutcome::ALL, PlanBundleNonceOutcome::as_sql_str);
+    let initiatives = Table::Initiatives.as_str();
+    let plan_bundles = Table::PlanBundles.as_str();
+    let plan_bundle_artifacts = Table::PlanBundleArtifacts.as_str();
+    let plan_bundle_nonces_seen = Table::PlanBundleNoncesSeen.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+    let outcome_check = check_in_clause(
+        &PlanBundleNonceOutcome::ALL,
+        PlanBundleNonceOutcome::as_sql_str,
+    );
 
     format!(
         "
@@ -1486,19 +1481,17 @@ COMMIT;
 
 fn apply_migration_9(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_9_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 9 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 9 failed: {e}")))
 }
 
 /// The complete migration-9 DDL. INV-STORE-03: every table identifier
 /// is rendered through `Table::...as_str()`; the CHECK clause is
 /// rendered through the `CloneStrategy` enum's `ALL` array.
 pub fn render_migration_9_ddl() -> String {
-    let tasks          = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
-    let clone_strategy_check =
-        check_in_clause(&CloneStrategy::ALL, CloneStrategy::as_sql_str);
+    let clone_strategy_check = check_in_clause(&CloneStrategy::ALL, CloneStrategy::as_sql_str);
 
     format!(
         "
@@ -1592,9 +1585,8 @@ COMMIT;
 
 fn apply_migration_10(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_10_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 10 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 10 failed: {e}")))
 }
 
 /// The complete migration-10 DDL. INV-STORE-03: every table
@@ -1604,9 +1596,9 @@ fn apply_migration_10(conn: &Connection) -> Result<(), StoreError> {
 /// drift-protected by
 /// `tests::migration_10_proxy_type_check_pins_known_variants`.
 pub fn render_migration_10_ddl() -> String {
-    let tasks                  = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
     let task_credential_proxies = Table::TaskCredentialProxies.as_str();
-    let schema_version         = Table::SchemaVersion.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -1691,9 +1683,8 @@ COMMIT;
 
 fn apply_migration_11(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_11_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 11 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 11 failed: {e}")))
 }
 
 /// The complete migration-11 DDL. Same INV-STORE-03 contract as
@@ -1704,17 +1695,18 @@ fn apply_migration_11(conn: &Connection) -> Result<(), StoreError> {
 /// CHECK constraints is caught by the
 /// `tests::migration_11_*_check_pins_known_variants` guards below.
 pub fn render_migration_11_ddl() -> String {
-    let initiatives                = Table::Initiatives.as_str();
+    let initiatives = Table::Initiatives.as_str();
     let integration_merge_attempts = Table::IntegrationMergeAttempts.as_str();
-    let schema_version             = Table::SchemaVersion.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
-    let attempt_state_check =
-        check_in_clause(&IntegrationMergeAttemptState::ALL, IntegrationMergeAttemptState::as_sql_str);
-    let discard_reason_check =
-        check_in_clause(
-            &IntegrationMergeAttemptDiscardReason::ALL,
-            IntegrationMergeAttemptDiscardReason::as_sql_str,
-        );
+    let attempt_state_check = check_in_clause(
+        &IntegrationMergeAttemptState::ALL,
+        IntegrationMergeAttemptState::as_sql_str,
+    );
+    let discard_reason_check = check_in_clause(
+        &IntegrationMergeAttemptDiscardReason::ALL,
+        IntegrationMergeAttemptDiscardReason::as_sql_str,
+    );
 
     format!(
         "
@@ -1859,15 +1851,14 @@ COMMIT;
 
 fn apply_migration_12(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_12_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 12 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 12 failed: {e}")))
 }
 
 /// The complete migration-12 DDL. Two `ALTER TABLE` statements add
 /// the cumulative token-usage and dollar-cost columns to `tasks`.
 pub fn render_migration_12_ddl() -> String {
-    let tasks          = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -1936,18 +1927,17 @@ COMMIT;
 
 fn apply_migration_13(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_13_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 13 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 13 failed: {e}")))
 }
 
 /// The complete migration-13 DDL.
 pub fn render_migration_13_ddl() -> String {
     let structured_outputs = Table::StructuredOutputs.as_str();
-    let initiatives        = Table::Initiatives.as_str();
-    let tasks              = Table::Tasks.as_str();
-    let sessions           = Table::Sessions.as_str();
-    let schema_version     = Table::SchemaVersion.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let tasks = Table::Tasks.as_str();
+    let sessions = Table::Sessions.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -1997,17 +1987,16 @@ COMMIT;
 
 fn apply_migration_14(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_14_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 14 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 14 failed: {e}")))
 }
 
 /// The complete migration-14 DDL.
 pub fn render_migration_14_ddl() -> String {
-    let notifications  = Table::Notifications.as_str();
-    let initiatives    = Table::Initiatives.as_str();
-    let tasks          = Table::Tasks.as_str();
-    let sessions       = Table::Sessions.as_str();
+    let notifications = Table::Notifications.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let tasks = Table::Tasks.as_str();
+    let sessions = Table::Sessions.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -2061,20 +2050,19 @@ COMMIT;
 
 fn apply_migration_15(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_15_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 15 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 15 failed: {e}")))
 }
 
 /// The complete migration-15 DDL.
 pub fn render_migration_15_ddl() -> String {
     let provider_circuit_state = Table::ProviderCircuitState.as_str();
-    let schema_version         = Table::SchemaVersion.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     // Derive the CHECK constraint from the canonical enum — single
     // source of truth (raxis-types::fsm::CircuitBreakerState).
     let state_check = raxis_types::CircuitBreakerState::sql_check_in_clause();
-    let open_str    = raxis_types::CircuitBreakerState::Open.as_sql_str();
+    let open_str = raxis_types::CircuitBreakerState::Open.as_sql_str();
 
     format!(
         "
@@ -2142,14 +2130,13 @@ COMMIT;
 
 fn apply_migration_16(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_16_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 16 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 16 failed: {e}")))
 }
 
 /// The complete migration-16 DDL.
 pub fn render_migration_16_ddl() -> String {
-    let initiatives    = Table::Initiatives.as_str();
+    let initiatives = Table::Initiatives.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -2206,16 +2193,15 @@ COMMIT;
 
 fn apply_migration_17(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_17_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 17 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 17 failed: {e}")))
 }
 
 /// The complete migration-17 DDL.
 pub fn render_migration_17_ddl() -> String {
     let task_credential_proxies = Table::TaskCredentialProxies.as_str();
-    let tasks                   = Table::Tasks.as_str();
-    let schema_version          = Table::SchemaVersion.as_str();
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -2332,18 +2318,17 @@ COMMIT;
 
 fn apply_migration_18(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_18_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 18 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 18 failed: {e}")))
 }
 
 /// The complete migration-18 DDL.
 pub fn render_migration_18_ddl() -> String {
-    let sessions           = Table::Sessions.as_str();
-    let initiatives        = Table::Initiatives.as_str();
-    let tasks              = Table::Tasks.as_str();
+    let sessions = Table::Sessions.as_str();
+    let initiatives = Table::Initiatives.as_str();
+    let tasks = Table::Tasks.as_str();
     let structured_outputs = Table::StructuredOutputs.as_str();
-    let schema_version     = Table::SchemaVersion.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
 
     format!(
         "
@@ -2463,14 +2448,13 @@ COMMIT;
 
 fn apply_migration_19(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_19_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 19 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 19 failed: {e}")))
 }
 
 /// The complete migration-19 DDL.
 pub fn render_migration_19_ddl() -> String {
-    let initiatives    = Table::Initiatives.as_str();
+    let initiatives = Table::Initiatives.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -2523,14 +2507,13 @@ COMMIT;
 
 fn apply_migration_20(conn: &Connection) -> Result<(), StoreError> {
     let ddl = render_migration_20_ddl();
-    conn.execute_batch(&ddl).map_err(|e| {
-        StoreError::Migration(format!("migration 20 failed: {e}"))
-    })
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 20 failed: {e}")))
 }
 
 /// The complete migration-20 DDL.
 pub fn render_migration_20_ddl() -> String {
-    let escalations    = Table::Escalations.as_str();
+    let escalations = Table::Escalations.as_str();
     let schema_version = Table::SchemaVersion.as_str();
 
     format!(
@@ -2578,17 +2561,17 @@ mod tests {
         apply_pending(&conn).expect("all migrations should apply on fresh db");
 
         let v = read_current_version(&conn).unwrap();
-        assert_eq!(v, SCHEMA_VERSION as i64,
-            "schema_version should be SCHEMA_VERSION ({SCHEMA_VERSION}) after first apply");
+        assert_eq!(
+            v, SCHEMA_VERSION as i64,
+            "schema_version should be SCHEMA_VERSION ({SCHEMA_VERSION}) after first apply"
+        );
 
         // Spot-check: a representative table exists post-migration.
         // We use `Table::Tasks.as_str()` here too — keeping the test
         // consistent with the production INV-STORE-03 contract.
         let count: i64 = conn
             .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
-                ),
+                &format!("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",),
                 [Table::Tasks.as_str()],
                 |r| r.get(0),
             )
@@ -2613,8 +2596,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n, SCHEMA_VERSION as i64,
-            "expected one row per applied migration");
+        assert_eq!(
+            n, SCHEMA_VERSION as i64,
+            "expected one row per applied migration"
+        );
     }
 
     /// If the DB has `schema_version` but `MAX(version)` returns NULL (no rows),
@@ -2681,9 +2666,9 @@ mod tests {
         // Use `Table` enum + `as_sql_str` to keep test SQL aligned with
         // production INV-STORE-03 contract.
         let initiatives_t = Table::Initiatives.as_str();
-        let tasks_t       = Table::Tasks.as_str();
-        let draft         = InitiativeState::Draft.as_sql_str();
-        let admitted      = TaskState::Admitted.as_sql_str();
+        let tasks_t = Table::Tasks.as_str();
+        let draft = InitiativeState::Draft.as_sql_str();
+        let admitted = TaskState::Admitted.as_sql_str();
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives_t} (initiative_id, state, terminal_criteria_json,
                                        plan_artifact_sha256, created_at)
@@ -2750,10 +2735,10 @@ mod tests {
         );
         // delegations.status — only STORED variants. kernel-store.md Table 7.
         assert_eq!(
-            check_in_clause(
-                &DelegationStatus::STORED,
-                |s| DelegationStatus::as_sql_str(s).expect("STORED variants must serialise"),
-            ),
+            check_in_clause(&DelegationStatus::STORED, |s| DelegationStatus::as_sql_str(
+                s
+            )
+            .expect("STORED variants must serialise"),),
             "('Active', 'StaleOnNextUse', 'RenewalRequired')",
         );
         // escalations.status — kernel-store.md §2.5.1 Table 9.
@@ -2878,8 +2863,11 @@ mod tests {
     fn migration_2_creates_operator_certificates_table() {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
-            "schema_version must be SCHEMA_VERSION after applying all migrations");
+        assert_eq!(
+            read_current_version(&conn).unwrap(),
+            SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations"
+        );
 
         // Column metadata sanity check via PRAGMA — every column
         // we documented in the migration MUST be present.
@@ -2894,30 +2882,44 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         for required in [
-            "pubkey_fingerprint",   "epoch_id",        "kind",
-            "display_name",         "pubkey_hex",      "not_before",
-            "not_after",            "warn_before_expiry_days",
-            "grace_period_days",    "permitted_ops_json",
-            "contact_info",         "self_sig_hex",
-            "force_misconfig_bypass", "installed_at",
+            "pubkey_fingerprint",
+            "epoch_id",
+            "kind",
+            "display_name",
+            "pubkey_hex",
+            "not_before",
+            "not_after",
+            "warn_before_expiry_days",
+            "grace_period_days",
+            "permitted_ops_json",
+            "contact_info",
+            "self_sig_hex",
+            "force_misconfig_bypass",
+            "installed_at",
         ] {
-            assert!(cols.iter().any(|c| c == required),
+            assert!(
+                cols.iter().any(|c| c == required),
                 "operator_certificates is missing column {required:?}; \
-                 got columns: {cols:?}");
+                 got columns: {cols:?}"
+            );
         }
 
         // Both partial indexes registered.
-        let idx_count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM sqlite_master \
+        let idx_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM sqlite_master \
                  WHERE type='index' AND tbl_name='{}'",
-                Table::OperatorCertificates.as_str(),
-            ),
-            [],
-            |r| r.get(0),
-        ).unwrap();
-        assert!(idx_count >= 2,
-            "expected at least 2 indexes on operator_certificates, got {idx_count}");
+                    Table::OperatorCertificates.as_str(),
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            idx_count >= 2,
+            "expected at least 2 indexes on operator_certificates, got {idx_count}"
+        );
     }
 
     /// Migration 2 enforces CHECK (kind IN ('Standard', 'EmergencyRecovery')).
@@ -2937,7 +2939,8 @@ mod tests {
                 ph = Table::PolicyEpochHistory.as_str(),
             ),
             [],
-        ).unwrap();
+        )
+        .unwrap();
 
         let result = conn.execute(
             &format!(
@@ -2949,8 +2952,10 @@ mod tests {
             ),
             [],
         );
-        assert!(result.is_err(),
-            "INSERT with kind='NotARealKind' must violate CHECK constraint");
+        assert!(
+            result.is_err(),
+            "INSERT with kind='NotARealKind' must violate CHECK constraint"
+        );
     }
 
     /// Migration 2's FK on epoch_id MUST point at policy_epoch_history.
@@ -2973,8 +2978,10 @@ mod tests {
             ),
             [],
         );
-        assert!(result.is_err(),
-            "INSERT referencing missing epoch_id MUST trip the FK constraint");
+        assert!(
+            result.is_err(),
+            "INSERT referencing missing epoch_id MUST trip the FK constraint"
+        );
     }
 
     // ── Migration 3 — initiative_quarantines ─────────────────────────
@@ -2986,8 +2993,11 @@ mod tests {
     fn migration_3_creates_initiative_quarantines_table_and_signer_column() {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
-            "schema_version must be SCHEMA_VERSION after applying all migrations");
+        assert_eq!(
+            read_current_version(&conn).unwrap(),
+            SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations"
+        );
 
         // Quarantine table columns.
         let cols: Vec<String> = conn
@@ -3001,11 +3011,16 @@ mod tests {
             .map(Result::unwrap)
             .collect();
         for required in [
-            "initiative_id", "quarantined_at", "quarantined_by",
-            "reason",        "sweep_target",
+            "initiative_id",
+            "quarantined_at",
+            "quarantined_by",
+            "reason",
+            "sweep_target",
         ] {
-            assert!(cols.iter().any(|c| c == required),
-                "initiative_quarantines is missing column {required:?}; got: {cols:?}");
+            assert!(
+                cols.iter().any(|c| c == required),
+                "initiative_quarantines is missing column {required:?}; got: {cols:?}"
+            );
         }
 
         // signed_plan_artifacts now carries signed_by_fingerprint.
@@ -3019,8 +3034,10 @@ mod tests {
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert!(plan_cols.iter().any(|c| c == "signed_by_fingerprint"),
-            "migration 3 must add signed_by_fingerprint; got: {plan_cols:?}");
+        assert!(
+            plan_cols.iter().any(|c| c == "signed_by_fingerprint"),
+            "migration 3 must add signed_by_fingerprint; got: {plan_cols:?}"
+        );
     }
 
     // ── Migration 4 — quarantined_at index for spec parity ──────────
@@ -3035,8 +3052,11 @@ mod tests {
     fn migration_4_creates_quarantined_at_index() {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64,
-            "schema_version must be SCHEMA_VERSION after applying all migrations");
+        assert_eq!(
+            read_current_version(&conn).unwrap(),
+            SCHEMA_VERSION as i64,
+            "schema_version must be SCHEMA_VERSION after applying all migrations"
+        );
 
         // `sqlite_master` is the authoritative inventory of indexes; we
         // verify both the index name and its target table to catch
@@ -3050,21 +3070,29 @@ mod tests {
             )
             .expect("idx_initiative_quarantines_quarantined_at should exist after migration 4");
         assert_eq!(row.0, "idx_initiative_quarantines_quarantined_at");
-        assert_eq!(row.1, Table::InitiativeQuarantines.as_str(),
-            "index must be on the initiative_quarantines table");
+        assert_eq!(
+            row.1,
+            Table::InitiativeQuarantines.as_str(),
+            "index must be on the initiative_quarantines table"
+        );
 
         // The PRAGMA index_info confirms the index targets the right
         // column — protects against a future "fix" that points the
         // index at quarantined_by by mistake.
         let cols: Vec<String> = conn
-            .prepare("SELECT name FROM pragma_index_info('idx_initiative_quarantines_quarantined_at')")
+            .prepare(
+                "SELECT name FROM pragma_index_info('idx_initiative_quarantines_quarantined_at')",
+            )
             .unwrap()
             .query_map([], |r| r.get::<_, String>(0))
             .unwrap()
             .map(Result::unwrap)
             .collect();
-        assert_eq!(cols, vec!["quarantined_at".to_string()],
-            "index must be on the quarantined_at column only");
+        assert_eq!(
+            cols,
+            vec!["quarantined_at".to_string()],
+            "index must be on the quarantined_at column only"
+        );
     }
 
     /// Upgrade scenario: a database that completed migration 3 but
@@ -3090,8 +3118,11 @@ mod tests {
         apply_migration_1(&conn).unwrap();
         apply_migration_2(&conn).unwrap();
         apply_migration_3(&conn).unwrap();
-        assert_eq!(read_current_version(&conn).unwrap(), 3,
-            "test pre-condition: database must be at version 3");
+        assert_eq!(
+            read_current_version(&conn).unwrap(),
+            3,
+            "test pre-condition: database must be at version 3"
+        );
         let n_before: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master \
@@ -3115,8 +3146,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(n_after, 1,
-            "migration 4 must add the index when re-running on a v3 database");
+        assert_eq!(
+            n_after, 1,
+            "migration 4 must add the index when re-running on a v3 database"
+        );
     }
 
     /// `apply_pending` followed by a second `apply_pending` MUST be
@@ -3162,8 +3195,10 @@ mod tests {
             ),
             [],
         );
-        assert!(result.is_err(),
-            "INSERT referencing missing initiative_id MUST trip the FK constraint");
+        assert!(
+            result.is_err(),
+            "INSERT referencing missing initiative_id MUST trip the FK constraint"
+        );
     }
 
     /// Hash-pin the rendered Migration 1 DDL.
@@ -3241,16 +3276,31 @@ mod tests {
     /// above does.
     #[test]
     fn enum_variant_counts_are_pinned_to_v1() {
-        assert_eq!(InitiativeState::ALL.len(), 7,
-            "InitiativeState v1 has 7 variants; bumping this requires migration_2");
-        assert_eq!(TaskState::ALL.len(), 8,
-            "TaskState v1 has 8 variants; bumping this requires migration_2");
-        assert_eq!(EscalationStatus::ALL.len(), 6,
-            "EscalationStatus v1 has 6 variants; bumping this requires migration_2");
-        assert_eq!(WitnessResultClass::ALL.len(), 3,
-            "WitnessResultClass v1 has 3 variants; bumping this requires migration_2");
-        assert_eq!(DelegationStatus::STORED.len(), 3,
-            "DelegationStatus v1 STORED has 3 variants; bumping this requires migration_2");
+        assert_eq!(
+            InitiativeState::ALL.len(),
+            7,
+            "InitiativeState v1 has 7 variants; bumping this requires migration_2"
+        );
+        assert_eq!(
+            TaskState::ALL.len(),
+            8,
+            "TaskState v1 has 8 variants; bumping this requires migration_2"
+        );
+        assert_eq!(
+            EscalationStatus::ALL.len(),
+            6,
+            "EscalationStatus v1 has 6 variants; bumping this requires migration_2"
+        );
+        assert_eq!(
+            WitnessResultClass::ALL.len(),
+            3,
+            "WitnessResultClass v1 has 3 variants; bumping this requires migration_2"
+        );
+        assert_eq!(
+            DelegationStatus::STORED.len(),
+            3,
+            "DelegationStatus v1 STORED has 3 variants; bumping this requires migration_2"
+        );
     }
 
     /// V2 enum-shape pin. Bumping any of these requires a NEW migration
@@ -3262,12 +3312,18 @@ mod tests {
     /// migration 5's rendered DDL.
     #[test]
     fn v2_enum_variant_counts_are_pinned_to_migration_5() {
-        assert_eq!(SessionAgentType::ALL.len(), 3,
+        assert_eq!(
+            SessionAgentType::ALL.len(),
+            3,
             "SessionAgentType v2 has 3 variants (Orchestrator, Executor, \
-             Reviewer); bumping this requires a new migration");
-        assert_eq!(SubtaskActivationState::ALL.len(), 4,
+             Reviewer); bumping this requires a new migration"
+        );
+        assert_eq!(
+            SubtaskActivationState::ALL.len(),
+            4,
             "SubtaskActivationState v2 has 4 variants; bumping this \
-             requires a new migration");
+             requires a new migration"
+        );
     }
 
     // ── Migration 5 — V2 hierarchical orchestration ────────────────────────
@@ -3318,8 +3374,11 @@ mod tests {
             .expect("sessions.can_delegate must exist after migration 5");
         assert_eq!(ty, "INTEGER");
         assert_eq!(*notnull, 1, "can_delegate must be NOT NULL");
-        assert_eq!(dflt.as_deref(), Some("0"),
-            "can_delegate must default to 0 so V1 rows survive ALTER");
+        assert_eq!(
+            dflt.as_deref(),
+            Some("0"),
+            "can_delegate must default to 0 so V1 rows survive ALTER"
+        );
 
         // vsock_cid: INTEGER, NULLable.
         let (ty, notnull, _) = cols
@@ -3357,9 +3416,11 @@ mod tests {
             ),
             [],
         );
-        assert!(bad.is_err(),
+        assert!(
+            bad.is_err(),
             "INV-DELEGATE-01 row-level CHECK must reject \
-             can_delegate=1 with session_agent_type='Reviewer'");
+             can_delegate=1 with session_agent_type='Reviewer'"
+        );
 
         // Orchestrator + can_delegate=1 must SUCCEED.
         let good = conn.execute(
@@ -3372,8 +3433,10 @@ mod tests {
             ),
             [],
         );
-        assert!(good.is_ok(),
-            "Orchestrator + can_delegate=1 must satisfy INV-DELEGATE-01");
+        assert!(
+            good.is_ok(),
+            "Orchestrator + can_delegate=1 must satisfy INV-DELEGATE-01"
+        );
     }
 
     /// V1 backward compat: a row with no V2 fields populated must
@@ -3422,10 +3485,10 @@ mod tests {
 
         // Seed the FK targets.
         let initiatives_t = Table::Initiatives.as_str();
-        let tasks_t       = Table::Tasks.as_str();
-        let activ_t       = Table::SubtaskActivations.as_str();
-        let draft         = InitiativeState::Draft.as_sql_str();
-        let admitted      = TaskState::Admitted.as_sql_str();
+        let tasks_t = Table::Tasks.as_str();
+        let activ_t = Table::SubtaskActivations.as_str();
+        let draft = InitiativeState::Draft.as_sql_str();
+        let admitted = TaskState::Admitted.as_sql_str();
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives_t} (initiative_id, state, terminal_criteria_json, \
                                           plan_artifact_sha256, created_at) \
@@ -3434,7 +3497,8 @@ mod tests {
                                      policy_epoch, admitted_at, transitioned_at) \
              VALUES ('task-1', 'init-1', 'default', '{admitted}', 'planner', \
                      1, 0, 0);"
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Legal: PendingActivation row with no session and no timestamps.
         let pending = SubtaskActivationState::PendingActivation.as_sql_str();
@@ -3470,8 +3534,10 @@ mod tests {
             ),
             [],
         );
-        assert!(r.is_err(),
-            "PendingActivation with non-NULL activated_at must trip the cross-CHECK");
+        assert!(
+            r.is_err(),
+            "PendingActivation with non-NULL activated_at must trip the cross-CHECK"
+        );
 
         // Illegal: Completed without timestamps.
         let completed = SubtaskActivationState::Completed.as_sql_str();
@@ -3483,8 +3549,10 @@ mod tests {
             ),
             [],
         );
-        assert!(r.is_err(),
-            "Completed without activated_at/terminated_at must trip the cross-CHECK");
+        assert!(
+            r.is_err(),
+            "Completed without activated_at/terminated_at must trip the cross-CHECK"
+        );
     }
 
     /// Migration 5 is idempotent: re-running `apply_pending` after a
@@ -3577,13 +3645,20 @@ mod tests {
         let ddl = render_migration_5_ddl();
         // The DDL must contain exactly one BEGIN and one COMMIT, in
         // that order, and no nested transactions.
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 5 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 5 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 5 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 5 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     // ── Migration 6 — V2 critique routing column on `tasks` ─────────────
@@ -3604,10 +3679,10 @@ mod tests {
         let cols: Vec<(String, String, i64, Option<String>)> = stmt
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, String>(1)?,           // name
-                    r.get::<_, String>(2)?,           // type
-                    r.get::<_, i64>(3)?,              // notnull
-                    r.get::<_, Option<String>>(4)?,   // dflt_value
+                    r.get::<_, String>(1)?,         // name
+                    r.get::<_, String>(2)?,         // type
+                    r.get::<_, i64>(3)?,            // notnull
+                    r.get::<_, Option<String>>(4)?, // dflt_value
                 ))
             })
             .unwrap()
@@ -3621,7 +3696,10 @@ mod tests {
 
         assert_eq!(last_critique.1, "TEXT", "last_critique must be TEXT");
         assert_eq!(last_critique.2, 0, "last_critique must be NULLable");
-        assert!(last_critique.3.is_none(), "last_critique must have no DEFAULT");
+        assert!(
+            last_critique.3.is_none(),
+            "last_critique must have no DEFAULT"
+        );
     }
 
     /// Migration 6 leaves V1 task rows untouched: the column is added
@@ -3644,9 +3722,8 @@ mod tests {
         // migration 6 with last_critique = NULL; the exact column set
         // matches whatever migration 1 created (kernel-store.md §2.5.1
         // Table 5).
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('init-mig6', 'Draft', '{{}}', 'deadbeef', 0); \
@@ -3655,10 +3732,10 @@ mod tests {
                      policy_epoch, admitted_at, transitioned_at) \
                  VALUES ('task-mig6', 'init-mig6', 'lane.default', \
                          'Admitted', 'Operator', 1, 0, 0);",
-                initiatives = Table::Initiatives.as_str(),
-                tasks       = Table::Tasks.as_str(),
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            tasks = Table::Tasks.as_str(),
+        ))
+        .unwrap();
 
         // Now run migration 6 only — assert the version is exactly 6
         // (this test is scoped to migration 6's contract; migration 7
@@ -3715,8 +3792,10 @@ mod tests {
             .map(Result::unwrap)
             .filter(|name| name == "last_critique")
             .count();
-        assert_eq!(n_last_critique, 1,
-            "last_critique must appear exactly once in tasks PRAGMA");
+        assert_eq!(
+            n_last_critique, 1,
+            "last_critique must appear exactly once in tasks PRAGMA"
+        );
     }
 
     /// Upgrade scenario: a database at v=5 (a build that shipped before
@@ -3763,13 +3842,20 @@ mod tests {
     #[test]
     fn migration_6_is_a_single_transaction() {
         let ddl = render_migration_6_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 6 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 6 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 6 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 6 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     // ── Migration 7 — V2 per-Reviewer verdict column on `tasks` ─────────
@@ -3789,10 +3875,10 @@ mod tests {
         let cols: Vec<(String, String, i64, Option<String>)> = stmt
             .query_map([], |r| {
                 Ok((
-                    r.get::<_, String>(1)?,           // name
-                    r.get::<_, String>(2)?,           // type
-                    r.get::<_, i64>(3)?,              // notnull
-                    r.get::<_, Option<String>>(4)?,   // dflt_value
+                    r.get::<_, String>(1)?,         // name
+                    r.get::<_, String>(2)?,         // type
+                    r.get::<_, i64>(3)?,            // notnull
+                    r.get::<_, Option<String>>(4)?, // dflt_value
                 ))
             })
             .unwrap()
@@ -3806,7 +3892,10 @@ mod tests {
 
         assert_eq!(review_verdict.1, "TEXT", "review_verdict must be TEXT");
         assert_eq!(review_verdict.2, 0, "review_verdict must be NULLable");
-        assert!(review_verdict.3.is_none(), "review_verdict must have no DEFAULT");
+        assert!(
+            review_verdict.3.is_none(),
+            "review_verdict must have no DEFAULT"
+        );
     }
 
     /// The CHECK constraint on `review_verdict` must accept the canonical
@@ -3819,9 +3908,8 @@ mod tests {
         // Seed an initiative + task so the CHECK constraint is exercised
         // by an actual UPDATE.
         let now = raxis_types::unix_now_secs();
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('init-mig7', 'Draft', '{{}}', 'deadbeef', {now}); \
@@ -3830,11 +3918,11 @@ mod tests {
                      policy_epoch, admitted_at, transitioned_at) \
                  VALUES ('task-mig7', 'init-mig7', 'lane.default', \
                          'Admitted', 'Operator', 1, {now}, {now});",
-                initiatives = Table::Initiatives.as_str(),
-                tasks       = Table::Tasks.as_str(),
-                now         = now,
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            tasks = Table::Tasks.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let upd_sql = format!(
             "UPDATE {} SET review_verdict = ?1 WHERE task_id = 'task-mig7'",
@@ -3844,8 +3932,10 @@ mod tests {
         // Canonical strings must be accepted.
         for variant in &ReviewVerdict::ALL {
             let r = conn.execute(&upd_sql, rusqlite::params![variant.as_sql_str()]);
-            assert!(r.is_ok(),
-                "CHECK constraint must accept canonical {variant:?} (got {r:?})");
+            assert!(
+                r.is_ok(),
+                "CHECK constraint must accept canonical {variant:?} (got {r:?})"
+            );
         }
         // NULL must be accepted.
         let r = conn.execute(&upd_sql, rusqlite::params![Option::<&str>::None]);
@@ -3853,8 +3943,10 @@ mod tests {
 
         // A bogus string must be rejected.
         let r = conn.execute(&upd_sql, rusqlite::params!["ApprovedYes"]);
-        assert!(r.is_err(),
-            "CHECK constraint must reject non-canonical strings");
+        assert!(
+            r.is_err(),
+            "CHECK constraint must reject non-canonical strings"
+        );
     }
 
     /// V2 enum-driven CHECK clauses are pinned at the SQL level so a
@@ -3895,8 +3987,10 @@ mod tests {
             .map(Result::unwrap)
             .filter(|name| name == "review_verdict")
             .count();
-        assert_eq!(n_review_verdict, 1,
-            "review_verdict must appear exactly once in tasks PRAGMA");
+        assert_eq!(
+            n_review_verdict, 1,
+            "review_verdict must appear exactly once in tasks PRAGMA"
+        );
     }
 
     /// Upgrade scenario: a database at v=6 must pick up migration 7
@@ -3941,13 +4035,20 @@ mod tests {
     #[test]
     fn migration_7_is_a_single_transaction() {
         let ddl = render_migration_7_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 7 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 7 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 7 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 7 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     // ── Migration 8 — V2 plan-bundle-sealing storage layout (§8.2) ─────
@@ -3974,8 +4075,7 @@ mod tests {
                     |r| r.get(0),
                 )
                 .unwrap();
-            assert_eq!(exists, 1,
-                "{} must exist after migration 8", table.as_str());
+            assert_eq!(exists, 1, "{} must exist after migration 8", table.as_str());
         }
     }
 
@@ -4012,27 +4112,27 @@ mod tests {
 
         // NOT NULL columns
         for (name, expected_type) in [
-            ("bundle_sha256",       "BLOB"),
-            ("bundle_bytes",        "BLOB"),
-            ("signature",           "BLOB"),
-            ("signed_by",           "BLOB"),
-            ("schema_version",      "INTEGER"),
-            ("artifact_count",      "INTEGER"),
-            ("bundle_bytes_len",    "INTEGER"),
+            ("bundle_sha256", "BLOB"),
+            ("bundle_bytes", "BLOB"),
+            ("signature", "BLOB"),
+            ("signed_by", "BLOB"),
+            ("schema_version", "INTEGER"),
+            ("artifact_count", "INTEGER"),
+            ("bundle_bytes_len", "INTEGER"),
             ("sealed_at_unix_secs", "INTEGER"),
         ] {
-            let (ty, nn) = by_name.get(name)
+            let (ty, nn) = by_name
+                .get(name)
                 .copied()
                 .unwrap_or_else(|| panic!("missing column: {name}"));
             assert_eq!(ty, expected_type, "column {name}: type mismatch");
             assert_eq!(nn, 1, "column {name} must be NOT NULL");
         }
         // Schema-1-nullable columns
-        for (name, expected_type) in [
-            ("signed_at_unix_secs", "INTEGER"),
-            ("bundle_nonce",        "BLOB"),
-        ] {
-            let (ty, nn) = by_name.get(name)
+        for (name, expected_type) in [("signed_at_unix_secs", "INTEGER"), ("bundle_nonce", "BLOB")]
+        {
+            let (ty, nn) = by_name
+                .get(name)
                 .copied()
                 .unwrap_or_else(|| panic!("missing column: {name}"));
             assert_eq!(ty, expected_type, "column {name}: type mismatch");
@@ -4060,13 +4160,14 @@ mod tests {
             .filter(|(_, pk)| *pk > 0)
             .collect();
 
-        assert_eq!(pk_columns.len(), 2,
-            "plan_bundle_artifacts must have a 2-column primary key");
+        assert_eq!(
+            pk_columns.len(),
+            2,
+            "plan_bundle_artifacts must have a 2-column primary key"
+        );
         // pk index is the position WITHIN the PK; SQLite assigns 1, 2.
-        let by_pk: std::collections::HashMap<i64, String> = pk_columns
-            .iter()
-            .map(|(n, pk)| (*pk, n.clone()))
-            .collect();
+        let by_pk: std::collections::HashMap<i64, String> =
+            pk_columns.iter().map(|(n, pk)| (*pk, n.clone())).collect();
         assert_eq!(by_pk.get(&1).map(String::as_str), Some("bundle_sha256"));
         assert_eq!(by_pk.get(&2).map(String::as_str), Some("artifact_seq"));
     }
@@ -4082,19 +4183,18 @@ mod tests {
         let nonce_a = vec![0x01u8; 16];
         let nonce_b = vec![0x02u8; 16];
         let nonce_c = vec![0x03u8; 16];
-        let bundle  = vec![0xAAu8; 32];
+        let bundle = vec![0xAAu8; 32];
 
         // Seed an initiative for the Admitted row's FK target.
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('init-mig8', 'Draft', '{{}}', 'deadbeef', {now});",
-                initiatives = Table::Initiatives.as_str(),
-                now         = now,
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let ins_sql = format!(
             "INSERT INTO {} \
@@ -4108,7 +4208,10 @@ mod tests {
         let r = conn.execute(
             &ins_sql,
             rusqlite::params![
-                nonce_a, bundle, now, now,
+                nonce_a,
+                bundle,
+                now,
+                now,
                 PlanBundleNonceOutcome::Admitted.as_sql_str(),
                 "init-mig8",
             ],
@@ -4119,25 +4222,28 @@ mod tests {
         let r = conn.execute(
             &ins_sql,
             rusqlite::params![
-                nonce_b, bundle, now, now,
+                nonce_b,
+                bundle,
+                now,
+                now,
                 PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
                 Option::<&str>::None,
             ],
         );
-        assert!(r.is_ok(),
-            "TerminallyRejected with NULL init_id must be accepted: {r:?}");
+        assert!(
+            r.is_ok(),
+            "TerminallyRejected with NULL init_id must be accepted: {r:?}"
+        );
 
         // Bogus outcome must be rejected.
         let r = conn.execute(
             &ins_sql,
-            rusqlite::params![
-                nonce_c, bundle, now, now,
-                "Pending",
-                Option::<&str>::None,
-            ],
+            rusqlite::params![nonce_c, bundle, now, now, "Pending", Option::<&str>::None,],
         );
-        assert!(r.is_err(),
-            "non-canonical outcome string must be rejected by CHECK");
+        assert!(
+            r.is_err(),
+            "non-canonical outcome string must be rejected by CHECK"
+        );
     }
 
     /// Admitted nonce row MUST carry a non-NULL `initiative_id`; a NULL
@@ -4149,7 +4255,7 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let now = raxis_types::unix_now_secs();
-        let nonce  = vec![0x55u8; 16];
+        let nonce = vec![0x55u8; 16];
         let bundle = vec![0xCCu8; 32];
 
         let r = conn.execute(
@@ -4161,14 +4267,19 @@ mod tests {
                 Table::PlanBundleNoncesSeen.as_str(),
             ),
             rusqlite::params![
-                nonce, bundle, now, now,
+                nonce,
+                bundle,
+                now,
+                now,
                 PlanBundleNonceOutcome::Admitted.as_sql_str(),
                 Option::<&str>::None,
             ],
         );
-        assert!(r.is_err(),
+        assert!(
+            r.is_err(),
             "Admitted with NULL initiative_id must be rejected by CHECK \
-             (plan-bundle-sealing.md §8.1 step 12b)");
+             (plan-bundle-sealing.md §8.1 step 12b)"
+        );
     }
 
     /// TerminallyRejected nonce row MUST carry a NULL `initiative_id`
@@ -4180,20 +4291,19 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let now = raxis_types::unix_now_secs();
-        let nonce  = vec![0xAAu8; 16];
+        let nonce = vec![0xAAu8; 16];
         let bundle = vec![0xBBu8; 32];
 
         // Seed an initiative so the FK *would* otherwise resolve.
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('init-mig8b', 'Draft', '{{}}', 'deadbeef', {now});",
-                initiatives = Table::Initiatives.as_str(),
-                now         = now,
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let r = conn.execute(
             &format!(
@@ -4204,14 +4314,19 @@ mod tests {
                 Table::PlanBundleNoncesSeen.as_str(),
             ),
             rusqlite::params![
-                nonce, bundle, now, now,
+                nonce,
+                bundle,
+                now,
+                now,
                 PlanBundleNonceOutcome::TerminallyRejected.as_sql_str(),
                 "init-mig8b",
             ],
         );
-        assert!(r.is_err(),
+        assert!(
+            r.is_err(),
             "TerminallyRejected with non-NULL initiative_id must be rejected \
-             by CHECK (plan-bundle-sealing.md §8.1 step 12b)");
+             by CHECK (plan-bundle-sealing.md §8.1 step 12b)"
+        );
     }
 
     /// Migration 8 enforces the schema-1/schema-2 envelope contract on
@@ -4222,14 +4337,14 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         apply_pending(&conn).unwrap();
 
-        let bundle_a   = vec![0x01u8; 32];
-        let bundle_b   = vec![0x02u8; 32];
-        let bundle_c   = vec![0x03u8; 32];
-        let bundle_d   = vec![0x04u8; 32];
-        let bundle_e   = vec![0x05u8; 32];
-        let signature  = vec![0x77u8; 64];
-        let signed_by  = vec![0x88u8; 8];
-        let nonce_16   = vec![0xAAu8; 16];
+        let bundle_a = vec![0x01u8; 32];
+        let bundle_b = vec![0x02u8; 32];
+        let bundle_c = vec![0x03u8; 32];
+        let bundle_d = vec![0x04u8; 32];
+        let bundle_e = vec![0x05u8; 32];
+        let signature = vec![0x77u8; 64];
+        let signed_by = vec![0x88u8; 8];
+        let nonce_16 = vec![0xAAu8; 16];
         let nonce_short = vec![0xAAu8; 12];
         let now = raxis_types::unix_now_secs();
         let bundle_bytes = vec![0u8; 4];
@@ -4245,16 +4360,26 @@ mod tests {
                     Table::PlanBundles.as_str(),
                 ),
                 rusqlite::params![
-                    sha, bundle_bytes, signature, signed_by,
-                    schema, 1i64, bundle_bytes.len() as i64, now,
-                    signed_at, nonce,
+                    sha,
+                    bundle_bytes,
+                    signature,
+                    signed_by,
+                    schema,
+                    1i64,
+                    bundle_bytes.len() as i64,
+                    now,
+                    signed_at,
+                    nonce,
                 ],
             )
         };
 
         // Schema-1 with both NULL → OK.
         let r = ins(&bundle_a, 1, None, None);
-        assert!(r.is_ok(), "schema-1 with NULL envelope fields must accept: {r:?}");
+        assert!(
+            r.is_ok(),
+            "schema-1 with NULL envelope fields must accept: {r:?}"
+        );
 
         // Schema-2 with full envelope → OK.
         let r = ins(&bundle_b, 2, Some(now), Some(&nonce_16));
@@ -4262,18 +4387,24 @@ mod tests {
 
         // Schema-1 with envelope fields populated → REJECT.
         let r = ins(&bundle_c, 1, Some(now), Some(&nonce_16));
-        assert!(r.is_err(),
-            "schema-1 with non-NULL envelope fields must be rejected by CHECK");
+        assert!(
+            r.is_err(),
+            "schema-1 with non-NULL envelope fields must be rejected by CHECK"
+        );
 
         // Schema-2 missing nonce → REJECT.
         let r = ins(&bundle_d, 2, Some(now), None);
-        assert!(r.is_err(),
-            "schema-2 with NULL bundle_nonce must be rejected by CHECK");
+        assert!(
+            r.is_err(),
+            "schema-2 with NULL bundle_nonce must be rejected by CHECK"
+        );
 
         // Schema-2 with wrong-length nonce → REJECT.
         let r = ins(&bundle_e, 2, Some(now), Some(&nonce_short));
-        assert!(r.is_err(),
-            "schema-2 with non-16-byte bundle_nonce must be rejected by CHECK");
+        assert!(
+            r.is_err(),
+            "schema-2 with non-16-byte bundle_nonce must be rejected by CHECK"
+        );
     }
 
     /// V1 initiatives rows survive migration 8 with `plan_bundle_sha256
@@ -4291,42 +4422,47 @@ mod tests {
         assert_eq!(read_current_version(&conn).unwrap(), 7);
 
         let now = raxis_types::unix_now_secs();
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('legacy-init', 'Draft', '{{}}', 'deadbeef', {now});",
-                initiatives = Table::Initiatives.as_str(),
-                now         = now,
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         apply_pending(&conn).unwrap();
         assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
 
         // Pre-existing column still readable.
-        let plan_artifact: String = conn.query_row(
-            &format!(
-                "SELECT plan_artifact_sha256 FROM {} WHERE initiative_id='legacy-init'",
-                Table::Initiatives.as_str(),
-            ),
-            [],
-            |r| r.get(0),
-        ).unwrap();
+        let plan_artifact: String = conn
+            .query_row(
+                &format!(
+                    "SELECT plan_artifact_sha256 FROM {} WHERE initiative_id='legacy-init'",
+                    Table::Initiatives.as_str(),
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(plan_artifact, "deadbeef");
 
         // New column is NULL for pre-existing row.
-        let plan_bundle: Option<Vec<u8>> = conn.query_row(
-            &format!(
-                "SELECT plan_bundle_sha256 FROM {} WHERE initiative_id='legacy-init'",
-                Table::Initiatives.as_str(),
-            ),
-            [],
-            |r| r.get(0),
-        ).unwrap();
-        assert!(plan_bundle.is_none(),
-            "V1 rows must retain plan_bundle_sha256 = NULL after migration 8");
+        let plan_bundle: Option<Vec<u8>> = conn
+            .query_row(
+                &format!(
+                    "SELECT plan_bundle_sha256 FROM {} WHERE initiative_id='legacy-init'",
+                    Table::Initiatives.as_str(),
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            plan_bundle.is_none(),
+            "V1 rows must retain plan_bundle_sha256 = NULL after migration 8"
+        );
     }
 
     /// Migration 8 is idempotent under `apply_pending`.
@@ -4345,9 +4481,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(total, SCHEMA_VERSION as i64,
+        assert_eq!(
+            total, SCHEMA_VERSION as i64,
             "schema_version must hold exactly SCHEMA_VERSION rows after \
-             two apply_pending calls");
+             two apply_pending calls"
+        );
 
         // Both new tables exist exactly once each.
         for table in [
@@ -4426,13 +4564,20 @@ mod tests {
     #[test]
     fn migration_8_is_a_single_transaction() {
         let ddl = render_migration_8_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 8 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 8 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 8 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 8 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     /// V2 enum-driven CHECK clause for the nonce-outcome column is
@@ -4477,9 +4622,11 @@ mod tests {
             .iter()
             .find(|(n, _)| n == "idx_plan_bundle_nonces_first_seen")
             .expect("idx_plan_bundle_nonces_first_seen must exist (§8.4 sweep)");
-        assert!(sweep_index.1.contains("first_seen_at_unix_secs"),
+        assert!(
+            sweep_index.1.contains("first_seen_at_unix_secs"),
             "sweep index must cover first_seen_at_unix_secs (got: {})",
-            sweep_index.1);
+            sweep_index.1
+        );
     }
 
     // ── Migration 9 — V2 worktree clone-strategy column on `tasks` ─────
@@ -4516,7 +4663,10 @@ mod tests {
 
         assert_eq!(clone_strategy.1, "TEXT", "clone_strategy must be TEXT");
         assert_eq!(clone_strategy.2, 0, "clone_strategy must be NULLable");
-        assert!(clone_strategy.3.is_none(), "clone_strategy must have no DEFAULT");
+        assert!(
+            clone_strategy.3.is_none(),
+            "clone_strategy must have no DEFAULT"
+        );
     }
 
     /// The CHECK constraint on `clone_strategy` must accept the
@@ -4528,9 +4678,8 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let now = raxis_types::unix_now_secs();
-        conn.execute_batch(
-            &format!(
-                "INSERT INTO {initiatives} \
+        conn.execute_batch(&format!(
+            "INSERT INTO {initiatives} \
                     (initiative_id, state, terminal_criteria_json, \
                      plan_artifact_sha256, created_at) \
                  VALUES ('init-mig9', 'Draft', '{{}}', 'deadbeef', {now}); \
@@ -4539,11 +4688,11 @@ mod tests {
                      policy_epoch, admitted_at, transitioned_at) \
                  VALUES ('task-mig9', 'init-mig9', 'lane.default', \
                          'Admitted', 'Operator', 1, {now}, {now});",
-                initiatives = Table::Initiatives.as_str(),
-                tasks       = Table::Tasks.as_str(),
-                now         = now,
-            ),
-        ).unwrap();
+            initiatives = Table::Initiatives.as_str(),
+            tasks = Table::Tasks.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let upd_sql = format!(
             "UPDATE {} SET clone_strategy = ?1 WHERE task_id = 'task-mig9'",
@@ -4552,16 +4701,20 @@ mod tests {
 
         for variant in &CloneStrategy::ALL {
             let r = conn.execute(&upd_sql, rusqlite::params![variant.as_sql_str()]);
-            assert!(r.is_ok(),
-                "CHECK constraint must accept canonical {variant:?} (got {r:?})");
+            assert!(
+                r.is_ok(),
+                "CHECK constraint must accept canonical {variant:?} (got {r:?})"
+            );
         }
         let r = conn.execute(&upd_sql, rusqlite::params![Option::<&str>::None]);
         assert!(r.is_ok(), "CHECK constraint must accept NULL (got {r:?})");
 
         for bogus in ["Full", "shallow", "treeless", ""] {
             let r = conn.execute(&upd_sql, rusqlite::params![bogus]);
-            assert!(r.is_err(),
-                "CHECK constraint must reject non-canonical {bogus:?}");
+            assert!(
+                r.is_err(),
+                "CHECK constraint must reject non-canonical {bogus:?}"
+            );
         }
     }
 
@@ -4603,8 +4756,10 @@ mod tests {
             .map(Result::unwrap)
             .filter(|name| name == "clone_strategy")
             .count();
-        assert_eq!(n_clone_strategy, 1,
-            "clone_strategy must appear exactly once in tasks PRAGMA");
+        assert_eq!(
+            n_clone_strategy, 1,
+            "clone_strategy must appear exactly once in tasks PRAGMA"
+        );
     }
 
     /// Upgrade scenario: a database at v=8 must pick up migration 9
@@ -4651,13 +4806,20 @@ mod tests {
     #[test]
     fn migration_9_is_a_single_transaction() {
         let ddl = render_migration_9_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 9 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 9 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 9 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 9 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     // ── Migration 10: task_credential_proxies (per-task credential-proxy
@@ -4713,8 +4875,8 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let initiative_id = "init-mig10";
-        let task_id       = "task-mig10";
-        let now           = 1_700_000_000_i64;
+        let task_id = "task-mig10";
+        let now = 1_700_000_000_i64;
 
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives}
@@ -4728,9 +4890,10 @@ mod tests {
              VALUES ('{task_id}', '{initiative_id}', 'lane.default',
                      'Admitted', 'Operator', 1, {now}, {now});",
             initiatives = Table::Initiatives.as_str(),
-            tasks       = Table::Tasks.as_str(),
-            now         = now,
-        )).unwrap();
+            tasks = Table::Tasks.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let ins_sql = format!(
             "INSERT INTO {} (task_id, credential_name, mount_as,
@@ -4740,7 +4903,12 @@ mod tests {
             Table::TaskCredentialProxies.as_str(),
         );
 
-        for (idx, ok) in ["postgres", "http", "k8s", "smtp", "redis", "aws", "gcp", "azure"].iter().enumerate() {
+        for (idx, ok) in [
+            "postgres", "http", "k8s", "smtp", "redis", "aws", "gcp", "azure",
+        ]
+        .iter()
+        .enumerate()
+        {
             let r = conn.execute(
                 &ins_sql,
                 rusqlite::params![
@@ -4752,8 +4920,10 @@ mod tests {
                     now,
                 ],
             );
-            assert!(r.is_ok(),
-                "CHECK constraint must accept canonical proxy_type {ok:?} (got {r:?})");
+            assert!(
+                r.is_ok(),
+                "CHECK constraint must accept canonical proxy_type {ok:?} (got {r:?})"
+            );
         }
 
         for bogus in ["Postgres", "HTTP", "ftp", "", "ssh"] {
@@ -4768,8 +4938,10 @@ mod tests {
                     now,
                 ],
             );
-            assert!(r.is_err(),
-                "CHECK constraint must reject non-canonical proxy_type {bogus:?}");
+            assert!(
+                r.is_err(),
+                "CHECK constraint must reject non-canonical proxy_type {bogus:?}"
+            );
         }
     }
 
@@ -4799,9 +4971,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1,
+        assert_eq!(
+            count, 1,
             "task_credential_proxies must appear exactly once after \
-             repeated apply_pending");
+             repeated apply_pending"
+        );
     }
 
     /// Upgrade scenario: a database at v=9 must pick up migration 10
@@ -4855,13 +5029,20 @@ mod tests {
     #[test]
     fn migration_10_is_a_single_transaction() {
         let ddl = render_migration_10_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 10 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 10 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 10 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 10 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     /// The composite PK enforces (task_id, credential_name) uniqueness.
@@ -4882,9 +5063,10 @@ mod tests {
              VALUES ('task-pk', 'init-pk', 'lane.default', 'Admitted',
                      'Operator', 1, {now}, {now});",
             initiatives = Table::Initiatives.as_str(),
-            tasks       = Table::Tasks.as_str(),
-            now         = now,
-        )).unwrap();
+            tasks = Table::Tasks.as_str(),
+            now = now,
+        ))
+        .unwrap();
 
         let ins_sql = format!(
             "INSERT INTO {} (task_id, credential_name, mount_as,
@@ -4904,8 +5086,10 @@ mod tests {
             &ins_sql,
             rusqlite::params!["task-pk", "db-main", "OTHER", "http", "{}", now],
         );
-        assert!(r2.is_err(),
-            "second insert with same (task_id, credential_name) must violate PK");
+        assert!(
+            r2.is_err(),
+            "second insert with same (task_id, credential_name) must violate PK"
+        );
     }
 
     // ── Migration 11: integration_merge_attempts (V2 pre-merge verifier
@@ -4943,7 +5127,7 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let initiative_id = "init-mig11-state";
-        let now           = 1_700_000_000_i64;
+        let now = 1_700_000_000_i64;
 
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives}
@@ -4952,18 +5136,19 @@ mod tests {
              VALUES ('{initiative_id}', 'Draft', '{{}}',
                      'deadbeef', {now});",
             initiatives = Table::Initiatives.as_str(),
-            now         = now,
-        )).unwrap();
+            now = now,
+        ))
+        .unwrap();
 
         let imerge = Table::IntegrationMergeAttempts.as_str();
 
         for variant in &IntegrationMergeAttemptState::ALL {
             let (discard, finalized, candidate_merge_sha): (
-                Option<&str>, Option<i64>, Option<&str>,
+                Option<&str>,
+                Option<i64>,
+                Option<&str>,
             ) = match variant {
-                IntegrationMergeAttemptState::AwaitingPreMergeVerifiers => {
-                    (None, None, None)
-                }
+                IntegrationMergeAttemptState::AwaitingPreMergeVerifiers => (None, None, None),
                 IntegrationMergeAttemptState::PreMergeVerifiersPassed => {
                     (None, None, Some("c0ffee"))
                 }
@@ -5003,8 +5188,10 @@ mod tests {
                     finalized,
                 ],
             );
-            assert!(r.is_ok(),
-                "CHECK constraint must accept canonical state {variant:?} (got {r:?})");
+            assert!(
+                r.is_ok(),
+                "CHECK constraint must accept canonical state {variant:?} (got {r:?})"
+            );
         }
 
         let bogus_sql = format!(
@@ -5015,9 +5202,7 @@ mod tests {
                   created_at, finalized_at)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         );
-        for bogus in [
-            "Awaiting", "awaitingPremergeVerifiers", "Completed", "",
-        ] {
+        for bogus in ["Awaiting", "awaitingPremergeVerifiers", "Completed", ""] {
             let r = conn.execute(
                 &bogus_sql,
                 rusqlite::params![
@@ -5032,8 +5217,10 @@ mod tests {
                     Option::<i64>::None,
                 ],
             );
-            assert!(r.is_err(),
-                "CHECK constraint must reject non-canonical state {bogus:?}");
+            assert!(
+                r.is_err(),
+                "CHECK constraint must reject non-canonical state {bogus:?}"
+            );
         }
     }
 
@@ -5046,7 +5233,7 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let initiative_id = "init-mig11-discard";
-        let now           = 1_700_000_000_i64;
+        let now = 1_700_000_000_i64;
 
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives}
@@ -5055,8 +5242,9 @@ mod tests {
              VALUES ('{initiative_id}', 'Draft', '{{}}',
                      'deadbeef', {now});",
             initiatives = Table::Initiatives.as_str(),
-            now         = now,
-        )).unwrap();
+            now = now,
+        ))
+        .unwrap();
 
         let imerge = Table::IntegrationMergeAttempts.as_str();
         let ins_sql = format!(
@@ -5084,9 +5272,11 @@ mod tests {
                     now + 100,
                 ],
             );
-            assert!(r.is_ok(),
+            assert!(
+                r.is_ok(),
                 "CHECK constraint must accept canonical discard_reason \
-                 {variant:?} (got {r:?})");
+                 {variant:?} (got {r:?})"
+            );
         }
 
         for bogus in ["Verifier_Blocked", "VERIFIER_BLOCKED", "rejected", "abort"] {
@@ -5104,8 +5294,10 @@ mod tests {
                     now + 100,
                 ],
             );
-            assert!(r.is_err(),
-                "CHECK constraint must reject non-canonical discard_reason {bogus:?}");
+            assert!(
+                r.is_err(),
+                "CHECK constraint must reject non-canonical discard_reason {bogus:?}"
+            );
         }
     }
 
@@ -5146,7 +5338,7 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let initiative_id = "init-mig11-cross";
-        let now           = 1_700_000_000_i64;
+        let now = 1_700_000_000_i64;
 
         conn.execute_batch(&format!(
             "INSERT INTO {initiatives}
@@ -5155,8 +5347,9 @@ mod tests {
              VALUES ('{initiative_id}', 'Draft', '{{}}',
                      'deadbeef', {now});",
             initiatives = Table::Initiatives.as_str(),
-            now         = now,
-        )).unwrap();
+            now = now,
+        ))
+        .unwrap();
 
         let imerge = Table::IntegrationMergeAttempts.as_str();
         let ins_sql = format!(
@@ -5183,8 +5376,10 @@ mod tests {
                 Some(now + 1),
             ],
         );
-        assert!(r.is_err(),
-            "AwaitingPreMergeVerifiers with finalized_at must be rejected");
+        assert!(
+            r.is_err(),
+            "AwaitingPreMergeVerifiers with finalized_at must be rejected"
+        );
 
         // 2. PreMergeVerifiersPassed without candidate_merge_sha → reject.
         let r = conn.execute(
@@ -5201,8 +5396,10 @@ mod tests {
                 Option::<i64>::None,
             ],
         );
-        assert!(r.is_err(),
-            "PreMergeVerifiersPassed without candidate_merge_sha must be rejected");
+        assert!(
+            r.is_err(),
+            "PreMergeVerifiersPassed without candidate_merge_sha must be rejected"
+        );
 
         // 3. CompletedAdvanceApplied with discard_reason set → reject.
         let r = conn.execute(
@@ -5219,8 +5416,10 @@ mod tests {
                 Some(now + 1),
             ],
         );
-        assert!(r.is_err(),
-            "CompletedAdvanceApplied with discard_reason must be rejected");
+        assert!(
+            r.is_err(),
+            "CompletedAdvanceApplied with discard_reason must be rejected"
+        );
 
         // 4. BlockedByPreMergeVerifier without discard_reason → reject.
         let r = conn.execute(
@@ -5237,8 +5436,10 @@ mod tests {
                 Some(now + 1),
             ],
         );
-        assert!(r.is_err(),
-            "BlockedByPreMergeVerifier without discard_reason must be rejected");
+        assert!(
+            r.is_err(),
+            "BlockedByPreMergeVerifier without discard_reason must be rejected"
+        );
 
         // 5. DiscardedCrashRecovery without finalized_at → reject.
         let r = conn.execute(
@@ -5255,8 +5456,10 @@ mod tests {
                 Option::<i64>::None,
             ],
         );
-        assert!(r.is_err(),
-            "DiscardedCrashRecovery without finalized_at must be rejected");
+        assert!(
+            r.is_err(),
+            "DiscardedCrashRecovery without finalized_at must be rejected"
+        );
     }
 
     /// The partial open-attempts index is created and is the one
@@ -5313,8 +5516,10 @@ mod tests {
                 Option::<i64>::None,
             ],
         );
-        assert!(r.is_err(),
-            "FK on initiative_id must reject orphan rows when foreign_keys=ON");
+        assert!(
+            r.is_err(),
+            "FK on initiative_id must reject orphan rows when foreign_keys=ON"
+        );
     }
 
     /// Migration 11 is idempotent under `apply_pending`.
@@ -5343,9 +5548,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1,
+        assert_eq!(
+            count, 1,
             "integration_merge_attempts must appear exactly once after \
-             repeated apply_pending");
+             repeated apply_pending"
+        );
     }
 
     /// Upgrade scenario: a database at v=10 must pick up migration 11
@@ -5400,13 +5607,20 @@ mod tests {
     #[test]
     fn migration_11_is_a_single_transaction() {
         let ddl = render_migration_11_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 11 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 11 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 11 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 11 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     // ── Migration 18 — sessions.initiative_id + nullable structured_outputs.task_id ──
@@ -5416,13 +5630,20 @@ mod tests {
     #[test]
     fn migration_18_is_a_single_transaction() {
         let ddl = render_migration_18_ddl();
-        assert_eq!(ddl.matches("BEGIN EXCLUSIVE").count(), 1,
-            "migration 18 must open exactly one transaction (BEGIN EXCLUSIVE)");
-        assert_eq!(ddl.matches("COMMIT").count(), 1,
-            "migration 18 must commit exactly once");
-        assert!(ddl.find("BEGIN EXCLUSIVE").unwrap()
-                < ddl.find("COMMIT").unwrap(),
-            "BEGIN must precede COMMIT");
+        assert_eq!(
+            ddl.matches("BEGIN EXCLUSIVE").count(),
+            1,
+            "migration 18 must open exactly one transaction (BEGIN EXCLUSIVE)"
+        );
+        assert_eq!(
+            ddl.matches("COMMIT").count(),
+            1,
+            "migration 18 must commit exactly once"
+        );
+        assert!(
+            ddl.find("BEGIN EXCLUSIVE").unwrap() < ddl.find("COMMIT").unwrap(),
+            "BEGIN must precede COMMIT"
+        );
     }
 
     /// After migration 18, the `sessions` table carries an
@@ -5444,9 +5665,11 @@ mod tests {
             )
             .expect("sessions.initiative_id must exist after migration 18");
         assert_eq!(col_name, "initiative_id");
-        assert_eq!(notnull, 0,
+        assert_eq!(
+            notnull, 0,
             "sessions.initiative_id must be nullable for backward compatibility \
-             with non-V2 sessions (Gateway / Verifier)");
+             with non-V2 sessions (Gateway / Verifier)"
+        );
 
         // Partial index must exist.
         let idx_count: i64 = conn
@@ -5457,8 +5680,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(idx_count, 1,
-            "idx_sessions_initiative partial index must exist after migration 18");
+        assert_eq!(
+            idx_count, 1,
+            "idx_sessions_initiative partial index must exist after migration 18"
+        );
     }
 
     /// After migration 18, the `structured_outputs` table accepts a
@@ -5470,9 +5695,9 @@ mod tests {
         conn.execute("PRAGMA foreign_keys = ON", []).unwrap();
         apply_pending(&conn).unwrap();
 
-        let initiatives_t      = Table::Initiatives.as_str();
-        let sessions_t         = Table::Sessions.as_str();
-        let structured_outs_t  = Table::StructuredOutputs.as_str();
+        let initiatives_t = Table::Initiatives.as_str();
+        let sessions_t = Table::Sessions.as_str();
+        let structured_outs_t = Table::StructuredOutputs.as_str();
 
         // Seed an initiative + an Orchestrator session linked to it.
         // The session has `initiative_id = 'init-1'` (Migration 18
@@ -5489,7 +5714,8 @@ mod tests {
              VALUES \
                 ('sess-orch-1', 'Planner', 'tok-orch-1', 'lin-1', 0, 100, \
                  9999999999, 0, 'Orchestrator', 1, 'init-1');"
-        )).unwrap();
+        ))
+        .unwrap();
 
         // INSERT with `task_id IS NULL` — the orchestrator path the
         // intent handler exercises at runtime.
@@ -5504,8 +5730,10 @@ mod tests {
             ),
             [],
         );
-        assert!(r.is_ok(),
-            "structured_outputs.task_id must accept NULL after migration 18: {r:?}");
+        assert!(
+            r.is_ok(),
+            "structured_outputs.task_id must accept NULL after migration 18: {r:?}"
+        );
 
         // FK is still enforced when task_id IS NOT NULL — an
         // orphan task_id rejects.
@@ -5520,9 +5748,11 @@ mod tests {
             ),
             [],
         );
-        assert!(r.is_err(),
+        assert!(
+            r.is_err(),
             "FK on structured_outputs.task_id must still reject orphan non-null values \
-             after migration 18");
+             after migration 18"
+        );
     }
 
     /// Migration 18 preserves every pre-existing structured_outputs
@@ -5553,9 +5783,9 @@ mod tests {
         assert_eq!(read_current_version(&conn).unwrap(), 17);
 
         let initiatives_t = Table::Initiatives.as_str();
-        let sessions_t    = Table::Sessions.as_str();
-        let tasks_t       = Table::Tasks.as_str();
-        let so_t          = Table::StructuredOutputs.as_str();
+        let sessions_t = Table::Sessions.as_str();
+        let tasks_t = Table::Tasks.as_str();
+        let so_t = Table::StructuredOutputs.as_str();
 
         // Seed minimum FK chain (initiative + session + task) and a
         // structured_outputs row pointing at the task. This row
@@ -5581,32 +5811,46 @@ mod tests {
              VALUES \
                 ('out-1', 'init-1', 'task-1', 'sess-1', \
                  'progress_report', NULL, '{{\"a\":1}}', 100);"
-        )).unwrap();
+        ))
+        .unwrap();
 
         // Apply migration 18.
         apply_pending(&conn).unwrap();
         assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
 
         // The pre-18 row survives unchanged.
-        let (output_id, initiative_id, task_id, session_id, kind, payload):
-            (String, String, Option<String>, String, String, String) = conn
+        let (output_id, initiative_id, task_id, session_id, kind, payload): (
+            String,
+            String,
+            Option<String>,
+            String,
+            String,
+            String,
+        ) = conn
             .query_row(
                 &format!(
                     "SELECT output_id, initiative_id, task_id, session_id, kind, payload_json \
                        FROM {so_t} WHERE output_id = 'out-1'"
                 ),
                 [],
-                |r| Ok((
-                    r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?,
-                )),
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                    ))
+                },
             )
             .expect("pre-Migration-18 row must survive the table rebuild");
-        assert_eq!(output_id,     "out-1");
+        assert_eq!(output_id, "out-1");
         assert_eq!(initiative_id, "init-1");
-        assert_eq!(task_id,       Some("task-1".to_owned()));
-        assert_eq!(session_id,    "sess-1");
-        assert_eq!(kind,          "progress_report");
-        assert_eq!(payload,       "{\"a\":1}");
+        assert_eq!(task_id, Some("task-1".to_owned()));
+        assert_eq!(session_id, "sess-1");
+        assert_eq!(kind, "progress_report");
+        assert_eq!(payload, "{\"a\":1}");
     }
 
     /// Migration 18 is idempotent under `apply_pending`.
@@ -5637,7 +5881,9 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(count, 1,
-            "structured_outputs must appear exactly once after repeated apply_pending");
+        assert_eq!(
+            count, 1,
+            "structured_outputs must appear exactly once after repeated apply_pending"
+        );
     }
 }

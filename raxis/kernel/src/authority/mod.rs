@@ -24,18 +24,18 @@
 //   Approval tokens:
 //     validate_approval_token, revoke_approval
 
-pub mod keys;
-pub mod session;
-pub mod delegation;
-pub mod verifier_token;
 pub mod approval;
-pub mod escalation;
 pub mod cert_check;
+pub mod delegation;
 pub mod dispatch_matrix;
+pub mod escalation;
+pub mod keys;
 pub mod revocations;
+pub mod session;
+pub mod verifier_token;
 
 // Re-export the public API surface per kernel-core.md §2.3 authority/mod.rs.
-pub use keys::{authority_pubkey_fingerprint, load_key_registry};
+pub use dispatch_matrix::evaluate_dispatch;
 #[cfg(test)]
 pub use keys::sign_audit_record;
-pub use dispatch_matrix::evaluate_dispatch;
+pub use keys::{authority_pubkey_fingerprint, load_key_registry};

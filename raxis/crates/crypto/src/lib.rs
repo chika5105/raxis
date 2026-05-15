@@ -21,21 +21,14 @@ pub mod token;
 pub mod verify;
 
 pub use cert::{
-    canonicalize_ops,
-    cert_canonical_signing_input,
-    cert_status,
-    sign_cert,
-    validate_cert_structurally,
-    verify_cert_self_signature,
-    CertError,
-    CertKind,
-    CertStatus,
+    canonicalize_ops, cert_canonical_signing_input, cert_status, sign_cert,
+    validate_cert_structurally, verify_cert_self_signature, CertError, CertKind, CertStatus,
     OperatorCert,
 };
 pub use plan_bundle::{
-    bundle_sha256, canonical_decode, canonical_encode, mint_bundle_nonce,
-    sha256_of_artifact_bytes, signing_input, verify_plan_bundle_signature,
-    PlanBundleCodecError, CANONICAL_INPUT_PREFIX, SIGNING_INPUT_PREFIX,
+    bundle_sha256, canonical_decode, canonical_encode, mint_bundle_nonce, sha256_of_artifact_bytes,
+    signing_input, verify_plan_bundle_signature, PlanBundleCodecError, CANONICAL_INPUT_PREFIX,
+    SIGNING_INPUT_PREFIX,
 };
-pub use pubkey::{PubkeyParseError, parse_ed25519_public_material};
-pub use verify::{CryptoError, verify_ed25519};
+pub use pubkey::{parse_ed25519_public_material, PubkeyParseError};
+pub use verify::{verify_ed25519, CryptoError};

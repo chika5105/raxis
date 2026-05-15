@@ -34,9 +34,9 @@ use crate::initiatives::plan_registry::{PlanRegistry, TaskKey, TaskPlanFields};
 use crate::scheduler::{self, SchedulerError};
 
 // Table name consts — one definition, used everywhere below.
-const INITIATIVES: &str            = Table::Initiatives.as_str();
-const SIGNED_PLAN_ARTIFACTS: &str  = Table::SignedPlanArtifacts.as_str();
-const TASKS: &str                  = Table::Tasks.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
+const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
+const TASKS: &str = Table::Tasks.as_str();
 /// Per-task credential-proxy declarations, METADATA ONLY. Credential
 /// **values** never live in `kernel.db` — see
 /// `raxis_store::Table::TaskCredentialProxies` for the authoritative
@@ -47,7 +47,7 @@ const TASK_CREDENTIAL_PROXIES: &str = Table::TaskCredentialProxies.as_str();
 /// with the parent `tasks` row (INV-STORE-02). See
 /// `raxis_store::Table::SubtaskActivations` for the authoritative
 /// invariant note.
-const SUBTASK_ACTIVATIONS: &str    = Table::SubtaskActivations.as_str();
+const SUBTASK_ACTIVATIONS: &str = Table::SubtaskActivations.as_str();
 
 // ---------------------------------------------------------------------------
 // Error type
@@ -98,8 +98,8 @@ pub enum LifecycleError {
     #[error("path_allowlist[{entry:?}] on task {task_id}: {reason}")]
     PathAllowlistInvalidSyntax {
         task_id: String,
-        entry:   String,
-        reason:  &'static str,
+        entry: String,
+        reason: &'static str,
     },
 
     /// **V2 (Step 11) — `FAIL_CROSS_CUTTING_ARTIFACT_INVALID_SYNTAX`.**
@@ -122,10 +122,7 @@ pub enum LifecycleError {
     ///     a directory prefix; cross-cutting artifacts are exact files
     ///     only per Step 11).
     #[error("cross_cutting_artifacts[{entry:?}]: {reason}")]
-    CrossCuttingArtifactInvalidSyntax {
-        entry:  String,
-        reason: &'static str,
-    },
+    CrossCuttingArtifactInvalidSyntax { entry: String, reason: &'static str },
 
     /// **V2 (Step 27) — `INVALID_PLAN_SCHEMA` clone-strategy family.**
     /// A `[[tasks]]` block declares either:
@@ -158,9 +155,9 @@ pub enum LifecycleError {
     ///     `raxis-orchestrator-core` image; operators do not declare it).
     #[error("plan clone-strategy invalid (rule={rule}, task={offending_task}): {suggestion}")]
     PlanCloneStrategyInvalid {
-        rule:           &'static str,
+        rule: &'static str,
         offending_task: String,
-        suggestion:     String,
+        suggestion: String,
     },
 
     /// **V2 (Step 28) — `INVALID_PLAN_SCHEMA` single-lane propagation.**
@@ -197,11 +194,13 @@ pub enum LifecycleError {
     /// `suggestion` is the actionable remediation hint required by
     /// `v2-deep-spec.md §Step 17` ("must always include a concrete
     /// remediation suggestion, not just the violation").
-    #[error("plan single-lane propagation invalid (rule={rule}, task={offending_task}): {suggestion}")]
+    #[error(
+        "plan single-lane propagation invalid (rule={rule}, task={offending_task}): {suggestion}"
+    )]
     PlanSingleLaneInvalid {
-        rule:           &'static str,
+        rule: &'static str,
         offending_task: String,
-        suggestion:     String,
+        suggestion: String,
     },
 
     /// **V2 (Step 28) — `INVALID_PLAN_SCHEMA` lane-not-in-policy.**
@@ -258,9 +257,9 @@ pub enum LifecycleError {
     /// new lane, or change the plan to use a declared lane).
     #[error("plan workspace lane_id `{workspace_lane}` not declared in policy [[lanes]] (declared: {declared_lanes}): {suggestion}")]
     PlanLaneNotInPolicy {
-        workspace_lane:  String,
-        declared_lanes:  String,
-        suggestion:      String,
+        workspace_lane: String,
+        declared_lanes: String,
+        suggestion: String,
     },
 
     /// **V2 (Step 17) — `INVALID_PLAN_SCHEMA` shift-left, DAG family.**
@@ -293,9 +292,9 @@ pub enum LifecycleError {
     /// this variant.
     #[error("plan DAG invalid (rule={rule}, task={offending_task}): {suggestion}")]
     PlanDagInvalid {
-        rule:           &'static str,
+        rule: &'static str,
         offending_task: String,
-        suggestion:     String,
+        suggestion: String,
     },
 
     /// **V2 (`verifier-processes.md §15` / `§10.3` operator-side
@@ -346,14 +345,14 @@ pub enum LifecycleError {
     #[error("plan [[plan.integration_merge_verifiers]] invalid (rule={rule}, verifier={offending_verifier}): {suggestion}")]
     PlanIntegrationMergeVerifierInvalid {
         /// One of the rule strings listed in the variant doc.
-        rule:               &'static str,
+        rule: &'static str,
         /// The `name` field on the offending verifier, or the
         /// literal `"<unparsed>"` if the parser failed before the
         /// name was reached.
         offending_verifier: String,
         /// Operator-facing remediation hint per Step 17 ("must
         /// always include a concrete remediation suggestion").
-        suggestion:         String,
+        suggestion: String,
     },
 
     /// **V2 (Step 17 / `credential-proxy.md §3`) —
@@ -379,16 +378,16 @@ pub enum LifecycleError {
     #[error("plan task-credentials invalid (rule={rule}, task={offending_task}, credential={offending_credential}): {suggestion}")]
     PlanTaskCredentialsInvalid {
         /// One of `unknown_proxy_type`, `malformed`.
-        rule:                 &'static str,
+        rule: &'static str,
         /// The task whose `[[tasks.credentials]]` block was rejected.
-        offending_task:       String,
+        offending_task: String,
         /// The `name` field on the offending credential decl, or
         /// the literal `"<unparsed>"` when the parser failed before
         /// the name was reached.
         offending_credential: String,
         /// Operator-facing remediation hint per Step 17 ("must
         /// always include a concrete remediation suggestion").
-        suggestion:           String,
+        suggestion: String,
     },
 
     /// **V2.5 (`V2_GAPS.md §13`) — INV-VM-CAP-03 / INV-PLANNER-HARNESS-03.**
@@ -420,18 +419,18 @@ pub enum LifecycleError {
         /// One of `"reviewer_image_not_allowed"`,
         /// `"image_not_registered"`,
         /// `"role_restriction_mismatch"`.
-        rule:             &'static str,
+        rule: &'static str,
         /// The task whose `vm_image` field was rejected.
-        offending_task:   String,
+        offending_task: String,
         /// The alias declared by the plan, or the empty string
         /// when the rule is `"reviewer_image_not_allowed"` and
         /// the operator declared `vm_image = ""` (which still
         /// counts as "field present" because the parser only
         /// produces non-empty strings here — see the
         /// `vm_image.trim().is_empty()` short-circuit).
-        offending_image:  String,
+        offending_image: String,
         /// Operator-facing remediation hint.
-        suggestion:       String,
+        suggestion: String,
     },
 
     /// **V2 (V2_GAPS.md §12.8 / §12.9, INV-PLAN-POLICY-PRECEDENCE-01).**
@@ -454,17 +453,17 @@ pub enum LifecycleError {
     #[error("plan target_ref invalid (rule={rule}): plan={plan_value:?}, policy={policy_value:?}, suggestion={suggestion}")]
     PlanTargetRefInvalid {
         /// One of `"locked"`, `"invalid"`.
-        rule:         &'static str,
+        rule: &'static str,
         /// The value the plan declared (may be `None` for
         /// rule="invalid" if the policy default itself failed
         /// validation, but in practice the policy default is
         /// validated at `PolicyBundle::validate` time and never
         /// reaches this site).
-        plan_value:   Option<String>,
+        plan_value: Option<String>,
         /// The operator-side `[git] default_target_ref` for context.
         policy_value: String,
         /// Operator-facing remediation hint.
-        suggestion:   String,
+        suggestion: String,
     },
 
     #[error("scheduler error during admission: {0}")]
@@ -597,14 +596,14 @@ pub struct PlanApproved {
 #[cfg(any(debug_assertions, test))]
 #[allow(clippy::too_many_arguments)]
 pub fn approve_plan_for_test(
-    initiative_id:                   &str,
-    approving_operator:              &str,
+    initiative_id: &str,
+    approving_operator: &str,
     approving_operator_display_name: Option<String>,
-    operator_pubkey_bytes:           &[u8],
-    policy_epoch:                    u64,
-    store:                           &Store,
-    audit:                           &dyn AuditSink,
-    plan_registry:                   &PlanRegistry,
+    operator_pubkey_bytes: &[u8],
+    policy_epoch: u64,
+    store: &Store,
+    audit: &dyn AuditSink,
+    plan_registry: &PlanRegistry,
 ) -> Result<PlanApproved, LifecycleError> {
     use std::collections::HashMap;
     let empty_envs: HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
@@ -647,31 +646,31 @@ pub fn approve_plan_for_test(
 
 #[allow(clippy::too_many_arguments)]
 pub fn approve_plan(
-    initiative_id:                       &str,
-    approving_operator:                  &str,
-    approving_operator_display_name:     Option<String>,
-    operator_pubkey_bytes:               &[u8],
-    policy_epoch:                        u64,
-    policy_default_target_ref:           &str,
-    policy_target_ref_locked:            bool,
+    initiative_id: &str,
+    approving_operator: &str,
+    approving_operator_display_name: Option<String>,
+    operator_pubkey_bytes: &[u8],
+    policy_epoch: u64,
+    policy_default_target_ref: &str,
+    policy_target_ref_locked: bool,
     // V2_GAPS §E1 — `[environments.<label>]` snapshot. Empty
     // map ⇒ environment model inert (per
     // `environment-access-control.md §1.5.2` activation gate);
     // the per-task INV-ENV-01 check is a no-op.
-    policy_environments:                 &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    policy_environments: &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
     // V2_GAPS §E1 — `[[permitted_credentials]]` snapshot. V2
     // consults this only for environment-binding lookups via
     // `validate_task_environment_consistency`; the V3 promotion
     // to `FAIL_CREDENTIAL_NOT_PERMITTED` for absent names is
     // deferred.
-    policy_permitted_credentials:        &[raxis_policy::PermittedCredentialConfig],
+    policy_permitted_credentials: &[raxis_policy::PermittedCredentialConfig],
     // V2_GAPS §13 (V2.5 BLOCKER) — operator-published
     // `[[vm_images]]` registry. The shift-left validator
     // `validate_task_vm_images` resolves each task's
     // `vm_image` alias against this slice; an empty registry is
     // permitted (legacy V1 behavior — every Executor task boots
     // the canonical starter image).
-    policy_vm_images:                    &[raxis_policy::VmImageConfig],
+    policy_vm_images: &[raxis_policy::VmImageConfig],
     // V2_GAPS §13 (V2.5 BLOCKER) — operator-side
     // `[default_executor_image] alias`. When `Some`, Executor
     // tasks that omit `vm_image` are transparently back-filled
@@ -680,7 +679,7 @@ pub fn approve_plan(
     // alias resolves and is Executor-permitted; absence is
     // equivalent to "no kernel-side defaulting" (matches V1
     // behavior).
-    policy_default_executor_image:       Option<&raxis_policy::DefaultExecutorImageConfig>,
+    policy_default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
     // V2 `elastic-vm-scaling.md §2.1` — operator-side
     // `[elastic]` configuration. Drives the
     // plan-narrows-policy validator (INV-ELASTIC-01) so any
@@ -689,7 +688,7 @@ pub fn approve_plan(
     // BEFORE BEGIN TRANSACTION. Always present (defaults to
     // [`raxis_policy::ElasticConfig::default`] when the
     // operator omits the section).
-    policy_elastic:                      &raxis_policy::ElasticConfig,
+    policy_elastic: &raxis_policy::ElasticConfig,
     // V2 §Step 28 + INV-SCHED-03 — operator-side `[[lanes]]`
     // registry snapshot. Drives `validate_workspace_lane_in_policy`
     // so any plan whose `[workspace] lane_id` doesn't resolve
@@ -702,16 +701,16 @@ pub fn approve_plan(
     // `handle_approve_plan` always passes the policy bundle's
     // `lanes()` slice, which is non-empty (genesis emits the
     // `default` lane).
-    policy_lanes:                        &[raxis_policy::LaneEntry],
-    store:                               &Store,
-    audit:                               &dyn AuditSink,
-    plan_registry:                       &PlanRegistry,
+    policy_lanes: &[raxis_policy::LaneEntry],
+    store: &Store,
+    audit: &dyn AuditSink,
+    plan_registry: &PlanRegistry,
     // V2_GAPS §C5 — content-addressed plan-bytes / signature
     // store. `None` for tests; production passes
     // `ctx.artifact_store.as_deref()`. Writes happen AFTER
     // signature verification and BEFORE BEGIN TRANSACTION so
     // a malformed plan never lands an artifact.
-    artifact_store:                      Option<&raxis_artifact_store::ArtifactStore>,
+    artifact_store: Option<&raxis_artifact_store::ArtifactStore>,
 ) -> Result<PlanApproved, LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -733,19 +732,23 @@ pub fn approve_plan(
     let current_state: String;
     let plan_bundle_sha256_blob: Option<Vec<u8>>;
     {
-        let row: (String, Option<Vec<u8>>) = conn.query_row(
-            &format!("SELECT state, plan_bundle_sha256 FROM {INITIATIVES} \
-                      WHERE initiative_id=?1"),
-            rusqlite::params![initiative_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
-        ).map_err(|e| match e {
-            rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
-                initiative_id: initiative_id.to_owned(),
-            },
-            other => LifecycleError::Sql(other),
-        })?;
-        current_state             = row.0;
-        plan_bundle_sha256_blob   = row.1;
+        let row: (String, Option<Vec<u8>>) = conn
+            .query_row(
+                &format!(
+                    "SELECT state, plan_bundle_sha256 FROM {INITIATIVES} \
+                      WHERE initiative_id=?1"
+                ),
+                rusqlite::params![initiative_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .map_err(|e| match e {
+                rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
+                    initiative_id: initiative_id.to_owned(),
+                },
+                other => LifecycleError::Sql(other),
+            })?;
+        current_state = row.0;
+        plan_bundle_sha256_blob = row.1;
     }
     if current_state != InitiativeState::Draft.as_sql_str() {
         return Err(LifecycleError::InitiativeTerminal { current_state });
@@ -765,40 +768,46 @@ pub fn approve_plan(
             // operator key rotation between admission and approval
             // fails closed (matches V1 semantics on
             // `kernel-store.md §1804–1822`).
-            const PLAN_BUNDLES:           &str = "plan_bundles";
-            const PLAN_BUNDLE_ARTIFACTS:  &str = "plan_bundle_artifacts";
-            let plan_toml_bytes: Vec<u8> = conn.query_row(
-                &format!(
-                    "SELECT artifact_bytes FROM {PLAN_BUNDLE_ARTIFACTS} \
+            const PLAN_BUNDLES: &str = "plan_bundles";
+            const PLAN_BUNDLE_ARTIFACTS: &str = "plan_bundle_artifacts";
+            let plan_toml_bytes: Vec<u8> = conn
+                .query_row(
+                    &format!(
+                        "SELECT artifact_bytes FROM {PLAN_BUNDLE_ARTIFACTS} \
                      WHERE bundle_sha256 = ?1 AND artifact_seq = 0"
-                ),
-                rusqlite::params![bundle_sha],
-                |r| r.get(0),
-            ).map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
-                    reason: format!(
-                        "V2 plan_bundle_artifacts row missing for bundle_sha256={}, \
-                         initiative_id={initiative_id}",
-                        hex::encode(bundle_sha),
                     ),
-                },
-                other => LifecycleError::Sql(other),
-            })?;
-            let bundle_sig: Vec<u8> = conn.query_row(
-                &format!("SELECT signature FROM {PLAN_BUNDLES} \
-                          WHERE bundle_sha256 = ?1"),
-                rusqlite::params![bundle_sha],
-                |r| r.get(0),
-            ).map_err(|e| match e {
-                rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
-                    reason: format!(
-                        "V2 plan_bundles row missing for bundle_sha256={}, \
+                    rusqlite::params![bundle_sha],
+                    |r| r.get(0),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
+                        reason: format!(
+                            "V2 plan_bundle_artifacts row missing for bundle_sha256={}, \
                          initiative_id={initiative_id}",
-                        hex::encode(bundle_sha),
+                            hex::encode(bundle_sha),
+                        ),
+                    },
+                    other => LifecycleError::Sql(other),
+                })?;
+            let bundle_sig: Vec<u8> = conn
+                .query_row(
+                    &format!(
+                        "SELECT signature FROM {PLAN_BUNDLES} \
+                          WHERE bundle_sha256 = ?1"
                     ),
-                },
-                other => LifecycleError::Sql(other),
-            })?;
+                    rusqlite::params![bundle_sha],
+                    |r| r.get(0),
+                )
+                .map_err(|e| match e {
+                    rusqlite::Error::QueryReturnedNoRows => LifecycleError::PlanSignatureInvalid {
+                        reason: format!(
+                            "V2 plan_bundles row missing for bundle_sha256={}, \
+                         initiative_id={initiative_id}",
+                            hex::encode(bundle_sha),
+                        ),
+                    },
+                    other => LifecycleError::Sql(other),
+                })?;
 
             // Re-verify the V2 bundle signature against the current
             // operator pubkey (key may have rotated between admission
@@ -810,13 +819,10 @@ pub fn approve_plan(
             bundle_sha_arr.copy_from_slice(bundle_sha);
             let bundle_sha_typed = raxis_types::BundleSha256::new(bundle_sha_arr);
             let sig_input = raxis_crypto::signing_input(&bundle_sha_typed);
-            raxis_crypto::verify::verify_ed25519(
-                operator_pubkey_bytes,
-                &sig_input,
-                &bundle_sig,
-            ).map_err(|e| LifecycleError::PlanSignatureInvalid {
-                reason: format!("V2 bundle re-verify: {e}"),
-            })?;
+            raxis_crypto::verify::verify_ed25519(operator_pubkey_bytes, &sig_input, &bundle_sig)
+                .map_err(|e| LifecycleError::PlanSignatureInvalid {
+                    reason: format!("V2 bundle re-verify: {e}"),
+                })?;
 
             (plan_toml_bytes, bundle_sig)
         }
@@ -844,10 +850,11 @@ pub fn approve_plan(
             // (the same signing domain the CLI's `policy sign`
             // constructs). Verifying raw plan bytes — as an earlier
             // draft did — would reject every CLI sig.
-            raxis_crypto::plan::verify_plan_signature(operator_pubkey_bytes, &pb, &ps)
-                .map_err(|e| LifecycleError::PlanSignatureInvalid {
+            raxis_crypto::plan::verify_plan_signature(operator_pubkey_bytes, &pb, &ps).map_err(
+                |e| LifecycleError::PlanSignatureInvalid {
                     reason: e.to_string(),
-                })?;
+                },
+            )?;
             (pb, ps)
         }
     };
@@ -880,20 +887,19 @@ pub fn approve_plan(
         }
     }
 
-    let plan_toml_str    = String::from_utf8_lossy(&plan_bytes);
-    let mut plan_tasks   = parse_plan_tasks(&plan_toml_str)?;
+    let plan_toml_str = String::from_utf8_lossy(&plan_bytes);
+    let mut plan_tasks = parse_plan_tasks(&plan_toml_str)?;
     let mut orchestrator_fields = parse_plan_orchestrator(&plan_toml_str)?;
     // V2 §Step 28 — read `[workspace] lane_id` (or surface the
     // missing/empty/override error below).
-    let workspace_lane_raw  = parse_plan_workspace_lane(&plan_toml_str)?;
+    let workspace_lane_raw = parse_plan_workspace_lane(&plan_toml_str)?;
     // V2_GAPS.md §12.8 — read `[workspace] target_ref` (or `None`
     // for plans that don't override the operator default).
     let plan_target_ref_raw = parse_plan_workspace_target_ref(&plan_toml_str)?;
     // V2 (`verifier-processes.md §15`) — parse plan-source pre-merge
     // verifiers. Empty `Vec` for plans that don't declare any.
     // Structural per-field rules run inside the validator below.
-    let plan_pre_merge_verifiers =
-        parse_plan_integration_merge_verifiers(&plan_toml_str)?;
+    let plan_pre_merge_verifiers = parse_plan_integration_merge_verifiers(&plan_toml_str)?;
 
     // V2 Step 17 — shift-left plan validation. Each helper runs BEFORE
     // `BEGIN TRANSACTION`, so a malformed plan never mutates kernel
@@ -938,11 +944,7 @@ pub fn approve_plan(
     // over-claiming plan never allocates a row. Reviewer-task
     // checks here are a defence-in-depth re-check of what the
     // parser already enforces.
-    validate_elastic_against_policy(
-        &plan_tasks,
-        &orchestrator_fields,
-        policy_elastic,
-    )?;
+    validate_elastic_against_policy(&plan_tasks, &orchestrator_fields, policy_elastic)?;
     // V2_GAPS §13 (V2.5 BLOCKER) — INV-VM-CAP-03 +
     // INV-PLANNER-HARNESS-03. Reject Reviewer tasks that try to
     // override the kernel-canonical Reviewer image and Executor
@@ -965,7 +967,8 @@ pub fn approve_plan(
     crate::initiatives::custom_tools_validator::validate_plan_custom_tools(
         &plan_toml_str,
         crate::initiatives::custom_tools_validator::DEFAULT_MAX_CUSTOM_TOOL_TIMEOUT_SECONDS,
-    ).map_err(|e| LifecycleError::PlanInvalid {
+    )
+    .map_err(|e| LifecycleError::PlanInvalid {
         reason: e.to_string(),
     })?;
     // V2_GAPS §E1 (`environment-access-control.md §11`) —
@@ -993,10 +996,7 @@ pub fn approve_plan(
     // before the transaction opens. `workspace_lane` is the
     // authoritative non-empty lane id every `scheduler::PlanTask`
     // below will be stamped with.
-    let workspace_lane = validate_single_lane_propagation(
-        &workspace_lane_raw,
-        &plan_tasks,
-    )?;
+    let workspace_lane = validate_single_lane_propagation(&workspace_lane_raw, &plan_tasks)?;
     // V2 §Step 28 + INV-SCHED-03 — lane-in-policy registration:
     // rejects a plan whose workspace lane has no `[[lanes]]` entry
     // in the operator's signed policy. Sister check to
@@ -1028,8 +1028,8 @@ pub fn approve_plan(
     )?;
     orchestrator_fields.target_ref = resolved_target_ref.clone();
 
-    let task_count    = plan_tasks.len();
-    let now           = unix_now_secs();
+    let task_count = plan_tasks.len();
+    let now = unix_now_secs();
 
     // ── INV-STORE-02 transaction ─────────────────────────────────────────
     // Everything below MUST commit or roll back as one unit.
@@ -1093,18 +1093,18 @@ pub fn approve_plan(
     // in the in-memory PlanRegistry, not in `tasks` columns). The clone
     // is small (mostly Vec<String> of plan-time globs) and only happens
     // once per task at approve time.
-    let mut path_scope_snapshots: Vec<(String, TaskPlanFields, bool)>
-        = Vec::with_capacity(plan_tasks.len());
+    let mut path_scope_snapshots: Vec<(String, TaskPlanFields, bool)> =
+        Vec::with_capacity(plan_tasks.len());
 
     for pt in plan_tasks {
         let path_fields = TaskPlanFields {
-            path_allowlist:            pt.path_allowlist.clone(),
+            path_allowlist: pt.path_allowlist.clone(),
             path_export_to_successors: pt.path_export_to_successors,
-            path_export_globs:         pt.path_export_globs.clone(),
-            path_scope_override:       pt.path_scope_override,
+            path_export_globs: pt.path_export_globs.clone(),
+            path_scope_override: pt.path_scope_override,
             // V2 §Step 27 — typed clone strategy + agent type.
-            clone_strategy:            pt.clone_strategy,
-            session_agent_type:        pt.session_agent_type,
+            clone_strategy: pt.clone_strategy,
+            session_agent_type: pt.session_agent_type,
             // V2.5 §13 — operator-published `[[vm_images]]` alias the
             // spawn path consults at activation. Always the
             // plan-author-declared value at this point (the
@@ -1112,34 +1112,34 @@ pub fn approve_plan(
             // policy registry); the kernel re-resolves at
             // activation against the *current* policy bundle so a
             // mid-flight policy rotation is observed.
-            vm_image:                  pt.vm_image.clone(),
+            vm_image: pt.vm_image.clone(),
             // V2 `v2_extended_gaps.md §1.1` — operator-authored seed
             // prompt; the activation handler stamps this verbatim into
             // `RAXIS_PLANNER_TASK_PROMPT`. Empty (the V1 default)
             // preserves the scaffold/park behaviour of the role binary.
-            description:               pt.description.clone(),
+            description: pt.description.clone(),
             // V2 `v2-deep-spec.md §Step 12` — retry ceilings.
             // `None` here means the operator omitted the field;
             // the `RetrySubTask` admission path substitutes the
             // conservative kernel default
             // (`DEFAULT_MAX_CRASH_RETRIES`,
             //  `DEFAULT_MAX_REVIEW_REJECTIONS`).
-            max_crash_retries:         pt.max_crash_retries,
-            max_review_rejections:     pt.max_review_rejections,
+            max_crash_retries: pt.max_crash_retries,
+            max_review_rejections: pt.max_review_rejections,
             // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — propagate
             // the operator-declared per-task hard turn ceiling into
             // the in-memory PlanRegistry. `None` preserves "operator
             // omitted" semantics so `effective_max_turns` can fall
             // through to `[gateway].planner_max_turns_default` and
             // then `DEFAULT_PLANNER_MAX_TURNS` at session-spawn time.
-            max_turns:                 pt.max_turns,
+            max_turns: pt.max_turns,
             // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01` —
             // propagate the operator-declared progressive scaling
             // step. `None` preserves "operator omitted" semantics so
             // the resolver can fall through to the policy default
             // (`[gateway].planner_max_turns_step_default`) and then
             // the derived `max(base/2, 10)` default at spawn time.
-            max_turns_step:            pt.max_turns_step,
+            max_turns_step: pt.max_turns_step,
             // V2 `elastic-vm-scaling.md §2.2` — propagate the
             // operator-declared elastic knobs into the in-memory
             // PlanRegistry so the spawn helper can consult them
@@ -1149,17 +1149,13 @@ pub fn approve_plan(
             // `build_scaled_vm_spec`) can apply the policy
             // default with full visibility into "operator
             // omitted vs declared".
-            elastic:                   pt.elastic,
-            min_vcpus:                 pt.min_vcpus,
-            max_vcpus:                 pt.max_vcpus,
-            min_memory_mb:             pt.min_memory_mb,
-            max_memory_mb:             pt.max_memory_mb,
+            elastic: pt.elastic,
+            min_vcpus: pt.min_vcpus,
+            max_vcpus: pt.max_vcpus,
+            min_memory_mb: pt.min_memory_mb,
+            max_memory_mb: pt.max_memory_mb,
         };
-        path_scope_snapshots.push((
-            pt.task_id.clone(),
-            path_fields,
-            pt.path_scope_override,
-        ));
+        path_scope_snapshots.push((pt.task_id.clone(), path_fields, pt.path_scope_override));
 
         // V2 §Step 28 — every task row carries the workspace-root
         // lane verbatim. `pt.lane_id` is `""` here (validator
@@ -1177,11 +1173,11 @@ pub fn approve_plan(
         let agent_type_for_activation = pt.session_agent_type;
 
         let task = scheduler::PlanTask {
-            task_id:       pt.task_id.clone(),
+            task_id: pt.task_id.clone(),
             initiative_id: initiative_id.to_owned(),
-            lane_id:       workspace_lane.clone(),
-            name:          pt.name,
-            dependencies:  pt.predecessors,
+            lane_id: workspace_lane.clone(),
+            name: pt.name,
+            dependencies: pt.predecessors,
         };
         scheduler::admit_in_tx(&tx, task, policy_epoch)?;
 
@@ -1200,11 +1196,7 @@ pub fn approve_plan(
         // `tasks` row AND every declared credential-proxy land,
         // or both roll back together.
         if !credentials_for_task.is_empty() {
-            insert_task_credential_proxies_in_tx(
-                &tx,
-                &task_id_for_creds,
-                &credentials_for_task,
-            )?;
+            insert_task_credential_proxies_in_tx(&tx, &task_id_for_creds, &credentials_for_task)?;
         }
 
         // V2 §Step 5 — `subtask_activations` row population.
@@ -1237,16 +1229,15 @@ pub fn approve_plan(
     // (DDL allows `(base_sha NULL, worktree_root NULL)` per the
     // sessions table CHECK clause). `vsock_cid` is also NULL until
     // the hypervisor returns the assigned CID.
-    let orchestrator_auto_spawn =
-        auto_spawn_orchestrator_session_in_tx(
-            &tx,
-            initiative_id,
-            // The coordinator task carries the workspace-root lane
-            // verbatim so its budget reservations land in the same
-            // bucket as the sub-task admissions admitted just above.
-            &workspace_lane,
-            policy_epoch,
-        )?;
+    let orchestrator_auto_spawn = auto_spawn_orchestrator_session_in_tx(
+        &tx,
+        initiative_id,
+        // The coordinator task carries the workspace-root lane
+        // verbatim so its budget reservations land in the same
+        // bucket as the sub-task admissions admitted just above.
+        &workspace_lane,
+        policy_epoch,
+    )?;
 
     tx.commit()?;
     drop(conn); // release the store mutex before doing audit I/O.
@@ -1267,10 +1258,7 @@ pub fn approve_plan(
     // is infallible — it's a `RwLock<HashMap>` write — so once we get
     // past `tx.commit()?` every `insert` below is guaranteed to land.
     for (task_id, fields, _) in &path_scope_snapshots {
-        plan_registry.insert(
-            TaskKey::new(initiative_id, task_id),
-            fields.clone(),
-        );
+        plan_registry.insert(TaskKey::new(initiative_id, task_id), fields.clone());
     }
 
     // V2 §Step 11 — persist the orchestrator's `cross_cutting_artifacts`
@@ -1312,9 +1300,9 @@ pub fn approve_plan(
     // failure here is repaired by `recovery::reconcile`.
     if let Err(e) = audit.emit(
         AuditEventKind::SessionCreated {
-            session_id:    orchestrator_auto_spawn.session_id.clone(),
-            role:          "planner".to_owned(),
-            lineage_id:    orchestrator_auto_spawn.lineage_id.clone(),
+            session_id: orchestrator_auto_spawn.session_id.clone(),
+            role: "planner".to_owned(),
+            lineage_id: orchestrator_auto_spawn.lineage_id.clone(),
             worktree_root: None,
             initiative_id: Some(initiative_id.to_owned()),
             // The plan_bundle_sha256 reference is wired by the
@@ -1323,9 +1311,8 @@ pub fn approve_plan(
             // attribution chain still resolves through
             // `signed_plan_artifacts.plan_artifact_sha256`.
             plan_bundle_sha256: None,
-            policy_epoch:  Some(policy_epoch),
-            session_agent_type:
-                Some(SessionAgentType::Orchestrator.as_sql_str().to_owned()),
+            policy_epoch: Some(policy_epoch),
+            session_agent_type: Some(SessionAgentType::Orchestrator.as_sql_str().to_owned()),
         },
         Some(&orchestrator_auto_spawn.session_id),
         None,
@@ -1346,14 +1333,15 @@ pub fn approve_plan(
     // never propagated, since the store is already consistent and the
     // override has *de facto* taken effect.
     for (task_id, _, override_on) in &path_scope_snapshots {
-        if !*override_on { continue; }
+        if !*override_on {
+            continue;
+        }
         if let Err(e) = audit.emit(
             AuditEventKind::PathScopeOverrideApplied {
-                initiative_id:      initiative_id.to_owned(),
-                task_id:            task_id.clone(),
+                initiative_id: initiative_id.to_owned(),
+                task_id: task_id.clone(),
                 approving_operator: approving_operator.to_owned(),
-                approving_operator_display_name:
-                    approving_operator_display_name.clone(),
+                approving_operator_display_name: approving_operator_display_name.clone(),
             },
             None,
             Some(task_id),
@@ -1434,7 +1422,7 @@ pub struct OrchestratorAutoSpawn {
 /// the operator sees a generic `FAIL_APPROVE_PLAN` and the store
 /// stays in `Draft`. There is no partial-spawn failure mode.
 fn auto_spawn_orchestrator_session_in_tx(
-    tx:            &rusqlite::Transaction<'_>,
+    tx: &rusqlite::Transaction<'_>,
     initiative_id: &str,
     // ── V2.5 IntegrationMerge plumbing — admit a synthetic
     //    "coordinator task" row whose `task_id == initiative_id`,
@@ -1480,18 +1468,18 @@ fn auto_spawn_orchestrator_session_in_tx(
     // the signed plan artifact, see
     // `evaluate_terminal_criteria_for_initiative`).
     workspace_lane: &str,
-    policy_epoch:   u64,
+    policy_epoch: u64,
 ) -> Result<OrchestratorAutoSpawn, LifecycleError> {
     use raxis_types::SessionId;
 
-    let session_id    = SessionId::new_v4();
-    let session_id_s  = session_id.as_str().to_owned();
-    let lineage_id    = uuid::Uuid::new_v4().to_string();
+    let session_id = SessionId::new_v4();
+    let session_id_s = session_id.as_str().to_owned();
+    let lineage_id = uuid::Uuid::new_v4().to_string();
 
     // 32 CSPRNG bytes → 64 hex chars. RNG failure surfaces here and
     // short-circuits approve_plan; we never write a zeroed token.
-    let session_token = raxis_crypto::token::generate_session_token()
-        .map_err(|e| LifecycleError::PlanInvalid {
+    let session_token =
+        raxis_crypto::token::generate_session_token().map_err(|e| LifecycleError::PlanInvalid {
             reason: format!("orchestrator session token RNG failed: {e}"),
         })?;
 
@@ -1499,7 +1487,7 @@ fn auto_spawn_orchestrator_session_in_tx(
     // loop renews active session expiries on heartbeat; a 1-day
     // baseline matches `SessionConfig::default()` in
     // `authority::session::create_session`.
-    let now_secs   = unix_now_secs();
+    let now_secs = unix_now_secs();
     let expires_at = now_secs + 86_400;
 
     let sessions_t = Table::Sessions.as_str();
@@ -1557,11 +1545,11 @@ fn auto_spawn_orchestrator_session_in_tx(
     // collides with an existing row via `INSERT OR IGNORE` returning
     // 0 rows (caller already aborts on `task_count` mismatch).
     let coordinator_task = scheduler::PlanTask {
-        task_id:       initiative_id.to_owned(),
+        task_id: initiative_id.to_owned(),
         initiative_id: initiative_id.to_owned(),
-        lane_id:       workspace_lane.to_owned(),
-        name:          format!("orchestrator-coordinator-{initiative_id}"),
-        dependencies:  Vec::new(),
+        lane_id: workspace_lane.to_owned(),
+        name: format!("orchestrator-coordinator-{initiative_id}"),
+        dependencies: Vec::new(),
     };
     scheduler::admit_in_tx(tx, coordinator_task, policy_epoch).map_err(|e| {
         // Wrap the scheduler error in `LifecycleError::Sql` so the
@@ -1611,10 +1599,10 @@ fn auto_spawn_orchestrator_session_in_tx(
 ///
 /// Returns the number of (initiative, task) pairs successfully inserted.
 pub fn repopulate_plan_registry(
-    store:                       &Store,
-    registry:                    &PlanRegistry,
-    policy_default_target_ref:   &str,
-    policy_target_ref_locked:    bool,
+    store: &Store,
+    registry: &PlanRegistry,
+    policy_default_target_ref: &str,
+    policy_target_ref_locked: bool,
 ) -> Result<usize, LifecycleError> {
     let conn = store.lock_sync();
 
@@ -1623,10 +1611,13 @@ pub fn repopulate_plan_registry(
          WHERE state IN (?1, ?2)",
     ))?;
     let initiative_ids: Vec<String> = stmt
-        .query_map(rusqlite::params![
-            InitiativeState::Executing.as_sql_str(),
-            InitiativeState::Blocked.as_sql_str(),
-        ], |r| r.get::<_, String>(0))?
+        .query_map(
+            rusqlite::params![
+                InitiativeState::Executing.as_sql_str(),
+                InitiativeState::Blocked.as_sql_str(),
+            ],
+            |r| r.get::<_, String>(0),
+        )?
         .collect::<Result<_, _>>()?;
     drop(stmt);
 
@@ -1648,9 +1639,7 @@ pub fn repopulate_plan_registry(
         // restart and `path_scope::effective_allow` returns
         // `NoPlanEntry` on the first intent.
         let plan_bytes: Vec<u8> = match conn.query_row(
-            &format!(
-                "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1",
-            ),
+            &format!("SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id=?1",),
             rusqlite::params![&init_id],
             |r| r.get::<_, Vec<u8>>(0),
         ) {
@@ -1691,7 +1680,7 @@ pub fn repopulate_plan_registry(
         };
 
         let plan_str = String::from_utf8_lossy(&plan_bytes);
-        let parsed   = match parse_plan_tasks(&plan_str) {
+        let parsed = match parse_plan_tasks(&plan_str) {
             Ok(t) => t,
             Err(e) => {
                 eprintln!(
@@ -1706,19 +1695,19 @@ pub fn repopulate_plan_registry(
             registry.insert(
                 TaskKey::new(&init_id, &pt.task_id),
                 TaskPlanFields {
-                    path_allowlist:            pt.path_allowlist,
+                    path_allowlist: pt.path_allowlist,
                     path_export_to_successors: pt.path_export_to_successors,
-                    path_export_globs:         pt.path_export_globs,
-                    path_scope_override:       pt.path_scope_override,
+                    path_export_globs: pt.path_export_globs,
+                    path_scope_override: pt.path_scope_override,
                     // V2 §Step 27 — re-hydrate typed clone strategy +
                     // agent type from the immutable signed plan bytes.
-                    clone_strategy:            pt.clone_strategy,
-                    session_agent_type:        pt.session_agent_type,
+                    clone_strategy: pt.clone_strategy,
+                    session_agent_type: pt.session_agent_type,
                     // V2.5 §13 — re-hydrate operator-published
                     // `[[vm_images]]` alias from the immutable
                     // signed plan bytes. Empty when the plan
                     // omitted the field.
-                    vm_image:                  pt.vm_image,
+                    vm_image: pt.vm_image,
                     // V2 `v2_extended_gaps.md §1.1` — re-hydrate the
                     // operator-authored seed prompt from the immutable
                     // signed plan bytes. Always non-empty: admission
@@ -1726,39 +1715,39 @@ pub fn repopulate_plan_registry(
                     // `[[tasks]]` row without a non-empty
                     // `description`, so a sealed plan can never carry
                     // a zero-length description through restart.
-                    description:               pt.description,
+                    description: pt.description,
                     // V2 `v2-deep-spec.md §Step 12` — re-hydrate the
                     // operator-declared retry ceilings. `None`
                     // preserves "operator omitted the field"
                     // semantics so a kernel reboot does not
                     // accidentally widen the budget by stamping a
                     // numeric value where the plan had silence.
-                    max_crash_retries:         pt.max_crash_retries,
-                    max_review_rejections:     pt.max_review_rejections,
+                    max_crash_retries: pt.max_crash_retries,
+                    max_review_rejections: pt.max_review_rejections,
                     // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` —
                     // re-hydrate the operator-declared per-task
                     // hard turn ceiling from the immutable signed
                     // plan bytes. `None` preserves "operator
                     // omitted" semantics so a kernel reboot does
                     // not silently widen the budget.
-                    max_turns:                 pt.max_turns,
+                    max_turns: pt.max_turns,
                     // V3 `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
                     // — re-hydrate the operator-declared progressive
                     // scaling step from the immutable signed plan
                     // bytes. Same `None`-stays-`None` discipline as
                     // `max_turns` above so the policy / derived
                     // defaults remain in play after restart.
-                    max_turns_step:            pt.max_turns_step,
+                    max_turns_step: pt.max_turns_step,
                     // V2 `elastic-vm-scaling.md §2.2` — re-hydrate
                     // the operator-declared elastic knobs from the
                     // immutable signed plan bytes. Same `None`
                     // discipline as the retry ceilings above: a
                     // missing field stays missing across restart.
-                    elastic:                   pt.elastic,
-                    min_vcpus:                 pt.min_vcpus,
-                    max_vcpus:                 pt.max_vcpus,
-                    min_memory_mb:             pt.min_memory_mb,
-                    max_memory_mb:             pt.max_memory_mb,
+                    elastic: pt.elastic,
+                    min_vcpus: pt.min_vcpus,
+                    max_vcpus: pt.max_vcpus,
+                    min_memory_mb: pt.min_memory_mb,
+                    max_memory_mb: pt.max_memory_mb,
                 },
             );
             inserted += 1;
@@ -1785,8 +1774,7 @@ pub fn repopulate_plan_registry(
                 // `IntegrationMerge` is the surface that hard-fails
                 // (and surfaces the actual lock error) rather than a
                 // silent boot-time skip.
-                let plan_tr = parse_plan_workspace_target_ref(&plan_str)
-                    .ok().flatten();
+                let plan_tr = parse_plan_workspace_target_ref(&plan_str).ok().flatten();
                 orch.target_ref = match resolve_target_ref(
                     plan_tr.as_deref(),
                     policy_default_target_ref,
@@ -1823,8 +1811,8 @@ pub fn repopulate_plan_registry(
 /// DDL CHECK constraint in kernel-store.md §2.5.1 Table 2).
 pub fn reject_plan(
     initiative_id: &str,
-    rejected_by:   &str,
-    _reason:       Option<&str>,
+    rejected_by: &str,
+    _reason: Option<&str>,
     store: &Store,
 ) -> Result<(), LifecycleError> {
     let conn = store.lock_sync();
@@ -1867,7 +1855,7 @@ pub fn reject_plan(
 /// Wrapping both writes in `conn.transaction()` makes the failure binary.
 pub fn abort_initiative(
     initiative_id: &str,
-    aborted_by:    &str,
+    aborted_by: &str,
     store: &Store,
 ) -> Result<(), LifecycleError> {
     let mut conn = store.lock_sync();
@@ -1875,32 +1863,40 @@ pub fn abort_initiative(
     // Pre-tx read: terminal-state guard (TOCTOU-safe — re-checked inside the
     // transaction's UPDATE WHERE clause via the initiative_id PK; concurrent
     // operator double-aborts collapse to one effective state change).
-    let current_state: String = conn.query_row(
-        &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
-        rusqlite::params![initiative_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
-            initiative_id: initiative_id.to_owned(),
-        },
-        other => LifecycleError::Sql(other),
-    })?;
-
-    let parsed = InitiativeState::from_sql_str(&current_state)
-        .ok_or_else(|| LifecycleError::InitiativeTerminal {
-            current_state: current_state.clone(),
+    let current_state: String = conn
+        .query_row(
+            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => LifecycleError::InitiativeNotFound {
+                initiative_id: initiative_id.to_owned(),
+            },
+            other => LifecycleError::Sql(other),
         })?;
+
+    let parsed = InitiativeState::from_sql_str(&current_state).ok_or_else(|| {
+        LifecycleError::InitiativeTerminal {
+            current_state: current_state.clone(),
+        }
+    })?;
     if parsed.is_terminal() {
         return Err(LifecycleError::InitiativeTerminal { current_state });
     }
 
     let now = unix_now_secs();
-    let cancel_state    = TaskState::Cancelled.as_sql_str();
-    let terminal_not_in = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
-        .iter()
-        .map(|s| format!("'{}'", s.as_sql_str()))
-        .collect::<Vec<_>>()
-        .join(", ");
+    let cancel_state = TaskState::Cancelled.as_sql_str();
+    let terminal_not_in = [
+        TaskState::Completed,
+        TaskState::Failed,
+        TaskState::Aborted,
+        TaskState::Cancelled,
+    ]
+    .iter()
+    .map(|s| format!("'{}'", s.as_sql_str()))
+    .collect::<Vec<_>>()
+    .join(", ");
 
     let tx = conn.transaction()?;
 
@@ -1971,32 +1967,37 @@ pub fn abort_initiative(
 // abort_task — operator cancels a single task
 // ---------------------------------------------------------------------------
 
-pub fn abort_task(
-    task_id:    &str,
-    aborted_by: &str,
-    store: &Store,
-) -> Result<(), LifecycleError> {
+pub fn abort_task(task_id: &str, aborted_by: &str, store: &Store) -> Result<(), LifecycleError> {
     let mut conn = store.lock_sync();
-    let now  = unix_now_secs();
+    let now = unix_now_secs();
 
     // Read state + lane_id together — we need lane_id for the
     // post-flip `release_budget_in_tx`, and folding both reads
     // into the same SELECT means one round trip instead of two.
-    let (state, lane_id): (String, String) = conn.query_row(
-        &format!("SELECT state, lane_id FROM {TASKS} WHERE task_id=?1"),
-        rusqlite::params![task_id],
-        |r| Ok((r.get(0)?, r.get(1)?)),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
-            task_id: task_id.to_owned(),
-        },
-        other => LifecycleError::Sql(other),
-    })?;
+    let (state, lane_id): (String, String) = conn
+        .query_row(
+            &format!("SELECT state, lane_id FROM {TASKS} WHERE task_id=?1"),
+            rusqlite::params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
+                task_id: task_id.to_owned(),
+            },
+            other => LifecycleError::Sql(other),
+        })?;
 
-    let aborted_states = [TaskState::Completed, TaskState::Failed, TaskState::Aborted, TaskState::Cancelled]
-        .map(|s| s.as_sql_str());
+    let aborted_states = [
+        TaskState::Completed,
+        TaskState::Failed,
+        TaskState::Aborted,
+        TaskState::Cancelled,
+    ]
+    .map(|s| s.as_sql_str());
     if aborted_states.contains(&state.as_str()) {
-        return Err(LifecycleError::TaskNotAbortable { current_state: state });
+        return Err(LifecycleError::TaskNotAbortable {
+            current_state: state,
+        });
     }
 
     // Transactional fold: state-flip + budget-release commit
@@ -2007,17 +2008,16 @@ pub fn abort_task(
     // but its lane reservation is still charged).
     let tx = conn.transaction()?;
     tx.execute(
-        &format!(
-            "UPDATE {TASKS} SET state=?1, transitioned_at=?2 WHERE task_id=?3"
-        ),
+        &format!("UPDATE {TASKS} SET state=?1, transitioned_at=?2 WHERE task_id=?3"),
         rusqlite::params![TaskState::Aborted.as_sql_str(), now, task_id],
     )?;
-    crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, task_id)
-        .map_err(|e| LifecycleError::PlanInvalid {
+    crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, task_id).map_err(|e| {
+        LifecycleError::PlanInvalid {
             reason: format!(
                 "release_budget_in_tx for aborted task {task_id} on lane {lane_id} failed: {e}"
             ),
-        })?;
+        }
+    })?;
     tx.commit()?;
 
     eprintln!(
@@ -2044,40 +2044,48 @@ pub fn abort_task(
 /// visibility for this transition.
 pub fn retry_task(
     task_id: &str,
-    store:   &Store,
-    audit:   Option<&dyn raxis_audit_tools::AuditSink>,
+    store: &Store,
+    audit: Option<&dyn raxis_audit_tools::AuditSink>,
 ) -> Result<(), LifecycleError> {
     use crate::initiatives::task_transitions::{
         emit_task_state_changed_audit, transition_task, TransitionActor,
     };
 
     let conn = store.lock_sync();
-    let state: String = conn.query_row(
-        &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
-        rusqlite::params![task_id],
-        |r| r.get(0),
-    ).map_err(|e| match e {
-        rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
-            task_id: task_id.to_owned(),
-        },
-        other => LifecycleError::Sql(other),
-    })?;
+    let state: String = conn
+        .query_row(
+            &format!("SELECT state FROM {TASKS} WHERE task_id=?1"),
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .map_err(|e| match e {
+            rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
+                task_id: task_id.to_owned(),
+            },
+            other => LifecycleError::Sql(other),
+        })?;
 
     if state != TaskState::Failed.as_sql_str() {
-        return Err(LifecycleError::TaskNotFailed { current_state: state });
+        return Err(LifecycleError::TaskNotFailed {
+            current_state: state,
+        });
     }
     drop(conn); // release lock before calling transition_task which re-acquires
 
-    let record = transition_task(task_id, TaskState::Admitted, None, TransitionActor::Kernel, store)
-        .map_err(|e| LifecycleError::Store(raxis_store::StoreError::Invariant(e.to_string())))?;
+    let record = transition_task(
+        task_id,
+        TaskState::Admitted,
+        None,
+        TransitionActor::Kernel,
+        store,
+    )
+    .map_err(|e| LifecycleError::Store(raxis_store::StoreError::Invariant(e.to_string())))?;
 
     if let Some(audit_sink) = audit {
         emit_task_state_changed_audit(audit_sink, &record, None);
     }
 
-    eprintln!(
-        "{{\"level\":\"info\",\"event\":\"TaskRetried\",\"task_id\":\"{task_id}\"}}",
-    );
+    eprintln!("{{\"level\":\"info\",\"event\":\"TaskRetried\",\"task_id\":\"{task_id}\"}}",);
     Ok(())
 }
 
@@ -2107,19 +2115,19 @@ pub fn retry_task(
 /// workspace-root value before persisting.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct PlanTask {
-    task_id:      String,
-    name:         String,
+    task_id: String,
+    name: String,
     /// Plan-author-declared lane override; `""` when omitted. The
     /// approve_plan path replaces this with the `[workspace] lane_id`
     /// value before constructing the scheduler-side `PlanTask`.
-    lane_id:      String,
+    lane_id: String,
     predecessors: Vec<String>,
 
     // ── V2 §Step 27 typed fields ───────────────────────────────────────
     /// **V2 §Step 27 — typed clone strategy.** `full | blobless | sparse`.
     /// Default `Blobless` (uniformly safe; cheaper than `Full` for repos
     /// with binary blobs). The TOML key is `clone_strategy`.
-    clone_strategy:     CloneStrategy,
+    clone_strategy: CloneStrategy,
     /// **V2 §Step 6 — agent type for this plan-declared task.**
     /// Default `Executor`. The Orchestrator is auto-created by the
     /// kernel at admission and is NOT operator-declared in `[[tasks]]`;
@@ -2130,15 +2138,15 @@ struct PlanTask {
 
     // ── §2.5.8 path-scope fields (in-memory only) ──────────────────────
     /// Glob patterns this task may touch. **Default `[]` (deny everything)**.
-    path_allowlist:            Vec<String>,
+    path_allowlist: Vec<String>,
     /// Whether to export `touched_paths` to direct DAG successors. Default `false`.
     path_export_to_successors: bool,
     /// Optional filter on what gets exported. Default `[]` (export the
     /// full touched set if `path_export_to_successors = true`).
-    path_export_globs:         Vec<String>,
+    path_export_globs: Vec<String>,
     /// Bypass flag. Default `false`. When `true`, kernel emits
     /// `PathScopeOverrideApplied` at `approve_plan`.
-    path_scope_override:       bool,
+    path_scope_override: bool,
 
     // ── V2 §Step 12 retry ceilings ─────────────────────────────────────
     /// **V2 §Step 12** — operator-declared ceiling on the
@@ -2147,12 +2155,12 @@ struct PlanTask {
     /// default applies (`DEFAULT_MAX_CRASH_RETRIES`). Read by the
     /// `RetrySubTask` admission path (`handle_retry_sub_task`)
     /// against the live counter on the most-recent activation row.
-    max_crash_retries:         Option<u32>,
+    max_crash_retries: Option<u32>,
     /// **V2 §Step 12** — operator-declared ceiling on the
     /// `subtask_activations.review_reject_count` counter for this task.
     /// Symmetric to `max_crash_retries`: `None` ⇒ kernel default
     /// (`DEFAULT_MAX_REVIEW_REJECTIONS`).
-    max_review_rejections:     Option<u32>,
+    max_review_rejections: Option<u32>,
 
     /// **V2.7 — `INV-PLANNER-MAX-TURNS-PRECEDENCE-01`.**
     /// Operator-declared per-task hard turn ceiling for the planner
@@ -2163,7 +2171,7 @@ struct PlanTask {
     /// See `TaskPlanFields::max_turns` /
     /// `TaskPlanFields::effective_max_turns` for the resolution
     /// contract.
-    max_turns:                 Option<u32>,
+    max_turns: Option<u32>,
 
     /// **V3 — `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`.**
     /// Operator-declared progressive scaling step. The kernel
@@ -2175,7 +2183,7 @@ struct PlanTask {
     /// `Some(0)` is rejected at parse time — a zero step degenerates
     /// the resolver back to a constant budget and masks the
     /// cold-start retry tax this knob exists to absorb.
-    max_turns_step:            Option<u32>,
+    max_turns_step: Option<u32>,
 
     // ── V2 `credential-proxy.md §3` typed credential decls ─────────────
     /// Parsed `[[tasks.credentials]]` entries for this task. Empty
@@ -2186,7 +2194,7 @@ struct PlanTask {
     /// `CredentialProxyManager::start_for_session` consumes the
     /// vector once a session-spawn callsite hands it the
     /// per-task decls (see `kernel/src/ipc/context.rs proxy_manager`).
-    credentials:               Vec<raxis_plan_credentials::TaskCredentialDecl>,
+    credentials: Vec<raxis_plan_credentials::TaskCredentialDecl>,
 
     /// **V2.5 §13 — `[[plan.tasks.X]] vm_image`.** Operator-published
     /// `[[vm_images]]` alias selecting the executor image to spawn
@@ -2203,7 +2211,7 @@ struct PlanTask {
     ///   (the Reviewer image is kernel-canonical per
     ///   `INV-PLANNER-HARNESS-02`); a non-empty value is rejected
     ///   with `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`.
-    vm_image:                  String,
+    vm_image: String,
 
     /// **V2 `v2_extended_gaps.md §1.1` — `[[plan.tasks.X]] description`.**
     /// Operator-authored seed prompt for the Executor / Reviewer agent.
@@ -2216,7 +2224,7 @@ struct PlanTask {
     /// Strings beyond 64 KiB are also rejected at validation time to
     /// bound the env-var footprint passed to the substrate
     /// (`execve(2)` `ARG_MAX` ~128 KiB on Linux).
-    description:               String,
+    description: String,
 
     // ── V2 elastic-vm-scaling.md §2.2 — per-task elastic knobs ─────
     /// **V2 `elastic-vm-scaling.md §2.2`** — operator opt-out from
@@ -2226,17 +2234,17 @@ struct PlanTask {
     /// `Some(true)` paired with policy `enabled = false`
     /// (`FAIL_ELASTIC_PLAN_EXCEEDS_POLICY`). Reviewer tasks must
     /// leave this `None` (`FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
-    elastic:                   Option<bool>,
+    elastic: Option<bool>,
     /// Per-task floor on vCPU count (used as the lower bound by
     /// scale-down; default = role baseline).
-    min_vcpus:                 Option<u32>,
+    min_vcpus: Option<u32>,
     /// Per-task ceiling on vCPU count (used as the upper bound by
     /// scale-up; default = `policy.[elastic].max_vcpus_per_session`).
-    max_vcpus:                 Option<u32>,
+    max_vcpus: Option<u32>,
     /// Per-task floor on memory MiB. Same shape as `min_vcpus`.
-    min_memory_mb:             Option<u32>,
+    min_memory_mb: Option<u32>,
     /// Per-task ceiling on memory MiB. Same shape as `max_vcpus`.
-    max_memory_mb:             Option<u32>,
+    max_memory_mb: Option<u32>,
 }
 
 /// Parse `[[tasks]]` array from plan TOML.
@@ -2265,12 +2273,12 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         reason: format!("TOML parse error: {e}"),
     })?;
 
-    let tasks_array = doc
-        .get("tasks")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| LifecycleError::PlanInvalid {
-            reason: "plan TOML missing [[tasks]] array".to_owned(),
-        })?;
+    let tasks_array =
+        doc.get("tasks")
+            .and_then(|v| v.as_array())
+            .ok_or_else(|| LifecycleError::PlanInvalid {
+                reason: "plan TOML missing [[tasks]] array".to_owned(),
+            })?;
 
     let mut tasks = Vec::with_capacity(tasks_array.len());
     for (i, entry) in tasks_array.iter().enumerate() {
@@ -2281,7 +2289,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 reason: format!("tasks[{i}] missing task_id"),
             })?
             .to_owned();
-        let name    = entry.get("name").and_then(|v| v.as_str()).unwrap_or(&task_id).to_owned();
+        let name = entry
+            .get("name")
+            .and_then(|v| v.as_str())
+            .unwrap_or(&task_id)
+            .to_owned();
         // V2 §Step 28: do NOT default to "default" here. Empty marker
         // means "operator omitted lane_id"; any non-empty value is a
         // per-task override that `validate_single_lane_propagation`
@@ -2292,9 +2304,9 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
             .unwrap_or("")
             .to_owned();
 
-        let predecessors        = string_array(entry, "predecessors");
-        let path_allowlist      = string_array(entry, "path_allowlist");
-        let path_export_globs   = string_array(entry, "path_export_globs");
+        let predecessors = string_array(entry, "predecessors");
+        let path_allowlist = string_array(entry, "path_allowlist");
+        let path_export_globs = string_array(entry, "path_export_globs");
 
         let path_export_to_successors = entry
             .get("path_export_to_successors")
@@ -2312,40 +2324,48 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // `unknown_clone_strategy` at validation time, not as a silent
         // fallback to the default. Operators who omit the key get the
         // V2 default (`Blobless`).
-        let clone_strategy_raw     = entry.get("clone_strategy")
-            .and_then(|v| v.as_str()).map(str::to_owned);
-        let session_agent_type_raw = entry.get("session_agent_type")
-            .and_then(|v| v.as_str()).map(str::to_owned);
+        let clone_strategy_raw = entry
+            .get("clone_strategy")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
+        let session_agent_type_raw = entry
+            .get("session_agent_type")
+            .and_then(|v| v.as_str())
+            .map(str::to_owned);
 
         let clone_strategy = match clone_strategy_raw.as_deref() {
-            None    => CloneStrategy::Blobless,
+            None => CloneStrategy::Blobless,
             Some(s) => match CloneStrategy::from_sql_str(s) {
                 Some(strategy) => strategy,
-                None => return Err(LifecycleError::PlanCloneStrategyInvalid {
-                    rule:           "unknown_clone_strategy",
-                    offending_task: task_id.clone(),
-                    suggestion: format!(
-                        "value `{s}` is not a valid clone_strategy. \
+                None => {
+                    return Err(LifecycleError::PlanCloneStrategyInvalid {
+                        rule: "unknown_clone_strategy",
+                        offending_task: task_id.clone(),
+                        suggestion: format!(
+                            "value `{s}` is not a valid clone_strategy. \
                          Valid values: full, blobless, sparse. \
                          (V2 default: blobless.)",
-                    ),
-                }),
+                        ),
+                    })
+                }
             },
         };
         let session_agent_type = match session_agent_type_raw.as_deref() {
-            None    => SessionAgentType::Executor,
+            None => SessionAgentType::Executor,
             Some(s) => match SessionAgentType::from_sql_str(s) {
                 Some(t) => t,
-                None => return Err(LifecycleError::PlanCloneStrategyInvalid {
-                    rule:           "unknown_agent_type",
-                    offending_task: task_id.clone(),
-                    suggestion: format!(
-                        "value `{s}` is not a valid session_agent_type. \
+                None => {
+                    return Err(LifecycleError::PlanCloneStrategyInvalid {
+                        rule: "unknown_agent_type",
+                        offending_task: task_id.clone(),
+                        suggestion: format!(
+                            "value `{s}` is not a valid session_agent_type. \
                          Valid values: Executor, Reviewer. \
                          (Orchestrator is auto-created by the kernel and \
                          must not appear in [[tasks]].)",
-                    ),
-                }),
+                        ),
+                    })
+                }
             },
         };
 
@@ -2358,10 +2378,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // `validate_task_credentials` alongside the other Step 17
         // shift-left validators so the error path matches the rest
         // of the plan-shape rejections.
-        let credentials = raxis_plan_credentials::parse_for_task(entry)
-            .map_err(|e| LifecycleError::PlanInvalid {
+        let credentials = raxis_plan_credentials::parse_for_task(entry).map_err(|e| {
+            LifecycleError::PlanInvalid {
                 reason: format!("[[tasks.credentials]] (task `{task_id}`): {e}"),
-            })?;
+            }
+        })?;
 
         // V2.5 §13 — `vm_image` selects the operator-published
         // [[vm_images]] alias for this task. Empty string means
@@ -2453,12 +2474,9 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // SQL but the in-RAM counter saturates well below 4 billion;
         // a plan declaring a higher ceiling is almost certainly a
         // typo.
-        let max_crash_retries = parse_optional_u32_field(
-            entry, "max_crash_retries", &task_id,
-        )?;
-        let max_review_rejections = parse_optional_u32_field(
-            entry, "max_review_rejections", &task_id,
-        )?;
+        let max_crash_retries = parse_optional_u32_field(entry, "max_crash_retries", &task_id)?;
+        let max_review_rejections =
+            parse_optional_u32_field(entry, "max_review_rejections", &task_id)?;
 
         // V2.7 `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` — per-task hard
         // turn ceiling. Same parse shape as the retry-ceiling fields
@@ -2469,9 +2487,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // here: a 0-turn budget would terminate the dispatch loop
         // before the first model call, which is never useful and
         // almost always indicates an operator typo.
-        let max_turns = parse_optional_u32_field(
-            entry, "max_turns", &task_id,
-        )?;
+        let max_turns = parse_optional_u32_field(entry, "max_turns", &task_id)?;
         if let Some(0) = max_turns {
             return Err(LifecycleError::PlanInvalid {
                 reason: format!(
@@ -2492,9 +2508,7 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
         // step would degrade the progressive resolver back to a
         // constant budget — operators who want the constant-budget
         // behaviour should pin `max_turns` higher instead.
-        let max_turns_step = parse_optional_u32_field(
-            entry, "max_turns_step", &task_id,
-        )?;
+        let max_turns_step = parse_optional_u32_field(entry, "max_turns_step", &task_id)?;
         if let Some(0) = max_turns_step {
             return Err(LifecycleError::PlanInvalid {
                 reason: format!(
@@ -2530,8 +2544,8 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
                 });
             }
         };
-        let min_vcpus     = parse_optional_u32_field(entry, "min_vcpus",     &task_id)?;
-        let max_vcpus     = parse_optional_u32_field(entry, "max_vcpus",     &task_id)?;
+        let min_vcpus = parse_optional_u32_field(entry, "min_vcpus", &task_id)?;
+        let max_vcpus = parse_optional_u32_field(entry, "max_vcpus", &task_id)?;
         let min_memory_mb = parse_optional_u32_field(entry, "min_memory_mb", &task_id)?;
         let max_memory_mb = parse_optional_u32_field(entry, "max_memory_mb", &task_id)?;
         // Internal-consistency check: floor ≤ ceiling. This rule
@@ -2619,13 +2633,11 @@ fn parse_plan_tasks(plan_toml: &str) -> Result<Vec<PlanTask>, LifecycleError> {
 /// [orchestrator]
 /// cross_cutting_artifacts = ["Cargo.lock", "package-lock.json", "go.sum"]
 /// ```
-fn parse_plan_orchestrator(plan_toml: &str)
-    -> Result<crate::initiatives::OrchestratorPlanFields, LifecycleError>
-{
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        LifecycleError::PlanInvalid {
-            reason: format!("TOML parse error: {e}"),
-        }
+fn parse_plan_orchestrator(
+    plan_toml: &str,
+) -> Result<crate::initiatives::OrchestratorPlanFields, LifecycleError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
     })?;
 
     let cross_cutting_artifacts = doc
@@ -2670,7 +2682,8 @@ fn parse_plan_orchestrator(plan_toml: &str)
                 reason: "[plan.initiative] is missing required `description` \
                          field — operator must declare what the initiative is \
                          about (V2 v2_extended_gaps.md §1.1, \
-                         kernel-mechanics-prompt.md §3.2)".to_owned(),
+                         kernel-mechanics-prompt.md §3.2)"
+                    .to_owned(),
             });
         }
     };
@@ -2678,7 +2691,8 @@ fn parse_plan_orchestrator(plan_toml: &str)
         return Err(LifecycleError::PlanInvalid {
             reason: "[plan.initiative] `description` is empty — operator \
                      must declare what the initiative is about \
-                     (V2 v2_extended_gaps.md §1.1)".to_owned(),
+                     (V2 v2_extended_gaps.md §1.1)"
+                .to_owned(),
         });
     }
     if description.len() > MAX_DESCRIPTION_BYTES {
@@ -2748,9 +2762,9 @@ fn parse_plan_orchestrator(plan_toml: &str)
 // drops `pub(crate)` rather than promoting `PlanTask` (and its 25+
 // fields) to crate visibility for a single in-module callsite.
 fn validate_elastic_against_policy(
-    tasks:        &[PlanTask],
-    initiative:   &crate::initiatives::OrchestratorPlanFields,
-    elastic_cfg:  &raxis_policy::ElasticConfig,
+    tasks: &[PlanTask],
+    initiative: &crate::initiatives::OrchestratorPlanFields,
+    elastic_cfg: &raxis_policy::ElasticConfig,
 ) -> Result<(), LifecycleError> {
     if matches!(initiative.elastic, Some(true)) && !elastic_cfg.enabled {
         return Err(LifecycleError::PlanInvalid {
@@ -2845,13 +2859,9 @@ fn validate_elastic_against_policy(
 /// with the per-task-override validator inside the same audit
 /// surface — a single `PlanSingleLaneInvalid` error type, three
 /// disjoint `rule` strings.
-fn parse_plan_workspace_lane(plan_toml: &str)
-    -> Result<Option<String>, LifecycleError>
-{
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        LifecycleError::PlanInvalid {
-            reason: format!("TOML parse error: {e}"),
-        }
+fn parse_plan_workspace_lane(plan_toml: &str) -> Result<Option<String>, LifecycleError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
     })?;
 
     let raw = doc
@@ -2876,18 +2886,14 @@ fn parse_plan_workspace_lane(plan_toml: &str)
 /// Surfaces structural-shape errors (non-string, wrong section
 /// nesting) through `LifecycleError::PlanInvalid` so the operator
 /// diagnostic shows the malformed-section context.
-fn parse_plan_workspace_target_ref(plan_toml: &str)
-    -> Result<Option<String>, LifecycleError>
-{
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        LifecycleError::PlanInvalid {
-            reason: format!("TOML parse error: {e}"),
-        }
+fn parse_plan_workspace_target_ref(plan_toml: &str) -> Result<Option<String>, LifecycleError> {
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| LifecycleError::PlanInvalid {
+        reason: format!("TOML parse error: {e}"),
     })?;
 
     let workspace = match doc.get("workspace").and_then(|v| v.as_table()) {
         Some(t) => t,
-        None    => return Ok(None),
+        None => return Ok(None),
     };
 
     match workspace.get("target_ref") {
@@ -2902,7 +2908,8 @@ fn parse_plan_workspace_target_ref(plan_toml: &str)
             if s.is_empty() {
                 return Err(LifecycleError::PlanInvalid {
                     reason: "[workspace] target_ref is the empty string \
-                             (omit the field to apply the policy default)".to_owned(),
+                             (omit the field to apply the policy default)"
+                        .to_owned(),
                 });
             }
             Ok(Some(s.to_owned()))
@@ -2931,19 +2938,19 @@ fn parse_plan_workspace_target_ref(plan_toml: &str)
 /// before the locked-field check; the policy default was already
 /// validated at `PolicyBundle::validate` time.
 pub(crate) fn resolve_target_ref(
-    plan_value:    Option<&str>,
+    plan_value: Option<&str>,
     policy_default: &str,
-    locked:         bool,
+    locked: bool,
 ) -> Result<String, LifecycleError> {
     match plan_value {
         None => Ok(policy_default.to_owned()),
         Some(plan_ref) => {
             raxis_policy::validate_target_ref_format(plan_ref).map_err(|reason| {
                 LifecycleError::PlanTargetRefInvalid {
-                    rule:         "invalid",
-                    plan_value:   Some(plan_ref.to_owned()),
+                    rule: "invalid",
+                    plan_value: Some(plan_ref.to_owned()),
                     policy_value: policy_default.to_owned(),
-                    suggestion:   format!(
+                    suggestion: format!(
                         "[workspace] target_ref={plan_ref:?} {reason}; \
                          valid example: \"refs/heads/raxis/<initiative-name>\""
                     ),
@@ -2951,10 +2958,10 @@ pub(crate) fn resolve_target_ref(
             })?;
             if locked && plan_ref != policy_default {
                 return Err(LifecycleError::PlanTargetRefInvalid {
-                    rule:         "locked",
-                    plan_value:   Some(plan_ref.to_owned()),
+                    rule: "locked",
+                    plan_value: Some(plan_ref.to_owned()),
                     policy_value: policy_default.to_owned(),
-                    suggestion:   format!(
+                    suggestion: format!(
                         "policy `[git] target_ref_locked = true` forbids the \
                          plan from overriding `target_ref`; either rewrite \
                          the plan with `[workspace] target_ref = \"{policy_default}\"` \
@@ -3018,18 +3025,16 @@ fn parse_plan_integration_merge_verifiers(
 
     let mut entries = Vec::with_capacity(array.len());
     for (i, entry) in array.iter().enumerate() {
-        let table = entry.as_table().ok_or_else(|| LifecycleError::PlanInvalid {
-            reason: format!(
-                "[[plan.integration_merge_verifiers]][{i}] is not a TOML table"
-            ),
-        })?;
+        let table = entry
+            .as_table()
+            .ok_or_else(|| LifecycleError::PlanInvalid {
+                reason: format!("[[plan.integration_merge_verifiers]][{i}] is not a TOML table"),
+            })?;
 
         let name = required_string(table, "name", "[[plan.integration_merge_verifiers]]", i)?;
         let image = required_string(table, "image", "[[plan.integration_merge_verifiers]]", i)?;
-        let command =
-            required_string(table, "command", "[[plan.integration_merge_verifiers]]", i)?;
-        let timeout =
-            required_string(table, "timeout", "[[plan.integration_merge_verifiers]]", i)?;
+        let command = required_string(table, "command", "[[plan.integration_merge_verifiers]]", i)?;
+        let timeout = required_string(table, "timeout", "[[plan.integration_merge_verifiers]]", i)?;
         let on_failure_str = required_string(
             table,
             "on_failure",
@@ -3046,7 +3051,7 @@ fn parse_plan_integration_merge_verifiers(
             // diagnostic so the operator gets a single failure path.
             other => {
                 return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                    rule:               "on_failure_invalid",
+                    rule: "on_failure_invalid",
                     offending_verifier: name.clone(),
                     suggestion: format!(
                         "value `{other}` is not a valid `on_failure` for a pre-merge \
@@ -3063,7 +3068,7 @@ fn parse_plan_integration_merge_verifiers(
             Some("last") => IntegrationMergeVerifierAppliesTo::Last,
             Some(other) => {
                 return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                    rule:               "applies_to_invalid",
+                    rule: "applies_to_invalid",
                     offending_verifier: name,
                     suggestion: format!(
                         "value `{other}` is not a valid `applies_to`. Valid \
@@ -3142,10 +3147,10 @@ fn parse_plan_integration_merge_verifiers(
 /// required string field from a TOML table, surfacing a structured
 /// `PlanInvalid` error when the field is missing or not a string.
 fn required_string(
-    table:    &toml::value::Table,
-    field:    &str,
-    section:  &str,
-    index:    usize,
+    table: &toml::value::Table,
+    field: &str,
+    section: &str,
+    index: usize,
 ) -> Result<String, LifecycleError> {
     table
         .get(field)
@@ -3176,7 +3181,7 @@ fn required_string(
 /// snapshot.
 fn validate_plan_integration_merge_verifiers(
     plan_verifiers: &[raxis_policy::IntegrationMergeVerifierEntry],
-    plan_tasks:     &[PlanTask],
+    plan_tasks: &[PlanTask],
 ) -> Result<(), LifecycleError> {
     use raxis_policy::{
         is_valid_verifier_name, parse_verifier_timeout_secs, IntegrationMergeVerifierAppliesTo,
@@ -3187,14 +3192,13 @@ fn validate_plan_integration_merge_verifiers(
     use std::collections::HashSet;
 
     let mut seen_names: HashSet<&str> = HashSet::with_capacity(plan_verifiers.len());
-    let declared_task_ids: HashSet<&str> =
-        plan_tasks.iter().map(|t| t.task_id.as_str()).collect();
+    let declared_task_ids: HashSet<&str> = plan_tasks.iter().map(|t| t.task_id.as_str()).collect();
 
     for entry in plan_verifiers {
         // Rule — name shape + uniqueness within plan-source.
         if !is_valid_verifier_name(&entry.name) {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "name_invalid",
+                rule: "name_invalid",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "verifier name `{}` must match `[a-z][a-z0-9_]{{0,31}}` \
@@ -3206,7 +3210,7 @@ fn validate_plan_integration_merge_verifiers(
         }
         if !seen_names.insert(entry.name.as_str()) {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "name_collision_within_plan",
+                rule: "name_collision_within_plan",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "duplicate `[[plan.integration_merge_verifiers]]` name \
@@ -3222,7 +3226,7 @@ fn validate_plan_integration_merge_verifiers(
         // Rule — image / command non-empty.
         if entry.image.trim().is_empty() {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "image_required",
+                rule: "image_required",
                 offending_verifier: entry.name.clone(),
                 suggestion: "declare a non-empty `image` (resolved against \
                              `[[vm_images]]` at IntegrationMerge admission)."
@@ -3231,7 +3235,7 @@ fn validate_plan_integration_merge_verifiers(
         }
         if entry.command.trim().is_empty() {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "command_required",
+                rule: "command_required",
                 offending_verifier: entry.name.clone(),
                 suggestion: "declare a non-empty `command` (run via `sh -lc` \
                              inside the verifier VM)."
@@ -3240,19 +3244,20 @@ fn validate_plan_integration_merge_verifiers(
         }
 
         // Rule — timeout parses and is ≥ 5s.
-        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout)
-            .ok_or_else(|| LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "timeout_invalid",
+        let timeout_secs = parse_verifier_timeout_secs(&entry.timeout).ok_or_else(|| {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule: "timeout_invalid",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "value `{}` is not a valid duration. Valid shapes: \
                      `\"30s\"`, `\"10m\"`, `\"1h\"`.",
                     entry.timeout,
                 ),
-            })?;
+            }
+        })?;
         if timeout_secs < VERIFIER_TIMEOUT_MIN_SECS {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "timeout_too_short",
+                rule: "timeout_too_short",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "`timeout = {timeout_secs}s` is below the {VERIFIER_TIMEOUT_MIN_SECS}-second \
@@ -3276,7 +3281,7 @@ fn validate_plan_integration_merge_verifiers(
             IntegrationMergeVerifierAppliesTo::TaskSet => {
                 if entry.task_set.is_empty() {
                     return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                        rule:               "task_set_empty",
+                        rule: "task_set_empty",
                         offending_verifier: entry.name.clone(),
                         suggestion: "`applies_to = \"task_set\"` requires a \
                                      non-empty `task_set = [...]` array \
@@ -3287,7 +3292,7 @@ fn validate_plan_integration_merge_verifiers(
                 for task_id in &entry.task_set {
                     if !declared_task_ids.contains(task_id.as_str()) {
                         return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                            rule:               "task_set_unknown_task",
+                            rule: "task_set_unknown_task",
                             offending_verifier: entry.name.clone(),
                             suggestion: format!(
                                 "`task_set` entry `{task_id}` does not match any declared \
@@ -3298,11 +3303,10 @@ fn validate_plan_integration_merge_verifiers(
                     }
                 }
             }
-            IntegrationMergeVerifierAppliesTo::All
-            | IntegrationMergeVerifierAppliesTo::Last => {
+            IntegrationMergeVerifierAppliesTo::All | IntegrationMergeVerifierAppliesTo::Last => {
                 if !entry.task_set.is_empty() {
                     return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                        rule:               "task_set_inconsistent",
+                        rule: "task_set_inconsistent",
                         offending_verifier: entry.name.clone(),
                         suggestion: "`task_set = [...]` was populated but \
                                      `applies_to` is `all` or `last`. Either \
@@ -3318,7 +3322,7 @@ fn validate_plan_integration_merge_verifiers(
         if let Some(path) = entry.artifact.as_ref() {
             if !path.starts_with("/raxis/") {
                 return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                    rule:               "artifact_path_invalid",
+                    rule: "artifact_path_invalid",
                     offending_verifier: entry.name.clone(),
                     suggestion: format!(
                         "`artifact = {path:?}` — path must start with `/raxis/` \
@@ -3328,7 +3332,7 @@ fn validate_plan_integration_merge_verifiers(
             }
             if path.chars().count() > VERIFIER_ARTIFACT_MAX_PATH_CHARS {
                 return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                    rule:               "artifact_path_too_long",
+                    rule: "artifact_path_too_long",
                     offending_verifier: entry.name.clone(),
                     suggestion: format!(
                         "`artifact` path exceeds {VERIFIER_ARTIFACT_MAX_PATH_CHARS} chars."
@@ -3340,7 +3344,7 @@ fn validate_plan_integration_merge_verifiers(
         // Rule — env cap + reserved-prefix.
         if entry.env.len() > VERIFIER_ENV_MAX_ENTRIES {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "env_too_many_entries",
+                rule: "env_too_many_entries",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "declared {} env entries; max is {VERIFIER_ENV_MAX_ENTRIES}.",
@@ -3352,7 +3356,7 @@ fn validate_plan_integration_merge_verifiers(
         for (k, v) in &entry.env {
             if k.starts_with(RAXIS_RESERVED_ENV_PREFIX) {
                 return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                    rule:               "env_reserved_key",
+                    rule: "env_reserved_key",
                     offending_verifier: entry.name.clone(),
                     suggestion: format!(
                         "env key `{k}` collides with the reserved \
@@ -3367,7 +3371,7 @@ fn validate_plan_integration_merge_verifiers(
         }
         if env_byte_total > VERIFIER_ENV_MAX_TOTAL_BYTES {
             return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule:               "env_too_large",
+                rule: "env_too_large",
                 offending_verifier: entry.name.clone(),
                 suggestion: format!(
                     "env entries sum to {env_byte_total} bytes; max is \
@@ -3403,33 +3407,37 @@ fn validate_plan_integration_merge_verifiers(
 /// `scheduler::PlanTask::lane_id`.
 fn validate_single_lane_propagation(
     workspace_lane: &Option<String>,
-    tasks:          &[PlanTask],
+    tasks: &[PlanTask],
 ) -> Result<String, LifecycleError> {
     let workspace_lane = match workspace_lane {
-        None => return Err(LifecycleError::PlanSingleLaneInvalid {
-            rule:           "missing_workspace_lane",
-            offending_task: "<workspace>".to_owned(),
-            suggestion:     "Add `[workspace]\\nlane_id = \"<lane>\"` to plan.toml. \
+        None => {
+            return Err(LifecycleError::PlanSingleLaneInvalid {
+                rule: "missing_workspace_lane",
+                offending_task: "<workspace>".to_owned(),
+                suggestion: "Add `[workspace]\\nlane_id = \"<lane>\"` to plan.toml. \
                              V2 requires a single workspace-root lane so the \
                              initiative budget ceiling propagates to every \
                              session in the initiative."
-                .to_owned(),
-        }),
-        Some(s) if s.is_empty() => return Err(LifecycleError::PlanSingleLaneInvalid {
-            rule:           "empty_workspace_lane",
-            offending_task: "<workspace>".to_owned(),
-            suggestion:     "Set `[workspace] lane_id` to a non-empty lane \
+                    .to_owned(),
+            })
+        }
+        Some(s) if s.is_empty() => {
+            return Err(LifecycleError::PlanSingleLaneInvalid {
+                rule: "empty_workspace_lane",
+                offending_task: "<workspace>".to_owned(),
+                suggestion: "Set `[workspace] lane_id` to a non-empty lane \
                              identifier from your policy.toml `[[lanes]]` list."
-                .to_owned(),
-        }),
+                    .to_owned(),
+            })
+        }
         Some(s) => s.clone(),
     };
 
     if let Some(offender) = tasks.iter().find(|t| !t.lane_id.is_empty()) {
         return Err(LifecycleError::PlanSingleLaneInvalid {
-            rule:           "single_lane_propagation",
+            rule: "single_lane_propagation",
             offending_task: offender.task_id.clone(),
-            suggestion:     "Remove `lane_id` from `[[tasks]]` blocks. V2 declares \
+            suggestion: "Remove `lane_id` from `[[tasks]]` blocks. V2 declares \
                              the lane once at `[workspace] lane_id` and \
                              propagates it to every sub-task — per-task \
                              overrides defeat the shared-budget ceiling."
@@ -3492,7 +3500,7 @@ fn validate_single_lane_propagation(
 /// test fixtures' "skip the policy plumbing" ergonomics.
 fn validate_workspace_lane_in_policy(
     workspace_lane: &str,
-    policy_lanes:   &[raxis_policy::LaneEntry],
+    policy_lanes: &[raxis_policy::LaneEntry],
 ) -> Result<(), LifecycleError> {
     if policy_lanes.is_empty() {
         return Ok(());
@@ -3505,7 +3513,9 @@ fn validate_workspace_lane_in_policy(
     // operator policy and never exceed tens of entries.
     let mut declared = String::with_capacity(128);
     for (i, lane) in policy_lanes.iter().enumerate() {
-        if i > 0 { declared.push_str(", "); }
+        if i > 0 {
+            declared.push_str(", ");
+        }
         declared.push('"');
         declared.push_str(&lane.lane_id);
         declared.push('"');
@@ -3513,7 +3523,7 @@ fn validate_workspace_lane_in_policy(
     Err(LifecycleError::PlanLaneNotInPolicy {
         workspace_lane: workspace_lane.to_owned(),
         declared_lanes: declared,
-        suggestion:     "Either (a) change the plan's `[workspace] lane_id` \
+        suggestion: "Either (a) change the plan's `[workspace] lane_id` \
                          to one of the declared `[[lanes]] lane_id` values, \
                          or (b) advance the policy epoch with a new \
                          `[[lanes]]` entry whose `lane_id` matches the plan \
@@ -3553,16 +3563,13 @@ fn validate_workspace_lane_in_policy(
 ///
 /// Runs before `BEGIN TRANSACTION` so a malformed plan never allocates
 /// a row.
-fn validate_sparse_orchestrator_exclusion(
-    tasks: &[PlanTask],
-) -> Result<(), LifecycleError> {
+fn validate_sparse_orchestrator_exclusion(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     for task in tasks {
         if task.session_agent_type == SessionAgentType::Orchestrator {
             return Err(LifecycleError::PlanCloneStrategyInvalid {
-                rule:           "orchestrator_task_not_permitted",
+                rule: "orchestrator_task_not_permitted",
                 offending_task: task.task_id.clone(),
-                suggestion:
-                    "Remove the `session_agent_type = \"Orchestrator\"` line from \
+                suggestion: "Remove the `session_agent_type = \"Orchestrator\"` line from \
                      this `[[tasks]]` block. V2 auto-creates exactly one \
                      Orchestrator session per initiative from the kernel-bundled \
                      `raxis-orchestrator-core` image; operators only declare \
@@ -3579,10 +3586,9 @@ fn validate_sparse_orchestrator_exclusion(
             // structural rule is loosened or a new agent type is added
             // without re-evaluating this constraint.
             return Err(LifecycleError::PlanCloneStrategyInvalid {
-                rule:           "sparse_orchestrator_exclusion",
+                rule: "sparse_orchestrator_exclusion",
                 offending_task: task.task_id.clone(),
-                suggestion:
-                    "The Orchestrator runs `git merge` in its workspace; \
+                suggestion: "The Orchestrator runs `git merge` in its workspace; \
                      git's 3-way tree traversal cannot complete safely \
                      against a sparse-checkout-trimmed working tree. \
                      Use `clone_strategy = \"full\"` or `\"blobless\"` for \
@@ -3662,7 +3668,10 @@ fn validate_cross_cutting_artifacts(
                 reason: "contains_slash",
             });
         }
-        if entry.chars().any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}')) {
+        if entry
+            .chars()
+            .any(|c| matches!(c, '*' | '?' | '[' | ']' | '{' | '}'))
+        {
             return Err(LifecycleError::CrossCuttingArtifactInvalidSyntax {
                 entry: raw.clone(),
                 reason: "glob_character",
@@ -3735,9 +3744,9 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     for pt in tasks {
         if !seen.insert(pt.task_id.as_str()) {
             return Err(LifecycleError::PlanDagInvalid {
-                rule:           "duplicate_task_id",
+                rule: "duplicate_task_id",
                 offending_task: pt.task_id.clone(),
-                suggestion:     format!(
+                suggestion: format!(
                     "Two `[[tasks]]` blocks declare task_id = {:?}. \
                      Pick a unique identifier for each task.",
                     pt.task_id,
@@ -3753,9 +3762,9 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     for pt in tasks {
         if pt.predecessors.iter().any(|d| d == &pt.task_id) {
             return Err(LifecycleError::PlanDagInvalid {
-                rule:           "self_loop",
+                rule: "self_loop",
                 offending_task: pt.task_id.clone(),
-                suggestion:     format!(
+                suggestion: format!(
                     "Task {:?} lists itself in `predecessors`. \
                      A task cannot depend on itself; remove that entry.",
                     pt.task_id,
@@ -3773,9 +3782,9 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
         for dep in &pt.predecessors {
             if !task_index.contains_key(dep.as_str()) {
                 return Err(LifecycleError::PlanDagInvalid {
-                    rule:           "dangling_dependency",
+                    rule: "dangling_dependency",
                     offending_task: pt.task_id.clone(),
-                    suggestion:     format!(
+                    suggestion: format!(
                         "Task {:?} declares `predecessors = [..., {:?}, ...]`, \
                          but no `[[tasks]]` block defines a task with that id. \
                          Either add the missing task or fix the typo in \
@@ -3799,9 +3808,15 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
     // based DFS over its predecessors; encountering a Gray node means
     // the current path closes a cycle.
     #[derive(Copy, Clone, PartialEq, Eq)]
-    enum Color { White, Gray, Black }
-    let mut color: HashMap<&str, Color> =
-        tasks.iter().map(|pt| (pt.task_id.as_str(), Color::White)).collect();
+    enum Color {
+        White,
+        Gray,
+        Black,
+    }
+    let mut color: HashMap<&str, Color> = tasks
+        .iter()
+        .map(|pt| (pt.task_id.as_str(), Color::White))
+        .collect();
 
     // Each DFS frame remembers the task and the next predecessor index
     // to inspect, so we can resume after recursing without using the
@@ -3831,9 +3846,9 @@ fn validate_plan_dag(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
                         // closes the cycle, which is the most
                         // actionable arrow for the operator to follow.
                         return Err(LifecycleError::PlanDagInvalid {
-                            rule:           "cyclic_dependency",
+                            rule: "cyclic_dependency",
                             offending_task: node_id.to_owned(),
-                            suggestion:     format!(
+                            suggestion: format!(
                                 "Task {:?} has a cyclic dependency through {:?}. \
                                  Break the cycle by removing one of the edges \
                                  along the chain.",
@@ -3910,7 +3925,7 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
             if let Some(reason) = path_allowlist_entry_violation(entry) {
                 return Err(LifecycleError::PathAllowlistInvalidSyntax {
                     task_id: pt.task_id.clone(),
-                    entry:   entry.clone(),
+                    entry: entry.clone(),
                     reason,
                 });
             }
@@ -3966,8 +3981,8 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
 /// once" — the canonical blast-radius property INV-ENV-01
 /// exists to prevent.
 fn validate_task_environment_consistency(
-    tasks:                  &[PlanTask],
-    policy_environments:    &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
+    tasks: &[PlanTask],
+    policy_environments: &std::collections::HashMap<String, raxis_policy::EnvironmentConfig>,
     policy_permitted_creds: &[raxis_policy::PermittedCredentialConfig],
 ) -> Result<(), LifecycleError> {
     if policy_environments.is_empty() {
@@ -3992,7 +4007,8 @@ fn validate_task_environment_consistency(
         }
         if envs.len() >= 2 {
             let labels: Vec<&str> = envs.iter().copied().collect();
-            let sources_rendered = sources.iter()
+            let sources_rendered = sources
+                .iter()
                 .map(|(label, src)| format!("{src}→{label}"))
                 .collect::<Vec<_>>()
                 .join(", ");
@@ -4005,8 +4021,8 @@ fn validate_task_environment_consistency(
                      task into separate DAG-connected tasks (one per \
                      environment) and let the kernel mediate the artifact \
                      handoff per §11.5.",
-                    task    = pt.task_id,
-                    envs    = labels.join(", "),
+                    task = pt.task_id,
+                    envs = labels.join(", "),
                     sources = sources_rendered,
                 ),
             });
@@ -4022,8 +4038,8 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
         for decl in &pt.credentials {
             if matches!(decl.proxy, ProxyDecl::Unknown) {
                 return Err(LifecycleError::PlanTaskCredentialsInvalid {
-                    rule:                 "unknown_proxy_type",
-                    offending_task:       pt.task_id.clone(),
+                    rule: "unknown_proxy_type",
+                    offending_task: pt.task_id.clone(),
                     offending_credential: decl.name.as_str().to_owned(),
                     suggestion: format!(
                         "task `{}` declares credential `{}` with a \
@@ -4079,8 +4095,8 @@ fn validate_task_credentials(tasks: &[PlanTask]) -> Result<(), LifecycleError> {
 /// `image_not_registered` so a half-rolled-out registry doesn't
 /// silently fall through.
 fn validate_task_vm_images(
-    tasks:                  &mut [PlanTask],
-    vm_images:              &[raxis_policy::VmImageConfig],
+    tasks: &mut [PlanTask],
+    vm_images: &[raxis_policy::VmImageConfig],
     default_executor_image: Option<&raxis_policy::DefaultExecutorImageConfig>,
 ) -> Result<(), LifecycleError> {
     use crate::initiatives::lifecycle::SessionAgentType;
@@ -4090,8 +4106,8 @@ fn validate_task_vm_images(
             SessionAgentType::Reviewer => {
                 if !pt.vm_image.is_empty() {
                     return Err(LifecycleError::PlanTaskVmImageInvalid {
-                        rule:            "reviewer_image_not_allowed",
-                        offending_task:  pt.task_id.clone(),
+                        rule: "reviewer_image_not_allowed",
+                        offending_task: pt.task_id.clone(),
                         offending_image: pt.vm_image.clone(),
                         suggestion: format!(
                             "task `{}` is `session_agent_type = \"Reviewer\"` and \
@@ -4119,15 +4135,13 @@ fn validate_task_vm_images(
                     }
                     continue;
                 }
-                let entry = vm_images
-                    .iter()
-                    .find(|img| img.name == pt.vm_image);
+                let entry = vm_images.iter().find(|img| img.name == pt.vm_image);
                 let entry = match entry {
                     Some(e) => e,
                     None => {
                         return Err(LifecycleError::PlanTaskVmImageInvalid {
-                            rule:            "image_not_registered",
-                            offending_task:  pt.task_id.clone(),
+                            rule: "image_not_registered",
+                            offending_task: pt.task_id.clone(),
                             offending_image: pt.vm_image.clone(),
                             suggestion: format!(
                                 "task `{}` declares `vm_image = {:?}`, \
@@ -4144,8 +4158,8 @@ fn validate_task_vm_images(
                 };
                 if !entry.permits_role("Executor") {
                     return Err(LifecycleError::PlanTaskVmImageInvalid {
-                        rule:            "role_restriction_mismatch",
-                        offending_task:  pt.task_id.clone(),
+                        rule: "role_restriction_mismatch",
+                        offending_task: pt.task_id.clone(),
                         offending_image: pt.vm_image.clone(),
                         suggestion: format!(
                             "task `{}` declares `vm_image = {:?}`, but \
@@ -4189,25 +4203,24 @@ fn proxy_type_label_for_storage(
     use raxis_plan_credentials::ProxyDecl;
     Ok(match decl {
         ProxyDecl::Postgres { .. } => "postgres",
-        ProxyDecl::Http { .. }     => "http",
-        ProxyDecl::K8s { .. }      => "k8s",
-        ProxyDecl::Smtp { .. }     => "smtp",
-        ProxyDecl::Redis { .. }    => "redis",
-        ProxyDecl::Aws { .. }      => "aws",
-        ProxyDecl::Gcp { .. }      => "gcp",
-        ProxyDecl::Azure { .. }    => "azure",
-        ProxyDecl::Mysql { .. }    => "mysql",
-        ProxyDecl::Mssql { .. }    => "mssql",
-        ProxyDecl::Mongodb { .. }  => "mongodb",
-        ProxyDecl::Unknown         => {
-            return Err(LifecycleError::Store(
-                raxis_store::StoreError::Invariant(
-                    "ProxyDecl::Unknown reached the persistence \
+        ProxyDecl::Http { .. } => "http",
+        ProxyDecl::K8s { .. } => "k8s",
+        ProxyDecl::Smtp { .. } => "smtp",
+        ProxyDecl::Redis { .. } => "redis",
+        ProxyDecl::Aws { .. } => "aws",
+        ProxyDecl::Gcp { .. } => "gcp",
+        ProxyDecl::Azure { .. } => "azure",
+        ProxyDecl::Mysql { .. } => "mysql",
+        ProxyDecl::Mssql { .. } => "mssql",
+        ProxyDecl::Mongodb { .. } => "mongodb",
+        ProxyDecl::Unknown => {
+            return Err(LifecycleError::Store(raxis_store::StoreError::Invariant(
+                "ProxyDecl::Unknown reached the persistence \
                      layer; validate_task_credentials must reject \
                      it shift-left before approve_plan opens its \
-                     transaction".to_owned(),
-                ),
-            ));
+                     transaction"
+                    .to_owned(),
+            )));
         }
     })
 }
@@ -4240,8 +4253,8 @@ fn proxy_type_label_for_storage(
 /// test at the bottom of this file additionally exercises the
 /// (insert → re-read → re-deserialise) loop end to end.
 fn insert_task_credential_proxies_in_tx(
-    tx:          &rusqlite::Transaction<'_>,
-    task_id:     &str,
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
     credentials: &[raxis_plan_credentials::TaskCredentialDecl],
 ) -> Result<(), LifecycleError> {
     let now = unix_now_secs();
@@ -4259,17 +4272,14 @@ fn insert_task_credential_proxies_in_tx(
 
     for decl in credentials {
         let proxy_type = proxy_type_label_for_storage(&decl.proxy)?;
-        let proxy_json = serde_json::to_string(&decl.proxy)
-            .map_err(|e| {
-                LifecycleError::Store(raxis_store::StoreError::Invariant(
-                    format!(
-                        "task `{task_id}` credential `{cred}`: \
+        let proxy_json = serde_json::to_string(&decl.proxy).map_err(|e| {
+            LifecycleError::Store(raxis_store::StoreError::Invariant(format!(
+                "task `{task_id}` credential `{cred}`: \
                          serde_json failed to serialise \
                          ProxyDecl: {e}",
-                        cred = decl.name.as_str(),
-                    ),
-                ))
-            })?;
+                cred = decl.name.as_str(),
+            )))
+        })?;
 
         stmt.execute(rusqlite::params![
             task_id,
@@ -4330,9 +4340,9 @@ fn insert_task_credential_proxies_in_tx(
 /// `subtask_activations_round_trip_after_approve_plan` test in this
 /// file exercises the full insert → read loop.
 fn insert_subtask_activation_in_tx(
-    tx:                 &rusqlite::Transaction<'_>,
-    task_id:            &str,
-    initiative_id:      &str,
+    tx: &rusqlite::Transaction<'_>,
+    task_id: &str,
+    initiative_id: &str,
     session_agent_type: SessionAgentType,
 ) -> Result<(), LifecycleError> {
     // Orchestrator tasks deliberately get no row (Step 5 §"Only
@@ -4383,7 +4393,7 @@ fn insert_subtask_activation_in_tx(
 /// manager separately calls `CredentialBackend::resolve` to fetch
 /// the bytes for each `decl.name` at bind time.
 pub fn read_task_credential_proxies_in_tx(
-    tx:      &rusqlite::Connection,
+    tx: &rusqlite::Connection,
     task_id: &str,
 ) -> Result<Vec<raxis_plan_credentials::TaskCredentialDecl>, LifecycleError> {
     use raxis_credentials::CredentialName;
@@ -4399,8 +4409,8 @@ pub fn read_task_credential_proxies_in_tx(
     let rows = stmt
         .query_map([task_id], |row| {
             let credential_name: String = row.get(0)?;
-            let mount_as:        String = row.get(1)?;
-            let proxy_json:      String = row.get(2)?;
+            let mount_as: String = row.get(1)?;
+            let proxy_json: String = row.get(2)?;
             Ok((credential_name, mount_as, proxy_json))
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -4414,14 +4424,12 @@ pub fn read_task_credential_proxies_in_tx(
         // the proxy silently no-op-ing.
         let proxy: raxis_plan_credentials::ProxyDecl =
             serde_json::from_str(&proxy_json).map_err(|e| {
-                LifecycleError::Store(raxis_store::StoreError::Invariant(
-                    format!(
-                        "task `{task_id}` credential `{credential_name}`: \
+                LifecycleError::Store(raxis_store::StoreError::Invariant(format!(
+                    "task `{task_id}` credential `{credential_name}`: \
                          serde_json failed to re-deserialise \
                          ProxyDecl from `task_credential_proxies. \
                          proxy_json` (schema drift?): {e}",
-                    ),
-                ))
+                )))
             })?;
 
         out.push(raxis_plan_credentials::TaskCredentialDecl {
@@ -4508,11 +4516,13 @@ fn string_array(entry: &toml::Value, field: &str) -> Vec<String> {
 /// intent legible: a typo'd `max_crash_retries = "three"` is a
 /// `PlanInvalid` at sign time, not a silent fallback to `3`.
 fn parse_optional_u32_field(
-    entry:   &toml::Value,
-    field:   &str,
+    entry: &toml::Value,
+    field: &str,
     task_id: &str,
 ) -> Result<Option<u32>, LifecycleError> {
-    let Some(value) = entry.get(field) else { return Ok(None); };
+    let Some(value) = entry.get(field) else {
+        return Ok(None);
+    };
     let Some(int_value) = value.as_integer() else {
         return Err(LifecycleError::PlanInvalid {
             reason: format!(
@@ -4621,8 +4631,14 @@ description = "do thing"
         let toml = "[[tasks]]\ntask_id = \"t1\"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("description"), "error must name the missing field; got: {msg}");
-        assert!(msg.contains("t1"), "error must name the offending task; got: {msg}");
+        assert!(
+            msg.contains("description"),
+            "error must name the missing field; got: {msg}"
+        );
+        assert!(
+            msg.contains("t1"),
+            "error must name the offending task; got: {msg}"
+        );
     }
 
     #[test]
@@ -4632,7 +4648,10 @@ description = "do thing"
         let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = \"   \"\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("empty"), "error must call out emptiness; got: {msg}");
+        assert!(
+            msg.contains("empty"),
+            "error must call out emptiness; got: {msg}"
+        );
     }
 
     #[test]
@@ -4642,7 +4661,10 @@ description = "do thing"
         let toml = "[[tasks]]\ntask_id = \"t1\"\ndescription = 42\n";
         let err = parse_plan_tasks(toml).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("string"), "error must mention TOML type; got: {msg}");
+        assert!(
+            msg.contains("string"),
+            "error must mention TOML type; got: {msg}"
+        );
     }
 
     // ── §2.5.8 path-scope field defaults — locked-down ────────────────────
@@ -4662,13 +4684,19 @@ description = "do thing"
         description = "exercise lockdown defaults"
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert!(tasks[0].path_allowlist.is_empty(),
-                "default allowlist must deny everything");
-        assert!(!tasks[0].path_export_to_successors,
-                "default export must be off (zero blast radius)");
+        assert!(
+            tasks[0].path_allowlist.is_empty(),
+            "default allowlist must deny everything"
+        );
+        assert!(
+            !tasks[0].path_export_to_successors,
+            "default export must be off (zero blast radius)"
+        );
         assert!(tasks[0].path_export_globs.is_empty());
-        assert!(!tasks[0].path_scope_override,
-                "default override must be off (no bypass)");
+        assert!(
+            !tasks[0].path_scope_override,
+            "default override must be off (no bypass)"
+        );
     }
 
     #[test]
@@ -4683,8 +4711,7 @@ description = "do thing"
         path_allowlist = ["src/", "tests/", "README.md"]
         "#;
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].path_allowlist,
-                   vec!["src/", "tests/", "README.md"]);
+        assert_eq!(tasks[0].path_allowlist, vec!["src/", "tests/", "README.md"]);
     }
 
     #[test]
@@ -4738,27 +4765,27 @@ description = "do thing"
     // strings.
     fn make_task(task_id: &str, allow: &[&str]) -> PlanTask {
         PlanTask {
-            task_id:                   task_id.to_owned(),
-            name:                      task_id.to_owned(),
-            lane_id:                   "default".to_owned(),
-            predecessors:              vec![],
-            path_allowlist:            allow.iter().map(|s| (*s).to_owned()).collect(),
+            task_id: task_id.to_owned(),
+            name: task_id.to_owned(),
+            lane_id: "default".to_owned(),
+            predecessors: vec![],
+            path_allowlist: allow.iter().map(|s| (*s).to_owned()).collect(),
             path_export_to_successors: false,
-            path_export_globs:         vec![],
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Blobless,
-            session_agent_type:        SessionAgentType::Executor,
-            credentials:               vec![],
-            vm_image:                  String::new(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: vec![],
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Blobless,
+            session_agent_type: SessionAgentType::Executor,
+            credentials: vec![],
+            vm_image: String::new(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
@@ -4766,10 +4793,16 @@ description = "do thing"
         let tasks = vec![make_task(task_id, entries)];
         let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
         match err {
-            LifecycleError::PathAllowlistInvalidSyntax { task_id: tid, entry: _, reason } => {
+            LifecycleError::PathAllowlistInvalidSyntax {
+                task_id: tid,
+                entry: _,
+                reason,
+            } => {
                 assert_eq!(tid, task_id);
-                assert_eq!(reason, expected_reason,
-                           "expected reason {expected_reason} but got {reason}");
+                assert_eq!(
+                    reason, expected_reason,
+                    "expected reason {expected_reason} but got {reason}"
+                );
             }
             other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
         }
@@ -4872,11 +4905,13 @@ description = "do thing"
         let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
         match err {
             LifecycleError::PathAllowlistInvalidSyntax {
-                task_id, entry, reason,
+                task_id,
+                entry,
+                reason,
             } => {
                 assert_eq!(task_id, "t2");
-                assert_eq!(entry,   "/etc/secrets/");
-                assert_eq!(reason,  "absolute_path");
+                assert_eq!(entry, "/etc/secrets/");
+                assert_eq!(reason, "absolute_path");
             }
             other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
         }
@@ -4891,15 +4926,15 @@ description = "do thing"
         let tasks = vec![make_task(
             "t",
             &[
-                "src/**",          // glob_character_in_path  ← reported
-                "/etc/secrets/",   // absolute_path           ← shadowed
-                "../escape/",      // path_escape             ← shadowed
+                "src/**",        // glob_character_in_path  ← reported
+                "/etc/secrets/", // absolute_path           ← shadowed
+                "../escape/",    // path_escape             ← shadowed
             ],
         )];
         let err = validate_path_allowlist_v2_format(&tasks).unwrap_err();
         match err {
             LifecycleError::PathAllowlistInvalidSyntax { entry, reason, .. } => {
-                assert_eq!(entry,  "src/**");
+                assert_eq!(entry, "src/**");
                 assert_eq!(reason, "glob_character_in_path");
             }
             other => panic!("expected PathAllowlistInvalidSyntax, got {other:?}"),
@@ -4918,46 +4953,56 @@ description = "do thing"
 
     fn dag_task(id: &str, deps: &[&str]) -> PlanTask {
         PlanTask {
-            task_id:                   id.to_owned(),
-            name:                      id.to_owned(),
-            lane_id:                   "default".to_owned(),
-            predecessors:              deps.iter().map(|s| (*s).to_owned()).collect(),
-            path_allowlist:            vec![],
+            task_id: id.to_owned(),
+            name: id.to_owned(),
+            lane_id: "default".to_owned(),
+            predecessors: deps.iter().map(|s| (*s).to_owned()).collect(),
+            path_allowlist: vec![],
             path_export_to_successors: false,
-            path_export_globs:         vec![],
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Blobless,
-            session_agent_type:        SessionAgentType::Executor,
-            credentials:               vec![],
-            vm_image:                  String::new(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: vec![],
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Blobless,
+            session_agent_type: SessionAgentType::Executor,
+            credentials: vec![],
+            vm_image: String::new(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
     fn assert_dag_invalid(
-        plan:                  Vec<PlanTask>,
-        expected_rule:         &'static str,
-        expected_offender:     &str,
+        plan: Vec<PlanTask>,
+        expected_rule: &'static str,
+        expected_offender: &str,
         suggestion_must_match: &str,
     ) {
         let err = validate_plan_dag(&plan).unwrap_err();
         match err {
-            LifecycleError::PlanDagInvalid { rule, offending_task, suggestion } => {
-                assert_eq!(rule, expected_rule,
-                           "expected rule {expected_rule}, got {rule}");
-                assert_eq!(offending_task, expected_offender,
-                           "expected offender {expected_offender}, got {offending_task}");
-                assert!(suggestion.contains(suggestion_must_match),
-                        "suggestion missing required fragment {suggestion_must_match:?}: \
-                         {suggestion:?}");
+            LifecycleError::PlanDagInvalid {
+                rule,
+                offending_task,
+                suggestion,
+            } => {
+                assert_eq!(
+                    rule, expected_rule,
+                    "expected rule {expected_rule}, got {rule}"
+                );
+                assert_eq!(
+                    offending_task, expected_offender,
+                    "expected offender {expected_offender}, got {offending_task}"
+                );
+                assert!(
+                    suggestion.contains(suggestion_must_match),
+                    "suggestion missing required fragment {suggestion_must_match:?}: \
+                         {suggestion:?}"
+                );
             }
             other => panic!("expected PlanDagInvalid({expected_rule}), got {other:?}"),
         }
@@ -5019,25 +5064,23 @@ description = "do thing"
         // `t2` references a missing predecessor. The diagnostic must
         // point at `t2` (the task that DECLARED the bad reference),
         // not at the missing `phantom`.
-        let plan = vec![
-            dag_task("t1", &[]),
-            dag_task("t2", &["phantom"]),
-        ];
+        let plan = vec![dag_task("t1", &[]), dag_task("t2", &["phantom"])];
         assert_dag_invalid(plan, "dangling_dependency", "t2", "phantom");
     }
 
     #[test]
     fn validate_plan_dag_rejects_two_node_cycle() {
-        let plan = vec![
-            dag_task("t1", &["t2"]),
-            dag_task("t2", &["t1"]),
-        ];
+        let plan = vec![dag_task("t1", &["t2"]), dag_task("t2", &["t1"])];
         let err = validate_plan_dag(&plan).unwrap_err();
         match err {
-            LifecycleError::PlanDagInvalid { rule, suggestion, .. } => {
+            LifecycleError::PlanDagInvalid {
+                rule, suggestion, ..
+            } => {
                 assert_eq!(rule, "cyclic_dependency");
-                assert!(suggestion.contains("Break the cycle"),
-                        "suggestion must include the canonical fix phrase: {suggestion:?}");
+                assert!(
+                    suggestion.contains("Break the cycle"),
+                    "suggestion must include the canonical fix phrase: {suggestion:?}"
+                );
             }
             other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
         }
@@ -5054,10 +5097,16 @@ description = "do thing"
         ];
         let err = validate_plan_dag(&plan).unwrap_err();
         match err {
-            LifecycleError::PlanDagInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanDagInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "cyclic_dependency");
-                assert!(["t1", "t2", "t3"].contains(&offending_task.as_str()),
-                        "offending task must be on the cycle: got {offending_task}");
+                assert!(
+                    ["t1", "t2", "t3"].contains(&offending_task.as_str()),
+                    "offending task must be on the cycle: got {offending_task}"
+                );
             }
             other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
         }
@@ -5070,7 +5119,7 @@ description = "do thing"
         // the self-loop to a specific task instance.
         let plan = vec![
             dag_task("dup", &[]),
-            dag_task("dup", &["dup"]),  // would also be a self_loop
+            dag_task("dup", &["dup"]), // would also be a self_loop
         ];
         assert_dag_invalid(plan, "duplicate_task_id", "dup", "Pick a unique");
     }
@@ -5079,9 +5128,7 @@ description = "do thing"
     fn validate_plan_dag_rule_priority_self_loop_before_dangling() {
         // Both rules fire on the same task; `self_loop` is the more
         // specific (and more common typo), so it wins.
-        let plan = vec![
-            dag_task("a", &["a", "missing"]),
-        ];
+        let plan = vec![dag_task("a", &["a", "missing"])];
         assert_dag_invalid(plan, "self_loop", "a", "cannot depend on itself");
     }
 
@@ -5090,10 +5137,7 @@ description = "do thing"
         // A plan with both a dangling ref and a cycle must report the
         // dangling ref first — it is the structural rule, evaluable
         // without DFS, and operators usually fix it before re-validating.
-        let plan = vec![
-            dag_task("t1", &["t2"]),
-            dag_task("t2", &["t1", "ghost"]),
-        ];
+        let plan = vec![dag_task("t1", &["t2"]), dag_task("t2", &["t1", "ghost"])];
         assert_dag_invalid(plan, "dangling_dependency", "t2", "ghost");
     }
 
@@ -5147,22 +5191,30 @@ description = "do thing"
         let tasks = vec![lane_task("t1", "")];
         let err = validate_single_lane_propagation(&None, &tasks).unwrap_err();
         match err {
-            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanSingleLaneInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "missing_workspace_lane");
                 assert_eq!(offending_task, "<workspace>");
             }
-            other => panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}"),
+            other => {
+                panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}")
+            }
         }
     }
 
     #[test]
     fn validate_single_lane_empty_workspace_lane_is_rejected() {
         let tasks = vec![lane_task("t1", "")];
-        let err = validate_single_lane_propagation(
-            &Some(String::new()), &tasks,
-        ).unwrap_err();
+        let err = validate_single_lane_propagation(&Some(String::new()), &tasks).unwrap_err();
         match err {
-            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanSingleLaneInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "empty_workspace_lane");
                 assert_eq!(offending_task, "<workspace>");
             }
@@ -5174,32 +5226,28 @@ description = "do thing"
     fn validate_single_lane_per_task_override_is_rejected() {
         // Workspace lane is fine; one task declares its own override.
         // The validator names that task in `offending_task`.
-        let tasks = vec![
-            lane_task("t1", ""),
-            lane_task("t2", "rogue-lane"),
-        ];
-        let err = validate_single_lane_propagation(
-            &Some("default".into()), &tasks,
-        ).unwrap_err();
+        let tasks = vec![lane_task("t1", ""), lane_task("t2", "rogue-lane")];
+        let err = validate_single_lane_propagation(&Some("default".into()), &tasks).unwrap_err();
         match err {
-            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, suggestion } => {
+            LifecycleError::PlanSingleLaneInvalid {
+                rule,
+                offending_task,
+                suggestion,
+            } => {
                 assert_eq!(rule, "single_lane_propagation");
                 assert_eq!(offending_task, "t2");
                 assert!(suggestion.contains("Remove `lane_id`"));
             }
-            other => panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}"),
+            other => {
+                panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}")
+            }
         }
     }
 
     #[test]
     fn validate_single_lane_happy_path_returns_workspace_lane() {
-        let tasks = vec![
-            lane_task("t1", ""),
-            lane_task("t2", ""),
-        ];
-        let lane = validate_single_lane_propagation(
-            &Some("feature-work".into()), &tasks,
-        ).unwrap();
+        let tasks = vec![lane_task("t1", ""), lane_task("t2", "")];
+        let lane = validate_single_lane_propagation(&Some("feature-work".into()), &tasks).unwrap();
         assert_eq!(lane, "feature-work");
     }
 
@@ -5234,8 +5282,10 @@ task_id = "t1"
 description = "test"
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].max_crash_retries, None,
-            "omitted max_crash_retries must yield None, not Some(0)");
+        assert_eq!(
+            tasks[0].max_crash_retries, None,
+            "omitted max_crash_retries must yield None, not Some(0)"
+        );
         assert_eq!(tasks[0].max_review_rejections, None);
     }
 
@@ -5252,8 +5302,11 @@ max_crash_retries = 0
 max_review_rejections = 0
 "#;
         let tasks = parse_plan_tasks(toml).unwrap();
-        assert_eq!(tasks[0].max_crash_retries, Some(0),
-            "explicit zero must round-trip as Some(0), not collapse to None");
+        assert_eq!(
+            tasks[0].max_crash_retries,
+            Some(0),
+            "explicit zero must round-trip as Some(0), not collapse to None"
+        );
         assert_eq!(tasks[0].max_review_rejections, Some(0));
     }
 
@@ -5268,10 +5321,14 @@ max_crash_retries = -1
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
             LifecycleError::PlanInvalid { reason } => {
-                assert!(reason.contains("max_crash_retries"),
-                    "rejection must name the offending field: {reason}");
-                assert!(reason.contains("non-negative"),
-                    "rejection must explain why -1 is invalid: {reason}");
+                assert!(
+                    reason.contains("max_crash_retries"),
+                    "rejection must name the offending field: {reason}"
+                );
+                assert!(
+                    reason.contains("non-negative"),
+                    "rejection must explain why -1 is invalid: {reason}"
+                );
             }
             other => panic!("expected PlanInvalid for negative value, got {other:?}"),
         }
@@ -5288,10 +5345,14 @@ max_review_rejections = "three"
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
             LifecycleError::PlanInvalid { reason } => {
-                assert!(reason.contains("max_review_rejections"),
-                    "rejection must name the offending field: {reason}");
-                assert!(reason.contains("integer"),
-                    "rejection must hint that the field must be integer: {reason}");
+                assert!(
+                    reason.contains("max_review_rejections"),
+                    "rejection must name the offending field: {reason}"
+                );
+                assert!(
+                    reason.contains("integer"),
+                    "rejection must hint that the field must be integer: {reason}"
+                );
             }
             other => panic!("expected PlanInvalid for string value, got {other:?}"),
         }
@@ -5324,10 +5385,14 @@ max_review_rejections = "three"
         let err = parse_plan_tasks(&toml).unwrap_err();
         match err {
             LifecycleError::PlanInvalid { reason } => {
-                assert!(reason.contains("max_crash_retries"),
-                    "rejection must name the offending field: {reason}");
-                assert!(reason.contains("u32::MAX"),
-                    "rejection must hint at the overflow: {reason}");
+                assert!(
+                    reason.contains("max_crash_retries"),
+                    "rejection must name the offending field: {reason}"
+                );
+                assert!(
+                    reason.contains("u32::MAX"),
+                    "rejection must hint at the overflow: {reason}"
+                );
             }
             other => panic!("expected PlanInvalid for overflow, got {other:?}"),
         }
@@ -5376,13 +5441,19 @@ clone_strategy = "treeless"
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
-            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, suggestion } => {
+            LifecycleError::PlanCloneStrategyInvalid {
+                rule,
+                offending_task,
+                suggestion,
+            } => {
                 assert_eq!(rule, "unknown_clone_strategy");
                 assert_eq!(offending_task, "t1");
                 assert!(suggestion.contains("treeless"));
                 assert!(suggestion.contains("full, blobless, sparse"));
             }
-            other => panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}"),
+            other => {
+                panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}")
+            }
         }
     }
 
@@ -5433,7 +5504,11 @@ session_agent_type = "Coordinator"
 "#;
         let err = parse_plan_tasks(toml).unwrap_err();
         match err {
-            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanCloneStrategyInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "unknown_agent_type");
                 assert_eq!(offending_task, "t1");
             }
@@ -5478,15 +5553,23 @@ session_agent_type = "Coordinator"
         // V2 auto-creates the Orchestrator; declaring one in `[[tasks]]`
         // is structurally wrong regardless of clone strategy.
         let tasks = vec![task_with_strategy_and_agent(
-            "rogue", CloneStrategy::Full, SessionAgentType::Orchestrator,
+            "rogue",
+            CloneStrategy::Full,
+            SessionAgentType::Orchestrator,
         )];
         let err = validate_sparse_orchestrator_exclusion(&tasks).unwrap_err();
         match err {
-            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanCloneStrategyInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "orchestrator_task_not_permitted");
                 assert_eq!(offending_task, "rogue");
             }
-            other => panic!("expected PlanCloneStrategyInvalid(orchestrator_task_not_permitted), got {other:?}"),
+            other => panic!(
+                "expected PlanCloneStrategyInvalid(orchestrator_task_not_permitted), got {other:?}"
+            ),
         }
     }
 
@@ -5495,7 +5578,9 @@ session_agent_type = "Coordinator"
         // Every strategy is valid for plan-declared Executor tasks.
         for strategy in CloneStrategy::ALL {
             let tasks = vec![task_with_strategy_and_agent(
-                "t", strategy, SessionAgentType::Executor,
+                "t",
+                strategy,
+                SessionAgentType::Executor,
             )];
             validate_sparse_orchestrator_exclusion(&tasks)
                 .unwrap_or_else(|e| panic!("strategy {strategy:?} on Executor must pass: {e:?}"));
@@ -5506,7 +5591,9 @@ session_agent_type = "Coordinator"
     fn validate_sparse_orchestrator_accepts_reviewer_with_any_strategy() {
         for strategy in CloneStrategy::ALL {
             let tasks = vec![task_with_strategy_and_agent(
-                "rev", strategy, SessionAgentType::Reviewer,
+                "rev",
+                strategy,
+                SessionAgentType::Reviewer,
             )];
             validate_sparse_orchestrator_exclusion(&tasks)
                 .unwrap_or_else(|e| panic!("strategy {strategy:?} on Reviewer must pass: {e:?}"));
@@ -5518,13 +5605,19 @@ session_agent_type = "Coordinator"
         // Multiple offenders → only the first task_id is reported.
         let tasks = vec![
             task_with_strategy_and_agent(
-                "executor-ok", CloneStrategy::Full, SessionAgentType::Executor,
+                "executor-ok",
+                CloneStrategy::Full,
+                SessionAgentType::Executor,
             ),
             task_with_strategy_and_agent(
-                "first-rogue", CloneStrategy::Full, SessionAgentType::Orchestrator,
+                "first-rogue",
+                CloneStrategy::Full,
+                SessionAgentType::Orchestrator,
             ),
             task_with_strategy_and_agent(
-                "second-rogue", CloneStrategy::Sparse, SessionAgentType::Orchestrator,
+                "second-rogue",
+                CloneStrategy::Sparse,
+                SessionAgentType::Orchestrator,
             ),
         ];
         let err = validate_sparse_orchestrator_exclusion(&tasks).unwrap_err();
@@ -5559,9 +5652,14 @@ session_agent_type = "Orchestrator"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
-            LifecycleError::PlanCloneStrategyInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanCloneStrategyInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "orchestrator_task_not_permitted");
                 assert_eq!(offending_task, "rogue-orch");
             }
@@ -5593,12 +5691,15 @@ clone_strategy = "treeless"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
             LifecycleError::PlanCloneStrategyInvalid { rule, .. } => {
                 assert_eq!(rule, "unknown_clone_strategy");
             }
-            other => panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}"),
+            other => {
+                panic!("expected PlanCloneStrategyInvalid(unknown_clone_strategy), got {other:?}")
+            }
         }
         assert_eq!(read_initiative_state(&store, &init_id), "Draft");
     }
@@ -5639,21 +5740,29 @@ predecessors       = ["run-tests"]
 
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Each task's typed `clone_strategy` and `session_agent_type`
         // are persisted in the in-memory PlanRegistry; this is what
         // `Step 24` and `Step 24b` will read at provisioning time.
-        let by_id: std::collections::HashMap<String, _> = registry
-            .tasks_in_initiative(&init_id)
-            .into_iter()
-            .collect();
+        let by_id: std::collections::HashMap<String, _> =
+            registry.tasks_in_initiative(&init_id).into_iter().collect();
         assert_eq!(by_id["build-svc"].clone_strategy, CloneStrategy::Blobless);
-        assert_eq!(by_id["build-svc"].session_agent_type, SessionAgentType::Executor);
+        assert_eq!(
+            by_id["build-svc"].session_agent_type,
+            SessionAgentType::Executor
+        );
         assert_eq!(by_id["run-tests"].clone_strategy, CloneStrategy::Sparse);
-        assert_eq!(by_id["run-tests"].session_agent_type, SessionAgentType::Executor);
+        assert_eq!(
+            by_id["run-tests"].session_agent_type,
+            SessionAgentType::Executor
+        );
         assert_eq!(by_id["review-it"].clone_strategy, CloneStrategy::Full);
-        assert_eq!(by_id["review-it"].session_agent_type, SessionAgentType::Reviewer);
+        assert_eq!(
+            by_id["review-it"].session_agent_type,
+            SessionAgentType::Reviewer
+        );
     }
 
     /// V2 §Step 5 — `approve_plan` MUST insert one
@@ -5693,18 +5802,21 @@ predecessors       = ["run-tests"]
 
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
         // Three Executor / Reviewer tasks → three activation rows.
         let conn = store.lock_sync();
-        let activation_count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {SUBTASK_ACTIVATIONS}
+        let activation_count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {SUBTASK_ACTIVATIONS}
                  WHERE initiative_id = ?1"
-            ),
-            rusqlite::params![&init_id],
-            |r| r.get(0),
-        ).unwrap();
+                ),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
             activation_count, 3,
             "expected one subtask_activations row per Executor/Reviewer task",
@@ -5713,41 +5825,59 @@ predecessors       = ["run-tests"]
         // Every row must start in PendingActivation with all three
         // post-activation timestamps NULL (the cross-column CHECK
         // requires this).
-        let mut stmt = conn.prepare(
-            &format!(
+        let mut stmt = conn
+            .prepare(&format!(
                 "SELECT task_id, activation_state, session_id,
                         activated_at, terminated_at,
                         crash_retry_count, review_reject_count
                  FROM {SUBTASK_ACTIVATIONS}
                  WHERE initiative_id = ?1
                  ORDER BY task_id"
-            )
-        ).unwrap();
-        let rows: Vec<(String, String, Option<String>, Option<i64>, Option<i64>, i64, i64)> = stmt
-            .query_map(rusqlite::params![&init_id], |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?,
-            )))
+            ))
+            .unwrap();
+        let rows: Vec<(
+            String,
+            String,
+            Option<String>,
+            Option<i64>,
+            Option<i64>,
+            i64,
+            i64,
+        )> = stmt
+            .query_map(rusqlite::params![&init_id], |r| {
+                Ok((
+                    r.get(0)?,
+                    r.get(1)?,
+                    r.get(2)?,
+                    r.get(3)?,
+                    r.get(4)?,
+                    r.get(5)?,
+                    r.get(6)?,
+                ))
+            })
             .unwrap()
             .map(Result::unwrap)
             .collect();
         assert_eq!(rows.len(), 3);
-        for (task_id, state, session_id, activated_at, terminated_at, crash, review)
-            in &rows
-        {
+        for (task_id, state, session_id, activated_at, terminated_at, crash, review) in &rows {
             assert_eq!(
                 state, "PendingActivation",
                 "{task_id}: expected PendingActivation, got {state}",
             );
-            assert!(session_id.is_none(),
-                "{task_id}: PendingActivation rows must have NULL session_id");
-            assert!(activated_at.is_none(),
-                "{task_id}: PendingActivation rows must have NULL activated_at");
-            assert!(terminated_at.is_none(),
-                "{task_id}: PendingActivation rows must have NULL terminated_at");
-            assert_eq!(*crash, 0,
-                "{task_id}: crash_retry_count must start at 0");
-            assert_eq!(*review, 0,
-                "{task_id}: review_reject_count must start at 0");
+            assert!(
+                session_id.is_none(),
+                "{task_id}: PendingActivation rows must have NULL session_id"
+            );
+            assert!(
+                activated_at.is_none(),
+                "{task_id}: PendingActivation rows must have NULL activated_at"
+            );
+            assert!(
+                terminated_at.is_none(),
+                "{task_id}: PendingActivation rows must have NULL terminated_at"
+            );
+            assert_eq!(*crash, 0, "{task_id}: crash_retry_count must start at 0");
+            assert_eq!(*review, 0, "{task_id}: review_reject_count must start at 0");
         }
 
         // The Orchestrator's auto-spawned session row (Step 6) must
@@ -5831,7 +5961,8 @@ predecessors = ["test-it"]
 
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect("plan with valid task-credentials must be accepted");
+        )
+        .expect("plan with valid task-credentials must be accepted");
 
         // The plan landed in Executing — task-credential validation
         // did not block the happy path.
@@ -5909,7 +6040,8 @@ predecessors = ["build-svc"]
 
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect("approve_plan must succeed");
+        )
+        .expect("approve_plan must succeed");
 
         // Read back through the session-spawn-side helper. We use a
         // short-lived read-only connection on the same store; the
@@ -5917,20 +6049,25 @@ predecessors = ["build-svc"]
         // not) so we can call it without opening a write tx here.
         let conn = store.lock_sync();
 
-        let build_svc = read_task_credential_proxies_in_tx(&conn, "build-svc")
-            .expect("read build-svc creds");
+        let build_svc =
+            read_task_credential_proxies_in_tx(&conn, "build-svc").expect("read build-svc creds");
         assert_eq!(build_svc.len(), 1, "build-svc has exactly 1 credential");
         assert_eq!(build_svc[0].name.as_str(), "pg-staging");
         assert_eq!(build_svc[0].mount_as, "DATABASE_URL");
         match &build_svc[0].proxy {
-            ProxyDecl::Postgres { restrictions: PostgresRestrictions { allow_only_select, .. } } => {
+            ProxyDecl::Postgres {
+                restrictions:
+                    PostgresRestrictions {
+                        allow_only_select, ..
+                    },
+            } => {
                 assert!(*allow_only_select, "postgres restrictions round-trip");
             }
             other => panic!("expected ProxyDecl::Postgres, got {other:?}"),
         }
 
-        let deploy = read_task_credential_proxies_in_tx(&conn, "deploy")
-            .expect("read deploy creds");
+        let deploy =
+            read_task_credential_proxies_in_tx(&conn, "deploy").expect("read deploy creds");
         assert_eq!(deploy.len(), 2, "deploy has exactly 2 credentials");
         // Order-stable: created_at_unix_secs ASC + credential_name ASC.
         // Both rows are inserted at the same wall-clock second by the
@@ -5938,7 +6075,12 @@ predecessors = ["build-svc"]
         // `k8s-staging` < `stripe-api-key`.
         assert_eq!(deploy[0].name.as_str(), "k8s-staging");
         match &deploy[0].proxy {
-            ProxyDecl::K8s { restrictions: HttpRestrictions { allowed_methods, .. } } => {
+            ProxyDecl::K8s {
+                restrictions:
+                    HttpRestrictions {
+                        allowed_methods, ..
+                    },
+            } => {
                 assert_eq!(allowed_methods, &vec!["GET".to_owned()]);
             }
             other => panic!("expected ProxyDecl::K8s, got {other:?}"),
@@ -5950,7 +6092,11 @@ predecessors = ["build-svc"]
             ProxyDecl::Http {
                 auth_mode: HttpAuthMode::Bearer,
                 upstream_url,
-                restrictions: HttpRestrictions { allowed_methods, allowed_path_prefixes },
+                restrictions:
+                    HttpRestrictions {
+                        allowed_methods,
+                        allowed_path_prefixes,
+                    },
             } => {
                 assert_eq!(upstream_url, "https://api.stripe.com/v1");
                 assert_eq!(allowed_methods, &vec!["GET".to_owned(), "POST".to_owned()]);
@@ -5970,9 +6116,8 @@ predecessors = ["build-svc"]
         // here as a hard test failure rather than slipping through
         // review.
         let columns: Vec<String> = conn
-            .prepare(&format!(
-                "SELECT name FROM pragma_table_info(?1)"
-            )).unwrap()
+            .prepare(&format!("SELECT name FROM pragma_table_info(?1)"))
+            .unwrap()
             .query_map([TASK_CREDENTIAL_PROXIES], |r| r.get::<_, String>(0))
             .unwrap()
             .map(Result::unwrap)
@@ -6048,19 +6193,22 @@ description = "send the email"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("unknown proxy_type must be rejected");
+        )
+        .expect_err("unknown proxy_type must be rejected");
 
         match err {
             LifecycleError::PlanTaskCredentialsInvalid {
-                rule, offending_task, offending_credential, suggestion,
+                rule,
+                offending_task,
+                offending_credential,
+                suggestion,
             } => {
                 assert_eq!(rule, "unknown_proxy_type");
                 assert_eq!(offending_task, "send-email");
                 assert_eq!(offending_credential, "future-uri");
                 for proxy_type in &[
-                    "postgres", "http", "k8s", "smtp", "redis",
-                    "aws", "gcp", "azure",
-                    "mysql", "mssql", "mongodb",
+                    "postgres", "http", "k8s", "smtp", "redis", "aws", "gcp", "azure", "mysql",
+                    "mssql", "mongodb",
                 ] {
                     assert!(
                         suggestion.contains(proxy_type),
@@ -6107,7 +6255,8 @@ description = "do thing"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("malformed credential block must be rejected");
+        )
+        .expect_err("malformed credential block must be rejected");
 
         match err {
             LifecycleError::PlanInvalid { reason } => {
@@ -6134,45 +6283,43 @@ description = "do thing"
 
     fn task_for_pre_merge_test(task_id: &str) -> PlanTask {
         PlanTask {
-            task_id:                   task_id.to_owned(),
-            name:                      task_id.to_owned(),
-            lane_id:                   String::new(),
-            predecessors:              Vec::new(),
-            path_allowlist:            Vec::new(),
+            task_id: task_id.to_owned(),
+            name: task_id.to_owned(),
+            lane_id: String::new(),
+            predecessors: Vec::new(),
+            path_allowlist: Vec::new(),
             path_export_to_successors: false,
-            path_export_globs:         Vec::new(),
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Full,
-            session_agent_type:        SessionAgentType::Executor,
-            credentials:               Vec::new(),
-            vm_image:                  String::new(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: Vec::new(),
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Full,
+            session_agent_type: SessionAgentType::Executor,
+            credentials: Vec::new(),
+            vm_image: String::new(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
-    fn pre_merge_verifier_template(
-        name: &str,
-    ) -> raxis_policy::IntegrationMergeVerifierEntry {
+    fn pre_merge_verifier_template(name: &str) -> raxis_policy::IntegrationMergeVerifierEntry {
         raxis_policy::IntegrationMergeVerifierEntry {
-            name:                      name.to_owned(),
-            image:                     "raxis-verifier-rust-starter".to_owned(),
-            command:                   "cargo test --quiet".to_owned(),
-            timeout:                   "10m".to_owned(),
-            on_failure:                raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge,
-            applies_to:                raxis_policy::IntegrationMergeVerifierAppliesTo::All,
-            task_set:                  Vec::new(),
-            artifact:                  None,
-            artifact_max_bytes:        None,
-            env:                       std::collections::HashMap::new(),
-            allowed_egress:            Vec::new(),
+            name: name.to_owned(),
+            image: "raxis-verifier-rust-starter".to_owned(),
+            command: "cargo test --quiet".to_owned(),
+            timeout: "10m".to_owned(),
+            on_failure: raxis_policy::IntegrationMergeVerifierOnFailure::BlockMerge,
+            applies_to: raxis_policy::IntegrationMergeVerifierAppliesTo::All,
+            task_set: Vec::new(),
+            artifact: None,
+            artifact_max_bytes: None,
+            env: std::collections::HashMap::new(),
+            allowed_egress: Vec::new(),
             required_for_environments: None,
         }
     }
@@ -6189,11 +6336,14 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_invalid_name() {
         let mut e = pre_merge_verifier_template("BadName");
         e.name = "BadName".to_owned();
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).expect_err("uppercase name must be rejected");
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .expect_err("uppercase name must be rejected");
         match err {
-            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, offending_verifier, .. } => {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule,
+                offending_verifier,
+                ..
+            } => {
                 assert_eq!(rule, "name_invalid");
                 assert_eq!(offending_verifier, "BadName");
             }
@@ -6207,9 +6357,9 @@ description = "do thing"
             pre_merge_verifier_template("twin"),
             pre_merge_verifier_template("twin"),
         ];
-        let err = validate_plan_integration_merge_verifiers(
-            &entries, &[task_for_pre_merge_test("t1")],
-        ).expect_err("duplicate names must be rejected");
+        let err =
+            validate_plan_integration_merge_verifiers(&entries, &[task_for_pre_merge_test("t1")])
+                .expect_err("duplicate names must be rejected");
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "name_collision_within_plan");
@@ -6222,9 +6372,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_empty_image() {
         let mut e = pre_merge_verifier_template("e2e");
         e.image = "".to_owned();
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "image_required");
@@ -6237,9 +6386,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_empty_command() {
         let mut e = pre_merge_verifier_template("e2e");
         e.command = "   ".to_owned();
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "command_required");
@@ -6252,9 +6400,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_unparseable_timeout() {
         let mut e = pre_merge_verifier_template("e2e");
         e.timeout = "fortnight".to_owned();
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "timeout_invalid");
@@ -6267,9 +6414,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_too_short_timeout() {
         let mut e = pre_merge_verifier_template("e2e");
         e.timeout = "1s".to_owned();
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "timeout_too_short");
@@ -6282,9 +6428,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_task_set_empty() {
         let mut e = pre_merge_verifier_template("e2e");
         e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet;
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "task_set_empty");
@@ -6297,12 +6442,13 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_task_set_unknown_task() {
         let mut e = pre_merge_verifier_template("e2e");
         e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::TaskSet;
-        e.task_set   = vec!["not-declared".to_owned()];
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        e.task_set = vec!["not-declared".to_owned()];
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
-            LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, suggestion, .. } => {
+            LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule, suggestion, ..
+            } => {
                 assert_eq!(rule, "task_set_unknown_task");
                 assert!(suggestion.contains("not-declared"));
             }
@@ -6314,10 +6460,9 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_task_set_inconsistent() {
         let mut e = pre_merge_verifier_template("e2e");
         e.applies_to = raxis_policy::IntegrationMergeVerifierAppliesTo::All;
-        e.task_set   = vec!["t1".to_owned()];
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        e.task_set = vec!["t1".to_owned()];
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "task_set_inconsistent");
@@ -6330,9 +6475,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_artifact_path_not_under_raxis() {
         let mut e = pre_merge_verifier_template("e2e");
         e.artifact = Some("/etc/passwd".to_owned());
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "artifact_path_invalid");
@@ -6348,9 +6492,8 @@ description = "do thing"
             "/raxis/{}",
             "x".repeat(raxis_policy::VERIFIER_ARTIFACT_MAX_PATH_CHARS),
         ));
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "artifact_path_too_long");
@@ -6365,9 +6508,8 @@ description = "do thing"
         for i in 0..(raxis_policy::VERIFIER_ENV_MAX_ENTRIES + 1) {
             e.env.insert(format!("k{i}"), "v".to_owned());
         }
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "env_too_many_entries");
@@ -6383,9 +6525,8 @@ description = "do thing"
             "BIG".to_owned(),
             "x".repeat(raxis_policy::VERIFIER_ENV_MAX_TOTAL_BYTES),
         );
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "env_too_large");
@@ -6398,9 +6539,8 @@ description = "do thing"
     fn validate_plan_pre_merge_verifiers_rejects_reserved_env_key() {
         let mut e = pre_merge_verifier_template("e2e");
         e.env.insert("RAXIS_INJECTED".to_owned(), "1".to_owned());
-        let err = validate_plan_integration_merge_verifiers(
-            &[e], &[task_for_pre_merge_test("t1")],
-        ).unwrap_err();
+        let err = validate_plan_integration_merge_verifiers(&[e], &[task_for_pre_merge_test("t1")])
+            .unwrap_err();
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid { rule, .. } => {
                 assert_eq!(rule, "env_reserved_key");
@@ -6519,11 +6659,14 @@ task_set    = ["implement_auth", "implement_session"]
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("plan referencing undeclared task in task_set must be rejected");
+        )
+        .expect_err("plan referencing undeclared task in task_set must be rejected");
 
         match err {
             LifecycleError::PlanIntegrationMergeVerifierInvalid {
-                rule, offending_verifier, suggestion,
+                rule,
+                offending_verifier,
+                suggestion,
             } => {
                 assert_eq!(rule, "task_set_unknown_task");
                 assert_eq!(offending_verifier, "auth_integration");
@@ -6564,7 +6707,8 @@ applies_to  = "all"
         let registry = PlanRegistry::new();
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect("a structurally valid plan with a pre-merge verifier must approve");
+        )
+        .expect("a structurally valid plan with a pre-merge verifier must approve");
     }
 
     #[test]
@@ -6613,27 +6757,23 @@ target_ref = "refs/heads/raxis/feature"
     fn parse_plan_workspace_target_ref_rejects_empty_string() {
         let toml = "[workspace]\nlane_id = \"default\"\ntarget_ref = \"\"\n";
         let err = parse_plan_workspace_target_ref(toml).unwrap_err();
-        assert!(matches!(err, LifecycleError::PlanInvalid { .. }),
-            "empty target_ref must surface PlanInvalid, got {err:?}");
+        assert!(
+            matches!(err, LifecycleError::PlanInvalid { .. }),
+            "empty target_ref must surface PlanInvalid, got {err:?}"
+        );
     }
 
     #[test]
     fn resolve_target_ref_falls_back_to_policy_default_when_plan_omits() {
-        let resolved = resolve_target_ref(
-            None,
-            "refs/heads/main",
-            false,
-        ).unwrap();
+        let resolved = resolve_target_ref(None, "refs/heads/main", false).unwrap();
         assert_eq!(resolved, "refs/heads/main");
     }
 
     #[test]
     fn resolve_target_ref_plan_override_wins_when_unlocked() {
-        let resolved = resolve_target_ref(
-            Some("refs/heads/raxis/feature-x"),
-            "refs/heads/main",
-            false,
-        ).unwrap();
+        let resolved =
+            resolve_target_ref(Some("refs/heads/raxis/feature-x"), "refs/heads/main", false)
+                .unwrap();
         assert_eq!(resolved, "refs/heads/raxis/feature-x");
     }
 
@@ -6642,24 +6782,21 @@ target_ref = "refs/heads/raxis/feature"
         // INV-PLAN-POLICY-PRECEDENCE-01: equality check is strict-byte;
         // a plan that explicitly declares the same value as the policy
         // default round-trips cleanly even when the field is locked.
-        let resolved = resolve_target_ref(
-            Some("refs/heads/main"),
-            "refs/heads/main",
-            true,
-        ).unwrap();
+        let resolved =
+            resolve_target_ref(Some("refs/heads/main"), "refs/heads/main", true).unwrap();
         assert_eq!(resolved, "refs/heads/main");
     }
 
     #[test]
     fn resolve_target_ref_locked_with_diverging_plan_value_rejects() {
-        let err = resolve_target_ref(
-            Some("refs/heads/raxis/feature-x"),
-            "refs/heads/main",
-            true,
-        ).unwrap_err();
+        let err = resolve_target_ref(Some("refs/heads/raxis/feature-x"), "refs/heads/main", true)
+            .unwrap_err();
         match err {
             LifecycleError::PlanTargetRefInvalid {
-                rule, plan_value, policy_value, ..
+                rule,
+                plan_value,
+                policy_value,
+                ..
             } => {
                 assert_eq!(rule, "locked");
                 assert_eq!(plan_value.as_deref(), Some("refs/heads/raxis/feature-x"));
@@ -6672,11 +6809,7 @@ target_ref = "refs/heads/raxis/feature"
     #[test]
     fn resolve_target_ref_rejects_invalid_plan_format() {
         // Non-`refs/heads/` prefix → "invalid" rule, NOT "locked".
-        let err = resolve_target_ref(
-            Some("refs/tags/v1.0"),
-            "refs/heads/main",
-            false,
-        ).unwrap_err();
+        let err = resolve_target_ref(Some("refs/tags/v1.0"), "refs/heads/main", false).unwrap_err();
         match err {
             LifecycleError::PlanTargetRefInvalid {
                 rule, plan_value, ..
@@ -6694,16 +6827,15 @@ target_ref = "refs/heads/raxis/feature"
         // would violate the locked-field check, the format check
         // wins so the operator's diagnostic surfaces the actionable
         // syntax problem first.
-        let err = resolve_target_ref(
-            Some("refs/heads/has space"),
-            "refs/heads/main",
-            true,
-        ).unwrap_err();
+        let err =
+            resolve_target_ref(Some("refs/heads/has space"), "refs/heads/main", true).unwrap_err();
         match err {
             LifecycleError::PlanTargetRefInvalid { rule, .. } => {
-                assert_eq!(rule, "invalid",
+                assert_eq!(
+                    rule, "invalid",
                     "format-invalid input must surface rule=\"invalid\" \
-                     even when the locked-field check would also fire");
+                     even when the locked-field check would also fire"
+                );
             }
             other => panic!("expected PlanTargetRefInvalid, got {other:?}"),
         }
@@ -6714,29 +6846,40 @@ target_ref = "refs/heads/raxis/feature"
         // Direct unit test of the helper — pins the (entry → reason)
         // table that `policy-plan-authority.md
         // §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` calls out.
-        assert_eq!(path_allowlist_entry_violation(""),
-                   Some("empty_entry"));
-        assert_eq!(path_allowlist_entry_violation("src/**"),
-                   Some("glob_character_in_path"));
-        assert_eq!(path_allowlist_entry_violation("/abs/"),
-                   Some("absolute_path"));
-        assert_eq!(path_allowlist_entry_violation("../up/"),
-                   Some("path_escape"));
-        assert_eq!(path_allowlist_entry_violation("!neg"),
-                   Some("negation_marker"));
+        assert_eq!(path_allowlist_entry_violation(""), Some("empty_entry"));
+        assert_eq!(
+            path_allowlist_entry_violation("src/**"),
+            Some("glob_character_in_path")
+        );
+        assert_eq!(
+            path_allowlist_entry_violation("/abs/"),
+            Some("absolute_path")
+        );
+        assert_eq!(
+            path_allowlist_entry_violation("../up/"),
+            Some("path_escape")
+        );
+        assert_eq!(
+            path_allowlist_entry_violation("!neg"),
+            Some("negation_marker")
+        );
         assert_eq!(path_allowlist_entry_violation("src/api/handler.rs"), None);
-        assert_eq!(path_allowlist_entry_violation("src/"),               None);
+        assert_eq!(path_allowlist_entry_violation("src/"), None);
     }
 
     #[test]
     fn lifecycle_error_initiative_not_found_display() {
-        let e = LifecycleError::InitiativeNotFound { initiative_id: "i-1".into() };
+        let e = LifecycleError::InitiativeNotFound {
+            initiative_id: "i-1".into(),
+        };
         assert!(e.to_string().contains("i-1"));
     }
 
     #[test]
     fn lifecycle_error_task_not_failed_display() {
-        let e = LifecycleError::TaskNotFailed { current_state: "Running".into() };
+        let e = LifecycleError::TaskNotFailed {
+            current_state: "Running".into(),
+        };
         assert!(e.to_string().contains("Running"));
     }
 
@@ -6750,8 +6893,8 @@ target_ref = "refs/heads/raxis/feature"
     // ───────────────────────────────────────────────────────────────────
 
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_test_support::FakeAuditSink;
     use raxis_store::Store;
+    use raxis_test_support::FakeAuditSink;
 
     /// Deterministic Ed25519 keypair for fixtures (no entropy needed).
     fn fixture_keypair() -> (SigningKey, [u8; 32]) {
@@ -6770,19 +6913,17 @@ target_ref = "refs/heads/raxis/feature"
         // around the table name). The bytes-substring check is good
         // enough — TOML test fixtures here are hand-authored and
         // never embed the literal sequence inside a string value.
-        let with_workspace = if plan_toml.contains("[workspace]")
-            || plan_toml.contains("[ workspace ]")
-        {
-            plan_toml.to_owned()
-        } else {
-            format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
-        };
+        let with_workspace =
+            if plan_toml.contains("[workspace]") || plan_toml.contains("[ workspace ]") {
+                plan_toml.to_owned()
+            } else {
+                format!("[workspace]\nlane_id = \"default\"\n\n{plan_toml}")
+            };
         // V2 `v2_extended_gaps.md §1.1` — `[plan.initiative]
         // description` is REQUIRED. If the test author didn't add
         // one, splice in a deterministic placeholder (and the
         // surrounding `[plan.initiative]` table when missing).
-        let with_initiative_description =
-            ensure_plan_initiative_description(&with_workspace);
+        let with_initiative_description = ensure_plan_initiative_description(&with_workspace);
         // V2 `v2_extended_gaps.md §1.1` — every `[[tasks]]` block
         // must declare a non-empty `description`. Inject a
         // deterministic placeholder per task that lacks one so
@@ -6858,9 +6999,7 @@ target_ref = "refs/heads/raxis/feature"
                 lines.next();
             }
             if !has_description {
-                out.push_str(
-                    "description = \"test fixture: exercise the planner harness\"\n",
-                );
+                out.push_str("description = \"test fixture: exercise the planner harness\"\n");
             }
             for buffered in peek_buf {
                 out.push_str(&buffered);
@@ -6898,11 +7037,7 @@ target_ref = "refs/heads/raxis/feature"
     /// (no IPC), returning everything the test needs to call
     /// `approve_plan`. Auto-prepends `[workspace] lane_id = "default"`
     /// unless the plan already has a `[workspace]` table.
-    fn seed_draft_initiative(
-        store:      &Store,
-        plan_toml:  &str,
-        sk:         &SigningKey,
-    ) -> (String, Vec<u8>) {
+    fn seed_draft_initiative(store: &Store, plan_toml: &str, sk: &SigningKey) -> (String, Vec<u8>) {
         let plan_with_lane = ensure_workspace_lane(plan_toml);
         seed_draft_initiative_raw(store, &plan_with_lane, sk)
     }
@@ -6913,17 +7048,17 @@ target_ref = "refs/heads/raxis/feature"
     /// (`missing_workspace_lane`, `empty_workspace_lane`,
     /// `single_lane_propagation`).
     fn seed_draft_initiative_raw(
-        store:      &Store,
-        plan_toml:  &str,
-        sk:         &SigningKey,
+        store: &Store,
+        plan_toml: &str,
+        sk: &SigningKey,
     ) -> (String, Vec<u8>) {
         let initiative_id = "init-test".to_owned();
-        let plan_bytes    = plan_toml.as_bytes().to_vec();
+        let plan_bytes = plan_toml.as_bytes().to_vec();
         let signing_input = raxis_crypto::plan::plan_signing_input(&plan_bytes);
-        let sig_bytes     = sk.sign(&signing_input).to_bytes().to_vec();
-        let plan_sha      = raxis_crypto::plan::plan_artifact_sha256(&plan_bytes);
-        let pk_bytes      = sk.verifying_key().to_bytes();
-        let now           = unix_now_secs();
+        let sig_bytes = sk.sign(&signing_input).to_bytes().to_vec();
+        let plan_sha = raxis_crypto::plan::plan_artifact_sha256(&plan_bytes);
+        let pk_bytes = sk.verifying_key().to_bytes();
+        let now = unix_now_secs();
 
         let conn = store.lock_sync();
         // initiatives row in Draft. terminal_criteria_json is NOT NULL
@@ -6943,7 +7078,8 @@ target_ref = "refs/heads/raxis/feature"
                 &plan_sha,
                 now,
             ],
-        ).unwrap();
+        )
+        .unwrap();
 
         // signed_plan_artifacts: column set per kernel-store.md §2.5.1 Table 3
         // is exactly (initiative_id, plan_bytes, plan_sig, stored_at).
@@ -6954,7 +7090,8 @@ target_ref = "refs/heads/raxis/feature"
                  VALUES (?1, ?2, ?3, ?4)"
             ),
             rusqlite::params![&initiative_id, &plan_bytes, &sig_bytes, now],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
 
         (initiative_id, pk_bytes.to_vec())
@@ -6967,7 +7104,8 @@ target_ref = "refs/heads/raxis/feature"
             &format!("SELECT COUNT(*) FROM {table} WHERE initiative_id=?1"),
             rusqlite::params![init_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Count plan task rows (i.e. excluding the V2.5 synthetic
@@ -6984,7 +7122,8 @@ target_ref = "refs/heads/raxis/feature"
             ),
             rusqlite::params![init_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     /// Count edges that mention any task in the given initiative.
@@ -6999,7 +7138,8 @@ target_ref = "refs/heads/raxis/feature"
             ),
             rusqlite::params![init_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     fn read_initiative_state(store: &Store, init_id: &str) -> String {
@@ -7008,7 +7148,8 @@ target_ref = "refs/heads/raxis/feature"
             &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
             rusqlite::params![init_id],
             |r| r.get(0),
-        ).unwrap()
+        )
+        .unwrap()
     }
 
     // NOTE on test attribute choice: these tests use `#[test]`, not
@@ -7043,10 +7184,12 @@ target_ref = "refs/heads/raxis/feature"
         let registry = PlanRegistry::new();
         let result = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
         assert_eq!(result.tasks_admitted, 2);
         assert_eq!(
-            registry.len(), 2,
+            registry.len(),
+            2,
             "approve_plan must populate the in-memory plan registry for every task",
         );
 
@@ -7057,11 +7200,13 @@ target_ref = "refs/heads/raxis/feature"
         // this initiative is therefore `plan_tasks + 1 coordinator`.
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 3);
         assert_eq!(
-            count_plan_tasks_for_initiative(&store, &init_id), 2,
+            count_plan_tasks_for_initiative(&store, &init_id),
+            2,
             "two plan tasks (t1, t2) should be admitted, excluding the V2.5 coordinator",
         );
         assert_eq!(
-            count_edges_for_initiative(&store, &init_id), 1,
+            count_edges_for_initiative(&store, &init_id),
+            1,
             "one DAG edge (t1 → t2) should be inserted alongside the task rows",
         );
 
@@ -7070,9 +7215,12 @@ target_ref = "refs/heads/raxis/feature"
         // auto-spawned canonical Orchestrator session per
         // INV-PLANNER-HARNESS-06). Both carry `initiative_id`.
         let events = audit.events();
-        assert_eq!(events.len(), 2,
+        assert_eq!(
+            events.len(),
+            2,
             "V2 admission emits PlanApproved + SessionCreated (orchestrator); got {:?}",
-            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>());
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>()
+        );
         assert_eq!(events[0].kind.as_str(), "PlanApproved");
         assert_eq!(events[0].initiative_id.as_deref(), Some(init_id.as_str()));
         assert_eq!(events[1].kind.as_str(), "SessionCreated");
@@ -7080,14 +7228,17 @@ target_ref = "refs/heads/raxis/feature"
         // The auto-spawned session must surface a canonical Orchestrator
         // agent type on the audit record.
         match &events[1].kind {
-            AuditEventKind::SessionCreated { session_agent_type, .. } => {
+            AuditEventKind::SessionCreated {
+                session_agent_type, ..
+            } => {
                 assert_eq!(session_agent_type.as_deref(), Some("Orchestrator"));
             }
             other => panic!("expected SessionCreated; got {other:?}"),
         }
         // The post-commit `PlanApproved` return must carry the same
         // session_id as the audit emit.
-        let auto_spawn_id = result.orchestrator_session_id
+        let auto_spawn_id = result
+            .orchestrator_session_id
             .as_deref()
             .expect("V2 approve_plan must return orchestrator_session_id");
         match &events[1].kind {
@@ -7109,17 +7260,21 @@ target_ref = "refs/heads/raxis/feature"
         // `workspace_lane` argument), so the propagation invariant
         // applies to all `2 plan + 1 coordinator = 3` rows.
         let conn = store.lock_sync();
-        let lanes: Vec<String> = conn.prepare(
-            &format!("SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"),
-        ).unwrap()
+        let lanes: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"
+            ))
+            .unwrap()
             .query_map(rusqlite::params![&init_id], |r| r.get(0))
             .unwrap()
             .map(Result::unwrap)
             .collect();
         assert_eq!(lanes.len(), 3);
-        assert!(lanes.iter().all(|l| l == "default"),
+        assert!(
+            lanes.iter().all(|l| l == "default"),
             "every task row (plan + coordinator) must carry the workspace-root \
-             lane_id; got {lanes:?}");
+             lane_id; got {lanes:?}"
+        );
     }
 
     // ── V2 §Step 6 / INV-PLANNER-HARNESS-06 — Orchestrator auto-spawn ───
@@ -7142,54 +7297,84 @@ target_ref = "refs/heads/raxis/feature"
             task_id = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let result = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let auto_spawn_id = result.orchestrator_session_id
+        let auto_spawn_id = result
+            .orchestrator_session_id
             .as_deref()
             .expect("approve_plan must surface orchestrator_session_id");
 
         let conn = store.lock_sync();
         let row: (
-            String, String, String,         // session_id, role_id, session_token
-            Option<String>, Option<String>, // session_agent_type, worktree_root
-            Option<String>, Option<i64>,    // base_sha, vsock_cid
-            i64,                            // can_delegate
-        ) = conn.query_row(
-            &format!(
-                "SELECT session_id, role_id, session_token,
+            String,
+            String,
+            String, // session_id, role_id, session_token
+            Option<String>,
+            Option<String>, // session_agent_type, worktree_root
+            Option<String>,
+            Option<i64>, // base_sha, vsock_cid
+            i64,         // can_delegate
+        ) = conn
+            .query_row(
+                &format!(
+                    "SELECT session_id, role_id, session_token,
                         session_agent_type, worktree_root,
                         base_sha, vsock_cid, can_delegate
                  FROM {} WHERE session_id = ?1",
-                Table::Sessions.as_str(),
-            ),
-            rusqlite::params![auto_spawn_id],
-            |r| Ok((
-                r.get(0)?, r.get(1)?, r.get(2)?,
-                r.get(3)?, r.get(4)?,
-                r.get(5)?, r.get(6)?,
-                r.get(7)?,
-            )),
-        ).expect("orchestrator session row must exist after approve_plan");
+                    Table::Sessions.as_str(),
+                ),
+                rusqlite::params![auto_spawn_id],
+                |r| {
+                    Ok((
+                        r.get(0)?,
+                        r.get(1)?,
+                        r.get(2)?,
+                        r.get(3)?,
+                        r.get(4)?,
+                        r.get(5)?,
+                        r.get(6)?,
+                        r.get(7)?,
+                    ))
+                },
+            )
+            .expect("orchestrator session row must exist after approve_plan");
 
-        assert_eq!(row.1, "Planner",
-            "wire-role taxonomy: orchestrator session is roled as Planner");
-        assert_eq!(row.2.len(), 64,
-            "session_token must be 32 CSPRNG bytes hex-encoded");
-        assert_eq!(row.3.as_deref(), Some("Orchestrator"),
-            "session_agent_type must be 'Orchestrator' (V2 dispatch key)");
-        assert!(row.4.is_none(),
-            "worktree_root must be NULL until VM spawn provisions it");
-        assert!(row.5.is_none(),
-            "base_sha must be NULL until VM spawn binds it");
-        assert!(row.6.is_none(),
-            "vsock_cid must be NULL until hypervisor returns it");
-        assert_eq!(row.7, 1,
-            "can_delegate must be 1 for Orchestrator (INV-DELEGATE-01)");
+        assert_eq!(
+            row.1, "Planner",
+            "wire-role taxonomy: orchestrator session is roled as Planner"
+        );
+        assert_eq!(
+            row.2.len(),
+            64,
+            "session_token must be 32 CSPRNG bytes hex-encoded"
+        );
+        assert_eq!(
+            row.3.as_deref(),
+            Some("Orchestrator"),
+            "session_agent_type must be 'Orchestrator' (V2 dispatch key)"
+        );
+        assert!(
+            row.4.is_none(),
+            "worktree_root must be NULL until VM spawn provisions it"
+        );
+        assert!(
+            row.5.is_none(),
+            "base_sha must be NULL until VM spawn binds it"
+        );
+        assert!(
+            row.6.is_none(),
+            "vsock_cid must be NULL until hypervisor returns it"
+        );
+        assert_eq!(
+            row.7, 1,
+            "can_delegate must be 1 for Orchestrator (INV-DELEGATE-01)"
+        );
     }
 
     /// V2_GAPS §C5 — `approve_plan` MUST write the verified plan
@@ -7205,14 +7390,14 @@ target_ref = "refs/heads/raxis/feature"
             task_id = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let tmp = tempfile::tempdir().unwrap();
         let astore = raxis_artifact_store::ArtifactStore::open(tmp.path()).unwrap();
 
-        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig>
-            = std::collections::HashMap::new();
+        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig> =
+            std::collections::HashMap::new();
         let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
         let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
         let default_elastic = raxis_policy::ElasticConfig::default();
@@ -7235,27 +7420,28 @@ target_ref = "refs/heads/raxis/feature"
             &audit,
             &registry,
             Some(&astore),
-        ).unwrap();
+        )
+        .unwrap();
 
         // The plan bytes the test fixture wrote to the SQLite
         // signed_plan_artifacts row are the same bytes
         // approve_plan re-reads, verifies, and persists to the
         // artifact store. We recompute them here.
         let conn = store.lock_sync();
-        let plan_bytes: Vec<u8> = conn.query_row(
-            &format!(
-                "SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
-            ),
-            rusqlite::params![&init_id],
-            |r| r.get(0),
-        ).unwrap();
-        let plan_sig: Vec<u8> = conn.query_row(
-            &format!(
-                "SELECT plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"
-            ),
-            rusqlite::params![&init_id],
-            |r| r.get(0),
-        ).unwrap();
+        let plan_bytes: Vec<u8> = conn
+            .query_row(
+                &format!("SELECT plan_bytes FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let plan_sig: Vec<u8> = conn
+            .query_row(
+                &format!("SELECT plan_sig FROM {SIGNED_PLAN_ARTIFACTS} WHERE initiative_id = ?1"),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         drop(conn);
 
         let key = raxis_artifact_store::ArtifactKey::compute(&plan_bytes);
@@ -7268,19 +7454,19 @@ target_ref = "refs/heads/raxis/feature"
         let read_back = astore
             .read(raxis_artifact_store::Category::Plans, &key)
             .expect("artifact must read back cleanly");
-        assert_eq!(read_back, plan_bytes,
-            "artifact bytes must equal the verified plan bytes");
+        assert_eq!(
+            read_back, plan_bytes,
+            "artifact bytes must equal the verified plan bytes"
+        );
 
         // The companion `<sha256>.sig` must match the verified
         // operator signature byte-for-byte.
-        let sig_path = astore.companion_path(
-            raxis_artifact_store::Category::Plans,
-            &key,
-            "sig",
-        );
+        let sig_path = astore.companion_path(raxis_artifact_store::Category::Plans, &key, "sig");
         let sig_on_disk = std::fs::read(&sig_path).expect("sig companion must exist");
-        assert_eq!(sig_on_disk, plan_sig,
-            "companion .sig artifact must equal the verified signature");
+        assert_eq!(
+            sig_on_disk, plan_sig,
+            "companion .sig artifact must equal the verified signature"
+        );
     }
 
     /// Two independently-approved initiatives MUST receive two distinct
@@ -7298,32 +7484,40 @@ target_ref = "refs/heads/raxis/feature"
         let approve = |store: &Store| -> String {
             let (sk, _) = fixture_keypair();
             let (init, pk_bytes) = seed_draft_initiative(store, plan, &sk);
-            let audit    = FakeAuditSink::new();
+            let audit = FakeAuditSink::new();
             let registry = PlanRegistry::new();
-            let r = approve_plan_for_test(
-                &init, "op", None, &pk_bytes, 1, store, &audit, &registry,
-            ).unwrap();
+            let r =
+                approve_plan_for_test(&init, "op", None, &pk_bytes, 1, store, &audit, &registry)
+                    .unwrap();
             r.orchestrator_session_id.unwrap()
         };
 
         let store_a = Store::open_in_memory().unwrap();
         let store_b = Store::open_in_memory().unwrap();
-        let id_a    = approve(&store_a);
-        let id_b    = approve(&store_b);
-        assert_ne!(id_a, id_b,
-            "every initiative must auto-spawn a distinct orchestrator session");
+        let id_a = approve(&store_a);
+        let id_b = approve(&store_b);
+        assert_ne!(
+            id_a, id_b,
+            "every initiative must auto-spawn a distinct orchestrator session"
+        );
 
         let token = |store: &Store, sid: &str| -> String {
             let conn = store.lock_sync();
             conn.query_row(
-                &format!("SELECT session_token FROM {} WHERE session_id = ?1",
-                         Table::Sessions.as_str()),
+                &format!(
+                    "SELECT session_token FROM {} WHERE session_id = ?1",
+                    Table::Sessions.as_str()
+                ),
                 rusqlite::params![sid],
                 |r| r.get(0),
-            ).unwrap()
+            )
+            .unwrap()
         };
-        assert_ne!(token(&store_a, &id_a), token(&store_b, &id_b),
-            "each orchestrator session token must come from a fresh CSPRNG draw");
+        assert_ne!(
+            token(&store_a, &id_a),
+            token(&store_b, &id_b),
+            "each orchestrator session token must come from a fresh CSPRNG draw"
+        );
     }
 
     /// INV-STORE-02 atomicity: when the plan validator rejects mid-flight
@@ -7344,28 +7538,35 @@ target_ref = "refs/heads/raxis/feature"
             predecessors = ["t1"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
-        assert!(matches!(err, LifecycleError::PlanDagInvalid { .. }),
-            "cyclic plan must yield PlanDagInvalid; got {err:?}");
+        )
+        .unwrap_err();
+        assert!(
+            matches!(err, LifecycleError::PlanDagInvalid { .. }),
+            "cyclic plan must yield PlanDagInvalid; got {err:?}"
+        );
 
         // No orchestrator session row must be present for the failed
         // initiative — the entire transaction rolled back.
         let conn = store.lock_sync();
-        let count: i64 = conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {} WHERE session_agent_type = 'Orchestrator'",
-                Table::Sessions.as_str(),
-            ),
-            [],
-            |r| r.get(0),
-        ).unwrap();
-        assert_eq!(count, 0,
-            "rollback contract: no orchestrator session row may survive a failed approve_plan");
+        let count: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {} WHERE session_agent_type = 'Orchestrator'",
+                    Table::Sessions.as_str(),
+                ),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 0,
+            "rollback contract: no orchestrator session row may survive a failed approve_plan"
+        );
     }
 
     // ── V2 §Step 28 — approve_plan-level rejection of malformed plans ───
@@ -7401,13 +7602,20 @@ target_ref = "refs/heads/raxis/feature"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
-            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanSingleLaneInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "missing_workspace_lane");
                 assert_eq!(offending_task, "<workspace>");
             }
-            other => panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}"),
+            other => {
+                panic!("expected PlanSingleLaneInvalid(missing_workspace_lane), got {other:?}")
+            }
         }
 
         // Initiative stays Draft; no tasks admitted.
@@ -7438,7 +7646,8 @@ target_ref = "refs/heads/raxis/feature"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
             LifecycleError::PlanSingleLaneInvalid { rule, .. } => {
                 assert_eq!(rule, "empty_workspace_lane");
@@ -7475,13 +7684,20 @@ target_ref = "refs/heads/raxis/feature"
 
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
-            LifecycleError::PlanSingleLaneInvalid { rule, offending_task, .. } => {
+            LifecycleError::PlanSingleLaneInvalid {
+                rule,
+                offending_task,
+                ..
+            } => {
                 assert_eq!(rule, "single_lane_propagation");
                 assert_eq!(offending_task, "t2");
             }
-            other => panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}"),
+            other => {
+                panic!("expected PlanSingleLaneInvalid(single_lane_propagation), got {other:?}")
+            }
         }
         assert_eq!(read_initiative_state(&store, &init_id), "Draft");
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
@@ -7520,12 +7736,15 @@ target_ref = "refs/heads/raxis/feature"
 
         approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
         let conn = store.lock_sync();
-        let lanes: Vec<String> = conn.prepare(
-            &format!("SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"),
-        ).unwrap()
+        let lanes: Vec<String> = conn
+            .prepare(&format!(
+                "SELECT lane_id FROM {TASKS} WHERE initiative_id = ?1"
+            ))
+            .unwrap()
             .query_map(rusqlite::params![&init_id], |r| r.get(0))
             .unwrap()
             .map(Result::unwrap)
@@ -7537,9 +7756,11 @@ target_ref = "refs/heads/raxis/feature"
         // propagation invariant applies to all `3 plan + 1 coordinator = 4`
         // rows.
         assert_eq!(lanes.len(), 4);
-        assert!(lanes.iter().all(|l| l == "feature-work"),
+        assert!(
+            lanes.iter().all(|l| l == "feature-work"),
             "every task row (plan + coordinator) must carry the workspace-root \
-             lane_id verbatim; got {lanes:?}");
+             lane_id verbatim; got {lanes:?}"
+        );
     }
 
     #[test]
@@ -7572,40 +7793,54 @@ target_ref = "refs/heads/raxis/feature"
         let registry = PlanRegistry::new();
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match &err {
-            LifecycleError::PlanDagInvalid { rule, suggestion, .. } => {
-                assert_eq!(*rule, "cyclic_dependency",
-                           "shift-left validator must surface the cycle rule");
-                assert!(!suggestion.is_empty(),
-                        "Step 17 mandates a non-empty remediation suggestion");
+            LifecycleError::PlanDagInvalid {
+                rule, suggestion, ..
+            } => {
+                assert_eq!(
+                    *rule, "cyclic_dependency",
+                    "shift-left validator must surface the cycle rule"
+                );
+                assert!(
+                    !suggestion.is_empty(),
+                    "Step 17 mandates a non-empty remediation suggestion"
+                );
             }
             other => panic!("expected PlanDagInvalid(cyclic_dependency), got {other:?}"),
         }
         // Registry must remain empty too — partial population on a
         // rolled-back tx would let stale glob entries leak into later
         // intent checks. We populate AFTER tx.commit(), so this MUST hold.
-        assert!(registry.is_empty(),
-                "registry must not be populated when the tx rolls back");
+        assert!(
+            registry.is_empty(),
+            "registry must not be populated when the tx rolls back"
+        );
 
         // INV-STORE-02 atomicity: nothing partial.
         assert_eq!(
-            read_initiative_state(&store, &init_id), "Draft",
+            read_initiative_state(&store, &init_id),
+            "Draft",
             "initiative must remain Draft on cycle rejection",
         );
         assert_eq!(
-            count_initiative_rows(&store, "tasks", &init_id), 0,
+            count_initiative_rows(&store, "tasks", &init_id),
+            0,
             "no task rows may be persisted when the tx rolls back",
         );
         assert_eq!(
-            count_edges_for_initiative(&store, &init_id), 0,
+            count_edges_for_initiative(&store, &init_id),
+            0,
             "no edges may be persisted when the tx rolls back",
         );
 
         // Audit-after-commit invariant: a rolled-back operation MUST NOT
         // produce a PlanApproved record.
-        assert!(audit.events().is_empty(),
-                "no audit events may be emitted when the tx rolls back");
+        assert!(
+            audit.events().is_empty(),
+            "no audit events may be emitted when the tx rolls back"
+        );
     }
 
     // ───────────────────────────────────────────────────────────────────
@@ -7630,15 +7865,15 @@ target_ref = "refs/heads/raxis/feature"
     /// `assert_dag_rule_blocks_approve_plan` so the no-state-mutation
     /// invariant is checked the same way every shift-left rejection is.
     fn approve_plan_with_lanes(
-        store:        &Store,
-        init_id:      &str,
-        pk_bytes:     &[u8],
-        audit:        &FakeAuditSink,
-        registry:     &PlanRegistry,
+        store: &Store,
+        init_id: &str,
+        pk_bytes: &[u8],
+        audit: &FakeAuditSink,
+        registry: &PlanRegistry,
         policy_lanes: &[raxis_policy::LaneEntry],
     ) -> Result<PlanApproved, LifecycleError> {
-        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig>
-            = std::collections::HashMap::new();
+        let empty_envs: std::collections::HashMap<String, raxis_policy::EnvironmentConfig> =
+            std::collections::HashMap::new();
         let empty_creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
         let empty_vm_images: Vec<raxis_policy::VmImageConfig> = Vec::new();
         let default_elastic = raxis_policy::ElasticConfig::default();
@@ -7665,10 +7900,10 @@ target_ref = "refs/heads/raxis/feature"
 
     fn lane_entry(lane_id: &str) -> raxis_policy::LaneEntry {
         raxis_policy::LaneEntry {
-            lane_id:              lane_id.to_owned(),
+            lane_id: lane_id.to_owned(),
             max_concurrent_tasks: 4,
-            max_cost_per_epoch:   10_000,
-            priority:             100,
+            max_cost_per_epoch: 10_000,
+            priority: 100,
         }
     }
 
@@ -7692,39 +7927,66 @@ target_ref = "refs/heads/raxis/feature"
         // persisted verbatim (the lane-aware `seed_draft_initiative`
         // would auto-prepend a default workspace block).
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let policy_lanes = vec![lane_entry("default")];
 
         let err = approve_plan_with_lanes(
-            &store, &init_id, &pk_bytes, &audit, &registry, &policy_lanes,
-        ).unwrap_err();
+            &store,
+            &init_id,
+            &pk_bytes,
+            &audit,
+            &registry,
+            &policy_lanes,
+        )
+        .unwrap_err();
         match &err {
             LifecycleError::PlanLaneNotInPolicy {
-                workspace_lane, declared_lanes, suggestion,
+                workspace_lane,
+                declared_lanes,
+                suggestion,
             } => {
-                assert_eq!(workspace_lane, "ghost-lane",
-                    "error must carry the plan's literal workspace lane id");
-                assert!(declared_lanes.contains("\"default\""),
-                    "error must enumerate declared lanes; got: {declared_lanes}");
-                assert!(!suggestion.is_empty(),
-                    "V2 §Step 17 mandates a non-empty remediation suggestion");
+                assert_eq!(
+                    workspace_lane, "ghost-lane",
+                    "error must carry the plan's literal workspace lane id"
+                );
+                assert!(
+                    declared_lanes.contains("\"default\""),
+                    "error must enumerate declared lanes; got: {declared_lanes}"
+                );
+                assert!(
+                    !suggestion.is_empty(),
+                    "V2 §Step 17 mandates a non-empty remediation suggestion"
+                );
             }
             other => panic!("expected PlanLaneNotInPolicy, got {other:?}"),
         }
 
         // Pre-tx rejection — NOTHING may have been mutated.
-        assert_eq!(read_initiative_state(&store, &init_id), "Draft",
-                   "initiative must remain Draft after lane-in-policy rejection");
-        assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0,
-                   "no task rows may be persisted on shift-left rejection");
-        assert_eq!(count_edges_for_initiative(&store, &init_id), 0,
-                   "no DAG edges may be persisted on shift-left rejection");
-        assert!(audit.events().is_empty(),
-                "shift-left rejection must emit no audit events");
-        assert!(registry.is_empty(),
-                "shift-left rejection must not populate the plan registry");
+        assert_eq!(
+            read_initiative_state(&store, &init_id),
+            "Draft",
+            "initiative must remain Draft after lane-in-policy rejection"
+        );
+        assert_eq!(
+            count_initiative_rows(&store, "tasks", &init_id),
+            0,
+            "no task rows may be persisted on shift-left rejection"
+        );
+        assert_eq!(
+            count_edges_for_initiative(&store, &init_id),
+            0,
+            "no DAG edges may be persisted on shift-left rejection"
+        );
+        assert!(
+            audit.events().is_empty(),
+            "shift-left rejection must emit no audit events"
+        );
+        assert!(
+            registry.is_empty(),
+            "shift-left rejection must not populate the plan registry"
+        );
     }
 
     #[test]
@@ -7743,18 +8005,29 @@ target_ref = "refs/heads/raxis/feature"
             task_id = "t1"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let policy_lanes = vec![lane_entry("default"), lane_entry("feature-work")];
 
         let result = approve_plan_with_lanes(
-            &store, &init_id, &pk_bytes, &audit, &registry, &policy_lanes,
-        ).expect("declared workspace lane must admit successfully");
-        assert_eq!(result.tasks_admitted, 1,
-            "the single plan task must be admitted on the happy path");
-        assert_eq!(read_initiative_state(&store, &init_id), "Executing",
-            "initiative must transition Draft → Executing on admission");
+            &store,
+            &init_id,
+            &pk_bytes,
+            &audit,
+            &registry,
+            &policy_lanes,
+        )
+        .expect("declared workspace lane must admit successfully");
+        assert_eq!(
+            result.tasks_admitted, 1,
+            "the single plan task must be admitted on the happy path"
+        );
+        assert_eq!(
+            read_initiative_state(&store, &init_id),
+            "Executing",
+            "initiative must transition Draft → Executing on admission"
+        );
     }
 
     #[test]
@@ -7764,8 +8037,7 @@ target_ref = "refs/heads/raxis/feature"
         // `validate_task_vm_images` /
         // `validate_task_environment_consistency` so existing test
         // fixtures don't have to plumb a full policy bundle.
-        validate_workspace_lane_in_policy("any-lane", &[])
-            .expect("empty registry must be inert");
+        validate_workspace_lane_in_policy("any-lane", &[]).expect("empty registry must be inert");
         validate_workspace_lane_in_policy("", &[])
             .expect("empty registry must be inert even on empty workspace lane");
     }
@@ -7779,30 +8051,40 @@ target_ref = "refs/heads/raxis/feature"
         let store = Store::open_in_memory().unwrap();
         let (sk, _) = fixture_keypair();
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         match err {
             LifecycleError::PlanDagInvalid { rule, .. } => {
-                assert_eq!(rule, expected_rule,
-                           "expected rule {expected_rule}, got {rule}");
+                assert_eq!(
+                    rule, expected_rule,
+                    "expected rule {expected_rule}, got {rule}"
+                );
             }
             other => panic!("expected PlanDagInvalid({expected_rule}), got {other:?}"),
         }
 
         // INV-STORE-02 atomicity: shift-left rejection MUST NOT touch
         // initiatives, tasks, edges, or audit.
-        assert_eq!(read_initiative_state(&store, &init_id), "Draft",
-                   "initiative must remain Draft after shift-left rejection");
+        assert_eq!(
+            read_initiative_state(&store, &init_id),
+            "Draft",
+            "initiative must remain Draft after shift-left rejection"
+        );
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
         assert_eq!(count_edges_for_initiative(&store, &init_id), 0);
-        assert!(audit.events().is_empty(),
-                "shift-left rejection must emit no audit events");
-        assert!(registry.is_empty(),
-                "shift-left rejection must not populate the plan registry");
+        assert!(
+            audit.events().is_empty(),
+            "shift-left rejection must emit no audit events"
+        );
+        assert!(
+            registry.is_empty(),
+            "shift-left rejection must not populate the plan registry"
+        );
     }
 
     #[test]
@@ -7849,12 +8131,15 @@ target_ref = "refs/heads/raxis/feature"
         let (init_id, _correct_pk) = seed_draft_initiative(&store, plan, &sk);
 
         // Hand `approve_plan` a different pubkey — sig will fail to verify.
-        let wrong_pk = SigningKey::from_bytes(&[0x99u8; 32]).verifying_key().to_bytes();
-        let audit    = FakeAuditSink::new();
+        let wrong_pk = SigningKey::from_bytes(&[0x99u8; 32])
+            .verifying_key()
+            .to_bytes();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
         let err = approve_plan_for_test(
             &init_id, "op-test", None, &wrong_pk, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(
             matches!(err, LifecycleError::PlanSignatureInvalid { .. }),
             "expected PlanSignatureInvalid, got {err:?}",
@@ -7863,8 +8148,10 @@ target_ref = "refs/heads/raxis/feature"
         // No state change at all.
         assert_eq!(read_initiative_state(&store, &init_id), "Draft");
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
-        assert!(audit.events().is_empty(),
-                "audit must remain silent when the signature check fails");
+        assert!(
+            audit.events().is_empty(),
+            "audit must remain silent when the signature check fails"
+        );
     }
 
     #[test]
@@ -7882,8 +8169,13 @@ target_ref = "refs/heads/raxis/feature"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan_for_test(&init_id, "op-1", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
-        let second = approve_plan_for_test(&init_id, "op-2", None, &pk_bytes, 1, &store, &audit, &registry);
+        approve_plan_for_test(
+            &init_id, "op-1", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
+        let second = approve_plan_for_test(
+            &init_id, "op-2", None, &pk_bytes, 1, &store, &audit, &registry,
+        );
         assert!(second.is_err(), "second approve must fail (not Draft)");
 
         assert_eq!(read_initiative_state(&store, &init_id), "Executing");
@@ -7894,19 +8186,24 @@ target_ref = "refs/heads/raxis/feature"
         // call's rows untouched.
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 2);
         assert_eq!(
-            count_plan_tasks_for_initiative(&store, &init_id), 1,
+            count_plan_tasks_for_initiative(&store, &init_id),
+            1,
             "one plan task should be admitted from the first call, excluding \
              the V2.5 coordinator",
         );
 
         // Exactly ONE PlanApproved emitted, despite two attempts. The
         // second (failed) call must NOT add an audit row.
-        let approved: Vec<_> = audit.events()
+        let approved: Vec<_> = audit
+            .events()
             .into_iter()
             .filter(|e| e.kind.as_str() == "PlanApproved")
             .collect();
-        assert_eq!(approved.len(), 1,
-                   "PlanApproved must emit exactly once across both attempts");
+        assert_eq!(
+            approved.len(),
+            1,
+            "PlanApproved must emit exactly once across both attempts"
+        );
     }
 
     #[test]
@@ -7922,15 +8219,23 @@ target_ref = "refs/heads/raxis/feature"
         let audit = FakeAuditSink::new();
 
         let registry = PlanRegistry::new();
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 42, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 42, &store, &audit, &registry,
+        )
+        .unwrap();
 
         let conn = store.lock_sync();
-        let epoch: i64 = conn.query_row(
-            &format!("SELECT policy_epoch FROM {TASKS} WHERE initiative_id=?1"),
-            rusqlite::params![&init_id],
-            |r| r.get(0),
-        ).unwrap();
-        assert_eq!(epoch, 42, "policy_epoch must be the value passed to approve_plan");
+        let epoch: i64 = conn
+            .query_row(
+                &format!("SELECT policy_epoch FROM {TASKS} WHERE initiative_id=?1"),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            epoch, 42,
+            "policy_epoch must be the value passed to approve_plan"
+        );
     }
 
     /// Step-10 quarantine prerequisite: every successful approval MUST
@@ -7952,30 +8257,43 @@ target_ref = "refs/heads/raxis/feature"
         // Pre-approval: column exists (migration 3) but is NULL.
         {
             let conn = store.lock_sync();
-            let pre: Option<String> = conn.query_row(
-                &format!(
-                    "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
+            let pre: Option<String> = conn
+                .query_row(
+                    &format!(
+                        "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
                      WHERE initiative_id=?1"
-                ),
-                rusqlite::params![&init_id],
-                |r| r.get(0),
-            ).unwrap();
+                    ),
+                    rusqlite::params![&init_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert!(pre.is_none(),
                 "fresh signed_plan_artifacts row must have NULL signed_by_fingerprint until approval");
         }
 
-        approve_plan_for_test(&init_id, "op-prime-fp", None, &pk_bytes, 1, &store, &audit, &registry)
-            .unwrap();
+        approve_plan_for_test(
+            &init_id,
+            "op-prime-fp",
+            None,
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &registry,
+        )
+        .unwrap();
 
         let conn = store.lock_sync();
-        let stamped: Option<String> = conn.query_row(
-            &format!(
-                "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
+        let stamped: Option<String> = conn
+            .query_row(
+                &format!(
+                    "SELECT signed_by_fingerprint FROM {SIGNED_PLAN_ARTIFACTS} \
                  WHERE initiative_id=?1"
-            ),
-            rusqlite::params![&init_id],
-            |r| r.get(0),
-        ).unwrap();
+                ),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(
             stamped.as_deref(),
             Some("op-prime-fp"),
@@ -8008,23 +8326,30 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["docs/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
 
-        let f1 = registry.get(&TaskKey::new(&init_id, "t1"))
+        let f1 = registry
+            .get(&TaskKey::new(&init_id, "t1"))
             .expect("registry must contain t1");
         assert_eq!(f1.path_allowlist, vec!["src/", "README.md"]);
         assert!(f1.path_export_to_successors);
         assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
         assert!(!f1.path_scope_override);
 
-        let f2 = registry.get(&TaskKey::new(&init_id, "t2"))
+        let f2 = registry
+            .get(&TaskKey::new(&init_id, "t2"))
             .expect("registry must contain t2");
         assert_eq!(f2.path_allowlist, vec!["docs/"]);
-        assert!(!f2.path_export_to_successors,
-                "t2 omits the field — must default to false");
+        assert!(
+            !f2.path_export_to_successors,
+            "t2 omits the field — must default to false"
+        );
     }
 
     // ── V2 §Step 11 — `[orchestrator]` cross_cutting_artifacts wiring ─────
@@ -8046,12 +8371,16 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
 
-        let orch = registry.orchestrator(&init_id)
+        let orch = registry
+            .orchestrator(&init_id)
             .expect("registry must contain an orchestrator entry for the initiative");
         assert_eq!(
             orch.cross_cutting_artifacts,
@@ -8084,26 +8413,27 @@ target_ref = "refs/heads/raxis/feature"
             predecessors = ["with-prompt"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
-        let with_prompt = registry.get(&TaskKey::new(&init_id, "with-prompt"))
+        let with_prompt = registry
+            .get(&TaskKey::new(&init_id, "with-prompt"))
             .expect("registry must contain with-prompt");
         assert_eq!(
-            with_prompt.description,
-            "Add a /healthz endpoint that returns 200 OK",
+            with_prompt.description, "Add a /healthz endpoint that returns 200 OK",
             "task description must be stored verbatim — kernel does no template substitution",
         );
 
-        let second = registry.get(&TaskKey::new(&init_id, "second"))
+        let second = registry
+            .get(&TaskKey::new(&init_id, "second"))
             .expect("registry must contain second");
         assert_eq!(
-            second.description,
-            "Run the integration test against /healthz",
+            second.description, "Run the integration test against /healthz",
             "every task's description must round-trip verbatim, not be coerced",
         );
     }
@@ -8130,12 +8460,13 @@ target_ref = "refs/heads/raxis/feature"
             task_id = "only"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let result = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap();
+        )
+        .unwrap();
 
         assert_eq!(
             result.orchestrator_task_prompt,
@@ -8165,12 +8496,13 @@ target_ref = "refs/heads/raxis/feature"
             description = "fixture task"
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative_raw(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("plan without [plan.initiative] description must be rejected");
+        )
+        .expect_err("plan without [plan.initiative] description must be rejected");
         match err {
             LifecycleError::PlanInvalid { reason } => {
                 assert!(
@@ -8198,12 +8530,13 @@ target_ref = "refs/heads/raxis/feature"
             "#,
         );
         let (init_id, pk_bytes) = seed_draft_initiative(&store, &plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).expect_err("oversized description must reject the plan");
+        )
+        .expect_err("oversized description must reject the plan");
         match err {
             LifecycleError::PlanInvalid { reason } => {
                 assert!(
@@ -8228,15 +8561,19 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
 
-        let orch = registry.orchestrator(&init_id)
-            .unwrap_or_default();
-        assert!(orch.cross_cutting_artifacts.is_empty(),
-                "missing `[orchestrator]` must yield an empty artifact list");
+        let orch = registry.orchestrator(&init_id).unwrap_or_default();
+        assert!(
+            orch.cross_cutting_artifacts.is_empty(),
+            "missing `[orchestrator]` must yield an empty artifact list"
+        );
     }
 
     #[test]
@@ -8256,17 +8593,19 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
                 LifecycleError::CrossCuttingArtifactInvalidSyntax {
-                    reason: "glob_character", ..
+                    reason: "glob_character",
+                    ..
                 },
             ),
             "expected CrossCuttingArtifactInvalidSyntax(glob_character), got {err:?}",
@@ -8279,8 +8618,10 @@ target_ref = "refs/heads/raxis/feature"
         assert_eq!(count_initiative_rows(&store, "tasks", &init_id), 0);
         assert!(audit.events().is_empty());
         assert!(registry.is_empty());
-        assert!(registry.orchestrator(&init_id).is_none(),
-                "registry must NOT carry an orchestrator entry when approve_plan failed");
+        assert!(
+            registry.orchestrator(&init_id).is_none(),
+            "registry must NOT carry an orchestrator entry when approve_plan failed"
+        );
     }
 
     #[test]
@@ -8299,17 +8640,19 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
         let err = approve_plan_for_test(
             &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
-        ).unwrap_err();
+        )
+        .unwrap_err();
         assert!(
             matches!(
                 err,
                 LifecycleError::CrossCuttingArtifactInvalidSyntax {
-                    reason: "trailing_slash", ..
+                    reason: "trailing_slash",
+                    ..
                 },
             ),
             "expected CrossCuttingArtifactInvalidSyntax(trailing_slash), got {err:?}",
@@ -8334,17 +8677,28 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry_one = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry_one).unwrap();
+        approve_plan_for_test(
+            &init_id,
+            "op",
+            None,
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &registry_one,
+        )
+        .unwrap();
 
         // Simulate a kernel restart: brand-new (empty) registry rebuilt
         // from the on-disk store via repopulate_plan_registry.
         let registry_two = PlanRegistry::new();
         repopulate_plan_registry(&store, &registry_two, "refs/heads/main", false).unwrap();
 
-        let orch = registry_two.orchestrator(&init_id)
+        let orch = registry_two
+            .orchestrator(&init_id)
             .expect("repopulate must rehydrate orchestrator entry");
         assert_eq!(
             orch.cross_cutting_artifacts,
@@ -8381,10 +8735,20 @@ target_ref = "refs/heads/raxis/feature"
             path_scope_override = true
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op-prime", Some("Chika".to_owned()), &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id,
+            "op-prime",
+            Some("Chika".to_owned()),
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &registry,
+        )
+        .unwrap();
 
         let evs = audit.events();
         let kinds: Vec<_> = evs.iter().map(|e| e.kind.as_str()).collect();
@@ -8404,25 +8768,33 @@ target_ref = "refs/heads/raxis/feature"
         );
 
         // The override events MUST carry initiative + task + operator.
-        let overriding_task_ids: Vec<_> = evs.iter()
+        let overriding_task_ids: Vec<_> = evs
+            .iter()
             .filter(|e| e.kind.as_str() == "PathScopeOverrideApplied")
             .map(|e| e.task_id.clone().unwrap_or_default())
             .collect();
         assert_eq!(overriding_task_ids, vec!["t-override-1", "t-override-2"]);
 
-        for ev in evs.iter().filter(|e| e.kind.as_str() == "PathScopeOverrideApplied") {
+        for ev in evs
+            .iter()
+            .filter(|e| e.kind.as_str() == "PathScopeOverrideApplied")
+        {
             assert_eq!(ev.initiative_id.as_deref(), Some(init_id.as_str()));
             // Both the operator fingerprint AND the display name
             // (kernel-store.md §2.5.2 "Operator display-name fields")
             // go into the AuditEventKind variant payload. Pin both
             // so a future schema change can't silently drop either.
             let dbg = format!("{:?}", ev.kind);
-            assert!(dbg.contains("op-prime"),
-                    "PathScopeOverrideApplied payload must record approving_operator: {dbg}");
-            assert!(dbg.contains("Chika"),
-                    "PathScopeOverrideApplied payload must record \
+            assert!(
+                dbg.contains("op-prime"),
+                "PathScopeOverrideApplied payload must record approving_operator: {dbg}"
+            );
+            assert!(
+                dbg.contains("Chika"),
+                "PathScopeOverrideApplied payload must record \
                      approving_operator_display_name when the dispatcher \
-                     resolved one: {dbg}");
+                     resolved one: {dbg}"
+            );
         }
     }
 
@@ -8438,18 +8810,24 @@ target_ref = "refs/heads/raxis/feature"
             path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit    = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let registry = PlanRegistry::new();
 
-        approve_plan_for_test(&init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry).unwrap();
+        approve_plan_for_test(
+            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &registry,
+        )
+        .unwrap();
 
         let kinds: Vec<_> = audit.events().iter().map(|e| e.kind.as_str()).collect();
         // V2 admission still emits SessionCreated for the auto-spawned
         // Orchestrator (INV-PLANNER-HARNESS-06); the rule under test is
         // that NO PathScopeOverrideApplied event is emitted when no
         // operator task sets the override.
-        assert_eq!(kinds, vec!["PlanApproved", "SessionCreated"],
-                   "PathScopeOverrideApplied must NOT emit when no task sets the override");
+        assert_eq!(
+            kinds,
+            vec!["PlanApproved", "SessionCreated"],
+            "PathScopeOverrideApplied must NOT emit when no task sets the override"
+        );
     }
 
     // ── repopulate_plan_registry — kernel-restart hook ────────────────────
@@ -8474,26 +8852,39 @@ target_ref = "refs/heads/raxis/feature"
             path_scope_override = true
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit         = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
 
         approve_plan_for_test(
-            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
-        ).unwrap();
+            &init_id,
+            "op",
+            None,
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &live_registry,
+        )
+        .unwrap();
 
         // Simulate a kernel restart — fresh registry, populated only
         // by the boot-time hook.
         let restarted_registry = PlanRegistry::new();
-        let n = repopulate_plan_registry(&store, &restarted_registry, "refs/heads/main", false).unwrap();
+        let n = repopulate_plan_registry(&store, &restarted_registry, "refs/heads/main", false)
+            .unwrap();
         assert_eq!(n, 2, "two tasks must be re-inserted from the plan");
 
-        let f1 = restarted_registry.get(&TaskKey::new(&init_id, "t1")).unwrap();
+        let f1 = restarted_registry
+            .get(&TaskKey::new(&init_id, "t1"))
+            .unwrap();
         assert_eq!(f1.path_allowlist, vec!["src/"]);
         assert!(f1.path_export_to_successors);
         assert_eq!(f1.path_export_globs, vec!["src/ipc/**"]);
         assert!(!f1.path_scope_override);
 
-        let f2 = restarted_registry.get(&TaskKey::new(&init_id, "t2")).unwrap();
+        let f2 = restarted_registry
+            .get(&TaskKey::new(&init_id, "t2"))
+            .unwrap();
         assert!(f2.path_scope_override);
     }
 
@@ -8510,12 +8901,20 @@ target_ref = "refs/heads/raxis/feature"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk_bytes) = seed_draft_initiative(&store, plan, &sk);
-        let audit         = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
 
         approve_plan_for_test(
-            &init_id, "op", None, &pk_bytes, 1, &store, &audit, &live_registry,
-        ).unwrap();
+            &init_id,
+            "op",
+            None,
+            &pk_bytes,
+            1,
+            &store,
+            &audit,
+            &live_registry,
+        )
+        .unwrap();
         abort_initiative(&init_id, "op", &store).unwrap();
 
         let restarted = PlanRegistry::new();
@@ -8540,16 +8939,18 @@ target_ref = "refs/heads/raxis/feature"
 
         let registry = PlanRegistry::new();
         let n = repopulate_plan_registry(&store, &registry, "refs/heads/main", false).unwrap();
-        assert_eq!(n, 0,
-            "Draft initiatives have no admitted tasks — repopulate must skip");
+        assert_eq!(
+            n, 0,
+            "Draft initiatives have no admitted tasks — repopulate must skip"
+        );
     }
 
     #[test]
     fn repopulate_plan_registry_handles_empty_store() {
         // No initiatives → nothing to repopulate, MUST NOT error.
-        let store    = Store::open_in_memory().unwrap();
+        let store = Store::open_in_memory().unwrap();
         let registry = PlanRegistry::new();
-        let n        = repopulate_plan_registry(&store, &registry, "refs/heads/main", false).unwrap();
+        let n = repopulate_plan_registry(&store, &registry, "refs/heads/main", false).unwrap();
         assert_eq!(n, 0);
         assert!(registry.is_empty());
     }
@@ -8579,21 +8980,28 @@ target_ref = "refs/heads/raxis/feature"
         path_allowlist = ["src/"]
         "#;
         let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
-        let audit         = FakeAuditSink::new();
+        let audit = FakeAuditSink::new();
         let live_registry = PlanRegistry::new();
-        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry).unwrap();
+        approve_plan_for_test(&init_id, "op", None, &pk, 1, &store, &audit, &live_registry)
+            .unwrap();
 
         // Sanity: task is Admitted, initiative is Executing.
         {
             let conn = store.lock_sync();
-            let task_state: String = conn.query_row(
-                &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
-                [], |r| r.get(0),
-            ).unwrap();
-            let init_state: String = conn.query_row(
-                &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
-                rusqlite::params![&init_id], |r| r.get(0),
-            ).unwrap();
+            let task_state: String = conn
+                .query_row(
+                    &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
+                    [],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            let init_state: String = conn
+                .query_row(
+                    &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+                    rusqlite::params![&init_id],
+                    |r| r.get(0),
+                )
+                .unwrap();
             assert_eq!(task_state, "Admitted");
             assert_eq!(init_state, "Executing");
         }
@@ -8602,18 +9010,25 @@ target_ref = "refs/heads/raxis/feature"
 
         // Both writes MUST be visible (success path = commit both).
         let conn = store.lock_sync();
-        let task_state: String = conn.query_row(
-            &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
-            [], |r| r.get(0),
-        ).unwrap();
-        let init_state: String = conn.query_row(
-            &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
-            rusqlite::params![&init_id], |r| r.get(0),
-        ).unwrap();
-        assert_eq!(task_state, "Cancelled",
-            "tasks UPDATE must have committed");
-        assert_eq!(init_state, "Aborted",
-            "initiatives UPDATE must have committed in the SAME transaction");
+        let task_state: String = conn
+            .query_row(
+                &format!("SELECT state FROM {TASKS} WHERE task_id='t1'"),
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let init_state: String = conn
+            .query_row(
+                &format!("SELECT state FROM {INITIATIVES} WHERE initiative_id=?1"),
+                rusqlite::params![&init_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(task_state, "Cancelled", "tasks UPDATE must have committed");
+        assert_eq!(
+            init_state, "Aborted",
+            "initiatives UPDATE must have committed in the SAME transaction"
+        );
     }
 
     // V2.5 deletion: the V1 `create_initiative` two-INSERT
@@ -8676,8 +9091,11 @@ max_turns   = 1
 "#;
         let tasks = parse_plan_tasks(toml).expect("max_turns = 1 MUST be admissible");
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].max_turns, Some(1),
-            "parser MUST propagate `Some(1)` through to the in-memory PlanTask");
+        assert_eq!(
+            tasks[0].max_turns,
+            Some(1),
+            "parser MUST propagate `Some(1)` through to the in-memory PlanTask"
+        );
     }
 
     /// Omitted `max_turns` ⇒ `None` ⇒ the spawn-time resolver falls
@@ -8693,10 +9111,12 @@ task_id     = "t-omitted"
 description = "no per-task override; defer to policy / compiled fallback"
 "#;
         let tasks = parse_plan_tasks(toml).expect("omitted max_turns is admissible");
-        assert_eq!(tasks[0].max_turns, None,
+        assert_eq!(
+            tasks[0].max_turns, None,
             "omitted `max_turns` MUST parse as `None`, NOT `Some(default)` — \
              the resolver needs the option-shape to distinguish 'operator \
-             chose the default' from 'operator declared the value'");
+             chose the default' from 'operator declared the value'"
+        );
     }
 
     // ─────────────────────────────────────────────────────────────────
@@ -8755,8 +9175,11 @@ max_turns_step = 1
 "#;
         let tasks = parse_plan_tasks(toml).expect("max_turns_step = 1 MUST be admissible");
         assert_eq!(tasks.len(), 1);
-        assert_eq!(tasks[0].max_turns_step, Some(1),
-            "parser MUST propagate `Some(1)` through to the in-memory PlanTask");
+        assert_eq!(
+            tasks[0].max_turns_step,
+            Some(1),
+            "parser MUST propagate `Some(1)` through to the in-memory PlanTask"
+        );
     }
 
     /// Omitted `max_turns_step` ⇒ `None` ⇒ the spawn-time resolver
@@ -8774,10 +9197,12 @@ description = "no per-task step override; defer to policy / derived default"
 max_turns   = 30
 "#;
         let tasks = parse_plan_tasks(toml).expect("omitted max_turns_step is admissible");
-        assert_eq!(tasks[0].max_turns_step, None,
+        assert_eq!(
+            tasks[0].max_turns_step, None,
             "omitted `max_turns_step` MUST parse as `None`, NOT `Some(default)` — \
              the resolver needs the option-shape to distinguish 'operator \
-             chose the default' from 'operator declared the value'");
+             chose the default' from 'operator declared the value'"
+        );
     }
 }
 
@@ -8788,41 +9213,43 @@ max_turns   = 30
 #[cfg(test)]
 mod env_consistency_tests {
     use super::*;
-    use std::collections::HashMap;
     use raxis_credentials::CredentialName;
-    use raxis_plan_credentials::{ProxyDecl, TaskCredentialDecl, PostgresRestrictions};
+    use raxis_plan_credentials::{PostgresRestrictions, ProxyDecl, TaskCredentialDecl};
+    use std::collections::HashMap;
 
     fn pg_decl(name: &str, mount_as: &str) -> TaskCredentialDecl {
         TaskCredentialDecl {
-            name:     CredentialName::new(name),
+            name: CredentialName::new(name),
             mount_as: mount_as.to_owned(),
-            proxy:    ProxyDecl::Postgres { restrictions: PostgresRestrictions::default() },
+            proxy: ProxyDecl::Postgres {
+                restrictions: PostgresRestrictions::default(),
+            },
         }
     }
 
     fn task_with(creds: Vec<TaskCredentialDecl>) -> PlanTask {
         PlanTask {
-            task_id:                   "t1".to_owned(),
-            name:                      "t1".to_owned(),
-            lane_id:                   "main".to_owned(),
-            predecessors:              Vec::new(),
-            path_allowlist:            Vec::new(),
+            task_id: "t1".to_owned(),
+            name: "t1".to_owned(),
+            lane_id: "main".to_owned(),
+            predecessors: Vec::new(),
+            path_allowlist: Vec::new(),
             path_export_to_successors: false,
-            path_export_globs:         Vec::new(),
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Full,
-            session_agent_type:        SessionAgentType::Executor,
-            credentials:               creds,
-            vm_image:                  String::new(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: Vec::new(),
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Full,
+            session_agent_type: SessionAgentType::Executor,
+            credentials: creds,
+            vm_image: String::new(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
@@ -8835,7 +9262,7 @@ mod env_consistency_tests {
 
     fn permitted(name: &str, label: Option<&str>) -> raxis_policy::PermittedCredentialConfig {
         raxis_policy::PermittedCredentialConfig {
-            name:        name.to_owned(),
+            name: name.to_owned(),
             environment: label.map(str::to_owned),
             description: None,
         }
@@ -8846,8 +9273,11 @@ mod env_consistency_tests {
         // §1.5.2 activation gate — when zero `[environments.<label>]`
         // tables are declared, the consistency check is inert even
         // for tasks that hold many credentials.
-        let tasks = vec![task_with(vec![pg_decl("a", "A_URL"), pg_decl("b", "B_URL")])];
-        let envs:  HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
+        let tasks = vec![task_with(vec![
+            pg_decl("a", "A_URL"),
+            pg_decl("b", "B_URL"),
+        ])];
+        let envs: HashMap<String, raxis_policy::EnvironmentConfig> = HashMap::new();
         let creds: Vec<raxis_policy::PermittedCredentialConfig> = Vec::new();
         validate_task_environment_consistency(&tasks, &envs, &creds)
             .expect("must be a no-op when no environments are declared");
@@ -8874,10 +9304,7 @@ mod env_consistency_tests {
         ])];
         let mut envs = HashMap::new();
         envs.insert("beta".to_owned(), env("beta"));
-        let creds = vec![
-            permitted("npm-token", None),
-            permitted("cache-pg",  None),
-        ];
+        let creds = vec![permitted("npm-token", None), permitted("cache-pg", None)];
         validate_task_environment_consistency(&tasks, &envs, &creds)
             .expect("all-neutral task must pass even with envs declared");
     }
@@ -8891,7 +9318,7 @@ mod env_consistency_tests {
             pg_decl("prod-pg", "PROD_DB_URL"),
         ])];
         let mut envs = HashMap::new();
-        envs.insert("beta".to_owned(),       env("beta"));
+        envs.insert("beta".to_owned(), env("beta"));
         envs.insert("production".to_owned(), env("production"));
         let creds = vec![
             permitted("beta-pg", Some("beta")),
@@ -8901,11 +9328,19 @@ mod env_consistency_tests {
             .expect_err("cross-env credentials must fail");
         match err {
             LifecycleError::PlanInvalid { reason } => {
-                assert!(reason.contains("FAIL_TASK_ENVIRONMENT_INCONSISTENT"),
-                    "reason should pin the structured failure code: {reason}");
-                assert!(reason.contains("beta"),       "reason must list beta:  {reason}");
-                assert!(reason.contains("production"), "reason must list prod: {reason}");
-                assert!(reason.contains("INV-ENV-01"), "reason must cite INV-ENV-01: {reason}");
+                assert!(
+                    reason.contains("FAIL_TASK_ENVIRONMENT_INCONSISTENT"),
+                    "reason should pin the structured failure code: {reason}"
+                );
+                assert!(reason.contains("beta"), "reason must list beta:  {reason}");
+                assert!(
+                    reason.contains("production"),
+                    "reason must list prod: {reason}"
+                );
+                assert!(
+                    reason.contains("INV-ENV-01"),
+                    "reason must cite INV-ENV-01: {reason}"
+                );
             }
             other => panic!("expected PlanInvalid, got {other:?}"),
         }
@@ -8929,13 +9364,13 @@ mod env_consistency_tests {
         // Mixed neutral + env-bound: cardinality 1 ⇒ Bound("beta").
         let tasks = vec![task_with(vec![
             pg_decl("npm-token", "NPM_TOKEN"),
-            pg_decl("beta-pg",   "BETA_DB_URL"),
+            pg_decl("beta-pg", "BETA_DB_URL"),
         ])];
         let mut envs = HashMap::new();
         envs.insert("beta".to_owned(), env("beta"));
         let creds = vec![
             permitted("npm-token", None),
-            permitted("beta-pg",   Some("beta")),
+            permitted("beta-pg", Some("beta")),
         ];
         validate_task_environment_consistency(&tasks, &envs, &creds)
             .expect("neutral + bound = cardinality 1 must pass");
@@ -8947,49 +9382,42 @@ mod env_consistency_tests {
 mod vm_image_admission_tests {
     use super::*;
 
-    fn task(
-        task_id:  &str,
-        agent:    SessionAgentType,
-        vm_image: &str,
-    ) -> PlanTask {
+    fn task(task_id: &str, agent: SessionAgentType, vm_image: &str) -> PlanTask {
         PlanTask {
-            task_id:                   task_id.to_owned(),
-            name:                      task_id.to_owned(),
-            lane_id:                   "default".to_owned(),
-            predecessors:              Vec::new(),
-            path_allowlist:            Vec::new(),
+            task_id: task_id.to_owned(),
+            name: task_id.to_owned(),
+            lane_id: "default".to_owned(),
+            predecessors: Vec::new(),
+            path_allowlist: Vec::new(),
             path_export_to_successors: false,
-            path_export_globs:         Vec::new(),
-            path_scope_override:       false,
-            clone_strategy:            CloneStrategy::Blobless,
-            session_agent_type:        agent,
-            credentials:               Vec::new(),
-            vm_image:                  vm_image.to_owned(),
-            description:               String::new(),
-            max_crash_retries:         None,
-            max_review_rejections:     None,
-            max_turns:                 None,
-            elastic:                   None,
-            min_vcpus:                 None,
-            max_vcpus:                 None,
-            min_memory_mb:             None,
-            max_memory_mb:             None,
+            path_export_globs: Vec::new(),
+            path_scope_override: false,
+            clone_strategy: CloneStrategy::Blobless,
+            session_agent_type: agent,
+            credentials: Vec::new(),
+            vm_image: vm_image.to_owned(),
+            description: String::new(),
+            max_crash_retries: None,
+            max_review_rejections: None,
+            max_turns: None,
+            elastic: None,
+            min_vcpus: None,
+            max_vcpus: None,
+            min_memory_mb: None,
+            max_memory_mb: None,
         }
     }
 
-    fn registry_entry(
-        name:  &str,
-        roles: &[&str],
-    ) -> raxis_policy::VmImageConfig {
+    fn registry_entry(name: &str, roles: &[&str]) -> raxis_policy::VmImageConfig {
         raxis_policy::VmImageConfig {
-            name:                     name.to_owned(),
+            name: name.to_owned(),
             oci_digest: format!(
                 "sha256:{}",
                 "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
             ),
-            role_restriction:         roles.iter().map(|r| (*r).to_owned()).collect(),
+            role_restriction: roles.iter().map(|r| (*r).to_owned()).collect(),
             linux_kernel_version_min: (5, 14),
-            description:              String::new(),
+            description: String::new(),
         }
     }
 
@@ -9008,7 +9436,12 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("t1", SessionAgentType::Executor, "ghost-image")];
         let err = validate_task_vm_images(&mut tasks, &[], None).expect_err("must reject");
         match err {
-            LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, .. } => {
+            LifecycleError::PlanTaskVmImageInvalid {
+                rule,
+                offending_task,
+                offending_image,
+                ..
+            } => {
                 assert_eq!(rule, "image_not_registered");
                 assert_eq!(offending_task, "t1");
                 assert_eq!(offending_image, "ghost-image");
@@ -9023,12 +9456,19 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("rt", SessionAgentType::Reviewer, "rev-img")];
         let err = validate_task_vm_images(&mut tasks, &registry, None).expect_err("must reject");
         match err {
-            LifecycleError::PlanTaskVmImageInvalid { rule, offending_task, offending_image, suggestion } => {
+            LifecycleError::PlanTaskVmImageInvalid {
+                rule,
+                offending_task,
+                offending_image,
+                suggestion,
+            } => {
                 assert_eq!(rule, "reviewer_image_not_allowed");
                 assert_eq!(offending_task, "rt");
                 assert_eq!(offending_image, "rev-img");
-                assert!(suggestion.contains("INV-PLANNER-HARNESS-02"),
-                        "suggestion must cite the invariant: {suggestion}");
+                assert!(
+                    suggestion.contains("INV-PLANNER-HARNESS-02"),
+                    "suggestion must cite the invariant: {suggestion}"
+                );
             }
             other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
         }
@@ -9053,10 +9493,14 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("t1", SessionAgentType::Executor, "ver-only")];
         let err = validate_task_vm_images(&mut tasks, &registry, None).expect_err("must reject");
         match err {
-            LifecycleError::PlanTaskVmImageInvalid { rule, suggestion, .. } => {
+            LifecycleError::PlanTaskVmImageInvalid {
+                rule, suggestion, ..
+            } => {
                 assert_eq!(rule, "role_restriction_mismatch");
-                assert!(suggestion.contains("Executor"),
-                        "suggestion must mention the missing role: {suggestion}");
+                assert!(
+                    suggestion.contains("Executor"),
+                    "suggestion must mention the missing role: {suggestion}"
+                );
             }
             other => panic!("expected PlanTaskVmImageInvalid, got {other:?}"),
         }
@@ -9066,7 +9510,7 @@ mod vm_image_admission_tests {
     fn executor_with_executor_alias_is_admitted() {
         let registry = vec![
             registry_entry("primary-exec", &["Executor"]),
-            registry_entry("polyglot",     &["Executor", "Verifier"]),
+            registry_entry("polyglot", &["Executor", "Verifier"]),
         ];
         let mut tasks = vec![
             task("t1", SessionAgentType::Executor, "primary-exec"),
@@ -9097,15 +9541,17 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("t1", SessionAgentType::Executor, "")];
         validate_task_vm_images(&mut tasks, &registry, Some(&default))
             .expect("default-executor back-fill must admit");
-        assert_eq!(tasks[0].vm_image, "primary-exec",
-            "kernel must have back-filled the alias");
+        assert_eq!(
+            tasks[0].vm_image, "primary-exec",
+            "kernel must have back-filled the alias"
+        );
     }
 
     #[test]
     fn default_executor_image_does_not_overwrite_explicit_alias() {
         let registry = vec![
             registry_entry("primary-exec", &["Executor"]),
-            registry_entry("custom-exec",  &["Executor"]),
+            registry_entry("custom-exec", &["Executor"]),
         ];
         let default = raxis_policy::DefaultExecutorImageConfig {
             alias: "primary-exec".to_owned(),
@@ -9113,8 +9559,10 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("t1", SessionAgentType::Executor, "custom-exec")];
         validate_task_vm_images(&mut tasks, &registry, Some(&default))
             .expect("explicit alias must admit");
-        assert_eq!(tasks[0].vm_image, "custom-exec",
-            "explicit operator-declared alias must not be overwritten by the default");
+        assert_eq!(
+            tasks[0].vm_image, "custom-exec",
+            "explicit operator-declared alias must not be overwritten by the default"
+        );
     }
 
     #[test]
@@ -9126,7 +9574,9 @@ mod vm_image_admission_tests {
         let mut tasks = vec![task("rt", SessionAgentType::Reviewer, "")];
         validate_task_vm_images(&mut tasks, &registry, Some(&default))
             .expect("Reviewer omitting vm_image must admit");
-        assert!(tasks[0].vm_image.is_empty(),
-            "Reviewer tasks must NOT receive a default vm_image (INV-PLANNER-HARNESS-02)");
+        assert!(
+            tasks[0].vm_image.is_empty(),
+            "Reviewer tasks must NOT receive a default vm_image (INV-PLANNER-HARNESS-02)"
+        );
     }
 }

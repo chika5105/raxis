@@ -128,7 +128,8 @@ impl std::fmt::Debug for LoopbackListenerHandle {
 #[cfg(not(target_os = "macos"))]
 impl std::fmt::Debug for LoopbackListenerHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("LoopbackListenerHandle (unsupported)").finish()
+        f.debug_struct("LoopbackListenerHandle (unsupported)")
+            .finish()
     }
 }
 
@@ -159,7 +160,7 @@ mod stub_api {
     /// trait builds; live registration is rejected with
     /// `Unsupported`.
     pub fn register_listener_stub(
-        _vsock_port:        u32,
+        _vsock_port: u32,
         _host_loopback_port: u16,
     ) -> Result<LoopbackListenerHandle, LoopbackBridgeError> {
         Err(LoopbackBridgeError::Unsupported)
@@ -202,14 +203,14 @@ pub mod macos {
 
     /// Inner state owned by the listener handle.
     pub(crate) struct HandleInner {
-        pub(crate) vsock_port:         u32,
+        pub(crate) vsock_port: u32,
         pub(crate) host_loopback_port: u16,
         #[allow(dead_code)]
         delegate: DelegateHandle,
         #[allow(dead_code)]
         listener: ListenerHandle,
-        device:   DeviceHandle,
-        queue:    DispatchRetained<DispatchQueue>,
+        device: DeviceHandle,
+        queue: DispatchRetained<DispatchQueue>,
     }
 
     /// `Send`-marked wrapper around a retained
@@ -231,12 +232,14 @@ pub mod macos {
             // Remove the listener from the VM's vsock device on the
             // AVF dispatch queue (queue-confinement contract).
             // Drop must not panic — best-effort.
-            let device   = self.device.clone_handle();
-            let port     = self.vsock_port;
+            let device = self.device.clone_handle();
+            let port = self.vsock_port;
             self.queue.exec_async(move || {
                 // SAFETY: queue-confined call; idempotent per AVF
                 // docs ("Does nothing if the port had no listener.").
-                unsafe { device.raw().removeSocketListenerForPort(port); }
+                unsafe {
+                    device.raw().removeSocketListenerForPort(port);
+                }
             });
             // The delegate releases when `self.delegate` drops at
             // the end of this method — that releases every retained
@@ -254,8 +257,8 @@ pub mod macos {
     /// Per-listener delegate ivars.
     pub(crate) struct DelegateIvars {
         host_loopback_port: u16,
-        vsock_port:         u32,
-        retained:           Mutex<Vec<RetainedConn>>,
+        vsock_port: u32,
+        retained: Mutex<Vec<RetainedConn>>,
     }
 
     /// `Send`-marked wrapper around a retained
@@ -291,8 +294,12 @@ pub mod macos {
         pub fn from_retained(r: Retained<VZVirtioSocketDevice>) -> Self {
             Self(r)
         }
-        pub(crate) fn raw(&self) -> &VZVirtioSocketDevice { &self.0 }
-        pub(crate) fn clone_handle(&self) -> Self { Self(self.0.clone()) }
+        pub(crate) fn raw(&self) -> &VZVirtioSocketDevice {
+            &self.0
+        }
+        pub(crate) fn clone_handle(&self) -> Self {
+            Self(self.0.clone())
+        }
     }
 
     /// `Send`-marked wrapper around a retained
@@ -306,8 +313,12 @@ pub mod macos {
     unsafe impl Send for ListenerHandle {}
 
     impl ListenerHandle {
-        pub(crate) fn clone_handle(&self) -> Self { Self(self.0.clone()) }
-        pub(crate) fn raw(&self) -> &VZVirtioSocketListener { &self.0 }
+        pub(crate) fn clone_handle(&self) -> Self {
+            Self(self.0.clone())
+        }
+        pub(crate) fn raw(&self) -> &VZVirtioSocketListener {
+            &self.0
+        }
     }
 
     define_class!(
@@ -328,8 +339,8 @@ pub mod macos {
             #[allow(non_snake_case)]
             fn listener_shouldAcceptNewConnection_fromSocketDevice(
                 &self,
-                _listener:      &VZVirtioSocketListener,
-                connection:     &VZVirtioSocketConnection,
+                _listener: &VZVirtioSocketListener,
+                connection: &VZVirtioSocketConnection,
                 _socket_device: &VZVirtioSocketDevice,
             ) -> objc2::runtime::Bool {
                 // Read the AVF-owned fd while the connection is
@@ -362,7 +373,8 @@ pub mod macos {
                     eprintln!(
                         "{{\"level\":\"warn\",\"event\":\"avf_vsock_loopback_dup_failed\",\
                           \"vsock_port\":{},\"err\":{:?}}}",
-                        self.ivars().vsock_port, e.to_string(),
+                        self.ivars().vsock_port,
+                        e.to_string(),
                     );
                     return objc2::runtime::Bool::NO;
                 }
@@ -371,13 +383,16 @@ pub mod macos {
                 // open until we explicitly release it at session
                 // teardown. The dup we just produced is what the
                 // host-side splice thread owns end-to-end.
-                let retained_conn: Retained<VZVirtioSocketConnection> =
-                    unsafe { Retained::retain(
-                        connection as *const _ as *mut VZVirtioSocketConnection,
-                    ) }
-                    .expect("retain on non-null AVF connection");
+                let retained_conn: Retained<VZVirtioSocketConnection> = unsafe {
+                    Retained::retain(connection as *const _ as *mut VZVirtioSocketConnection)
+                }
+                .expect("retain on non-null AVF connection");
                 {
-                    let mut guard = self.ivars().retained.lock().unwrap_or_else(|p| p.into_inner());
+                    let mut guard = self
+                        .ivars()
+                        .retained
+                        .lock()
+                        .unwrap_or_else(|p| p.into_inner());
                     guard.push(RetainedConn(retained_conn));
                 }
 
@@ -460,10 +475,7 @@ pub mod macos {
     // `unsafe impl Send for RetainedConn` only certifies that the
     // strong reference can cross threads on Drop.
     impl VsockLoopbackDelegate {
-        fn make(
-            host_loopback_port: u16,
-            vsock_port:         u32,
-        ) -> Retained<Self> {
+        fn make(host_loopback_port: u16, vsock_port: u32) -> Retained<Self> {
             let this = Self::alloc().set_ivars(DelegateIvars {
                 host_loopback_port,
                 vsock_port,
@@ -487,17 +499,15 @@ pub mod macos {
     /// shared with start / stop / connect_vsock and we don't
     /// stall it.
     fn run_splice(
-        vsock_stream:        UnixStream,
-        host_loopback_port:  u16,
-        vsock_port_for_log:  u32,
+        vsock_stream: UnixStream,
+        host_loopback_port: u16,
+        vsock_port_for_log: u32,
     ) -> std::io::Result<()> {
         let upstream_addr = SocketAddrV4::new(Ipv4Addr::LOCALHOST, host_loopback_port);
         let upstream = TcpStream::connect(upstream_addr).map_err(|e| {
             std::io::Error::new(
                 e.kind(),
-                format!(
-                    "vsock-loopback upstream TCP connect 127.0.0.1:{host_loopback_port}: {e}"
-                ),
+                format!("vsock-loopback upstream TCP connect 127.0.0.1:{host_loopback_port}: {e}"),
             )
         })?;
         // Disable Nagle so credential-proxy DB query/response
@@ -561,11 +571,11 @@ pub mod macos {
     /// the VM is alive. Takes the queue + device handle and
     /// returns the live `HandleInner`.
     pub(crate) fn register_listener(
-        queue:              &DispatchRetained<DispatchQueue>,
-        device:             DeviceHandle,
-        vsock_port:         u32,
+        queue: &DispatchRetained<DispatchQueue>,
+        device: DeviceHandle,
+        vsock_port: u32,
         host_loopback_port: u16,
-        dispatch_grace:     Duration,
+        dispatch_grace: Duration,
     ) -> Result<HandleInner, LoopbackBridgeError> {
         let delegate = VsockLoopbackDelegate::make(host_loopback_port, vsock_port);
 
@@ -578,7 +588,9 @@ pub mod macos {
             unsafe { VZVirtioSocketListener::new() };
         let proto: &ProtocolObject<dyn VZVirtioSocketListenerDelegate> =
             ProtocolObject::from_ref::<VsockLoopbackDelegate>(&delegate);
-        unsafe { listener_retained.setDelegate(Some(proto)); }
+        unsafe {
+            listener_retained.setDelegate(Some(proto));
+        }
         let listener = ListenerHandle(listener_retained);
 
         // Dispatch the registration on the AVF queue.
@@ -619,15 +631,21 @@ pub mod macos {
     // Suppress unused warnings on items only referenced through
     // generated macro paths.
     #[allow(dead_code)]
-    fn _ensure_refcell_in_scope(c: &RefCell<()>) -> &RefCell<()> { c }
+    fn _ensure_refcell_in_scope(c: &RefCell<()>) -> &RefCell<()> {
+        c
+    }
 
     #[allow(dead_code)]
-    fn _ensure_arc_in_scope(a: &Arc<()>) -> &Arc<()> { a }
+    fn _ensure_arc_in_scope(a: &Arc<()>) -> &Arc<()> {
+        a
+    }
 
     #[allow(dead_code)]
     fn _ensure_c_int_in_scope(_v: c_int) {}
     #[allow(dead_code)]
-    fn _ensure_rc_block_in_scope(b: RcBlock<dyn Fn()>) -> RcBlock<dyn Fn()> { b }
+    fn _ensure_rc_block_in_scope(b: RcBlock<dyn Fn()>) -> RcBlock<dyn Fn()> {
+        b
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -643,8 +661,14 @@ mod tests {
     #[test]
     fn build_loopback_plan_preserves_entry_order() {
         let plan = build_loopback_plan(vec![
-            LoopbackEntry { vsock_port: 5001, guest_loopback_port: 5432 },
-            LoopbackEntry { vsock_port: 5002, guest_loopback_port: 27017 },
+            LoopbackEntry {
+                vsock_port: 5001,
+                guest_loopback_port: 5432,
+            },
+            LoopbackEntry {
+                vsock_port: 5002,
+                guest_loopback_port: 27017,
+            },
         ]);
         assert_eq!(plan.len(), 2);
         assert_eq!(plan.iter().next().unwrap().vsock_port, 5001);
@@ -672,6 +696,9 @@ mod tests {
         let inactive = LoopbackBridgeError::InactiveVm("VM not started".to_owned());
         assert!(inactive.to_string().contains("VM not started"));
         let timeout = LoopbackBridgeError::DispatchTimeout(Duration::from_secs(1));
-        assert!(timeout.to_string().contains("DispatchTimeout") || timeout.to_string().contains("timeout"));
+        assert!(
+            timeout.to_string().contains("DispatchTimeout")
+                || timeout.to_string().contains("timeout")
+        );
     }
 }

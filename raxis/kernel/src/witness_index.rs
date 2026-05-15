@@ -38,7 +38,10 @@ pub enum WitnessError {
     Sql(#[from] rusqlite::Error),
 
     #[error("IO error writing witness blob {path}: {source}")]
-    Io { path: String, source: std::io::Error },
+    Io {
+        path: String,
+        source: std::io::Error,
+    },
 
     #[error("store error: {0}")]
     Store(#[from] raxis_store::StoreError),
@@ -51,13 +54,13 @@ pub enum WitnessError {
 #[derive(Debug, Clone)]
 pub struct WitnessRecord {
     pub verifier_run_id: String,
-    pub evaluation_sha:  String,
-    pub task_id:         String,
-    pub gate_type:       String,
-    pub result_class:    ResultClass,
-    pub blob_sha256:     String,
-    pub blob_path:       String,
-    pub recorded_at:     i64,
+    pub evaluation_sha: String,
+    pub task_id: String,
+    pub gate_type: String,
+    pub result_class: ResultClass,
+    pub blob_sha256: String,
+    pub blob_path: String,
+    pub recorded_at: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -70,18 +73,18 @@ pub enum ResultClass {
 impl ResultClass {
     pub fn as_str(&self) -> &'static str {
         match self {
-            ResultClass::Pass        => "Pass",
-            ResultClass::Fail        => "Fail",
+            ResultClass::Pass => "Pass",
+            ResultClass::Fail => "Fail",
             ResultClass::Inconclusive => "Inconclusive",
         }
     }
 
     pub fn from_str(s: &str) -> Option<Self> {
         match s {
-            "Pass"        => Some(ResultClass::Pass),
-            "Fail"        => Some(ResultClass::Fail),
+            "Pass" => Some(ResultClass::Pass),
+            "Fail" => Some(ResultClass::Fail),
             "Inconclusive" => Some(ResultClass::Inconclusive),
-            _             => None,
+            _ => None,
         }
     }
 }
@@ -92,7 +95,7 @@ impl ResultClass {
 
 #[derive(Debug)]
 pub struct WitnessStartupReport {
-    pub orphaned_blobs:      usize,
+    pub orphaned_blobs: usize,
     pub orphaned_index_rows: usize,
 }
 
@@ -113,8 +116,8 @@ pub struct WitnessStartupReport {
 /// validate-write-consume race documented in `kernel-store.md`
 /// §2.5.1.1 Pattern C.
 pub fn write_blob_to_disk(
-    record:      &WitnessRecord,
-    blob:        &[u8],
+    record: &WitnessRecord,
+    blob: &[u8],
     witness_dir: &Path,
 ) -> Result<(), WitnessError> {
     let computed = sha256_hex(blob);
@@ -150,8 +153,8 @@ pub fn write_blob_to_disk(
 /// `INSERT OR IGNORE` keeps duplicate `verifier_run_id` (PK) safe
 /// against the concurrent-double-callback case.
 pub fn insert_witness_index_in_tx(
-    conn:        &rusqlite::Connection,
-    record:      &WitnessRecord,
+    conn: &rusqlite::Connection,
+    record: &WitnessRecord,
     recorded_at: i64,
 ) -> Result<(), WitnessError> {
     conn.execute(
@@ -183,11 +186,11 @@ pub fn insert_witness_index_in_tx(
 /// If `verifier_run_id` is Some, returns that specific run.
 /// If None, returns the most recently recorded row for the triple.
 pub fn lookup(
-    evaluation_sha:  &str,
-    task_id:         &str,
-    gate_type:       &str,
+    evaluation_sha: &str,
+    task_id: &str,
+    gate_type: &str,
     verifier_run_id: Option<&str>,
-    store:           &Store,
+    store: &Store,
 ) -> Result<Option<WitnessRecord>, WitnessError> {
     let conn = store.lock_sync();
     let row = if let Some(run_id) = verifier_run_id {
@@ -221,17 +224,17 @@ pub fn lookup(
 
 fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WitnessRecord> {
     let result_class_str: String = row.get(4)?;
-    let result_class = ResultClass::from_str(&result_class_str)
-        .unwrap_or(ResultClass::Inconclusive);
+    let result_class =
+        ResultClass::from_str(&result_class_str).unwrap_or(ResultClass::Inconclusive);
     Ok(WitnessRecord {
         verifier_run_id: row.get(0)?,
-        evaluation_sha:  row.get(1)?,
-        task_id:         row.get(2)?,
-        gate_type:       row.get(3)?,
+        evaluation_sha: row.get(1)?,
+        task_id: row.get(2)?,
+        gate_type: row.get(3)?,
         result_class,
-        blob_sha256:     row.get(5)?,
-        blob_path:       row.get(6)?,
-        recorded_at:     row.get(7)?,
+        blob_sha256: row.get(5)?,
+        blob_path: row.get(6)?,
+        recorded_at: row.get(7)?,
     })
 }
 
@@ -255,15 +258,16 @@ pub fn get_blob(blob_sha256: &str, witness_dir: &Path) -> Result<Vec<u8>, Witnes
 /// Detect orphaned blobs (file exists, no index row) and orphaned index rows
 /// (row exists, file missing). Does NOT delete anything — reports counts only.
 pub fn startup_check(
-    store:       &Store,
+    store: &Store,
     witness_dir: &Path,
 ) -> Result<WitnessStartupReport, WitnessError> {
     // Collect all blob files.
     let mut blob_files: std::collections::HashSet<String> = std::collections::HashSet::new();
     if witness_dir.exists() {
-        for entry in std::fs::read_dir(witness_dir)
-            .map_err(|e| WitnessError::Io { path: witness_dir.display().to_string(), source: e })?
-        {
+        for entry in std::fs::read_dir(witness_dir).map_err(|e| WitnessError::Io {
+            path: witness_dir.display().to_string(),
+            source: e,
+        })? {
             let entry = entry.map_err(|e| WitnessError::Io {
                 path: witness_dir.display().to_string(),
                 source: e,
@@ -276,8 +280,7 @@ pub fn startup_check(
 
     // Collect all blob_sha256 values from the SQL index.
     let conn = store.lock_sync();
-    let select_blobs_sql =
-        format!("SELECT DISTINCT blob_sha256 FROM {WR}");
+    let select_blobs_sql = format!("SELECT DISTINCT blob_sha256 FROM {WR}");
     let mut stmt = conn.prepare(&select_blobs_sql)?;
     let index_shas: Vec<String> = stmt
         .query_map([], |row| row.get(0))?
@@ -286,7 +289,10 @@ pub fn startup_check(
     let index_set: std::collections::HashSet<String> = index_shas.iter().cloned().collect();
 
     // Orphaned blobs: file exists but not in index.
-    let orphaned_blobs = blob_files.iter().filter(|f| !index_set.contains(*f)).count();
+    let orphaned_blobs = blob_files
+        .iter()
+        .filter(|f| !index_set.contains(*f))
+        .count();
 
     // Orphaned index rows: SHA in index but file missing.
     let orphaned_index_rows = index_shas
@@ -331,18 +337,21 @@ mod tests {
 
         let rec = WitnessRecord {
             verifier_run_id: "run1".to_owned(),
-            evaluation_sha:  "aaaa".to_owned(),
-            task_id:         "t1".to_owned(),
-            gate_type:       "TestGate".to_owned(),
-            result_class:    ResultClass::Pass,
-            blob_sha256:     wrong_sha,
-            blob_path:       "does_not_matter".to_owned(),
-            recorded_at:     0,
+            evaluation_sha: "aaaa".to_owned(),
+            task_id: "t1".to_owned(),
+            gate_type: "TestGate".to_owned(),
+            result_class: ResultClass::Pass,
+            blob_sha256: wrong_sha,
+            blob_path: "does_not_matter".to_owned(),
+            recorded_at: 0,
         };
 
         let result = write_blob_to_disk(&rec, blob, &blob_dir);
         assert!(result.is_err());
-        assert!(matches!(result.unwrap_err(), WitnessError::BlobHashMismatch { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            WitnessError::BlobHashMismatch { .. }
+        ));
 
         std::fs::remove_dir_all(&base).ok();
     }
@@ -351,7 +360,10 @@ mod tests {
     fn get_blob_missing_returns_err() {
         let dir = temp_dir();
         let result = get_blob("nonexistent_sha", &dir);
-        assert!(matches!(result.unwrap_err(), WitnessError::BlobNotFound { .. }));
+        assert!(matches!(
+            result.unwrap_err(),
+            WitnessError::BlobNotFound { .. }
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

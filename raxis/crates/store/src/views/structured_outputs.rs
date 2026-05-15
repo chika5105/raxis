@@ -42,7 +42,7 @@ use crate::Table;
 /// re-validating.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StructuredOutputRow {
-    pub output_id:     String,
+    pub output_id: String,
     pub initiative_id: String,
     /// `Some(task_id)` for outputs emitted by an Executor or
     /// Reviewer session whose enclosing `tasks` row is still alive
@@ -50,22 +50,22 @@ pub struct StructuredOutputRow {
     /// **Orchestrator-emitted outputs** which are scoped to the
     /// initiative but are NOT bound to any single sub-task —
     /// see `v2_extended_gaps.md §3.2`.
-    pub task_id:       Option<String>,
-    pub session_id:    String,
+    pub task_id: Option<String>,
+    pub session_id: String,
     /// `progress_report` | `diagnostic_flag` | `task_summary`.
     /// Matches the wire `kind` discriminator the executor emits.
-    pub kind:          String,
+    pub kind: String,
     /// `Some("info" | "warning" | "critical")` for
     /// `diagnostic_flag` rows; `None` otherwise. The CHECK
     /// constraint in migration 13 pins the value set.
-    pub severity:      Option<String>,
+    pub severity: Option<String>,
     /// Verbatim JSON the kernel persisted (already validated /
     /// normalised at admission time by
     /// `StructuredOutputKind::validate_and_normalise`).
-    pub payload_json:  String,
+    pub payload_json: String,
     /// Unix-epoch seconds, recorded by the kernel handler when
     /// the row was written.
-    pub emitted_at:    i64,
+    pub emitted_at: i64,
 }
 
 #[derive(Debug, Error)]
@@ -83,14 +83,14 @@ const SELECT_ALL_COLS: &str = "output_id, initiative_id, task_id, session_id, \
 
 fn row_to_struct(row: &rusqlite::Row<'_>) -> rusqlite::Result<StructuredOutputRow> {
     Ok(StructuredOutputRow {
-        output_id:     row.get::<_, String>(0)?,
+        output_id: row.get::<_, String>(0)?,
         initiative_id: row.get::<_, String>(1)?,
-        task_id:       row.get::<_, Option<String>>(2)?,
-        session_id:    row.get::<_, String>(3)?,
-        kind:          row.get::<_, String>(4)?,
-        severity:      row.get::<_, Option<String>>(5)?,
-        payload_json:  row.get::<_, String>(6)?,
-        emitted_at:    row.get::<_, i64>(7)?,
+        task_id: row.get::<_, Option<String>>(2)?,
+        session_id: row.get::<_, String>(3)?,
+        kind: row.get::<_, String>(4)?,
+        severity: row.get::<_, Option<String>>(5)?,
+        payload_json: row.get::<_, String>(6)?,
+        emitted_at: row.get::<_, i64>(7)?,
     })
 }
 
@@ -110,7 +110,7 @@ where
 /// "what happened during this task?" reading order). Index probe
 /// via `idx_structured_outputs_task`.
 pub fn list_for_task(
-    conn:    &RoConn,
+    conn: &RoConn,
     task_id: &str,
 ) -> Result<Vec<StructuredOutputRow>, StructuredOutputViewError> {
     let table = Table::StructuredOutputs.as_str();
@@ -128,7 +128,7 @@ pub fn list_for_task(
 /// by `emitted_at ASC`. Index probe via
 /// `idx_structured_outputs_initiative`.
 pub fn list_for_initiative(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<Vec<StructuredOutputRow>, StructuredOutputViewError> {
     let table = Table::StructuredOutputs.as_str();
@@ -165,8 +165,8 @@ mod tests {
         let tx = conn.transaction().unwrap();
 
         let initiatives_t = Table::Initiatives.as_str();
-        let tasks_t       = Table::Tasks.as_str();
-        let sessions_t    = Table::Sessions.as_str();
+        let tasks_t = Table::Tasks.as_str();
+        let sessions_t = Table::Sessions.as_str();
 
         tx.execute_batch(&format!(
             "INSERT INTO {initiatives_t} \
@@ -183,7 +183,8 @@ mod tests {
                  policy_epoch, admitted_at, transitioned_at, session_id) \
              VALUES \
                 ('task-1', 'init-1', 'lane-1', 'Running', 'op', 1, 100, 100, 'sess-1');"
-        )).unwrap();
+        ))
+        .unwrap();
         tx.commit().unwrap();
 
         drop(conn);
@@ -192,15 +193,15 @@ mod tests {
     }
 
     fn insert_row(
-        tmp:           &TempDir,
-        output_id:     &str,
+        tmp: &TempDir,
+        output_id: &str,
         initiative_id: &str,
-        task_id:       &str,
-        session_id:    &str,
-        kind:          &str,
-        severity:      Option<&str>,
-        payload_json:  &str,
-        emitted_at:    i64,
+        task_id: &str,
+        session_id: &str,
+        kind: &str,
+        severity: Option<&str>,
+        payload_json: &str,
+        emitted_at: i64,
     ) {
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let conn = store.lock_sync();
@@ -213,10 +214,17 @@ mod tests {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ),
             r_params![
-                output_id, initiative_id, task_id, session_id,
-                kind, severity, payload_json, emitted_at,
+                output_id,
+                initiative_id,
+                task_id,
+                session_id,
+                kind,
+                severity,
+                payload_json,
+                emitted_at,
             ],
-        ).unwrap();
+        )
+        .unwrap();
         drop(conn);
         drop(store);
     }
@@ -233,12 +241,39 @@ mod tests {
     fn list_for_task_returns_rows_oldest_first() {
         let (tmp, init, task, sess) = fresh_store_with_seed();
 
-        insert_row(&tmp, "out-2", init, task, sess, "diagnostic_flag",
-                   Some("warning"), r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#, 200);
-        insert_row(&tmp, "out-1", init, task, sess, "progress_report",
-                   None, r#"{"ProgressReport":{"files_modified":[],"tests_passing":1,"tests_failing":0,"confidence":0.9}}"#, 100);
-        insert_row(&tmp, "out-3", init, task, sess, "task_summary",
-                   None, r#"{"TaskSummary":{"commit_sha":"deadbeef","changed_paths":[],"approach":"x"}}"#, 300);
+        insert_row(
+            &tmp,
+            "out-2",
+            init,
+            task,
+            sess,
+            "diagnostic_flag",
+            Some("warning"),
+            r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#,
+            200,
+        );
+        insert_row(
+            &tmp,
+            "out-1",
+            init,
+            task,
+            sess,
+            "progress_report",
+            None,
+            r#"{"ProgressReport":{"files_modified":[],"tests_passing":1,"tests_failing":0,"confidence":0.9}}"#,
+            100,
+        );
+        insert_row(
+            &tmp,
+            "out-3",
+            init,
+            task,
+            sess,
+            "task_summary",
+            None,
+            r#"{"TaskSummary":{"commit_sha":"deadbeef","changed_paths":[],"approach":"x"}}"#,
+            300,
+        );
 
         let ro = open_ro(tmp.path()).unwrap();
         let rows = list_for_task(&ro, task).unwrap();
@@ -264,7 +299,7 @@ mod tests {
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         {
             let conn = store.lock_sync();
-            let tasks_t    = Table::Tasks.as_str();
+            let tasks_t = Table::Tasks.as_str();
             let sessions_t = Table::Sessions.as_str();
             conn.execute_batch(&format!(
                 "INSERT INTO {sessions_t} \
@@ -277,14 +312,33 @@ mod tests {
                      policy_epoch, admitted_at, transitioned_at, session_id) \
                  VALUES \
                     ('task-2', '{init}', 'lane-1', 'Running', 'op', 1, 200, 200, 'sess-2');"
-            )).unwrap();
+            ))
+            .unwrap();
         }
         drop(store);
 
-        insert_row(&tmp, "a", init, task, sess, "progress_report",
-                   None, "{}", 100);
-        insert_row(&tmp, "b", init, "task-2", "sess-2", "task_summary",
-                   None, "{}", 200);
+        insert_row(
+            &tmp,
+            "a",
+            init,
+            task,
+            sess,
+            "progress_report",
+            None,
+            "{}",
+            100,
+        );
+        insert_row(
+            &tmp,
+            "b",
+            init,
+            "task-2",
+            "sess-2",
+            "task_summary",
+            None,
+            "{}",
+            200,
+        );
 
         let ro = open_ro(tmp.path()).unwrap();
         let by_init = list_for_initiative(&ro, init).unwrap();

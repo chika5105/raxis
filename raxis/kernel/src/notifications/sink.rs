@@ -72,30 +72,30 @@ struct InitiativeTracker {
     /// initiative_id → start_instant
     by_initiative: HashMap<String, Instant>,
     /// initiative_id → in-flight task count
-    in_flight:     HashMap<String, i64>,
+    in_flight: HashMap<String, i64>,
 }
 
 /// Wraps any `AuditSink` (typically `FileAuditSink` in production,
 /// `FakeAuditSink` in integration tests) and routes every emitted
 /// event through `notifications::dispatch`.
 pub struct NotifyingAuditSink {
-    inner:            Arc<dyn AuditSink>,
-    policy:           Arc<ArcSwap<PolicyBundle>>,
-    data_dir:         PathBuf,
+    inner: Arc<dyn AuditSink>,
+    policy: Arc<ArcSwap<PolicyBundle>>,
+    data_dir: PathBuf,
     sidecar_registry: Option<Arc<SidecarRegistry>>,
-    store:            Option<Arc<Store>>,
+    store: Option<Arc<Store>>,
     /// Optional `ObservabilityHub` reference. When present, every
     /// successful inner emit ALSO bumps the matching V3 §3 metric
     /// (egress admit / deny / default-grant / stall, credential-proxy
     /// substitution). When absent (e.g. in legacy unit tests that
     /// never wire a hub), the bridge is a noop. The hub is the
     /// dashboard fast path; the audit log remains the source of truth.
-    obs_hub:          Option<Arc<ObservabilityHub>>,
+    obs_hub: Option<Arc<ObservabilityHub>>,
     /// V3 observability — per-session correlation state used to
     /// compute session-duration / agent_type-tagged lifecycle
     /// transitions. Only mutated when `obs_hub` is `Some(_)` AND
     /// the inner emit succeeded; cleared on `SessionVmExited`.
-    sessions:    Mutex<SessionTracker>,
+    sessions: Mutex<SessionTracker>,
     /// V3 observability — per-initiative correlation state used to
     /// compute initiative-duration and the in-flight task gauge.
     /// Same lifecycle discipline as `sessions`.
@@ -108,8 +108,8 @@ impl NotifyingAuditSink {
     /// section. The wrapped sink is itself an `AuditSink` so it slots
     /// into `HandlerContext.audit` without any other call-site change.
     pub fn new(
-        inner:    Arc<dyn AuditSink>,
-        policy:   Arc<ArcSwap<PolicyBundle>>,
+        inner: Arc<dyn AuditSink>,
+        policy: Arc<ArcSwap<PolicyBundle>>,
         data_dir: PathBuf,
     ) -> Self {
         Self {
@@ -119,7 +119,7 @@ impl NotifyingAuditSink {
             sidecar_registry: None,
             store: None,
             obs_hub: None,
-            sessions:    Mutex::new(SessionTracker::default()),
+            sessions: Mutex::new(SessionTracker::default()),
             initiatives: Mutex::new(InitiativeTracker::default()),
         }
     }
@@ -208,9 +208,9 @@ fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
 /// cross-event correlation (spawn→exit duration, in-flight gauge);
 /// stateless variants ignore them.
 fn bridge_audit_to_metric(
-    hub:         &ObservabilityHub,
-    kind:        &AuditEventKind,
-    sessions:    &Mutex<SessionTracker>,
+    hub: &ObservabilityHub,
+    kind: &AuditEventKind,
+    sessions: &Mutex<SessionTracker>,
     initiatives: &Mutex<InitiativeTracker>,
 ) {
     use crate::observability as obs;
@@ -238,22 +238,24 @@ fn bridge_audit_to_metric(
         // type; we cache it under the session id so the later
         // `SessionVmExited` can emit duration + lifecycle transition
         // with the right `agent_type` label.
-        AuditEventKind::SessionCreated { session_id, session_agent_type, .. } => {
+        AuditEventKind::SessionCreated {
+            session_id,
+            session_agent_type,
+            ..
+        } => {
             let agent_type = session_agent_type
                 .as_deref()
                 .unwrap_or("unknown")
                 .to_owned();
-            obs::record_session_lifecycle_transition(
-                hub, "None", "Created", &agent_type, "ok",
-            );
+            obs::record_session_lifecycle_transition(hub, "None", "Created", &agent_type, "ok");
             // Cache the agent_type. The spawn instant comes later on
             // `SessionVmSpawned`; we seed with `Instant::now()` so
             // sessions that go straight to exited without a spawn
             // still get a non-zero duration window.
-            sessions.lock().by_session.insert(
-                session_id.clone(),
-                (Instant::now(), agent_type),
-            );
+            sessions
+                .lock()
+                .by_session
+                .insert(session_id.clone(), (Instant::now(), agent_type));
         }
         AuditEventKind::SessionVmSpawned { session_id, .. } => {
             // Refresh the spawn instant — `SessionCreated` happens
@@ -267,10 +269,9 @@ fn bridge_audit_to_metric(
                     // SessionCreated was missed (legacy chain or
                     // SessionCreated emit failed); seed a fresh entry
                     // with unknown agent_type.
-                    guard.by_session.insert(
-                        session_id.clone(),
-                        (now, "unknown".to_owned()),
-                    );
+                    guard
+                        .by_session
+                        .insert(session_id.clone(), (now, "unknown".to_owned()));
                 }
             }
             // Pull agent_type for the transition label without
@@ -282,12 +283,12 @@ fn bridge_audit_to_metric(
                 .map(|(_, a)| a.clone())
                 .unwrap_or_else(|| "unknown".to_owned());
             drop(guard);
-            obs::record_session_lifecycle_transition(
-                hub, "Created", "Spawned", &agent_type, "ok",
-            );
+            obs::record_session_lifecycle_transition(hub, "Created", "Spawned", &agent_type, "ok");
         }
         AuditEventKind::SessionVmExited {
-            session_id, signal_class, ..
+            session_id,
+            signal_class,
+            ..
         } => {
             let entry = sessions.lock().by_session.remove(session_id);
             let (spawn_instant, agent_type) = match entry {
@@ -300,11 +301,13 @@ fn bridge_audit_to_metric(
                 _ => "error",
             };
             obs::record_session_lifecycle_transition(
-                hub, "Spawned", "Exited", &agent_type, outcome,
+                hub,
+                "Spawned",
+                "Exited",
+                &agent_type,
+                outcome,
             );
-            obs::record_session_duration(
-                hub, &agent_type, outcome, duration_ms,
-            );
+            obs::record_session_duration(hub, &agent_type, outcome, duration_ms);
         }
 
         // ── Initiative lifecycle (duration + in-flight gauge) ────
@@ -314,13 +317,15 @@ fn bridge_audit_to_metric(
         // valid label — the redactor accepts it under the closed
         // `initiative_class` allow-list entry.
         AuditEventKind::InitiativeCreated { initiative_id, .. } => {
-            initiatives.lock().by_initiative.insert(
-                initiative_id.clone(),
-                Instant::now(),
-            );
+            initiatives
+                .lock()
+                .by_initiative
+                .insert(initiative_id.clone(), Instant::now());
         }
         AuditEventKind::InitiativeStateChanged {
-            initiative_id, to_state, ..
+            initiative_id,
+            to_state,
+            ..
         } => {
             // Only the terminal state-changes produce a duration
             // observation. Mirror the FSM terminal set
@@ -340,9 +345,7 @@ fn bridge_audit_to_metric(
                     "Completed" => "ok",
                     _ => "error",
                 };
-                obs::record_initiative_duration(
-                    hub, "unknown", outcome, duration_ms,
-                );
+                obs::record_initiative_duration(hub, "unknown", outcome, duration_ms);
             }
         }
         AuditEventKind::InitiativeAborted { initiative_id, .. } => {
@@ -352,9 +355,7 @@ fn bridge_audit_to_metric(
                 .remove(initiative_id)
                 .unwrap_or_else(Instant::now);
             let duration_ms = start.elapsed().as_millis() as i64;
-            obs::record_initiative_duration(
-                hub, "unknown", "aborted", duration_ms,
-            );
+            obs::record_initiative_duration(hub, "unknown", "aborted", duration_ms);
         }
         AuditEventKind::TaskAdmitted { initiative_id, .. } => {
             let mut guard = initiatives.lock();
@@ -380,7 +381,11 @@ fn bridge_audit_to_metric(
 
         // ── Notifications ─────────────────────────────────────────
         AuditEventKind::NotificationDelivered {
-            channel_kind, channel_id, event_kind, delivery_ms, ..
+            channel_kind,
+            channel_id,
+            event_kind,
+            delivery_ms,
+            ..
         } => {
             obs::record_notification_delivery(
                 hub,
@@ -392,30 +397,25 @@ fn bridge_audit_to_metric(
             );
         }
         AuditEventKind::NotificationDeliveryFailed {
-            channel_id, event_kind, ..
+            channel_id,
+            event_kind,
+            ..
         } => {
             // `NotificationDeliveryFailed` does not carry
             // `channel_kind` or `delivery_ms` — both surface only on
             // the success path. Use `"unknown"` and 0 so the metric
             // still records the failure attempt; dashboards filter
             // on `success=false` to surface the failure rate.
-            obs::record_notification_delivery(
-                hub,
-                "unknown",
-                channel_id,
-                event_kind,
-                false,
-                0,
-            );
+            obs::record_notification_delivery(hub, "unknown", channel_id, event_kind, false, 0);
         }
 
         // ── Credential proxies ───────────────────────────────────
         AuditEventKind::CredentialProxyUpstreamConnected {
-            proxy_type, handshake_ms, ..
+            proxy_type,
+            handshake_ms,
+            ..
         } => {
-            obs::record_credproxy_connection(
-                hub, proxy_type, "ok", *handshake_ms as i64,
-            );
+            obs::record_credproxy_connection(hub, proxy_type, "ok", *handshake_ms as i64);
         }
         AuditEventKind::CredentialProxyUpstreamFailed {
             proxy_type, reason, ..
@@ -427,23 +427,35 @@ fn bridge_audit_to_metric(
             operation, blocked, ..
         } => {
             let outcome = if *blocked { "blocked" } else { "ok" };
-            obs::record_credproxy_statement(
-                hub, "database", operation, outcome, *blocked, 0,
-            );
+            obs::record_credproxy_statement(hub, "database", operation, outcome, *blocked, 0);
         }
         AuditEventKind::DatabaseQueryCompleted {
-            proxy_type, bytes_returned, duration_ms, upstream_error, ..
+            proxy_type,
+            bytes_returned,
+            duration_ms,
+            upstream_error,
+            ..
         } => {
-            let outcome = if upstream_error.is_some() { "error" } else { "ok" };
+            let outcome = if upstream_error.is_some() {
+                "error"
+            } else {
+                "ok"
+            };
             obs::record_credproxy_statement(
-                hub, proxy_type, "query", outcome, false, *duration_ms as i64,
+                hub,
+                proxy_type,
+                "query",
+                outcome,
+                false,
+                *duration_ms as i64,
             );
-            obs::record_credproxy_bytes(
-                hub, proxy_type, "in", *bytes_returned as i64,
-            );
+            obs::record_credproxy_bytes(hub, proxy_type, "in", *bytes_returned as i64);
         }
         AuditEventKind::HttpProxyRequestExecuted {
-            method, blocked, status_code, ..
+            method,
+            blocked,
+            status_code,
+            ..
         } => {
             let outcome = if *blocked {
                 "blocked"
@@ -452,30 +464,22 @@ fn bridge_audit_to_metric(
             } else {
                 "ok"
             };
-            obs::record_credproxy_statement(
-                hub, "http", method, outcome, *blocked, 0,
-            );
+            obs::record_credproxy_statement(hub, "http", method, outcome, *blocked, 0);
         }
-        AuditEventKind::SmtpMessageRelayed {
-            bytes_relayed, ..
-        } => {
-            obs::record_credproxy_statement(
-                hub, "smtp", "relay", "ok", false, 0,
-            );
-            obs::record_credproxy_bytes(
-                hub, "smtp", "out", *bytes_relayed as i64,
-            );
+        AuditEventKind::SmtpMessageRelayed { bytes_relayed, .. } => {
+            obs::record_credproxy_statement(hub, "smtp", "relay", "ok", false, 0);
+            obs::record_credproxy_bytes(hub, "smtp", "out", *bytes_relayed as i64);
         }
         AuditEventKind::SmtpMessageRejected { reason, .. } => {
-            obs::record_credproxy_statement(
-                hub, "smtp", "relay", "blocked", true, 0,
-            );
+            obs::record_credproxy_statement(hub, "smtp", "relay", "blocked", true, 0);
             obs::record_credproxy_policy_block(hub, "smtp", reason);
         }
 
         // ── Reviewer aggregation ─────────────────────────────────
         AuditEventKind::ReviewAggregationCompleted {
-            verdict, reviewer_count, ..
+            verdict,
+            reviewer_count,
+            ..
         } => {
             // `record_reviewer_review` records one observation per
             // terminal aggregation. Duration is unknown at this
@@ -489,18 +493,15 @@ fn bridge_audit_to_metric(
                 // proxy); the helper takes an i64 and the
                 // `reviewer_count` value is the closest available
                 // measure at this layer.
-                obs::record_reviewer_disagreement(
-                    hub, *reviewer_count as i64,
-                );
+                obs::record_reviewer_disagreement(hub, *reviewer_count as i64);
             }
             obs::record_review_revision_round(hub, *reviewer_count as i64);
         }
         AuditEventKind::ExecutorRespawnFromReviewRejection {
-            review_reject_count, ..
+            review_reject_count,
+            ..
         } => {
-            obs::record_review_revision_round(
-                hub, *review_reject_count as i64,
-            );
+            obs::record_review_revision_round(hub, *review_reject_count as i64);
         }
 
         // ── Git integration ──────────────────────────────────────
@@ -520,9 +521,9 @@ fn bridge_audit_to_metric(
 impl AuditSink for NotifyingAuditSink {
     fn emit(
         &self,
-        kind:          AuditEventKind,
-        session_id:    Option<&str>,
-        task_id:       Option<&str>,
+        kind: AuditEventKind,
+        session_id: Option<&str>,
+        task_id: Option<&str>,
         initiative_id: Option<&str>,
     ) -> Result<AuditEvent, AuditWriterError> {
         // 1. Inner emit FIRST. The audit chain is the source of truth;
@@ -637,8 +638,8 @@ impl AuditSink for NotifyingAuditSink {
 mod tests {
     use super::*;
     use crate::notifications::dispatch_blocking_for_tests;
-    use raxis_test_support::FakeAuditSink;
     use raxis_policy::{OperatorEntry, PolicyBundle};
+    use raxis_test_support::FakeAuditSink;
     use serde_json::json;
 
     fn bundle() -> Arc<ArcSwap<PolicyBundle>> {
@@ -652,10 +653,10 @@ mod tests {
         let pubkey = "0".repeat(64);
         let b = PolicyBundle::for_tests_with_operators(vec![OperatorEntry {
             pubkey_fingerprint: "fp".into(),
-            display_name:       "fp".into(),
-            pubkey_hex:         pubkey.clone(),
-            permitted_ops:      vec![],
-            cert:                  raxis_test_support::stub_cert_for_pubkey(pubkey),
+            display_name: "fp".into(),
+            pubkey_hex: pubkey.clone(),
+            permitted_ops: vec![],
+            cert: raxis_test_support::stub_cert_for_pubkey(pubkey),
             force_misconfig_bypass: false,
         }]);
         Arc::new(ArcSwap::from_pointee(b))
@@ -666,23 +667,24 @@ mod tests {
     /// the only side effect.
     #[tokio::test]
     async fn emit_forwards_to_inner_and_returns_event() {
-        let tmp     = tempfile::tempdir().unwrap();
-        let inner   = Arc::new(FakeAuditSink::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
         let inner_dyn: Arc<dyn AuditSink> = inner.clone();
-        let sink    = NotifyingAuditSink::new(
-            Arc::clone(&inner_dyn),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf());
 
-        let evt = sink.emit(
-            AuditEventKind::EscalationApproved {
-                escalation_id: "esc-A".into(),
-                approved_by:   "op".into(),
-                approved_by_display_name: None,
-            },
-            None, None, None,
-        ).unwrap();
+        let evt = sink
+            .emit(
+                AuditEventKind::EscalationApproved {
+                    escalation_id: "esc-A".into(),
+                    approved_by: "op".into(),
+                    approved_by_display_name: None,
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         assert_eq!(evt.event_kind, "EscalationApproved");
         assert_eq!(inner.events().len(), 1, "inner sink must capture one event");
@@ -695,35 +697,33 @@ mod tests {
     async fn dispatch_writes_inbox_line_on_emit() {
         let tmp = tempfile::tempdir().unwrap();
         let inner: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
-        let sink  = NotifyingAuditSink::new(
-            Arc::clone(&inner),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink = NotifyingAuditSink::new(Arc::clone(&inner), bundle(), tmp.path().to_path_buf());
 
         // Emit through the wrapper to ensure inner-side capture.
-        let evt = sink.emit(
-            AuditEventKind::EscalationApproved {
-                escalation_id: "esc-B".into(),
-                approved_by:   "op".into(),
-                approved_by_display_name: None,
-            },
-            None, None, None,
-        ).unwrap();
+        let evt = sink
+            .emit(
+                AuditEventKind::EscalationApproved {
+                    escalation_id: "esc-B".into(),
+                    approved_by: "op".into(),
+                    approved_by_display_name: None,
+                },
+                None,
+                None,
+                None,
+            )
+            .unwrap();
 
         // The production code path uses `tokio::spawn`; for assertion
         // determinism we replay the same dispatch synchronously.
-        dispatch_blocking_for_tests(
-            evt,
-            &bundle().load_full(),
-            tmp.path(),
-            Arc::clone(&inner),
-        ).await;
+        dispatch_blocking_for_tests(evt, &bundle().load_full(), tmp.path(), Arc::clone(&inner))
+            .await;
 
         let inbox = PolicyBundle::inbox_path_for(tmp.path());
-        let raw   = std::fs::read_to_string(&inbox).unwrap_or_default();
-        assert!(raw.contains("EscalationApproved"),
-            "inbox MUST carry the dispatched event; got: {raw:?}");
+        let raw = std::fs::read_to_string(&inbox).unwrap_or_default();
+        assert!(
+            raw.contains("EscalationApproved"),
+            "inbox MUST carry the dispatched event; got: {raw:?}"
+        );
     }
 
     /// `INV-NOTIF-SCOPE-01`: operator-passive dashboard actions
@@ -739,19 +739,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let inner = Arc::new(FakeAuditSink::new());
         let inner_dyn: Arc<dyn AuditSink> = inner.clone();
-        let sink = NotifyingAuditSink::new(
-            Arc::clone(&inner_dyn),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf());
 
         let evt = sink
             .emit(
                 AuditEventKind::OperatorNotificationMarkedRead {
                     operator_fingerprint: "fp".into(),
-                    notification_id:      "n-1".into(),
-                    updated:              true,
-                    outcome:              "Accepted".into(),
+                    notification_id: "n-1".into(),
+                    updated: true,
+                    outcome: "Accepted".into(),
                 },
                 None,
                 None,
@@ -791,11 +788,8 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let inner = Arc::new(FakeAuditSink::new());
         let inner_dyn: Arc<dyn AuditSink> = inner.clone();
-        let sink = NotifyingAuditSink::new(
-            Arc::clone(&inner_dyn),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf());
 
         sink.emit(
             AuditEventKind::SessionCreated {
@@ -843,10 +837,10 @@ mod tests {
         // flush — same pattern the observability crate's own tests use.
         let exp = Arc::new(InMemoryExporter::new());
         let cfg = HubConfig {
-            enabled:             true,
-            max_queue_depth:     1024,
-            sample_rate:         1.0,
-            max_attrs_per_span:  32,
+            enabled: true,
+            max_queue_depth: 1024,
+            sample_rate: 1.0,
+            max_attrs_per_span: 32,
             max_events_per_span: 16,
             ..HubConfig::default()
         };
@@ -855,38 +849,41 @@ mod tests {
             Arc::clone(&exp) as Arc<dyn ObservabilityExporter>,
         ));
 
-        let tmp     = tempfile::tempdir().unwrap();
-        let inner   = Arc::new(FakeAuditSink::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
         let inner_dyn: Arc<dyn AuditSink> = inner.clone();
-        let sink    = NotifyingAuditSink::new(
-            Arc::clone(&inner_dyn),
-            bundle(),
-            tmp.path().to_path_buf(),
-        )
-        .with_observability(Arc::clone(&hub));
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf())
+                .with_observability(Arc::clone(&hub));
 
         // Bridged variant: TransparentProxyDenied → raxis.egress.deny.total.
         sink.emit(
             AuditEventKind::TransparentProxyDenied {
-                session_id:        "sess-1".into(),
-                host_or_sni:       Some("forbidden.example.com".into()),
-                original_dst_ip:   "10.0.0.1".into(),
+                session_id: "sess-1".into(),
+                host_or_sni: Some("forbidden.example.com".into()),
+                original_dst_ip: "10.0.0.1".into(),
                 original_dst_port: 443,
-                protocol:          "https".into(),
-                reason:            "host_not_in_allowlist".into(),
+                protocol: "https".into(),
+                reason: "host_not_in_allowlist".into(),
             },
-            Some("sess-1"), None, None,
-        ).unwrap();
+            Some("sess-1"),
+            None,
+            None,
+        )
+        .unwrap();
 
         // Non-bridged variant: KernelStarted should NOT touch metrics.
         sink.emit(
             AuditEventKind::KernelStarted {
-                data_dir:        "/tmp".into(),
-                policy_epoch:    1,
-                schema_version:  1,
+                data_dir: "/tmp".into(),
+                policy_epoch: 1,
+                schema_version: 1,
             },
-            None, None, None,
-        ).unwrap();
+            None,
+            None,
+            None,
+        )
+        .unwrap();
 
         hub.flush();
 
@@ -898,9 +895,9 @@ mod tests {
         let deny = metrics
             .iter()
             .find(|m| m.name.as_otel_name() == "raxis.egress.deny.total")
-            .unwrap_or_else(|| panic!(
-                "expected one raxis.egress.deny.total metric; got {metrics:#?}",
-            ));
+            .unwrap_or_else(|| {
+                panic!("expected one raxis.egress.deny.total metric; got {metrics:#?}",)
+            });
         assert_eq!(
             deny.labels.get("chokepoint").map(|v| match v {
                 raxis_observability::AttrValue::Str(s) => s.as_str(),
@@ -923,27 +920,31 @@ mod tests {
     /// side-effect and no panics.
     #[tokio::test]
     async fn bridge_is_inert_when_no_hub_attached() {
-        let tmp     = tempfile::tempdir().unwrap();
-        let inner   = Arc::new(FakeAuditSink::new());
+        let tmp = tempfile::tempdir().unwrap();
+        let inner = Arc::new(FakeAuditSink::new());
         let inner_dyn: Arc<dyn AuditSink> = inner.clone();
-        let sink    = NotifyingAuditSink::new(
-            Arc::clone(&inner_dyn),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink =
+            NotifyingAuditSink::new(Arc::clone(&inner_dyn), bundle(), tmp.path().to_path_buf());
 
         sink.emit(
             AuditEventKind::TransparentProxyAdmitted {
-                session_id:        "sess-A".into(),
-                host_or_sni:       Some("api.example.com".into()),
-                original_dst_ip:   "10.0.0.2".into(),
+                session_id: "sess-A".into(),
+                host_or_sni: Some("api.example.com".into()),
+                original_dst_ip: "10.0.0.2".into(),
                 original_dst_port: 443,
-                protocol:          "https".into(),
+                protocol: "https".into(),
             },
-            Some("sess-A"), None, None,
-        ).unwrap();
+            Some("sess-A"),
+            None,
+            None,
+        )
+        .unwrap();
 
-        assert_eq!(inner.events().len(), 1, "inner sink still observes the emit");
+        assert_eq!(
+            inner.events().len(),
+            1,
+            "inner sink still observes the emit"
+        );
     }
 
     /// If the inner sink returns Err, the wrapper MUST propagate the
@@ -963,29 +964,29 @@ mod tests {
                 Err(AuditWriterError::Io(std::io::Error::other("synthetic")))
             }
         }
-        let tmp     = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let inner: Arc<dyn AuditSink> = Arc::new(AlwaysFail);
-        let sink    = NotifyingAuditSink::new(
-            Arc::clone(&inner),
-            bundle(),
-            tmp.path().to_path_buf(),
-        );
+        let sink = NotifyingAuditSink::new(Arc::clone(&inner), bundle(), tmp.path().to_path_buf());
 
         let result = sink.emit(
             AuditEventKind::KernelStarted {
-                data_dir:        "/tmp".into(),
-                policy_epoch:    1,
-                schema_version:  1,
+                data_dir: "/tmp".into(),
+                policy_epoch: 1,
+                schema_version: 1,
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
         assert!(matches!(result, Err(AuditWriterError::Io(_))));
 
         // The inbox file must NOT have been created — we never reached
         // the dispatch fan-out.
         let inbox = PolicyBundle::inbox_path_for(tmp.path());
-        assert!(!inbox.exists(),
-            "no inbox write must occur on a failed inner emit; found {inbox:?}");
+        assert!(
+            !inbox.exists(),
+            "no inbox write must occur on a failed inner emit; found {inbox:?}"
+        );
         let _ = json!({}); // keep serde_json import live for future variant assertions
     }
 }

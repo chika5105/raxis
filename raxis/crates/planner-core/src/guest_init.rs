@@ -65,9 +65,9 @@ mod linux {
 
     /// One filesystem to mount.
     struct MountPlan {
-        target:  &'static str,
+        target: &'static str,
         fs_type: &'static str,
-        flags:   libc::c_ulong,
+        flags: libc::c_ulong,
     }
 
     /// Canonical mount table for V2 GA. Order matters: `/dev` is
@@ -75,28 +75,28 @@ mod linux {
     /// an earlier mount failure on stderr.
     const PLAN: &[MountPlan] = &[
         MountPlan {
-            target:  "/proc",
+            target: "/proc",
             fs_type: "proc",
             // procfs default flags: nodev, noexec, nosuid (kernel
             // sets these automatically for procfs even without
             // explicit flags, but we set them so older kernels
             // behave consistently).
-            flags:   libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
+            flags: libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
         },
         MountPlan {
-            target:  "/sys",
+            target: "/sys",
             fs_type: "sysfs",
-            flags:   libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
+            flags: libc::MS_NODEV | libc::MS_NOEXEC | libc::MS_NOSUID,
         },
         MountPlan {
-            target:  "/tmp",
+            target: "/tmp",
             fs_type: "tmpfs",
-            flags:   libc::MS_NODEV | libc::MS_NOSUID,
+            flags: libc::MS_NODEV | libc::MS_NOSUID,
         },
         MountPlan {
-            target:  "/dev",
+            target: "/dev",
             fs_type: "devtmpfs",
-            flags:   libc::MS_NOSUID,
+            flags: libc::MS_NOSUID,
         },
     ];
 
@@ -114,7 +114,8 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"mkdir_failed\",\"target\":{:?},\
                       \"err\":{:?}}}",
-                    plan.target, e.to_string(),
+                    plan.target,
+                    e.to_string(),
                 );
                 continue;
             }
@@ -138,7 +139,9 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"mount_failed\",\"target\":{:?},\
                       \"fs_type\":{:?},\"err\":{:?}}}",
-                    plan.target, plan.fs_type, e.to_string(),
+                    plan.target,
+                    plan.fs_type,
+                    e.to_string(),
                 ),
             }
         }
@@ -217,9 +220,7 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"open_console_failed\",\
                       \"errno\":{}}}",
-                    io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                 );
                 return;
             }
@@ -247,9 +248,7 @@ mod linux {
                       \"event\":\"dup2_failed\",\"target\":{},\
                       \"errno\":{}}}",
                     target,
-                    io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                 );
             }
         }
@@ -306,9 +305,7 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"loopback_socket_failed\",\
                       \"errno\":{}}}",
-                    io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                 );
                 return;
             }
@@ -334,9 +331,7 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"loopback_ioctl_get_failed\",\
                       \"errno\":{}}}",
-                    io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                 );
                 libc::close(sock);
                 return;
@@ -349,9 +344,7 @@ mod linux {
             // directly through the union to keep this dependency-
             // free of any helper crate.
             let cur_flags = ifr.ifr_ifru.ifru_flags;
-            let want = cur_flags
-                | (libc::IFF_UP as i16)
-                | (libc::IFF_RUNNING as i16);
+            let want = cur_flags | (libc::IFF_UP as i16) | (libc::IFF_RUNNING as i16);
             if cur_flags == want {
                 eprintln!(
                     "{{\"level\":\"info\",\"step\":\"guest-init\",\
@@ -367,9 +360,7 @@ mod linux {
                     "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                       \"event\":\"loopback_ioctl_set_failed\",\
                       \"errno\":{}}}",
-                    io::Error::last_os_error()
-                        .raw_os_error()
-                        .unwrap_or(-1),
+                    io::Error::last_os_error().raw_os_error().unwrap_or(-1),
                 );
                 libc::close(sock);
                 return;
@@ -389,7 +380,7 @@ mod linux {
         // pass `null` for `source` and `data` because procfs /
         // sysfs / devtmpfs / tmpfs all ignore them.
         let target_c = CString::new(target).expect("static target has no NUL bytes");
-        let fs_c     = CString::new(fs_type).expect("static fs_type has no NUL bytes");
+        let fs_c = CString::new(fs_type).expect("static fs_type has no NUL bytes");
         let rc = unsafe {
             libc::mount(
                 std::ptr::null(),
@@ -410,16 +401,15 @@ mod linux {
     /// `mount -t virtiofs <tag> <guest_path>` (read/write) or
     /// `mount -t virtiofs -o ro <tag> <guest_path>` (read-only).
     pub(super) fn try_mount_virtiofs(
-        tag:        &str,
+        tag: &str,
         guest_path: &str,
-        read_only:  bool,
+        read_only: bool,
     ) -> io::Result<()> {
-        let source_c = CString::new(tag)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let target_c = CString::new(guest_path)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
-        let fs_c = CString::new("virtiofs")
-            .expect("static fs_type has no NUL bytes");
+        let source_c =
+            CString::new(tag).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let target_c =
+            CString::new(guest_path).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        let fs_c = CString::new("virtiofs").expect("static fs_type has no NUL bytes");
         // VirtioFS does not need a `data` parameter for the basic
         // case; mount options like `cache=…` would be supplied
         // here. The kernel's virtiofs driver pulls cache mode
@@ -574,8 +564,7 @@ mod linux_a3 {
         // sole resolver target when no `search` / `options` lines
         // are present. The stub forwarder is the dispatcher to
         // the kernel-side resolver via vsock.
-        let contents: &[u8] =
-            b"# raxis Path A3 universal airgap -- kernel-mediated DNS.\n\
+        let contents: &[u8] = b"# raxis Path A3 universal airgap -- kernel-mediated DNS.\n\
               nameserver 127.0.0.1\n\
               options single-request-reopen timeout:5 attempts:2\n";
         // `/etc` may or may not exist in the canonical executor
@@ -624,10 +613,7 @@ mod linux_a3 {
             // Don't REDIRECT traffic that is already loopback —
             // the cred-proxy loopback forwarder and the DNS stub
             // both bind 127.0.0.1.
-            vec![
-                "-t", "nat", "-A", "OUTPUT",
-                "-o", "lo", "-j", "RETURN",
-            ],
+            vec!["-t", "nat", "-A", "OUTPUT", "-o", "lo", "-j", "RETURN"],
             // Default-deny REJECT-as-RST equivalent is implicit:
             // anything that doesn't hit one of the REDIRECT rules
             // below has no upstream NIC anyway (substrate gave us
@@ -635,15 +621,36 @@ mod linux_a3 {
             // ENETUNREACH / EHOSTUNREACH which surfaces to the
             // agent's libc as a clean failure.
             vec![
-                "-t", "nat", "-A", "OUTPUT",
-                "-p", "tcp", "!", "-d", "127.0.0.1/32",
-                "-j", "REDIRECT", "--to-port", &tproxy_port_s,
+                "-t",
+                "nat",
+                "-A",
+                "OUTPUT",
+                "-p",
+                "tcp",
+                "!",
+                "-d",
+                "127.0.0.1/32",
+                "-j",
+                "REDIRECT",
+                "--to-port",
+                &tproxy_port_s,
             ],
             vec![
-                "-t", "nat", "-A", "OUTPUT",
-                "-p", "udp", "--dport", "53",
-                "!", "-d", "127.0.0.1/32",
-                "-j", "REDIRECT", "--to-port", "53",
+                "-t",
+                "nat",
+                "-A",
+                "OUTPUT",
+                "-p",
+                "udp",
+                "--dport",
+                "53",
+                "!",
+                "-d",
+                "127.0.0.1/32",
+                "-j",
+                "REDIRECT",
+                "--to-port",
+                "53",
             ],
         ];
 
@@ -652,9 +659,7 @@ mod linux_a3 {
         for binary in binaries {
             let mut ok = true;
             for argv in &rules {
-                let status = std::process::Command::new(binary)
-                    .args(argv)
-                    .status();
+                let status = std::process::Command::new(binary).args(argv).status();
                 match status {
                     Ok(s) if s.success() => {}
                     Ok(s) => {
@@ -719,7 +724,7 @@ mod tests_a3 {
         // constants in `planner-executor::main`) survive because
         // the kernel still needs to communicate per-session vsock
         // port assignments to the guest.
-        assert_eq!(A3_TPROXY_PORT_ENV,   "RAXIS_AIRGAP_A3_TPROXY_PORT");
+        assert_eq!(A3_TPROXY_PORT_ENV, "RAXIS_AIRGAP_A3_TPROXY_PORT");
         assert_eq!(A3_DEFAULT_TPROXY_PORT, 3129);
     }
 }
@@ -837,9 +842,7 @@ pub enum MountStatus {
 /// Parse one comma-separated `RAXIS_VIRTIOFS_MOUNTS` payload into
 /// [`VirtioFsMountSpec`]s + the index of the first malformed
 /// token (if any).
-pub fn parse_virtiofs_mounts(
-    raw: &str,
-) -> (Vec<VirtioFsMountSpec>, Option<String>) {
+pub fn parse_virtiofs_mounts(raw: &str) -> (Vec<VirtioFsMountSpec>, Option<String>) {
     let mut out: Vec<VirtioFsMountSpec> = Vec::new();
     let mut bad: Option<String> = None;
     for (idx, raw_entry) in raw.split(',').enumerate() {
@@ -852,9 +855,7 @@ pub fn parse_virtiofs_mounts(
             Some(t) if !t.is_empty() => t.to_owned(),
             _ => {
                 if bad.is_none() {
-                    bad = Some(format!(
-                        "entry {idx}: missing or empty <tag> field"
-                    ));
+                    bad = Some(format!("entry {idx}: missing or empty <tag> field"));
                 }
                 continue;
             }
@@ -871,9 +872,7 @@ pub fn parse_virtiofs_mounts(
             }
             None => {
                 if bad.is_none() {
-                    bad = Some(format!(
-                        "entry {idx}: missing <guest_path> field"
-                    ));
+                    bad = Some(format!("entry {idx}: missing <guest_path> field"));
                 }
                 continue;
             }
@@ -891,17 +890,13 @@ pub fn parse_virtiofs_mounts(
             }
             None => {
                 if bad.is_none() {
-                    bad = Some(format!(
-                        "entry {idx}: missing <mode> field"
-                    ));
+                    bad = Some(format!("entry {idx}: missing <mode> field"));
                 }
                 continue;
             }
         };
         if parts.next().is_some() && bad.is_none() {
-            bad = Some(format!(
-                "entry {idx}: too many ':' separated fields"
-            ));
+            bad = Some(format!("entry {idx}: too many ':' separated fields"));
             // Still accept the spec — extra fields are tolerated
             // for forward-compatibility, but flagged.
         }
@@ -944,16 +939,15 @@ pub fn mount_workspace_shares() -> WorkspaceMountOutcome {
 fn mount_one(spec: &VirtioFsMountSpec) -> MountStatus {
     if let Err(e) = std::fs::create_dir_all(&spec.guest_path) {
         return MountStatus::Failed {
-            reason: format!(
-                "mkdir -p {target}: {e}",
-                target = spec.guest_path,
-            ),
+            reason: format!("mkdir -p {target}: {e}", target = spec.guest_path,),
         };
     }
     match linux::try_mount_virtiofs(&spec.tag, &spec.guest_path, spec.read_only) {
         Ok(()) => MountStatus::Ok,
         Err(e) if e.raw_os_error() == Some(libc::EBUSY) => MountStatus::Already,
-        Err(e) => MountStatus::Failed { reason: e.to_string() },
+        Err(e) => MountStatus::Failed {
+            reason: e.to_string(),
+        },
     }
 }
 
@@ -1034,9 +1028,7 @@ pub fn shutdown_or_exit(code: u8) -> ! {
             // Reaching this line means reboot(2) returned non-zero —
             // log it and fall through to a regular exit so we do not
             // leave the planner process hanging.
-            let errno = std::io::Error::last_os_error()
-                .raw_os_error()
-                .unwrap_or(-1);
+            let errno = std::io::Error::last_os_error().raw_os_error().unwrap_or(-1);
             eprintln!(
                 "{{\"level\":\"warn\",\"step\":\"guest-init\",\
                   \"event\":\"shutdown_power_off_failed\",\
@@ -1093,9 +1085,7 @@ pub const CARGO_OFFLINE_ENV: &str = "CARGO_NET_OFFLINE";
 /// for each session).
 pub fn ensure_cargo_offline_default() -> CargoOfflineDefaultOutcome {
     match std::env::var(CARGO_OFFLINE_ENV) {
-        Ok(v) if !v.is_empty() => {
-            CargoOfflineDefaultOutcome::PreservedExisting { value: v }
-        }
+        Ok(v) if !v.is_empty() => CargoOfflineDefaultOutcome::PreservedExisting { value: v },
         _ => {
             // SAFETY: `set_var` is unsafe-by-Rust-2024 because of
             // multi-threaded access semantics. This call runs
@@ -1149,13 +1139,15 @@ mod cargo_offline_default_tests {
         // SAFETY: holding the static mutex serialises every test
         // in this module against any other test in this module
         // that touches the same env key.
-        unsafe { std::env::remove_var(key); }
+        unsafe {
+            std::env::remove_var(key);
+        }
         f();
         // SAFETY: see above.
         unsafe {
             match prev {
                 Some(v) => std::env::set_var(key, v),
-                None    => std::env::remove_var(key),
+                None => std::env::remove_var(key),
             }
         }
     }
@@ -1164,7 +1156,10 @@ mod cargo_offline_default_tests {
     fn ensure_cargo_offline_default_sets_when_absent() {
         with_env_snapshot(CARGO_OFFLINE_ENV, || {
             let outcome = ensure_cargo_offline_default();
-            assert!(matches!(outcome, CargoOfflineDefaultOutcome::DefaultedToOffline));
+            assert!(matches!(
+                outcome,
+                CargoOfflineDefaultOutcome::DefaultedToOffline
+            ));
             assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
         });
     }
@@ -1173,7 +1168,9 @@ mod cargo_offline_default_tests {
     fn ensure_cargo_offline_default_preserves_existing_truthy_value() {
         with_env_snapshot(CARGO_OFFLINE_ENV, || {
             // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, "true"); }
+            unsafe {
+                std::env::set_var(CARGO_OFFLINE_ENV, "true");
+            }
             let outcome = ensure_cargo_offline_default();
             match outcome {
                 CargoOfflineDefaultOutcome::PreservedExisting { value } => {
@@ -1195,7 +1192,9 @@ mod cargo_offline_default_tests {
         // choice.
         with_env_snapshot(CARGO_OFFLINE_ENV, || {
             // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, "false"); }
+            unsafe {
+                std::env::set_var(CARGO_OFFLINE_ENV, "false");
+            }
             let outcome = ensure_cargo_offline_default();
             match outcome {
                 CargoOfflineDefaultOutcome::PreservedExisting { value } => {
@@ -1216,9 +1215,14 @@ mod cargo_offline_default_tests {
         // as "no preference set".
         with_env_snapshot(CARGO_OFFLINE_ENV, || {
             // SAFETY: serialised via `with_env_snapshot`'s mutex.
-            unsafe { std::env::set_var(CARGO_OFFLINE_ENV, ""); }
+            unsafe {
+                std::env::set_var(CARGO_OFFLINE_ENV, "");
+            }
             let outcome = ensure_cargo_offline_default();
-            assert!(matches!(outcome, CargoOfflineDefaultOutcome::DefaultedToOffline));
+            assert!(matches!(
+                outcome,
+                CargoOfflineDefaultOutcome::DefaultedToOffline
+            ));
             assert_eq!(std::env::var(CARGO_OFFLINE_ENV).unwrap(), "true");
         });
     }

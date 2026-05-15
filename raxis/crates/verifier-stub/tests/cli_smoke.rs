@@ -39,8 +39,11 @@ fn exit_code_2_when_no_env_vars_are_set() {
     // so the integration test can distinguish "envelope is wrong" from
     // "everything was right but the kernel rejected the witness" (1).
     let status = empty_envelope().status().expect("spawn stub");
-    assert_eq!(status.code(), Some(2),
-        "expected MissingEnv exit code 2 with empty env, got {status:?}");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "expected MissingEnv exit code 2 with empty env, got {status:?}"
+    );
 }
 
 #[test]
@@ -49,13 +52,19 @@ fn exit_code_2_when_only_socket_is_missing() {
     // socket path is fatal. Tests the per-var error precision.
     let status = empty_envelope()
         .env("RAXIS_VERIFIER_TOKEN", "tok")
-        .env("RAXIS_TASK_ID",        "task-1")
-        .env("RAXIS_GATE_TYPE",      "test-gate")
-        .env("RAXIS_EVALUATION_SHA", "abcd1234abcd1234abcd1234abcd1234abcd1234")
+        .env("RAXIS_TASK_ID", "task-1")
+        .env("RAXIS_GATE_TYPE", "test-gate")
+        .env(
+            "RAXIS_EVALUATION_SHA",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
         .status()
         .expect("spawn stub");
-    assert_eq!(status.code(), Some(2),
-        "expected MissingEnv exit code 2, got {status:?}");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "expected MissingEnv exit code 2, got {status:?}"
+    );
 }
 
 #[test]
@@ -68,14 +77,23 @@ fn exit_code_3_when_socket_path_does_not_exist() {
     // 3 means something I/O-shaped happened".
     let status = empty_envelope()
         .env("RAXIS_VERIFIER_TOKEN", "tok")
-        .env("RAXIS_TASK_ID",        "task-1")
-        .env("RAXIS_GATE_TYPE",      "test-gate")
-        .env("RAXIS_EVALUATION_SHA", "abcd1234abcd1234abcd1234abcd1234abcd1234")
-        .env("RAXIS_KERNEL_SOCKET",  "/tmp/raxis-stub-no-such-socket-9f2c7b.sock")
+        .env("RAXIS_TASK_ID", "task-1")
+        .env("RAXIS_GATE_TYPE", "test-gate")
+        .env(
+            "RAXIS_EVALUATION_SHA",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .env(
+            "RAXIS_KERNEL_SOCKET",
+            "/tmp/raxis-stub-no-such-socket-9f2c7b.sock",
+        )
         .status()
         .expect("spawn stub");
-    assert_eq!(status.code(), Some(3),
-        "expected IoError exit code 3 for missing socket, got {status:?}");
+    assert_eq!(
+        status.code(),
+        Some(3),
+        "expected IoError exit code 3 for missing socket, got {status:?}"
+    );
 }
 
 #[test]
@@ -84,15 +102,21 @@ fn exit_code_2_when_result_class_env_var_is_invalid() {
     // vs "Pass") to catch a future loosening of `parse_result_class`
     // that would silently accept the wrong spelling.
     let status = empty_envelope()
-        .env("RAXIS_VERIFIER_TOKEN",      "tok")
-        .env("RAXIS_TASK_ID",             "task-1")
-        .env("RAXIS_GATE_TYPE",           "test-gate")
-        .env("RAXIS_EVALUATION_SHA",      "abcd1234abcd1234abcd1234abcd1234abcd1234")
-        .env("RAXIS_KERNEL_SOCKET",       "/tmp/whatever.sock")
-        .env("RAXIS_STUB_RESULT_CLASS",   "Passed") // close to "Pass" — must NOT be accepted
+        .env("RAXIS_VERIFIER_TOKEN", "tok")
+        .env("RAXIS_TASK_ID", "task-1")
+        .env("RAXIS_GATE_TYPE", "test-gate")
+        .env(
+            "RAXIS_EVALUATION_SHA",
+            "abcd1234abcd1234abcd1234abcd1234abcd1234",
+        )
+        .env("RAXIS_KERNEL_SOCKET", "/tmp/whatever.sock")
+        .env("RAXIS_STUB_RESULT_CLASS", "Passed") // close to "Pass" — must NOT be accepted
         .status()
         .expect("spawn stub");
     // We exit BEFORE attempting to connect, so this stays at MissingEnv.
-    assert_eq!(status.code(), Some(2),
-        "expected MissingEnv exit code 2 for invalid RAXIS_STUB_RESULT_CLASS, got {status:?}");
+    assert_eq!(
+        status.code(),
+        Some(2),
+        "expected MissingEnv exit code 2 for invalid RAXIS_STUB_RESULT_CLASS, got {status:?}"
+    );
 }

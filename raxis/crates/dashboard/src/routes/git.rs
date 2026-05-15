@@ -50,8 +50,7 @@ use serde::Deserialize;
 
 use crate::auth::DashboardRole;
 use crate::data::{
-    WorktreeDetail, WorktreeDiff, WorktreeFile,
-    WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
+    WorktreeDetail, WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
 };
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
@@ -94,7 +93,9 @@ pub struct LogQuery {
     pub limit: u32,
 }
 
-fn default_log_limit() -> u32 { 50 }
+fn default_log_limit() -> u32 {
+    50
+}
 
 /// `GET /api/git/worktrees/:name/log`.
 pub async fn log<D>(
@@ -202,7 +203,10 @@ where
         });
     }
     let file_path = validate_relative_path(raw)?;
-    state.data.worktree_file(validated_name, file_path).map(Json)
+    state
+        .data
+        .worktree_file(validated_name, file_path)
+        .map(Json)
 }
 
 // ---------------------------------------------------------------------------
@@ -310,7 +314,8 @@ fn parse_range(range: &str) -> ApiResult<(String, String)> {
 }
 
 fn is_hex(s: &str) -> bool {
-    s.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+    s.bytes()
+        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
 }
 
 fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
@@ -318,7 +323,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

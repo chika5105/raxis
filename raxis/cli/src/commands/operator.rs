@@ -54,11 +54,11 @@ pub fn run_quarantine_plans_by(flags: &GlobalFlags, args: &[String]) -> Result<(
     let (mut conn, _fp) = open_conn(flags)?;
     let req = OperatorRequest::QuarantinePlansBy {
         target_fingerprint: parsed.target_fingerprint,
-        reason:             parsed.reason,
+        reason: parsed.reason,
     };
     let resp = conn.send_request(&to_wire(&req)?)?;
     handle_response(resp, |ok| {
-        let at  = ok["quarantined_at"].as_i64().unwrap_or(0);
+        let at = ok["quarantined_at"].as_i64().unwrap_or(0);
         let ids = ok["newly_quarantined_ids"]
             .as_array()
             .cloned()
@@ -85,7 +85,7 @@ pub fn run_quarantine_plans_by(flags: &GlobalFlags, args: &[String]) -> Result<(
 #[derive(Debug, PartialEq, Eq)]
 struct ParsedQuarantinePlansByArgs {
     target_fingerprint: String,
-    reason:             Option<String>,
+    reason: Option<String>,
 }
 
 fn parse_quarantine_plans_by_args(
@@ -106,9 +106,9 @@ fn parse_quarantine_plans_by_args(
     while let Some(arg) = iter.next() {
         match arg.as_str() {
             "--reason" => {
-                let v = iter.next().ok_or_else(|| {
-                    CliError::Usage("--reason requires a value".to_owned())
-                })?;
+                let v = iter
+                    .next()
+                    .ok_or_else(|| CliError::Usage("--reason requires a value".to_owned()))?;
                 reason = Some(v.clone());
             }
             other => {
@@ -159,13 +159,12 @@ mod tests {
 
     #[test]
     fn fingerprint_only_parses_with_no_reason() {
-        let parsed =
-            parse_quarantine_plans_by_args(&s(&["abcdef0123456789"])).unwrap();
+        let parsed = parse_quarantine_plans_by_args(&s(&["abcdef0123456789"])).unwrap();
         assert_eq!(
             parsed,
             ParsedQuarantinePlansByArgs {
                 target_fingerprint: "abcdef0123456789".to_owned(),
-                reason:             None,
+                reason: None,
             }
         );
     }
@@ -182,7 +181,7 @@ mod tests {
             parsed,
             ParsedQuarantinePlansByArgs {
                 target_fingerprint: "abcdef0123456789".to_owned(),
-                reason:             Some("key suspected leaked".to_owned()),
+                reason: Some("key suspected leaked".to_owned()),
             }
         );
     }
@@ -202,8 +201,7 @@ mod tests {
     #[test]
     fn unknown_flag_is_usage_error() {
         let err =
-            parse_quarantine_plans_by_args(&s(&["abcdef0123456789", "--whatever"]))
-                .unwrap_err();
+            parse_quarantine_plans_by_args(&s(&["abcdef0123456789", "--whatever"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         if let CliError::Usage(m) = err {
             assert!(m.contains("--whatever") || m.contains("unknown flag"));
@@ -213,8 +211,7 @@ mod tests {
     #[test]
     fn reason_without_value_is_usage_error() {
         let err =
-            parse_quarantine_plans_by_args(&s(&["abcdef0123456789", "--reason"]))
-                .unwrap_err();
+            parse_quarantine_plans_by_args(&s(&["abcdef0123456789", "--reason"])).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
         if let CliError::Usage(m) = err {
             assert!(m.contains("--reason requires a value"));

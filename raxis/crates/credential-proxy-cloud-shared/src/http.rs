@@ -15,16 +15,16 @@ use std::time::Duration;
 use bytes::Bytes;
 use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
 
-use crate::allowlist::{CloudUpstreamHost, validate_upstream_url};
-use crate::error::{UpstreamError, classify_reqwest_error};
+use crate::allowlist::{validate_upstream_url, CloudUpstreamHost};
+use crate::error::{classify_reqwest_error, UpstreamError};
 
 /// Outbound HTTPS client pinned to a single cloud-control-plane
 /// host. Refuses any dispatch off the allowlist.
 #[derive(Debug, Clone)]
 pub struct CloudHttpClient {
     upstream: CloudUpstreamHost,
-    inner:    reqwest::Client,
-    timeout:  Duration,
+    inner: reqwest::Client,
+    timeout: Duration,
 }
 
 impl CloudHttpClient {
@@ -41,7 +41,7 @@ impl CloudHttpClient {
     /// transient latency.
     pub fn with_timeout(
         upstream: CloudUpstreamHost,
-        timeout:  Duration,
+        timeout: Duration,
     ) -> Result<Self, UpstreamError> {
         if timeout < Duration::from_secs(5) {
             return Err(UpstreamError::Misconfigured(
@@ -54,17 +54,25 @@ impl CloudHttpClient {
             .connect_timeout(Duration::from_secs(5))
             .no_proxy()
             .build()
-            .map_err(|e| UpstreamError::Misconfigured(format!(
-                "reqwest client build failed: {e}",
-            )))?;
-        Ok(Self { upstream, inner, timeout })
+            .map_err(|e| {
+                UpstreamError::Misconfigured(format!("reqwest client build failed: {e}",))
+            })?;
+        Ok(Self {
+            upstream,
+            inner,
+            timeout,
+        })
     }
 
     /// Upstream host this client is bound to.
-    pub fn upstream(&self) -> &CloudUpstreamHost { &self.upstream }
+    pub fn upstream(&self) -> &CloudUpstreamHost {
+        &self.upstream
+    }
 
     /// Configured request timeout.
-    pub fn timeout(&self) -> Duration { self.timeout }
+    pub fn timeout(&self) -> Duration {
+        self.timeout
+    }
 
     /// Dispatch a POST with `application/x-www-form-urlencoded`
     /// body. `url` MUST resolve to the constructor-configured
@@ -76,9 +84,9 @@ impl CloudHttpClient {
     /// / `Upstream5xx`).
     pub async fn post_form_urlencoded(
         &self,
-        url:         &str,
-        body:        Bytes,
-        extra_hdrs:  &[(&str, &str)],
+        url: &str,
+        body: Bytes,
+        extra_hdrs: &[(&str, &str)],
     ) -> Result<(u16, Bytes), UpstreamError> {
         validate_upstream_url(&self.upstream, url)?;
 
@@ -90,23 +98,18 @@ impl CloudHttpClient {
         headers.insert(
             reqwest::header::HOST,
             HeaderValue::from_str(self.upstream.host())
-                .map_err(|e| UpstreamError::Misconfigured(format!(
-                    "host header invalid: {e}",
-                )))?,
+                .map_err(|e| UpstreamError::Misconfigured(format!("host header invalid: {e}",)))?,
         );
         for (k, v) in extra_hdrs {
             let name = HeaderName::from_bytes(k.as_bytes())
-                .map_err(|e| UpstreamError::Misconfigured(format!(
-                    "header name invalid: {e}",
-                )))?;
+                .map_err(|e| UpstreamError::Misconfigured(format!("header name invalid: {e}",)))?;
             let value = HeaderValue::from_str(v)
-                .map_err(|e| UpstreamError::Misconfigured(format!(
-                    "header value invalid: {e}",
-                )))?;
+                .map_err(|e| UpstreamError::Misconfigured(format!("header value invalid: {e}",)))?;
             headers.insert(name, value);
         }
 
-        let response = self.inner
+        let response = self
+            .inner
             .post(url)
             .headers(headers)
             .body(body)
@@ -115,10 +118,7 @@ impl CloudHttpClient {
             .map_err(classify_reqwest_error)?;
 
         let status = response.status().as_u16();
-        let bytes = response
-            .bytes()
-            .await
-            .map_err(classify_reqwest_error)?;
+        let bytes = response.bytes().await.map_err(classify_reqwest_error)?;
         Ok((status, bytes))
     }
 }
@@ -140,10 +140,9 @@ mod tests {
 
     #[test]
     fn client_refuses_too_short_timeout() {
-        let err = CloudHttpClient::with_timeout(
-            CloudUpstreamHost::aws_global(),
-            Duration::from_secs(1),
-        ).unwrap_err();
+        let err =
+            CloudHttpClient::with_timeout(CloudUpstreamHost::aws_global(), Duration::from_secs(1))
+                .unwrap_err();
         assert!(matches!(err, UpstreamError::Misconfigured(_)));
     }
 
@@ -151,11 +150,7 @@ mod tests {
     async fn post_form_urlencoded_rejects_off_allowlist_url() {
         let c = CloudHttpClient::new(CloudUpstreamHost::aws_global()).unwrap();
         let err = c
-            .post_form_urlencoded(
-                "https://attacker.example/foo",
-                Bytes::from_static(b""),
-                &[],
-            )
+            .post_form_urlencoded("https://attacker.example/foo", Bytes::from_static(b""), &[])
             .await
             .unwrap_err();
         assert!(matches!(err, UpstreamError::EgressAllowlist(_)));
@@ -165,11 +160,7 @@ mod tests {
     async fn post_form_urlencoded_rejects_http_scheme() {
         let c = CloudHttpClient::new(CloudUpstreamHost::aws_global()).unwrap();
         let err = c
-            .post_form_urlencoded(
-                "http://sts.amazonaws.com/",
-                Bytes::from_static(b""),
-                &[],
-            )
+            .post_form_urlencoded("http://sts.amazonaws.com/", Bytes::from_static(b""), &[])
             .await
             .unwrap_err();
         assert!(matches!(err, UpstreamError::EgressAllowlist(_)));

@@ -221,9 +221,7 @@ pub enum GatewayMessage {
     /// Typed as `u64` (rather than UUID) to explicitly enforce monotonicity
     /// (preventing replay attacks of older policies) and to provide human-readable
     /// sequence numbers for operator ergonomics (e.g. `policy_epoch: 4`).
-    EpochAdvanced {
-        new_epoch_id: u64,
-    },
+    EpochAdvanced { new_epoch_id: u64 },
 
     // -----------------------------------------------------------------------
     // gateway → kernel
@@ -249,9 +247,7 @@ pub enum GatewayMessage {
 
     /// Gateway → kernel: gateway is ready to accept requests (sent once at startup
     /// after the gateway has loaded credentials and policy).
-    GatewayReady {
-        gateway_token: String,
-    },
+    GatewayReady { gateway_token: String },
 }
 
 /// The kind of external fetch, determining timeout and size limits.

@@ -11,13 +11,13 @@
 // All sockets use the raxis-ipc length-prefixed framing with bincode
 // `config::standard()`.
 
-pub mod context;
 pub mod auth;
 pub mod cid_blocklist;
+pub mod context;
 pub mod log;
-pub mod server;
 pub mod operator;
 pub mod operator_ergonomics;
+pub mod server;
 
 // V2 Step 15 — pre-auth CID blocklist. Re-exported here because the
 // accept layer consults it BEFORE any authenticated session lookup

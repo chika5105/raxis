@@ -129,11 +129,7 @@ impl DelegationStatus {
     /// CHECK constraint on already-installed databases. Adding a
     /// runtime-derived variant (like `Expired`) does NOT touch this
     /// array.
-    pub const STORED: [Self; 3] = [
-        Self::Active,
-        Self::StaleOnNextUse,
-        Self::RenewalRequired,
-    ];
+    pub const STORED: [Self; 3] = [Self::Active, Self::StaleOnNextUse, Self::RenewalRequired];
 
     pub fn as_sql_str(self) -> Option<&'static str> {
         match self {

@@ -62,9 +62,8 @@ use raxis_types::{unix_now_secs, FailureReason, TaskState};
 /// `FailureReason` rather than `Option<String>`.
 #[test]
 fn failure_reason_newtype_rejects_empty_string() {
-    let err = FailureReason::new("").expect_err(
-        "empty input MUST be rejected per INV-FAILURE-REASON-MANDATORY-01",
-    );
+    let err = FailureReason::new("")
+        .expect_err("empty input MUST be rejected per INV-FAILURE-REASON-MANDATORY-01");
     let msg = format!("{err}");
     assert!(
         msg.contains("INV-FAILURE-REASON-MANDATORY-01"),
@@ -97,13 +96,16 @@ fn failure_reason_newtype_accepts_valid_reason() {
                max_turns: 30 (see guests/<sid>/console.log for \
                planner-boot-error)";
     let reason = FailureReason::new(raw).expect("non-empty input must succeed");
-    assert_eq!(reason.as_str(), raw, "constructor must NOT trim — \
+    assert_eq!(
+        reason.as_str(),
+        raw,
+        "constructor must NOT trim — \
         leading / trailing context matters for dashboard rendering of \
-        multi-line stack tails");
+        multi-line stack tails"
+    );
     assert_eq!(format!("{reason}"), raw, "Display round-trip");
     let json = serde_json::to_string(&reason).expect("serialise");
-    let back: FailureReason = serde_json::from_str(&json)
-        .expect("deserialise round-trip");
+    let back: FailureReason = serde_json::from_str(&json).expect("deserialise round-trip");
     assert_eq!(back, reason);
 }
 
@@ -119,8 +121,8 @@ fn failure_reason_newtype_accepts_valid_reason() {
 #[test]
 fn session_revoked_audit_carries_revoked_by_display_name() {
     let event = AuditEventKind::SessionRevoked {
-        session_id:              "s-witness".to_owned(),
-        revoked_by:              "fp-witness".to_owned(),
+        session_id: "s-witness".to_owned(),
+        revoked_by: "fp-witness".to_owned(),
         revoked_by_display_name: Some("alice@example.com".to_owned()),
     };
     let AuditEventKind::SessionRevoked {
@@ -164,9 +166,9 @@ fn session_revoked_audit_carries_revoked_by_display_name() {
 #[test]
 fn initiative_aborted_audit_carries_operator_attribution_when_present() {
     let kernel_abort = AuditEventKind::InitiativeAborted {
-        initiative_id:                       "init-kernel".to_owned(),
-        triggered_by_operator:               None,
-        triggered_by_operator_display_name:  None,
+        initiative_id: "init-kernel".to_owned(),
+        triggered_by_operator: None,
+        triggered_by_operator_display_name: None,
     };
     let AuditEventKind::InitiativeAborted {
         triggered_by_operator,
@@ -180,9 +182,9 @@ fn initiative_aborted_audit_carries_operator_attribution_when_present() {
     assert!(triggered_by_operator_display_name.is_none());
 
     let operator_abort = AuditEventKind::InitiativeAborted {
-        initiative_id:                       "init-op".to_owned(),
-        triggered_by_operator:               Some("fp-op".to_owned()),
-        triggered_by_operator_display_name:  Some("bob@example.com".to_owned()),
+        initiative_id: "init-op".to_owned(),
+        triggered_by_operator: Some("fp-op".to_owned()),
+        triggered_by_operator_display_name: Some("bob@example.com".to_owned()),
     };
     let AuditEventKind::InitiativeAborted {
         triggered_by_operator,
@@ -192,9 +194,9 @@ fn initiative_aborted_audit_carries_operator_attribution_when_present() {
     else {
         panic!("wrong variant");
     };
-    let fp = triggered_by_operator.as_deref().expect(
-        "operator-driven abort MUST carry the fingerprint",
-    );
+    let fp = triggered_by_operator
+        .as_deref()
+        .expect("operator-driven abort MUST carry the fingerprint");
     let name = triggered_by_operator_display_name.as_deref().expect(
         "operator-driven abort MUST carry the display name when the \
          operator is resolvable — INV-FAILURE-REASON-MANDATORY-01",
@@ -218,14 +220,13 @@ fn tasks_block_reason_persists_failure_reason_verbatim() {
 
     let now = unix_now_secs();
     let initiatives = Table::Initiatives.as_str();
-    let tasks       = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
 
-    let task_id     = "t-fr-witness";
-    let initiative  = "init-fr-witness";
+    let task_id = "t-fr-witness";
+    let initiative = "init-fr-witness";
 
-    let reason = FailureReason::new(
-        "executor exit_code=4: dispatch loop exceeded max_turns: 30",
-    ).expect("real reason constructs");
+    let reason = FailureReason::new("executor exit_code=4: dispatch loop exceeded max_turns: 30")
+        .expect("real reason constructs");
 
     {
         let conn = store.lock_sync();
@@ -237,7 +238,8 @@ fn tasks_block_reason_persists_failure_reason_verbatim() {
                  VALUES (?1, 'Executing', '{{}}', 'beef', ?2)"
             ),
             rusqlite::params![initiative, now],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn.execute(
             &format!(
                 "INSERT INTO {tasks}
@@ -254,7 +256,8 @@ fn tasks_block_reason_persists_failure_reason_verbatim() {
                 now,
                 reason.as_str(),
             ],
-        ).expect("write Failed row with reason");
+        )
+        .expect("write Failed row with reason");
     }
 
     let persisted: Option<String> = {
@@ -263,7 +266,8 @@ fn tasks_block_reason_persists_failure_reason_verbatim() {
             &format!("SELECT block_reason FROM {tasks} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get::<_, Option<String>>(0),
-        ).expect("read block_reason")
+        )
+        .expect("read block_reason")
     };
     let payload = persisted.expect(
         "INV-FAILURE-REASON-MANDATORY-01: tasks.block_reason MUST \
@@ -404,13 +408,17 @@ fn tasks_block_reason_clean_exit_with_activity_is_non_generic() {
     let store = raxis_store::Store::open_in_memory().expect("open store");
     let now = unix_now_secs();
     let initiatives = Table::Initiatives.as_str();
-    let tasks       = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
 
-    let task_id    = "t-clean-exit-activity";
+    let task_id = "t-clean-exit-activity";
     let initiative = "init-clean-exit-activity";
 
     let synthesised = synthesised_block_reason_with_activity(
-        "executor", "StructuredOutput", 7, "Accepted", 1_715_694_342,
+        "executor",
+        "StructuredOutput",
+        7,
+        "Accepted",
+        1_715_694_342,
     );
     // FailureReason newtype admits the text — type-level layer.
     let fr = FailureReason::new(&synthesised).expect(
@@ -429,7 +437,8 @@ fn tasks_block_reason_clean_exit_with_activity_is_non_generic() {
                  VALUES (?1, 'Executing', '{{}}', 'beef', ?2)"
             ),
             rusqlite::params![initiative, now],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn.execute(
             &format!(
                 "INSERT INTO {tasks}
@@ -446,7 +455,8 @@ fn tasks_block_reason_clean_exit_with_activity_is_non_generic() {
                 now,
                 fr.as_str(),
             ],
-        ).expect("write Failed row with synthesised reason");
+        )
+        .expect("write Failed row with synthesised reason");
     }
 
     let persisted: Option<String> = {
@@ -455,7 +465,8 @@ fn tasks_block_reason_clean_exit_with_activity_is_non_generic() {
             &format!("SELECT block_reason FROM {tasks} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get::<_, Option<String>>(0),
-        ).expect("read block_reason")
+        )
+        .expect("read block_reason")
     };
     let payload = persisted.expect(
         "INV-FAILURE-REASON-MANDATORY-01: tasks.block_reason MUST \
@@ -517,9 +528,9 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
     let store = raxis_store::Store::open_in_memory().expect("open store");
     let now = unix_now_secs();
     let initiatives = Table::Initiatives.as_str();
-    let tasks       = Table::Tasks.as_str();
+    let tasks = Table::Tasks.as_str();
 
-    let task_id    = "t-clean-exit-no-activity";
+    let task_id = "t-clean-exit-no-activity";
     let initiative = "init-clean-exit-no-activity";
 
     let synthesised = synthesised_block_reason_without_activity("reviewer");
@@ -539,7 +550,8 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
                  VALUES (?1, 'Executing', '{{}}', 'beef', ?2)"
             ),
             rusqlite::params![initiative, now],
-        ).expect("seed initiative");
+        )
+        .expect("seed initiative");
         conn.execute(
             &format!(
                 "INSERT INTO {tasks}
@@ -556,7 +568,8 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
                 now,
                 fr.as_str(),
             ],
-        ).expect("write Failed row with synthesised reason");
+        )
+        .expect("write Failed row with synthesised reason");
     }
 
     let persisted: Option<String> = {
@@ -565,7 +578,8 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
             &format!("SELECT block_reason FROM {tasks} WHERE task_id = ?1"),
             rusqlite::params![task_id],
             |r| r.get::<_, Option<String>>(0),
-        ).expect("read block_reason")
+        )
+        .expect("read block_reason")
     };
     let payload = persisted.expect(
         "INV-FAILURE-REASON-MANDATORY-01: tasks.block_reason MUST \
@@ -585,17 +599,17 @@ fn tasks_block_reason_clean_exit_without_activity_is_non_generic() {
     // is the whole point. A future edit that collapses both
     // branches to one template fails THIS test loudly.
     let must_contain = [
-        "reviewer",                          // role disambiguation
-        "without ever submitting",           // distinguishing prefix
-        "IntentRequest",                     // dispatch-channel marker
+        "reviewer",                // role disambiguation
+        "without ever submitting", // distinguishing prefix
+        "IntentRequest",           // dispatch-channel marker
         // `INV-FAILURE-REASON-CONCRETE-01` — the post-retemplate
         // helper names the boot-failure surface concretely
         // (cold-start panic / model-init OOM / missing
         // RAXIS_MODEL_ID) instead of the pre-fix
         // `planner-boot-error / model-init failure / dispatch
         // loop returned Idle on the very first turn` umbrella.
-        "planner-boot",                      // operator hint about likely cause
-        "PlannerExitNotice",                 // missing-notice gap is named explicitly
+        "planner-boot",      // operator hint about likely cause
+        "PlannerExitNotice", // missing-notice gap is named explicitly
     ];
     for marker in must_contain {
         assert!(

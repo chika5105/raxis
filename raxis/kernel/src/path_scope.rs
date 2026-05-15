@@ -63,11 +63,11 @@ use crate::initiatives::{OrchestratorPlanFields, PlanRegistry, TaskKey, TaskPlan
 
 // INV-STORE-03 (kernel-store.md §2.5.1): no raw SQL table-name literals
 // in `kernel/src`; the constants below are interpolated into every query.
-const TASK_DAG_EDGES:               &str = Table::TaskDagEdges.as_str();
-const TASKS:                        &str = Table::Tasks.as_str();
+const TASK_DAG_EDGES: &str = Table::TaskDagEdges.as_str();
+const TASKS: &str = Table::Tasks.as_str();
 const TASK_EXPORTED_PATH_SNAPSHOTS: &str = Table::TaskExportedPathSnapshots.as_str();
 #[cfg(test)]
-const INITIATIVES:                  &str = Table::Initiatives.as_str();
+const INITIATIVES: &str = Table::Initiatives.as_str();
 
 // ---------------------------------------------------------------------------
 // AllowSet — glob patterns ∪ exact paths, with override flag
@@ -116,7 +116,7 @@ impl PathEntry {
     /// branch in `handlers/intent.rs`).
     pub fn matches(&self, path: &str) -> bool {
         match self {
-            PathEntry::Exact(p)           => p == path,
+            PathEntry::Exact(p) => p == path,
             PathEntry::DirectoryPrefix(p) => path.starts_with(p.as_str()),
         }
     }
@@ -140,20 +140,23 @@ pub struct AllowSet {
     /// `path_scope_override = true` short-circuits all checks. When set,
     /// `path_entries` and `exact_paths` are ignored. `PathScopeOverrideApplied`
     /// has already been emitted at `approve_plan` time per §2.5.8.
-    pub universal:    bool,
+    pub universal: bool,
     /// V2 path-allowlist entries from the task's signed plan
     /// (Step 19: exact filename or trailing-slash directory).
     pub path_entries: Vec<PathEntry>,
     /// Concrete literal paths inherited from completed-predecessor
     /// exports. These are NOT pattern-matched — see §2.5.8 "Why the
     /// compound type matters". Equality only.
-    pub exact_paths:  BTreeSet<String>,
+    pub exact_paths: BTreeSet<String>,
 }
 
 impl AllowSet {
     /// Universal/override singleton — every check passes.
     pub fn universal() -> Self {
-        Self { universal: true, ..Default::default() }
+        Self {
+            universal: true,
+            ..Default::default()
+        }
     }
 
     /// Test whether one path is allowed.
@@ -184,7 +187,10 @@ pub enum PathScopeError {
     /// `FAIL_PATH_POLICY_VIOLATION` rather than silently widening to
     /// "deny everything by accident allowed everything".
     #[error("no plan-registry entry for task `{task_id}` (initiative `{initiative_id}`)")]
-    NoPlanEntry { initiative_id: String, task_id: String },
+    NoPlanEntry {
+        initiative_id: String,
+        task_id: String,
+    },
 
     /// A V2 path-allowlist entry from the registry could not be parsed
     /// into a `PathEntry`. Under the V2 admission gate
@@ -229,16 +235,16 @@ pub struct PathPolicyViolation {
 /// completion between two intents must immediately widen the set.
 pub fn effective_allow(
     initiative_id: &str,
-    task_id:       &str,
-    registry:      &PlanRegistry,
-    store:         &Store,
+    task_id: &str,
+    registry: &PlanRegistry,
+    store: &Store,
 ) -> Result<AllowSet, PathScopeError> {
     let key = TaskKey::new(initiative_id, task_id);
     let fields = registry
         .get(&key)
         .ok_or_else(|| PathScopeError::NoPlanEntry {
             initiative_id: initiative_id.to_owned(),
-            task_id:       task_id.to_owned(),
+            task_id: task_id.to_owned(),
         })?;
 
     if fields.path_scope_override {
@@ -246,9 +252,13 @@ pub fn effective_allow(
     }
 
     let path_entries = parse_v2_entries(&fields.path_allowlist)?;
-    let exact_paths  = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
+    let exact_paths = collect_predecessor_exports(initiative_id, task_id, registry, store)?;
 
-    Ok(AllowSet { universal: false, path_entries, exact_paths })
+    Ok(AllowSet {
+        universal: false,
+        path_entries,
+        exact_paths,
+    })
 }
 
 /// V2 §Step 11 — Compute the `hybrid_effective_allow` for an
@@ -295,7 +305,7 @@ pub fn effective_allow(
 /// other grounds (initiative quarantine / not found / not Executing).
 pub fn compute_hybrid_effective_allow(
     initiative_id: &str,
-    registry:      &PlanRegistry,
+    registry: &PlanRegistry,
 ) -> Result<AllowSet, PathScopeError> {
     let task_snapshot = registry.tasks_in_initiative(initiative_id);
 
@@ -332,7 +342,11 @@ pub fn compute_hybrid_effective_allow(
         .map(|o: OrchestratorPlanFields| o.cross_cutting_artifacts.into_iter().collect())
         .unwrap_or_default();
 
-    Ok(AllowSet { universal: false, path_entries: entries, exact_paths })
+    Ok(AllowSet {
+        universal: false,
+        path_entries: entries,
+        exact_paths,
+    })
 }
 
 /// V2 §Step 11 — `check_paths` analog for `IntentKind::IntegrationMerge`.
@@ -344,7 +358,7 @@ pub fn compute_hybrid_effective_allow(
 pub fn check_paths_hybrid(
     touched_paths: &[std::path::PathBuf],
     initiative_id: &str,
-    registry:      &PlanRegistry,
+    registry: &PlanRegistry,
 ) -> Result<Result<(), PathPolicyViolation>, PathScopeError> {
     let allow = compute_hybrid_effective_allow(initiative_id, registry)?;
 
@@ -389,9 +403,9 @@ fn parse_v2_entries(entries: &[String]) -> Result<Vec<PathEntry>, PathScopeError
 /// `NoPlanEntry` because the successor IS the subject of the check.)
 fn collect_predecessor_exports(
     initiative_id: &str,
-    task_id:       &str,
-    registry:      &PlanRegistry,
-    store:         &Store,
+    task_id: &str,
+    registry: &PlanRegistry,
+    store: &Store,
 ) -> Result<BTreeSet<String>, PathScopeError> {
     let conn = store.lock_sync();
 
@@ -465,9 +479,9 @@ fn collect_predecessor_exports(
 pub fn check_paths(
     touched_paths: &[std::path::PathBuf],
     initiative_id: &str,
-    task_id:       &str,
-    registry:      &PlanRegistry,
-    store:         &Store,
+    task_id: &str,
+    registry: &PlanRegistry,
+    store: &Store,
 ) -> Result<Result<(), PathPolicyViolation>, PathScopeError> {
     let allow = effective_allow(initiative_id, task_id, registry, store)?;
 
@@ -591,7 +605,10 @@ mod tests {
     fn exact_paths_inherited_from_predecessors_match_only_literally() {
         let mut exact = BTreeSet::new();
         exact.insert("src/ipc/handlers/new.rs".to_owned());
-        let s = AllowSet { exact_paths: exact, ..Default::default() };
+        let s = AllowSet {
+            exact_paths: exact,
+            ..Default::default()
+        };
         assert!(s.matches("src/ipc/handlers/new.rs"));
         assert!(!s.matches("src/ipc/handlers/other.rs"));
         // Glob-looking literal must NOT be interpreted as a pattern —
@@ -605,11 +622,11 @@ mod tests {
         exact.insert("README.md".to_owned());
         let s = AllowSet {
             path_entries: vec![dir("src/")],
-            exact_paths:  exact,
+            exact_paths: exact,
             ..Default::default()
         };
-        assert!(s.matches("src/lib.rs"),     "directory-prefix layer");
-        assert!(s.matches("README.md"),      "exact-paths layer");
+        assert!(s.matches("src/lib.rs"), "directory-prefix layer");
+        assert!(s.matches("README.md"), "exact-paths layer");
         assert!(!s.matches("docs/intro.md"), "neither layer");
     }
 
@@ -637,8 +654,12 @@ mod tests {
         assert_eq!(parsed.len(), 4);
         assert!(matches!(parsed[0], PathEntry::DirectoryPrefix(ref p) if p == "src/"));
         assert!(matches!(parsed[1], PathEntry::Exact(ref p)           if p == "README.md"));
-        assert!(matches!(parsed[2], PathEntry::DirectoryPrefix(ref p) if p == "tests/integration/"));
-        assert!(matches!(parsed[3], PathEntry::Exact(ref p)           if p == ".github/workflows/ci.yml"));
+        assert!(
+            matches!(parsed[2], PathEntry::DirectoryPrefix(ref p) if p == "tests/integration/")
+        );
+        assert!(
+            matches!(parsed[3], PathEntry::Exact(ref p)           if p == ".github/workflows/ci.yml")
+        );
     }
 
     // ── effective_allow / check_paths against a real Store ────────────────
@@ -663,7 +684,8 @@ mod tests {
                 init_id,
                 raxis_types::InitiativeState::Executing.as_sql_str(),
             ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     /// Take a typed `TaskState` rather than a free `&str` so a typo in
@@ -678,7 +700,8 @@ mod tests {
                  VALUES (?1, ?2, 'default', ?3, 'kernel', 1, 0, 0, 0)"
             ),
             rusqlite::params![task_id, init_id, state.as_sql_str()],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn seed_edge(store: &Store, init_id: &str, pred: &str, succ: &str) {
@@ -691,7 +714,8 @@ mod tests {
                  VALUES (?1, ?2, ?3, 0)"
             ),
             rusqlite::params![init_id, pred, succ],
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     fn seed_exported(store: &Store, task_id: &str, paths: &[&str]) {
@@ -703,7 +727,8 @@ mod tests {
                      VALUES (?1, ?2)"
                 ),
                 rusqlite::params![task_id, p],
-            ).unwrap();
+            )
+            .unwrap();
         }
     }
 
@@ -732,8 +757,12 @@ mod tests {
     fn override_returns_universal_set() {
         let store = Store::open_in_memory().unwrap();
         let registry = registry_with(&[(
-            "init-A", "t1",
-            TaskPlanFields { path_scope_override: true, ..Default::default() },
+            "init-A",
+            "t1",
+            TaskPlanFields {
+                path_scope_override: true,
+                ..Default::default()
+            },
         )]);
         let allow = effective_allow("init-A", "t1", &registry, &store).unwrap();
         assert!(allow.universal);
@@ -746,7 +775,8 @@ mod tests {
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
-            "init-A", "t1",
+            "init-A",
+            "t1",
             TaskPlanFields {
                 // V2 syntax: directory prefix `src/` (recursive) plus
                 // exact filename `README.md`.
@@ -776,14 +806,22 @@ mod tests {
         seed_exported(&store, "pred", &["src/predout/x.rs", "src/predout/y.rs"]);
 
         let registry = registry_with(&[
-            ("init-A", "pred", TaskPlanFields {
-                path_export_to_successors: true,
-                ..Default::default()
-            }),
-            ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/".into()],
-                ..Default::default()
-            }),
+            (
+                "init-A",
+                "pred",
+                TaskPlanFields {
+                    path_export_to_successors: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-A",
+                "succ",
+                TaskPlanFields {
+                    path_allowlist: vec!["docs/".into()],
+                    ..Default::default()
+                },
+            ),
         ]);
 
         let allow = effective_allow("init-A", "succ", &registry, &store).unwrap();
@@ -791,7 +829,10 @@ mod tests {
         assert!(allow.matches("src/predout/x.rs"));
         assert!(allow.matches("src/predout/y.rs"));
         assert!(allow.matches("docs/intro.md"));
-        assert!(!allow.matches("src/predout/z.rs"), "exact match only — not a prefix");
+        assert!(
+            !allow.matches("src/predout/z.rs"),
+            "exact match only — not a prefix"
+        );
     }
 
     #[test]
@@ -803,19 +844,29 @@ mod tests {
         seed_edge(&store, "init-A", "pred", "succ");
         seed_exported(&store, "pred", &["src/predout/x.rs"]);
         let registry = registry_with(&[
-            ("init-A", "pred", TaskPlanFields {
-                path_export_to_successors: true,
-                ..Default::default()
-            }),
-            ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/".into()],
-                ..Default::default()
-            }),
+            (
+                "init-A",
+                "pred",
+                TaskPlanFields {
+                    path_export_to_successors: true,
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-A",
+                "succ",
+                TaskPlanFields {
+                    path_allowlist: vec!["docs/".into()],
+                    ..Default::default()
+                },
+            ),
         ]);
 
         let allow = effective_allow("init-A", "succ", &registry, &store).unwrap();
-        assert!(allow.exact_paths.is_empty(),
-                "aborted predecessor must not contribute exports");
+        assert!(
+            allow.exact_paths.is_empty(),
+            "aborted predecessor must not contribute exports"
+        );
         assert!(!allow.matches("src/predout/x.rs"));
     }
 
@@ -833,10 +884,14 @@ mod tests {
         // says "skip".
         let registry = registry_with(&[
             ("init-A", "pred", TaskPlanFields::default()),
-            ("init-A", "succ", TaskPlanFields {
-                path_allowlist: vec!["docs/".into()],
-                ..Default::default()
-            }),
+            (
+                "init-A",
+                "succ",
+                TaskPlanFields {
+                    path_allowlist: vec!["docs/".into()],
+                    ..Default::default()
+                },
+            ),
         ]);
 
         let allow = effective_allow("init-A", "succ", &registry, &store).unwrap();
@@ -849,7 +904,8 @@ mod tests {
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
-            "init-A", "t1",
+            "init-A",
+            "t1",
             TaskPlanFields {
                 path_allowlist: vec!["src/".into()],
                 ..Default::default()
@@ -867,7 +923,8 @@ mod tests {
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
-            "init-A", "t1",
+            "init-A",
+            "t1",
             TaskPlanFields {
                 path_allowlist: vec!["src/".into()],
                 ..Default::default()
@@ -875,9 +932,9 @@ mod tests {
         )]);
 
         let touched = vec![
-            PathBuf::from("src/a.rs"),       // covered
-            PathBuf::from("docs/intro.md"),  // violation
-            PathBuf::from("Cargo.toml"),     // violation
+            PathBuf::from("src/a.rs"),      // covered
+            PathBuf::from("docs/intro.md"), // violation
+            PathBuf::from("Cargo.toml"),    // violation
         ];
         let result = check_paths(&touched, "init-A", "t1", &registry, &store).unwrap();
         let violation = result.expect_err("must collect violations");
@@ -893,13 +950,17 @@ mod tests {
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
-            "init-A", "t1",
-            TaskPlanFields::default(),  // empty allowlist on purpose
+            "init-A",
+            "t1",
+            TaskPlanFields::default(), // empty allowlist on purpose
         )]);
 
         let touched: Vec<PathBuf> = vec![];
         let result = check_paths(&touched, "init-A", "t1", &registry, &store).unwrap();
-        assert!(result.is_ok(), "empty input must pass even with empty allowlist");
+        assert!(
+            result.is_ok(),
+            "empty input must pass even with empty allowlist"
+        );
     }
 
     #[test]
@@ -908,14 +969,15 @@ mod tests {
         seed_initiative(&store, "init-A");
         seed_task(&store, "init-A", "t1", raxis_types::TaskState::Admitted);
         let registry = registry_with(&[(
-            "init-A", "t1",
-            TaskPlanFields { path_scope_override: true, ..Default::default() },
+            "init-A",
+            "t1",
+            TaskPlanFields {
+                path_scope_override: true,
+                ..Default::default()
+            },
         )]);
 
-        let touched = vec![
-            PathBuf::from("/etc/passwd"),
-            PathBuf::from("../escape"),
-        ];
+        let touched = vec![PathBuf::from("/etc/passwd"), PathBuf::from("../escape")];
         let result = check_paths(&touched, "init-A", "t1", &registry, &store).unwrap();
         assert!(result.is_ok());
     }
@@ -928,45 +990,63 @@ mod tests {
         // init-A must contain both A-tasks' entries and NOTHING from
         // init-B (cross-initiative leakage would be a security bug).
         let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
-                path_allowlist: vec!["src/api/".to_owned()],
-                ..Default::default()
-            }),
-            ("init-A", "t2", TaskPlanFields {
-                path_allowlist: vec!["src/db/".to_owned()],
-                ..Default::default()
-            }),
-            ("init-B", "x1", TaskPlanFields {
-                path_allowlist: vec!["should/not/leak/".to_owned()],
-                ..Default::default()
-            }),
+            (
+                "init-A",
+                "t1",
+                TaskPlanFields {
+                    path_allowlist: vec!["src/api/".to_owned()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-A",
+                "t2",
+                TaskPlanFields {
+                    path_allowlist: vec!["src/db/".to_owned()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-B",
+                "x1",
+                TaskPlanFields {
+                    path_allowlist: vec!["should/not/leak/".to_owned()],
+                    ..Default::default()
+                },
+            ),
         ]);
 
         let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
         assert!(!allow.universal);
         assert!(allow.matches("src/api/handler.rs"));
         assert!(allow.matches("src/db/migrate.rs"));
-        assert!(!allow.matches("should/not/leak/x.rs"),
-            "init-B's entries must NOT leak into init-A's hybrid allow");
-        assert!(!allow.matches("README.md"),
-            "no entry, no admission");
+        assert!(
+            !allow.matches("should/not/leak/x.rs"),
+            "init-B's entries must NOT leak into init-A's hybrid allow"
+        );
+        assert!(!allow.matches("README.md"), "no entry, no admission");
     }
 
     #[test]
     fn hybrid_adds_cross_cutting_artifacts_as_exact_matches() {
-        let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
+        let registry = registry_with(&[(
+            "init-A",
+            "t1",
+            TaskPlanFields {
                 path_allowlist: vec!["src/".to_owned()],
                 ..Default::default()
-            }),
-        ]);
-        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec![
-                "Cargo.lock".to_owned(),
-                "package-lock.json".to_owned(),
-            ],
-            ..Default::default()
-        });
+            },
+        )]);
+        registry.insert_orchestrator(
+            "init-A",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec![
+                    "Cargo.lock".to_owned(),
+                    "package-lock.json".to_owned(),
+                ],
+                ..Default::default()
+            },
+        );
 
         let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
         // Sub-task allowlist still admits.
@@ -986,12 +1066,14 @@ mod tests {
         // V1 backward compat: an initiative with no `[orchestrator]`
         // entry in the registry produces a hybrid allow that's just
         // the union of sub-task allowlists, with NO cross-cutting.
-        let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
+        let registry = registry_with(&[(
+            "init-A",
+            "t1",
+            TaskPlanFields {
                 path_allowlist: vec!["src/".to_owned()],
                 ..Default::default()
-            }),
-        ]);
+            },
+        )]);
 
         let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
         assert!(allow.matches("src/x.rs"));
@@ -1006,14 +1088,22 @@ mod tests {
         // universal. Pin this so an audit/forensics review of an
         // override doesn't quietly miss the IntegrationMerge widening.
         let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
-                path_allowlist: vec!["src/".to_owned()],
-                ..Default::default()
-            }),
-            ("init-A", "t2", TaskPlanFields {
-                path_scope_override: true,
-                ..Default::default()
-            }),
+            (
+                "init-A",
+                "t1",
+                TaskPlanFields {
+                    path_allowlist: vec!["src/".to_owned()],
+                    ..Default::default()
+                },
+            ),
+            (
+                "init-A",
+                "t2",
+                TaskPlanFields {
+                    path_scope_override: true,
+                    ..Default::default()
+                },
+            ),
         ]);
 
         let allow = compute_hybrid_effective_allow("init-A", &registry).unwrap();
@@ -1044,12 +1134,14 @@ mod tests {
         // admission gate, but defensively guarded here) surfaces as
         // `InvalidPathEntry`. The handler maps this to the opaque
         // `FailPathPolicyViolation` per INV-08.
-        let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
-                path_allowlist: vec!["".to_owned()],  // <-- malformed
+        let registry = registry_with(&[(
+            "init-A",
+            "t1",
+            TaskPlanFields {
+                path_allowlist: vec!["".to_owned()], // <-- malformed
                 ..Default::default()
-            }),
-        ]);
+            },
+        )]);
 
         let err = compute_hybrid_effective_allow("init-A", &registry)
             .expect_err("empty entry must surface InvalidPathEntry");
@@ -1061,41 +1153,48 @@ mod tests {
 
     #[test]
     fn check_paths_hybrid_passes_when_every_path_admitted() {
-        let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
+        let registry = registry_with(&[(
+            "init-A",
+            "t1",
+            TaskPlanFields {
                 path_allowlist: vec!["src/".to_owned()],
                 ..Default::default()
-            }),
-        ]);
-        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
-            ..Default::default()
-        });
-        let touched = vec![
-            PathBuf::from("src/lib.rs"),
-            PathBuf::from("Cargo.lock"),
-        ];
+            },
+        )]);
+        registry.insert_orchestrator(
+            "init-A",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+                ..Default::default()
+            },
+        );
+        let touched = vec![PathBuf::from("src/lib.rs"), PathBuf::from("Cargo.lock")];
         let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
         assert!(result.is_ok(), "all paths admitted by hybrid allow");
     }
 
     #[test]
     fn check_paths_hybrid_collects_violations() {
-        let registry = registry_with(&[
-            ("init-A", "t1", TaskPlanFields {
+        let registry = registry_with(&[(
+            "init-A",
+            "t1",
+            TaskPlanFields {
                 path_allowlist: vec!["src/".to_owned()],
                 ..Default::default()
-            }),
-        ]);
-        registry.insert_orchestrator("init-A", OrchestratorPlanFields {
-            cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
-            ..Default::default()
-        });
+            },
+        )]);
+        registry.insert_orchestrator(
+            "init-A",
+            OrchestratorPlanFields {
+                cross_cutting_artifacts: vec!["Cargo.lock".to_owned()],
+                ..Default::default()
+            },
+        );
         let touched = vec![
-            PathBuf::from("src/lib.rs"),       // admitted (sub-task)
-            PathBuf::from("Cargo.lock"),       // admitted (cross-cutting)
-            PathBuf::from("docs/intro.md"),    // VIOLATION
-            PathBuf::from("Cargo.lock.bak"),   // VIOLATION (no prefix bleed)
+            PathBuf::from("src/lib.rs"),     // admitted (sub-task)
+            PathBuf::from("Cargo.lock"),     // admitted (cross-cutting)
+            PathBuf::from("docs/intro.md"),  // VIOLATION
+            PathBuf::from("Cargo.lock.bak"), // VIOLATION (no prefix bleed)
         ];
         let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
         let violation = result.expect_err("violations expected");
@@ -1107,7 +1206,9 @@ mod tests {
         let registry = PlanRegistry::new();
         let touched: Vec<PathBuf> = vec![];
         let result = check_paths_hybrid(&touched, "init-A", &registry).unwrap();
-        assert!(result.is_ok(),
-            "empty touched_paths trivially passes regardless of allow set");
+        assert!(
+            result.is_ok(),
+            "empty touched_paths trivially passes regardless of allow set"
+        );
     }
 }

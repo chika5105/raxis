@@ -44,7 +44,7 @@ pub enum VmmError {
     #[error("API socket {path} did not appear within {grace_ms}ms")]
     ApiSockTimeout {
         /// Path the VMM was asked to bind.
-        path:     PathBuf,
+        path: PathBuf,
         /// Grace period the supervisor waited.
         grace_ms: u64,
     },
@@ -66,10 +66,10 @@ pub enum VmmError {
 #[derive(Debug)]
 pub struct FirecrackerVmm {
     /// Live child process (`None` after `terminate` / `shutdown`).
-    child:    Option<Child>,
+    child: Option<Child>,
     /// PID we captured at spawn time; remains valid even after
     /// `child.wait()` consumes the handle.
-    pid:      u32,
+    pid: u32,
     /// API socket path; we tear this down on `Drop` to avoid leaking
     /// stale UDS files on the host.
     api_sock: PathBuf,
@@ -128,7 +128,7 @@ impl FirecrackerVmm {
         let pid = child.id();
 
         let mut vmm = Self {
-            child:    Some(child),
+            child: Some(child),
             pid,
             api_sock: args.api_sock.clone(),
         };
@@ -228,9 +228,9 @@ impl Drop for FirecrackerVmm {
 pub struct SpawnArgs {
     /// Path the VMM binds its REST API on. The caller picks the path
     /// (typically `<runtime_dir>/<session_uuid>.api.sock`).
-    pub api_sock:       PathBuf,
+    pub api_sock: PathBuf,
     /// `firecracker` binary path. `None` ⇒ use `PATH` lookup.
-    pub binary:         Option<PathBuf>,
+    pub binary: Option<PathBuf>,
     /// Argv tokens injected BEFORE `--api-sock <path>`.
     ///
     /// Production V2 leaves this empty — Firecracker accepts
@@ -247,16 +247,16 @@ pub struct SpawnArgs {
     ///    around this by setting `binary = /bin/sh` and
     ///    `pre_args = [stub.sh]`, so the shell loads + interprets
     ///    the script (read-side, no exec needed).
-    pub pre_args:       Option<Vec<std::ffi::OsString>>,
+    pub pre_args: Option<Vec<std::ffi::OsString>>,
     /// VMM log verbosity (`Error`, `Warning`, `Info`, `Debug`). `None`
     /// ⇒ Firecracker's own default (`Warning`).
-    pub log_level:      Option<String>,
+    pub log_level: Option<String>,
     /// Additional argv tokens. Empty in production V2; tests use this
     /// to inject `--no-api` or stub-mode flags into a fake binary.
-    pub extra_args:     Option<Vec<String>>,
+    pub extra_args: Option<Vec<String>>,
     /// How long to wait for the API socket to appear before declaring
     /// the boot failed.
-    pub boot_grace:     Duration,
+    pub boot_grace: Duration,
     /// Capture stderr into a pipe (kernel forwards to the audit
     /// channel as `SessionVmStderr` lines). `false` ⇒ /dev/null.
     pub capture_stderr: bool,
@@ -265,12 +265,12 @@ pub struct SpawnArgs {
 impl Default for SpawnArgs {
     fn default() -> Self {
         Self {
-            api_sock:       PathBuf::new(),
-            binary:         None,
-            pre_args:       None,
-            log_level:      None,
-            extra_args:     None,
-            boot_grace:     Duration::from_millis(2000),
+            api_sock: PathBuf::new(),
+            binary: None,
+            pre_args: None,
+            log_level: None,
+            extra_args: None,
+            boot_grace: Duration::from_millis(2000),
             capture_stderr: false,
         }
     }
@@ -289,7 +289,7 @@ fn wait_for_api_sock(path: &Path, grace: Duration) -> Result<(), VmmError> {
         std::thread::sleep(Duration::from_millis(20));
     }
     Err(VmmError::ApiSockTimeout {
-        path:     path.to_path_buf(),
+        path: path.to_path_buf(),
         grace_ms: grace.as_millis() as u64,
     })
 }
@@ -311,7 +311,7 @@ mod tests {
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
             api_sock: sock,
-            binary:   Some(PathBuf::from("/nonexistent/raxis-firecracker-no-such")),
+            binary: Some(PathBuf::from("/nonexistent/raxis-firecracker-no-such")),
             ..SpawnArgs::default()
         };
         let err = FirecrackerVmm::spawn(&args).unwrap_err();
@@ -353,10 +353,10 @@ mod tests {
         let (dir, sh_args) = write_sh_stub_args("touch \"$SOCK\"; sleep 30");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
-            api_sock:   sock.clone(),
-            binary:     Some(PathBuf::from("/bin/sh")),
-            pre_args:   Some(sh_args),
-            log_level:  None,
+            api_sock: sock.clone(),
+            binary: Some(PathBuf::from("/bin/sh")),
+            pre_args: Some(sh_args),
+            log_level: None,
             extra_args: None,
             boot_grace: Duration::from_secs(2),
             capture_stderr: false,
@@ -386,10 +386,10 @@ mod tests {
         let (dir, sh_args) = write_sh_stub_args("touch \"$SOCK\"; sleep 30");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
-            api_sock:   sock.clone(),
-            binary:     Some(PathBuf::from("/bin/sh")),
-            pre_args:   Some(sh_args),
-            log_level:  None,
+            api_sock: sock.clone(),
+            binary: Some(PathBuf::from("/bin/sh")),
+            pre_args: Some(sh_args),
+            log_level: None,
             extra_args: None,
             boot_grace: Duration::from_secs(2),
             capture_stderr: false,
@@ -419,10 +419,10 @@ mod tests {
         let (dir, sh_args) = write_sh_stub_args("exit 0");
         let sock = dir.path().join("api.sock");
         let args = SpawnArgs {
-            api_sock:   sock.clone(),
-            binary:     Some(PathBuf::from("/bin/sh")),
-            pre_args:   Some(sh_args),
-            log_level:  None,
+            api_sock: sock.clone(),
+            binary: Some(PathBuf::from("/bin/sh")),
+            pre_args: Some(sh_args),
+            log_level: None,
             extra_args: None,
             boot_grace: Duration::from_millis(75),
             capture_stderr: false,
@@ -467,7 +467,7 @@ mod tests {
     fn write_sh_stub_args(body: &str) -> (tempfile::TempDir, Vec<std::ffi::OsString>) {
         use std::io::Write;
 
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let stub = dir.path().join("fc-stub.sh");
         let mut script = String::new();
         // No `#!/bin/sh` shebang needed — /bin/sh reads the file as

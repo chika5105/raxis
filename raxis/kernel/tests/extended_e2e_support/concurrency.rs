@@ -23,7 +23,7 @@ use super::witnesses::typed;
 #[derive(Debug, Clone, Copy)]
 pub struct Interval {
     pub start: i64,
-    pub end:   i64,
+    pub end: i64,
 }
 
 impl Interval {
@@ -49,17 +49,16 @@ impl ConcurrencyReport {
 }
 
 /// Build per-task intervals + the list of overlapping pairs.
-pub fn build_report(
-    chain: &[AuditEvent],
-    task_ids: &[&str],
-) -> ConcurrencyReport {
+pub fn build_report(chain: &[AuditEvent], task_ids: &[&str]) -> ConcurrencyReport {
     let mut spawn_ts: BTreeMap<String, (i64, String)> = BTreeMap::new();
-    let mut exit_ts:  BTreeMap<String, i64> = BTreeMap::new();
+    let mut exit_ts: BTreeMap<String, i64> = BTreeMap::new();
 
     for ev in chain {
         match typed(ev) {
             Some(AuditEventKind::SessionVmSpawned {
-                session_id, task_id: Some(task_id), ..
+                session_id,
+                task_id: Some(task_id),
+                ..
             }) if task_ids.contains(&task_id.as_str()) => {
                 spawn_ts.insert(task_id.clone(), (ev.emitted_at, session_id));
             }
@@ -81,15 +80,15 @@ pub fn build_report(
     for i in 0..entries.len() {
         for j in (i + 1)..entries.len() {
             if entries[i].1.overlaps(entries[j].1) {
-                overlapping_pairs.push((
-                    entries[i].0.clone(),
-                    entries[j].0.clone(),
-                ));
+                overlapping_pairs.push((entries[i].0.clone(), entries[j].0.clone()));
             }
         }
     }
 
-    ConcurrencyReport { per_task, overlapping_pairs }
+    ConcurrencyReport {
+        per_task,
+        overlapping_pairs,
+    }
 }
 
 /// Convenience wrapper that panics with a per-task interval render
@@ -106,7 +105,9 @@ pub fn assert_overlap_or_panic(chain: &[AuditEvent], task_ids: &[&str]) {
         for (task, iv) in &report.per_task {
             msg.push_str(&format!(
                 "  {task}: [{}, {}] (duration {}s)\n",
-                iv.start, iv.end, iv.end - iv.start,
+                iv.start,
+                iv.end,
+                iv.end - iv.start,
             ));
         }
         msg.push_str(

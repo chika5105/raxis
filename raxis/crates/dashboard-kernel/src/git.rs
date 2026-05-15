@@ -137,7 +137,9 @@ fn run_git(args: &[&str], root: &Path) -> Result<(String, String, i32), GitError
     loop {
         if Instant::now() >= deadline {
             let _ = child.kill();
-            return Err(GitError::Timeout { secs: timeout.as_secs() });
+            return Err(GitError::Timeout {
+                secs: timeout.as_secs(),
+            });
         }
         match child.try_wait() {
             Ok(Some(_)) => break,
@@ -177,7 +179,11 @@ pub fn branch(root: &Path) -> Option<String> {
     match run_git(&["symbolic-ref", "--short", "HEAD"], root) {
         Ok((s, _, 0)) => {
             let trimmed = s.trim();
-            if trimmed.is_empty() { None } else { Some(trimmed.to_owned()) }
+            if trimmed.is_empty() {
+                None
+            } else {
+                Some(trimmed.to_owned())
+            }
         }
         _ => None,
     }
@@ -196,7 +202,12 @@ pub fn status_lines(root: &Path) -> Vec<String> {
 /// `Some((behind, ahead))` or `None` on failure.
 pub fn ahead_behind(root: &Path, base: &str) -> Option<(u32, u32)> {
     match run_git(
-        &["rev-list", "--left-right", "--count", &format!("{base}...HEAD")],
+        &[
+            "rev-list",
+            "--left-right",
+            "--count",
+            &format!("{base}...HEAD"),
+        ],
         root,
     ) {
         Ok((s, _, 0)) => {
@@ -252,7 +263,13 @@ pub fn log_entries(root: &Path, limit: u32) -> Result<Vec<WorktreeLogEntry>, Git
             continue;
         }
         let short_sha = sha[..8].to_owned();
-        out.push(WorktreeLogEntry { sha, short_sha, author, subject, at });
+        out.push(WorktreeLogEntry {
+            sha,
+            short_sha,
+            author,
+            subject,
+            at,
+        });
     }
     Ok(out)
 }
@@ -261,16 +278,9 @@ pub fn log_entries(root: &Path, limit: u32) -> Result<Vec<WorktreeLogEntry>, Git
 /// per-file `git diff <from>..<to> -- <path>` to populate the
 /// hunk text. Per-file hunks are truncated at
 /// [`MAX_PER_FILE_DIFF_BYTES`].
-pub fn diff_files(
-    root: &Path,
-    from: &str,
-    to: &str,
-) -> Result<Vec<WorktreeDiffFile>, GitError> {
+pub fn diff_files(root: &Path, from: &str, to: &str) -> Result<Vec<WorktreeDiffFile>, GitError> {
     let range = format!("{from}..{to}");
-    let (numstat, stderr, code) = run_git(
-        &["diff", &range, "--numstat", "--no-renames"],
-        root,
-    )?;
+    let (numstat, stderr, code) = run_git(&["diff", &range, "--numstat", "--no-renames"], root)?;
     if code != 0 {
         if stderr_is_not_a_git_repo(&stderr) {
             return Err(GitError::NotARepo {
@@ -282,10 +292,8 @@ pub fn diff_files(
             stderr: stderr.chars().take(256).collect(),
         });
     }
-    let (status, stderr2, code2) = run_git(
-        &["diff", &range, "--name-status", "--no-renames"],
-        root,
-    )?;
+    let (status, stderr2, code2) =
+        run_git(&["diff", &range, "--name-status", "--no-renames"], root)?;
     if code2 != 0 {
         if stderr_is_not_a_git_repo(&stderr2) {
             return Err(GitError::NotARepo {

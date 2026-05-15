@@ -39,8 +39,7 @@ async fn serve_with_bundle() -> (ServerHandle, String, tempfile::TempDir) {
         b"<!doctype html><html><body><div id=\"root\"></div></body></html>",
     )
     .expect("write index");
-    std::fs::write(dir.join("assets/app.js"), b"console.log('raxis');\n")
-        .expect("write asset");
+    std::fs::write(dir.join("assets/app.js"), b"console.log('raxis');\n").expect("write asset");
 
     let cfg = DashboardConfig {
         enabled: true,
@@ -126,7 +125,11 @@ async fn api_requests_do_not_fall_through_to_static_service() {
     // matters for routing precedence.
     let (handle, base, _tmp) = serve_with_bundle().await;
     let client = reqwest::Client::new();
-    let res = client.get(format!("{base}/api/health")).send().await.expect("send");
+    let res = client
+        .get(format!("{base}/api/health"))
+        .send()
+        .await
+        .expect("send");
     let ct = res
         .headers()
         .get(reqwest::header::CONTENT_TYPE)

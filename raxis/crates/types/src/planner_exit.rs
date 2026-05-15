@@ -302,14 +302,22 @@ mod tests {
     #[test]
     fn format_concrete_reason_avoids_forbidden_phrases() {
         let cases = vec![
-            PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 },
+            PlannerExitOutcome::MaxTurnsReached {
+                used: 60,
+                limit: 60,
+            },
             PlannerExitOutcome::MaxTokensReached {
                 which: "input".to_string(),
                 used: 100_001,
                 limit: 100_000,
             },
-            PlannerExitOutcome::IdleNoTerminalIntent { final_text_len: 1234 },
-            PlannerExitOutcome::ToolErrorBudgetExhausted { errors: 5, budget: 5 },
+            PlannerExitOutcome::IdleNoTerminalIntent {
+                final_text_len: 1234,
+            },
+            PlannerExitOutcome::ToolErrorBudgetExhausted {
+                errors: 5,
+                budget: 5,
+            },
             PlannerExitOutcome::ExplicitGiveUp {
                 reason: "sidecar env var RAXIS_PLANNER_SIDECAR_ENDPOINT missing".to_string(),
             },
@@ -319,7 +327,9 @@ mod tests {
         ];
         let re = regex_like_forbidden();
         for c in cases {
-            let got = c.format_concrete_reason("executor").expect("non-clean variant returns Some");
+            let got = c
+                .format_concrete_reason("executor")
+                .expect("non-clean variant returns Some");
             assert!(
                 !got.is_empty(),
                 "format_concrete_reason MUST be non-empty for {c:?}"
@@ -375,7 +385,10 @@ mod tests {
     /// for any internally-tagged enum (iter57 forensic surface).
     #[test]
     fn serde_json_roundtrip_external_tag() {
-        let c = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
+        let c = PlannerExitOutcome::MaxTurnsReached {
+            used: 60,
+            limit: 60,
+        };
         let s = serde_json::to_string(&c).unwrap();
         assert!(
             s.contains("\"MaxTurnsReached\""),
@@ -403,9 +416,12 @@ mod tests {
     /// reason. Locks down the iter57 fix surface.
     #[test]
     fn serde_bincode_roundtrip_no_identifier_not_supported() {
-        let c = PlannerExitOutcome::MaxTurnsReached { used: 60, limit: 60 };
-        let bytes = bincode::serde::encode_to_vec(&c, bincode::config::standard())
-            .expect("encode_to_vec");
+        let c = PlannerExitOutcome::MaxTurnsReached {
+            used: 60,
+            limit: 60,
+        };
+        let bytes =
+            bincode::serde::encode_to_vec(&c, bincode::config::standard()).expect("encode_to_vec");
         let (decoded, _read): (PlannerExitOutcome, usize) =
             bincode::serde::decode_from_slice(&bytes, bincode::config::standard())
                 .expect("decode_from_slice (this is the INV-IPC-BINCODE assertion)");

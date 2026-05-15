@@ -50,7 +50,7 @@ impl ClaimType {
 ///   "permit" and all matched paths have empty claim_types (empty deny list =
 ///   operator config error).
 pub fn required_claims(
-    paths:  &[PathBuf],
+    paths: &[PathBuf],
     policy: &PolicyBundle,
 ) -> Result<Vec<ClaimType>, GateError> {
     let rules = policy.claim_rules();
@@ -61,9 +61,9 @@ pub fn required_claims(
 
     for path in paths {
         let path_str = path.to_string_lossy();
-        let matched = rules.iter().find(|rule| {
-            glob_matches(&rule.path_glob, &path_str)
-        });
+        let matched = rules
+            .iter()
+            .find(|rule| glob_matches(&rule.path_glob, &path_str));
 
         match matched {
             Some(rule) => {
@@ -109,15 +109,15 @@ pub fn required_claims(
 /// An empty return means full coverage (claim passes scope check).
 /// Used by `gates/claim.rs` to construct `ScopeInsufficient`.
 pub fn check_claim_scope(
-    claim:  &SubmittedClaim,
-    paths:  &[PathBuf],
+    claim: &SubmittedClaim,
+    paths: &[PathBuf],
     _policy: &PolicyBundle,
 ) -> Vec<PathBuf> {
     // v1: scope check uses evidence_ref as a path-glob when present.
     // If evidence_ref is absent, the claim asserts global scope (all paths covered).
     let scope_glob = match &claim.evidence_ref {
         Some(s) => s.as_str(),
-        None    => "**",
+        None => "**",
     };
     paths
         .iter()
@@ -248,28 +248,31 @@ mod tests {
         // so we mint one from a deterministic test key and round-trip
         // through the shared genesis emitter rather than hand-rolling
         // a TOML body that the loader would refuse.
-        let key  = raxis_test_support::ephemeral_signing_key([0xAAu8; 32]);
-        let pk   = raxis_test_support::pubkey_hex(&key);
-        let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
-        let cert = raxis_test_support::ephemeral_cert_with_key(&key, raxis_test_support::CertOpts {
-            display_name: "Test".to_owned(),
-            permitted_ops: raxis_genesis_tools::PERMITTED_OPS
-                .iter()
-                .map(|s| (*s).to_owned())
-                .collect(),
-            ..raxis_test_support::CertOpts::default()
-        });
+        let key = raxis_test_support::ephemeral_signing_key([0xAAu8; 32]);
+        let pk = raxis_test_support::pubkey_hex(&key);
+        let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+        let cert = raxis_test_support::ephemeral_cert_with_key(
+            &key,
+            raxis_test_support::CertOpts {
+                display_name: "Test".to_owned(),
+                permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
         let toml = raxis_genesis_tools::render_genesis_policy_toml(
             raxis_genesis_tools::GenesisPolicyInputs {
                 authority_pubkey_hex:
                     "1111111111111111111111111111111111111111111111111111111111111111",
                 quality_pubkey_hex:
                     "2222222222222222222222222222222222222222222222222222222222222222",
-                operator_pubkey_hex:    &pk,
-                operator_fingerprint:   &fp,
-                signed_at_unix_secs:    1_700_000_000,
+                operator_pubkey_hex: &pk,
+                operator_fingerprint: &fp,
+                signed_at_unix_secs: 1_700_000_000,
                 allowed_worktree_roots: &["/work"],
-                operator_cert:          &cert,
+                operator_cert: &cert,
             },
         );
         std::fs::write(&p, toml).unwrap();

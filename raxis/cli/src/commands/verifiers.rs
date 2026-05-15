@@ -33,9 +33,7 @@ use std::io::Write;
 
 use raxis_runtime::read as read_heartbeat;
 use raxis_store::open_ro;
-use raxis_store::views::verifier_tokens::{
-    outstanding, recent_runs, VerifierTokenRow,
-};
+use raxis_store::views::verifier_tokens::{outstanding, recent_runs, VerifierTokenRow};
 
 use crate::errors::CliError;
 use crate::GlobalFlags;
@@ -80,13 +78,17 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 #[derive(Debug, Clone, Copy)]
 struct VerifiersOpts {
     recent: bool,
-    limit:  usize,
-    json:   bool,
+    limit: usize,
+    json: bool,
 }
 
 impl Default for VerifiersOpts {
     fn default() -> Self {
-        Self { recent: false, limit: DEFAULT_LIMIT, json: false }
+        Self {
+            recent: false,
+            limit: DEFAULT_LIMIT,
+            json: false,
+        }
     }
 }
 
@@ -95,9 +97,9 @@ fn parse_args(args: &[String]) -> Result<VerifiersOpts, CliError> {
     let mut i = 0;
     while i < args.len() {
         match args[i].as_str() {
-            "--json"   => opts.json   = true,
+            "--json" => opts.json = true,
             "--recent" => opts.recent = true,
-            "--limit"  => {
+            "--limit" => {
                 i += 1;
                 let raw = args
                     .get(i)
@@ -146,16 +148,16 @@ fn print_help() {
 // ────────────────────────────────────────────────────────────────────
 
 fn render_human<W: Write>(
-    out:        &mut W,
-    rows:       &[VerifierTokenRow],
-    recent:     bool,
-    heartbeat:  Option<&raxis_runtime::Snapshot>,
+    out: &mut W,
+    rows: &[VerifierTokenRow],
+    recent: bool,
+    heartbeat: Option<&raxis_runtime::Snapshot>,
 ) {
     let label = if recent { "recent" } else { "outstanding" };
     let _ = writeln!(
         out,
         "Verifiers ({label}, {n} row{plural}):",
-        n      = rows.len(),
+        n = rows.len(),
         plural = if rows.len() == 1 { "" } else { "s" },
     );
     if let Some(s) = heartbeat {
@@ -163,8 +165,8 @@ fn render_human<W: Write>(
             out,
             "  heartbeat: active={active} max_concurrent={max} (kernel_pid={pid})",
             active = s.active_verifiers,
-            max    = s.max_concurrent_verifiers,
-            pid    = s.kernel_pid,
+            max = s.max_concurrent_verifiers,
+            pid = s.kernel_pid,
         );
     } else {
         let _ = writeln!(out, "  heartbeat: <unavailable>");
@@ -176,11 +178,11 @@ fn render_human<W: Write>(
     let _ = writeln!(
         out,
         "  {run:<24} {task:<20} {gate:<16} {state:<10} {ttl:>10}",
-        run    = "verifier_run_id",
-        task   = "task_id",
-        gate   = "gate_type",
-        state  = "state",
-        ttl    = "ttl",
+        run = "verifier_run_id",
+        task = "task_id",
+        gate = "gate_type",
+        state = "state",
+        ttl = "ttl",
     );
     let now = unix_now_secs();
     for r in rows {
@@ -199,11 +201,11 @@ fn render_human<W: Write>(
         let _ = writeln!(
             out,
             "  {run:<24} {task:<20} {gate:<16} {state:<10} {ttl:>10}",
-            run   = truncate(&r.verifier_run_id, 24),
-            task  = truncate(&r.task_id, 20),
-            gate  = truncate(&r.gate_type, 16),
+            run = truncate(&r.verifier_run_id, 24),
+            task = truncate(&r.task_id, 20),
+            gate = truncate(&r.gate_type, 16),
             state = state,
-            ttl   = ttl,
+            ttl = ttl,
         );
     }
 }
@@ -213,9 +215,9 @@ fn render_human<W: Write>(
 // ────────────────────────────────────────────────────────────────────
 
 fn render_json<W: Write>(
-    out:       &mut W,
-    rows:      &[VerifierTokenRow],
-    recent:    bool,
+    out: &mut W,
+    rows: &[VerifierTokenRow],
+    recent: bool,
     heartbeat: Option<&raxis_runtime::Snapshot>,
 ) {
     let v = serde_json::json!({
@@ -263,10 +265,18 @@ fn unix_now_secs() -> u64 {
 }
 
 fn format_secs_relative(secs: u64) -> String {
-    if secs == 0                 { return "0s".to_owned(); }
-    if secs < 60                 { return format!("{secs}s"); }
-    if secs < 60 * 60            { return format!("{}m", secs / 60); }
-    if secs < 24 * 60 * 60       { return format!("{}h", secs / 3600); }
+    if secs == 0 {
+        return "0s".to_owned();
+    }
+    if secs < 60 {
+        return format!("{secs}s");
+    }
+    if secs < 60 * 60 {
+        return format!("{}m", secs / 60);
+    }
+    if secs < 24 * 60 * 60 {
+        return format!("{}h", secs / 3600);
+    }
     format!("{}d", secs / 86_400)
 }
 
@@ -281,13 +291,13 @@ mod tests {
     fn row(id: &str, consumed: bool, expires_at: u64) -> VerifierTokenRow {
         VerifierTokenRow {
             verifier_run_id: id.to_owned(),
-            task_id:         "t-1".to_owned(),
-            gate_type:       "tests".to_owned(),
-            evaluation_sha:  "eval".to_owned(),
-            issued_at:       100,
+            task_id: "t-1".to_owned(),
+            gate_type: "tests".to_owned(),
+            evaluation_sha: "eval".to_owned(),
+            issued_at: 100,
             expires_at,
             consumed,
-            consumed_at:     consumed.then_some(150),
+            consumed_at: consumed.then_some(150),
         }
     }
 
@@ -301,21 +311,14 @@ mod tests {
 
     #[test]
     fn parse_args_accepts_recent_and_limit() {
-        let o = parse_args(&[
-            "--recent".to_owned(),
-            "--limit".to_owned(),
-            "5".to_owned(),
-        ]).unwrap();
+        let o = parse_args(&["--recent".to_owned(), "--limit".to_owned(), "5".to_owned()]).unwrap();
         assert!(o.recent);
         assert_eq!(o.limit, 5);
     }
 
     #[test]
     fn parse_args_rejects_zero_limit() {
-        let err = parse_args(&[
-            "--limit".to_owned(),
-            "0".to_owned(),
-        ]).unwrap_err();
+        let err = parse_args(&["--limit".to_owned(), "0".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -323,9 +326,9 @@ mod tests {
     fn render_human_classifies_each_state() {
         let now = unix_now_secs();
         let rows = vec![
-            row("v-active",   false, now + 10_000), // in-flight
-            row("v-consumed", true,  now + 10_000), // consumed
-            row("v-expired",  false, now.saturating_sub(1)),  // expired
+            row("v-active", false, now + 10_000),           // in-flight
+            row("v-consumed", true, now + 10_000),          // consumed
+            row("v-expired", false, now.saturating_sub(1)), // expired
         ];
         let mut buf: Vec<u8> = Vec::new();
         render_human(&mut buf, &rows, false, None);

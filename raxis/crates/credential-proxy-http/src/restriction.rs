@@ -42,7 +42,9 @@ impl Restrictions {
         if self.allowed_path_prefixes.is_empty() {
             return true;
         }
-        self.allowed_path_prefixes.iter().any(|p| path.starts_with(p))
+        self.allowed_path_prefixes
+            .iter()
+            .any(|p| path.starts_with(p))
     }
 }
 
@@ -61,9 +63,9 @@ mod tests {
     #[test]
     fn read_only_blocks_writes() {
         let r = Restrictions::read_only();
-        assert!( r.allows_method("GET"));
-        assert!( r.allows_method("HEAD"));
-        assert!( r.allows_method("get"));
+        assert!(r.allows_method("GET"));
+        assert!(r.allows_method("HEAD"));
+        assert!(r.allows_method("get"));
         assert!(!r.allows_method("POST"));
         assert!(!r.allows_method("DELETE"));
     }
@@ -71,11 +73,11 @@ mod tests {
     #[test]
     fn path_prefix_filter() {
         let r = Restrictions {
-            allowed_methods:        vec![],
-            allowed_path_prefixes:  vec!["/api/v1/widgets".to_owned()],
+            allowed_methods: vec![],
+            allowed_path_prefixes: vec!["/api/v1/widgets".to_owned()],
         };
-        assert!( r.allows_path("/api/v1/widgets"));
-        assert!( r.allows_path("/api/v1/widgets/42"));
+        assert!(r.allows_path("/api/v1/widgets"));
+        assert!(r.allows_path("/api/v1/widgets/42"));
         assert!(!r.allows_path("/api/v1/users"));
     }
 }

@@ -90,8 +90,8 @@ impl Category {
     pub const fn sub_dir(self) -> &'static str {
         match self {
             Self::Policy => "policy",
-            Self::Plans  => "plans",
-            Self::Keys   => "keys",
+            Self::Plans => "plans",
+            Self::Keys => "keys",
         }
     }
 
@@ -100,8 +100,8 @@ impl Category {
     pub const fn ext(self) -> &'static str {
         match self {
             Self::Policy => "toml",
-            Self::Plans  => "toml",
-            Self::Keys   => "pem",
+            Self::Plans => "toml",
+            Self::Keys => "pem",
         }
     }
 }
@@ -173,7 +173,7 @@ pub enum ArtifactStoreError {
     #[error("io error at {path}: {source}")]
     Io {
         /// Path the operation targeted.
-        path:   PathBuf,
+        path: PathBuf,
         /// Source error.
         #[source]
         source: std::io::Error,
@@ -185,9 +185,9 @@ pub enum ArtifactStoreError {
     #[error("integrity mismatch at {path}: stored={stored_sha:?}, expected={expected_sha:?}")]
     IntegrityMismatch {
         /// Path the integrity check ran against.
-        path:         PathBuf,
+        path: PathBuf,
         /// SHA-256 actually present on disk.
-        stored_sha:   String,
+        stored_sha: String,
         /// SHA-256 the caller asked for.
         expected_sha: String,
     },
@@ -224,7 +224,7 @@ impl ArtifactStore {
         let root = data_dir.as_ref().join("artifacts");
         if !root.exists() {
             std::fs::create_dir_all(&root).map_err(|e| ArtifactStoreError::Io {
-                path:   root.clone(),
+                path: root.clone(),
                 source: e,
             })?;
             #[cfg(unix)]
@@ -268,13 +268,13 @@ impl ArtifactStore {
     pub fn write(
         &self,
         category: Category,
-        body:     &[u8],
+        body: &[u8],
     ) -> Result<(ArtifactKey, PathBuf), ArtifactStoreError> {
         let key = ArtifactKey::compute(body);
         let dir = self.root.join(category.sub_dir());
         if !dir.exists() {
             std::fs::create_dir_all(&dir).map_err(|e| ArtifactStoreError::Io {
-                path:   dir.clone(),
+                path: dir.clone(),
                 source: e,
             })?;
             #[cfg(unix)]
@@ -284,34 +284,28 @@ impl ArtifactStore {
             }
         }
         let path = self.path_for(category, &key);
-        let res = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path);
+        let res = OpenOptions::new().write(true).create_new(true).open(&path);
         match res {
             Ok(mut f) => {
                 f.write_all(body).map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 f.sync_all().map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
                 Ok((key, path))
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 // Verify the on-disk bytes hash to the same key.
                 let on_disk = std::fs::read(&path).map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 let actual = ArtifactKey::compute(&on_disk);
@@ -334,45 +328,39 @@ impl ArtifactStore {
     pub fn write_companion(
         &self,
         category: Category,
-        key:      &ArtifactKey,
-        ext:      &str,
-        body:     &[u8],
+        key: &ArtifactKey,
+        ext: &str,
+        body: &[u8],
     ) -> Result<PathBuf, ArtifactStoreError> {
         let path = self.companion_path(category, key, ext);
-        let dir  = path.parent().expect("companion_path has a parent");
+        let dir = path.parent().expect("companion_path has a parent");
         if !dir.exists() {
             std::fs::create_dir_all(dir).map_err(|e| ArtifactStoreError::Io {
-                path:   dir.to_path_buf(),
+                path: dir.to_path_buf(),
                 source: e,
             })?;
         }
-        let res = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path);
+        let res = OpenOptions::new().write(true).create_new(true).open(&path);
         match res {
             Ok(mut f) => {
                 f.write_all(body).map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 f.sync_all().map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 #[cfg(unix)]
                 {
                     use std::os::unix::fs::PermissionsExt;
-                    let _ = std::fs::set_permissions(
-                        &path,
-                        std::fs::Permissions::from_mode(0o600),
-                    );
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600));
                 }
                 Ok(path)
             }
             Err(e) if e.kind() == ErrorKind::AlreadyExists => {
                 let on_disk = std::fs::read(&path).map_err(|e| ArtifactStoreError::Io {
-                    path:   path.clone(),
+                    path: path.clone(),
                     source: e,
                 })?;
                 if on_disk == body {
@@ -391,23 +379,24 @@ impl ArtifactStore {
     pub fn read(
         &self,
         category: Category,
-        key:      &ArtifactKey,
+        key: &ArtifactKey,
     ) -> Result<Vec<u8>, ArtifactStoreError> {
         let path = self.path_for(category, key);
         let mut f = std::fs::File::open(&path).map_err(|e| ArtifactStoreError::Io {
-            path:   path.clone(),
+            path: path.clone(),
             source: e,
         })?;
         let mut body = Vec::new();
-        f.read_to_end(&mut body).map_err(|e| ArtifactStoreError::Io {
-            path:   path.clone(),
-            source: e,
-        })?;
+        f.read_to_end(&mut body)
+            .map_err(|e| ArtifactStoreError::Io {
+                path: path.clone(),
+                source: e,
+            })?;
         let actual = ArtifactKey::compute(&body);
         if &actual != key {
             return Err(ArtifactStoreError::IntegrityMismatch {
                 path,
-                stored_sha:   actual.as_hex(),
+                stored_sha: actual.as_hex(),
                 expected_sha: key.as_hex(),
             });
         }
@@ -429,7 +418,7 @@ mod tests {
     use super::*;
 
     fn fresh_store() -> (tempfile::TempDir, ArtifactStore) {
-        let dir   = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let store = ArtifactStore::open(dir.path()).unwrap();
         (dir, store)
     }
@@ -437,8 +426,8 @@ mod tests {
     #[test]
     fn artifact_key_round_trips_through_hex() {
         let body = b"hello raxis";
-        let k1   = ArtifactKey::compute(body);
-        let k2   = ArtifactKey::parse_hex(&k1.as_hex()).unwrap();
+        let k1 = ArtifactKey::compute(body);
+        let k2 = ArtifactKey::parse_hex(&k1.as_hex()).unwrap();
         assert_eq!(k1, k2);
     }
 
@@ -451,10 +440,12 @@ mod tests {
     #[test]
     fn write_then_read_round_trips() {
         let (_t, store) = fresh_store();
-        let body        = b"some-policy-toml-bytes";
+        let body = b"some-policy-toml-bytes";
         let (key, path) = store.write(Category::Policy, body).unwrap();
-        assert!(path.exists(),
-            "write must materialise the artifact at the computed path");
+        assert!(
+            path.exists(),
+            "write must materialise the artifact at the computed path"
+        );
         let read_back = store.read(Category::Policy, &key).unwrap();
         assert_eq!(read_back, body);
     }
@@ -462,9 +453,9 @@ mod tests {
     #[test]
     fn write_is_idempotent_on_identical_bytes() {
         let (_t, store) = fresh_store();
-        let body        = b"identical-bytes";
-        let (k1, p1)    = store.write(Category::Policy, body).unwrap();
-        let (k2, p2)    = store.write(Category::Policy, body).unwrap();
+        let body = b"identical-bytes";
+        let (k1, p1) = store.write(Category::Policy, body).unwrap();
+        let (k2, p2) = store.write(Category::Policy, body).unwrap();
         assert_eq!(k1, k2);
         assert_eq!(p1, p2);
     }
@@ -472,7 +463,7 @@ mod tests {
     #[test]
     fn write_detects_post_write_tampering_via_bytes_diverge() {
         let (_t, store) = fresh_store();
-        let body        = b"original-bytes";
+        let body = b"original-bytes";
         let (key, path) = store.write(Category::Policy, body).unwrap();
         // Tamper: overwrite the file with different bytes that hash
         // to a different sha256. The next `write(body)` call must
@@ -490,7 +481,7 @@ mod tests {
     #[test]
     fn read_surfaces_integrity_mismatch_on_tampering() {
         let (_t, store) = fresh_store();
-        let body        = b"trusted-bytes";
+        let body = b"trusted-bytes";
         let (key, path) = store.write(Category::Policy, body).unwrap();
         std::fs::write(&path, b"tampered-bytes").unwrap();
         let err = store.read(Category::Policy, &key).unwrap_err();
@@ -505,20 +496,22 @@ mod tests {
     #[test]
     fn exists_returns_true_for_written_only() {
         let (_t, store) = fresh_store();
-        let body        = b"present";
-        let (key, _)    = store.write(Category::Policy, body).unwrap();
+        let body = b"present";
+        let (key, _) = store.write(Category::Policy, body).unwrap();
         assert!(store.exists(Category::Policy, &key));
-        let other_key   = ArtifactKey::compute(b"absent");
+        let other_key = ArtifactKey::compute(b"absent");
         assert!(!store.exists(Category::Policy, &other_key));
     }
 
     #[test]
     fn write_companion_writes_sidecar_with_matching_stem() {
         let (_t, store) = fresh_store();
-        let body        = b"plan-bytes";
-        let sig         = b"signature-bytes";
-        let (key, _)    = store.write(Category::Plans, body).unwrap();
-        let sig_path    = store.write_companion(Category::Plans, &key, "sig", sig).unwrap();
+        let body = b"plan-bytes";
+        let sig = b"signature-bytes";
+        let (key, _) = store.write(Category::Plans, body).unwrap();
+        let sig_path = store
+            .write_companion(Category::Plans, &key, "sig", sig)
+            .unwrap();
         assert!(sig_path.exists());
         assert_eq!(std::fs::read(&sig_path).unwrap(), sig);
         // The companion's stem must match the artifact's hex sha256.
@@ -529,24 +522,28 @@ mod tests {
     #[test]
     fn category_pinning_does_not_collide() {
         let (_t, store) = fresh_store();
-        let body        = b"shared-bytes";
+        let body = b"shared-bytes";
         let (k_pol, p1) = store.write(Category::Policy, body).unwrap();
         let (k_plan, p2) = store.write(Category::Plans, body).unwrap();
-        assert_eq!(k_pol, k_plan,
-            "the SHA-256 is content-addressed and identical regardless of category");
-        assert_ne!(p1, p2,
+        assert_eq!(
+            k_pol, k_plan,
+            "the SHA-256 is content-addressed and identical regardless of category"
+        );
+        assert_ne!(
+            p1, p2,
             "the on-disk path MUST differ across categories — even \
              with an identical key — so accidental cross-category \
-             collisions cannot happen");
+             collisions cannot happen"
+        );
     }
 
     #[test]
     fn paths_use_canonical_extension_per_category() {
         assert_eq!(Category::Policy.ext(), "toml");
-        assert_eq!(Category::Plans.ext(),  "toml");
-        assert_eq!(Category::Keys.ext(),   "pem");
+        assert_eq!(Category::Plans.ext(), "toml");
+        assert_eq!(Category::Keys.ext(), "pem");
         assert_eq!(Category::Policy.sub_dir(), "policy");
-        assert_eq!(Category::Plans.sub_dir(),  "plans");
-        assert_eq!(Category::Keys.sub_dir(),   "keys");
+        assert_eq!(Category::Plans.sub_dir(), "plans");
+        assert_eq!(Category::Keys.sub_dir(), "keys");
     }
 }

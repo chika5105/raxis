@@ -93,15 +93,15 @@
 //! `<ErrorResponse>` wire shape but does NOT exercise the
 //! forwarding code path.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{anyhow, Context, Result};
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_aws::{
-    AwsProxy, ForwardingConfig as AwsForwardingConfig, NoopAuditChannel,
-    OwnedConsumer, ProxyConfig, Restrictions, StsCacheValue,
+    AwsProxy, ForwardingConfig as AwsForwardingConfig, NoopAuditChannel, OwnedConsumer,
+    ProxyConfig, Restrictions, StsCacheValue,
 };
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, CloudUpstreamHost, TokenCache};
 use raxis_credentials::{
@@ -118,32 +118,40 @@ const ACTION_QUERY: &str = "Action=GetCallerIdentity&Version=2011-06-15";
 /// proxy will SigV4-sign with this key and POST to real STS;
 /// STS rejects with `InvalidClientTokenId`.
 struct InvalidKeyBackend {
-    body:     Vec<u8>,
+    body: Vec<u8>,
     resolves: AtomicU32,
 }
 
 impl CredentialBackend for InvalidKeyBackend {
     fn resolve(
         &self,
-        _name:     &CredentialName,
+        _name: &CredentialName,
         _consumer: ConsumerIdentity<'_>,
     ) -> std::result::Result<CredentialValue, CredentialError> {
         self.resolves.fetch_add(1, Ordering::SeqCst);
         Ok(CredentialValue::from_bytes(self.body.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _v: CredentialValue, _a: OperatorId,
+        &self,
+        name: &CredentialName,
+        _v: CredentialValue,
+        _a: OperatorId,
     ) -> std::result::Result<(), CredentialError> {
         Err(CredentialError::Malformed {
-            name:   name.clone(),
+            name: name.clone(),
             reason: "live-e2e V3 witness backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, _name: &CredentialName) -> bool { true }
-    fn lease(&self, _: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e-v3-witness" }
+    fn exists(&self, _name: &CredentialName) -> bool {
+        true
+    }
+    fn lease(&self, _: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e-v3-witness"
+    }
 }
-
 
 /// Closed enum of stable AWS STS error codes for unsigned /
 /// invalid-credential requests. The slice asserts the response
@@ -252,11 +260,10 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     // Operator-stored long-lived IAM key. The key is
     // deliberately invalid (`AKIAEXAMPLE...`) — STS rejects
     // it, which is exactly what we want to assert.
-    let env_body =
-        "AWS_ACCESS_KEY_ID=AKIAEXAMPLEINVALIDKEY\n\
+    let env_body = "AWS_ACCESS_KEY_ID=AKIAEXAMPLEINVALIDKEY\n\
          AWS_SECRET_ACCESS_KEY=an-opaque-secret-that-cannot-pass-aws-iam\n";
     let backend: Arc<dyn CredentialBackend> = Arc::new(InvalidKeyBackend {
-        body:     env_body.as_bytes().to_vec(),
+        body: env_body.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
@@ -270,21 +277,21 @@ async fn run_v3_forwarding_witness() -> Result<()> {
 
     let fwd = AwsForwardingConfig {
         upstream,
-        region:              "us-east-1".to_owned(),
-        role_arn:            "arn:aws:iam::123456789012:role/raxis-v3-witness".to_owned(),
-        external_id:         None,
-        duration_seconds:    900,
+        region: "us-east-1".to_owned(),
+        role_arn: "arn:aws:iam::123456789012:role/raxis-v3-witness".to_owned(),
+        external_id: None,
+        duration_seconds: 900,
         cache_safety_window: Duration::from_secs(300),
     };
 
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("live-e2e-v3"),
-        consumer:        OwnedConsumer::new("live-e2e-aws-slice", "v3-witness"),
-        lease_seconds:   900,
-        role_arn:        Some(fwd.role_arn.clone()),
-        forwarding:      Some(fwd),
-        restrictions:    Restrictions::default(),
+        consumer: OwnedConsumer::new("live-e2e-aws-slice", "v3-witness"),
+        lease_seconds: 900,
+        role_arn: Some(fwd.role_arn.clone()),
+        forwarding: Some(fwd),
+        restrictions: Restrictions::default(),
     };
 
     let proxy = AwsProxy::bind_v3(
@@ -298,7 +305,9 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     .await
     .context("bind AwsProxy V3")?;
     let addr = proxy.local_addr().context("AwsProxy local_addr")?;
-    tokio::spawn(async move { proxy.serve().await; });
+    tokio::spawn(async move {
+        proxy.serve().await;
+    });
 
     // Dial the proxy's IMDS-shaped endpoint. The proxy will
     // SigV4-sign an AssumeRole with the invalid key and POST
@@ -311,10 +320,13 @@ async fn run_v3_forwarding_witness() -> Result<()> {
         .no_proxy()
         .build()
         .context("build reqwest client")?;
-    let resp = client.get(&url).send().await
+    let resp = client
+        .get(&url)
+        .send()
+        .await
         .with_context(|| format!("GET {url}"))?;
     let status = resp.status();
-    let body   = resp.text().await.context("read response body")?;
+    let body = resp.text().await.context("read response body")?;
 
     if status.is_success() {
         return Err(anyhow!(
@@ -329,8 +341,7 @@ async fn run_v3_forwarding_witness() -> Result<()> {
         ));
     }
     let lc_body = body.to_ascii_lowercase();
-    let saw_envelope = lc_body.contains("<errorresponse")
-        || lc_body.contains("<error>");
+    let saw_envelope = lc_body.contains("<errorresponse") || lc_body.contains("<error>");
     if !saw_envelope {
         return Err(anyhow!(
             "V3-forwarding response did not contain an `<ErrorResponse>` envelope; \

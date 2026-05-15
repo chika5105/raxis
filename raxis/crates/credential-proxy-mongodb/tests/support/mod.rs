@@ -115,7 +115,8 @@ async fn serve_one(
         let cmd = first_command_name(&body).unwrap_or_default();
         let resp = responses(&cmd).unwrap_or(FakeResponse::Ok { extras: vec![] });
         let reply_doc = build_reply_doc(&cmd, &resp);
-        let reply_msg = build_op_msg_reply(request_id.wrapping_add(0x4000_0000), request_id, &reply_doc);
+        let reply_msg =
+            build_op_msg_reply(request_id.wrapping_add(0x4000_0000), request_id, &reply_doc);
         s.write_all(&reply_msg).await?;
         s.flush().await?;
     }
@@ -135,7 +136,8 @@ fn first_command_name(body: &[u8]) -> Option<String> {
             if i + 4 > body.len() {
                 return None;
             }
-            let section_size = i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
+            let section_size =
+                i32::from_le_bytes([body[i], body[i + 1], body[i + 2], body[i + 3]]) as usize;
             if section_size < 4 || i + section_size > body.len() {
                 return None;
             }
@@ -180,14 +182,16 @@ fn build_reply_doc(_cmd: &str, resp: &FakeResponse) -> Vec<u8> {
             }
             b.finish()
         }
-        FakeResponse::Err { code, code_name, errmsg } => {
-            BsonBuilder::new()
-                .double("ok", 0.0)
-                .int32("code", *code)
-                .string("codeName", code_name)
-                .string("errmsg", errmsg)
-                .finish()
-        }
+        FakeResponse::Err {
+            code,
+            code_name,
+            errmsg,
+        } => BsonBuilder::new()
+            .double("ok", 0.0)
+            .int32("code", *code)
+            .string("codeName", code_name)
+            .string("errmsg", errmsg)
+            .finish(),
     }
 }
 
@@ -211,7 +215,9 @@ struct BsonBuilder {
 }
 
 impl BsonBuilder {
-    fn new() -> Self { Self::default() }
+    fn new() -> Self {
+        Self::default()
+    }
     fn int32(mut self, key: &str, val: i32) -> Self {
         self.body.push(0x10);
         self.body.extend_from_slice(key.as_bytes());
@@ -244,7 +250,8 @@ impl BsonBuilder {
         self.body.push(0x02);
         self.body.extend_from_slice(key.as_bytes());
         self.body.push(0);
-        self.body.extend_from_slice(&((val.len() + 1) as i32).to_le_bytes());
+        self.body
+            .extend_from_slice(&((val.len() + 1) as i32).to_le_bytes());
         self.body.extend_from_slice(val.as_bytes());
         self.body.push(0);
         self
@@ -262,7 +269,8 @@ impl BsonBuilder {
         self.body.push(0x05);
         self.body.extend_from_slice(key.as_bytes());
         self.body.push(0);
-        self.body.extend_from_slice(&(bytes.len() as i32).to_le_bytes());
+        self.body
+            .extend_from_slice(&(bytes.len() as i32).to_le_bytes());
         self.body.push(0); // subtype 0
         self.body.extend_from_slice(bytes);
         self
@@ -328,14 +336,23 @@ async fn serve_scram(
     let frame = read_op_msg_frame(&mut s).await?;
     let payload = extract_bin_payload(&frame).expect("saslStart payload");
     let cf = std::str::from_utf8(&payload).unwrap();
-    assert!(cf.starts_with("n,,n="),
-        "expected SCRAM client first message, got {cf:?}");
+    assert!(
+        cf.starts_with("n,,n="),
+        "expected SCRAM client first message, got {cf:?}"
+    );
     let bare = &cf[3..];
     let user_attr = bare.split(',').next().unwrap();
     let user = user_attr.trim_start_matches("n=");
     if user != username {
-        write_sasl_reply(&mut s, false, 1, b"e=unknown-user", true,
-            Some("UserNotFound")).await?;
+        write_sasl_reply(
+            &mut s,
+            false,
+            1,
+            b"e=unknown-user",
+            true,
+            Some("UserNotFound"),
+        )
+        .await?;
         return Ok(());
     }
     let cnonce = bare.split(',').nth(1).unwrap().trim_start_matches("r=");
@@ -354,8 +371,12 @@ async fn serve_scram(
     let mut got_combined = "";
     let mut proof_b64 = "";
     for attr in cf2.split(',') {
-        if let Some(v) = attr.strip_prefix("r=") { got_combined = v; }
-        if let Some(v) = attr.strip_prefix("p=") { proof_b64 = v; }
+        if let Some(v) = attr.strip_prefix("r=") {
+            got_combined = v;
+        }
+        if let Some(v) = attr.strip_prefix("p=") {
+            proof_b64 = v;
+        }
     }
     assert_eq!(got_combined, combined);
 
@@ -373,12 +394,20 @@ async fn serve_scram(
         *a ^= *b;
     }
     let got_proof = base64::engine::general_purpose::STANDARD
-        .decode(proof_b64).unwrap();
+        .decode(proof_b64)
+        .unwrap();
     let proof_matches = got_proof == expected_proof;
 
     if !proof_matches {
-        write_sasl_reply(&mut s, false, 1, b"e=invalid-proof", true,
-            Some("AuthenticationFailed")).await?;
+        write_sasl_reply(
+            &mut s,
+            false,
+            1,
+            b"e=invalid-proof",
+            true,
+            Some("AuthenticationFailed"),
+        )
+        .await?;
         return Ok(());
     }
     let server_sig = test_hmac_sha256(&server_key, auth_msg.as_bytes());
@@ -405,9 +434,8 @@ async fn serve_scram(
         let cmd = first_command_name(&body).unwrap_or_default();
         let resp = responses(&cmd).unwrap_or(FakeResponse::Ok { extras: vec![] });
         let reply_doc = build_reply_doc(&cmd, &resp);
-        let reply_msg = build_op_msg_reply(
-            request_id.wrapping_add(0x4000_0000), request_id, &reply_doc,
-        );
+        let reply_msg =
+            build_op_msg_reply(request_id.wrapping_add(0x4000_0000), request_id, &reply_doc);
         s.write_all(&reply_msg).await?;
         s.flush().await?;
     }
@@ -429,41 +457,41 @@ async fn read_op_msg_frame(s: &mut TcpStream) -> std::io::Result<Vec<u8>> {
 fn extract_bin_payload(frame: &[u8]) -> Option<Vec<u8>> {
     let body = &frame[16..];
     let kind = *body.get(4)?;
-    if kind != 0 { return None; }
+    if kind != 0 {
+        return None;
+    }
     let doc = body.get(5..)?;
-    let total = i32::from_le_bytes([
-        *doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?,
-    ]) as usize;
+    let total =
+        i32::from_le_bytes([*doc.first()?, *doc.get(1)?, *doc.get(2)?, *doc.get(3)?]) as usize;
     let inner = &doc[4..total - 1];
     let mut i = 0;
     while i < inner.len() {
         let t = inner[i];
         i += 1;
-        if t == 0 { break; }
+        if t == 0 {
+            break;
+        }
         let nul = inner[i..].iter().position(|&b| b == 0)?;
         let name = std::str::from_utf8(&inner[i..i + nul]).ok()?;
         i += nul + 1;
         if t == 0x05 && name == "payload" {
-            let blen = i32::from_le_bytes([
-                inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-            ]) as usize;
+            let blen =
+                i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]) as usize;
             return Some(inner[i + 5..i + 5 + blen].to_vec());
         }
         let skip = match t {
             0x01 | 0x09 | 0x11 | 0x12 => 8,
             0x02 => {
-                let l = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 4 + l
             }
-            0x03 | 0x04 => i32::from_le_bytes([
-                inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-            ]) as usize,
+            0x03 | 0x04 => {
+                i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]]) as usize
+            }
             0x05 => {
-                let l = i32::from_le_bytes([
-                    inner[i], inner[i + 1], inner[i + 2], inner[i + 3],
-                ]) as usize;
+                let l = i32::from_le_bytes([inner[i], inner[i + 1], inner[i + 2], inner[i + 3]])
+                    as usize;
                 4 + 1 + l
             }
             0x07 => 12,

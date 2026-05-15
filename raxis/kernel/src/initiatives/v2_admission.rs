@@ -65,14 +65,13 @@ use std::sync::Arc;
 use arc_swap::ArcSwap;
 use raxis_audit_tools::{AuditEventKind, AuditSink};
 use raxis_crypto::{
-    bundle_sha256 as crypto_bundle_sha256, canonical_decode, signing_input,
-    PlanBundleCodecError,
+    bundle_sha256 as crypto_bundle_sha256, canonical_decode, signing_input, PlanBundleCodecError,
 };
 use raxis_policy::PolicyBundle;
 use raxis_store::{plan_bundles as pb_store, Store, Table};
 use raxis_types::{
-    BundleSha256, InitiativeState, OperatorFingerprint, PlanBundle,
-    PlanBundleNonceOutcome, SchemaVersion,
+    BundleSha256, InitiativeState, OperatorFingerprint, PlanBundle, PlanBundleNonceOutcome,
+    SchemaVersion,
 };
 use rusqlite::{params, TransactionBehavior};
 use thiserror::Error;
@@ -91,7 +90,7 @@ const INITIATIVES: &str = Table::Initiatives.as_str();
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct V2InitiativeCreated {
     pub initiative_id: String,
-    pub status:        String,
+    pub status: String,
     pub bundle_sha256: BundleSha256,
 }
 
@@ -106,16 +105,19 @@ pub enum V2AdmissionError {
     /// Step 2: `bundle_sha256` echo did not match
     /// `SHA-256(plan_bundle)`.
     #[error("FAIL_PLAN_BUNDLE_SHA256_MISMATCH: wire={wire_hex}, computed={computed_hex}")]
-    Sha256Mismatch { wire_hex: String, computed_hex: String },
+    Sha256Mismatch {
+        wire_hex: String,
+        computed_hex: String,
+    },
 
     /// Step 3 / step 3': size-cap violation. `which` indicates which
     /// cap was hit (artifact / bundle / count); `observed` and
     /// `limit` are the actual numbers.
     #[error("{which}: observed={observed}, limit={limit}")]
     SizeCap {
-        which:    SizeCapWhich,
+        which: SizeCapWhich,
         observed: u64,
-        limit:    u64,
+        limit: u64,
     },
 
     /// Step 4: canonical decode failed (structurally malformed
@@ -135,8 +137,8 @@ pub enum V2AdmissionError {
     /// or empty).
     #[error("FAIL_PLAN_BUNDLE_INVALID_NAME: artifact[{seq}] {reason}: {name:?}")]
     InvalidArtifactName {
-        seq:    usize,
-        name:   String,
+        seq: usize,
+        name: String,
         reason: &'static str,
     },
 
@@ -156,19 +158,27 @@ pub enum V2AdmissionError {
 
     /// Step 10a: `now() - signed_at > max_plan_bundle_age_secs`.
     #[error("FAIL_PLAN_BUNDLE_EXPIRED: signed_at={signed_at}, now={now}, max_age={max_age}")]
-    Expired { signed_at: u64, now: i64, max_age: u64 },
+    Expired {
+        signed_at: u64,
+        now: i64,
+        max_age: u64,
+    },
 
     /// Step 10a: `signed_at - now() > max_clock_skew_secs`.
     #[error("FAIL_PLAN_BUNDLE_FROM_FUTURE: signed_at={signed_at}, now={now}, max_skew={max_skew}")]
-    FromFuture { signed_at: u64, now: i64, max_skew: u64 },
+    FromFuture {
+        signed_at: u64,
+        now: i64,
+        max_skew: u64,
+    },
 
     /// Step 10b: `bundle_nonce` already present in
     /// `plan_bundle_nonces_seen`.
     #[error("FAIL_PLAN_BUNDLE_REPLAY: previous_outcome={previous_outcome:?}, previous_initiative_id={previous_initiative_id:?}, first_seen_at={first_seen_at}")]
     Replay {
-        previous_outcome:        PlanBundleNonceOutcome,
-        previous_initiative_id:  Option<String>,
-        first_seen_at:           i64,
+        previous_outcome: PlanBundleNonceOutcome,
+        previous_initiative_id: Option<String>,
+        first_seen_at: i64,
     },
 
     /// Step 11: `plan.toml` is not parseable as TOML. Recorded as
@@ -213,7 +223,7 @@ pub enum SizeCapWhich {
 impl std::fmt::Display for SizeCapWhich {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(match self {
-            Self::BundleBytes   => "FAIL_PLAN_BUNDLE_TOO_LARGE",
+            Self::BundleBytes => "FAIL_PLAN_BUNDLE_TOO_LARGE",
             Self::ArtifactBytes => "FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE",
             Self::ArtifactCount => "FAIL_PLAN_BUNDLE_TOO_MANY_ARTIFACTS",
         })
@@ -225,31 +235,32 @@ impl V2AdmissionError {
     /// `FAIL_*` code per `plan-bundle-sealing.md §9`.
     pub fn fail_code(&self) -> &'static str {
         match self {
-            Self::DecodeFailed(_)              => "FAIL_PLAN_BUNDLE_DECODE_FAILED",
-            Self::Sha256Mismatch { .. }        => "FAIL_PLAN_BUNDLE_SHA256_MISMATCH",
-            Self::SizeCap { which, .. }        => match which {
-                SizeCapWhich::BundleBytes   => "FAIL_PLAN_BUNDLE_TOO_LARGE",
+            Self::DecodeFailed(_) => "FAIL_PLAN_BUNDLE_DECODE_FAILED",
+            Self::Sha256Mismatch { .. } => "FAIL_PLAN_BUNDLE_SHA256_MISMATCH",
+            Self::SizeCap { which, .. } => match which {
+                SizeCapWhich::BundleBytes => "FAIL_PLAN_BUNDLE_TOO_LARGE",
                 SizeCapWhich::ArtifactBytes => "FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE",
                 SizeCapWhich::ArtifactCount => "FAIL_PLAN_BUNDLE_TOO_MANY_ARTIFACTS",
             },
             Self::CanonicalDecode(e) => match e {
-                PlanBundleCodecError::ArtifactHashMismatch { .. } =>
-                    "FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH",
+                PlanBundleCodecError::ArtifactHashMismatch { .. } => {
+                    "FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH"
+                }
                 _ => "FAIL_PLAN_BUNDLE_CANONICAL_DECODE_FAILED",
             },
-            Self::SchemaDeprecated             => "FAIL_PLAN_BUNDLE_SCHEMA_DEPRECATED",
-            Self::FirstArtifactNotPlanToml(_)  => "FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML",
-            Self::InvalidArtifactName { .. }   => "FAIL_PLAN_BUNDLE_INVALID_NAME",
-            Self::UnknownSigner(_)             => "FAIL_UNKNOWN_SIGNER",
+            Self::SchemaDeprecated => "FAIL_PLAN_BUNDLE_SCHEMA_DEPRECATED",
+            Self::FirstArtifactNotPlanToml(_) => "FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML",
+            Self::InvalidArtifactName { .. } => "FAIL_PLAN_BUNDLE_INVALID_NAME",
+            Self::UnknownSigner(_) => "FAIL_UNKNOWN_SIGNER",
             Self::PolicyOperatorPubkeyInvalid(_) => "FAIL_POLICY_OPERATOR_PUBKEY_INVALID",
-            Self::SignatureInvalid(_)          => "FAIL_PLAN_SIGNATURE_INVALID",
-            Self::Expired { .. }               => "FAIL_PLAN_BUNDLE_EXPIRED",
-            Self::FromFuture { .. }            => "FAIL_PLAN_BUNDLE_FROM_FUTURE",
-            Self::Replay { .. }                => "FAIL_PLAN_BUNDLE_REPLAY",
-            Self::PlanInvalidToml(_)           => "FAIL_PLAN_INVALID_TOML",
-            Self::InitiativeIdCollision(_)     => "FAIL_INITIATIVE_ID_COLLISION",
-            Self::Sqlite(_)                    => "FAIL_KERNEL_INTERNAL",
-            Self::PlanBundleStore(_)           => "FAIL_KERNEL_INTERNAL",
+            Self::SignatureInvalid(_) => "FAIL_PLAN_SIGNATURE_INVALID",
+            Self::Expired { .. } => "FAIL_PLAN_BUNDLE_EXPIRED",
+            Self::FromFuture { .. } => "FAIL_PLAN_BUNDLE_FROM_FUTURE",
+            Self::Replay { .. } => "FAIL_PLAN_BUNDLE_REPLAY",
+            Self::PlanInvalidToml(_) => "FAIL_PLAN_INVALID_TOML",
+            Self::InitiativeIdCollision(_) => "FAIL_INITIATIVE_ID_COLLISION",
+            Self::Sqlite(_) => "FAIL_KERNEL_INTERNAL",
+            Self::PlanBundleStore(_) => "FAIL_KERNEL_INTERNAL",
         }
     }
 }
@@ -259,10 +270,10 @@ impl V2AdmissionError {
 /// arguments.
 pub struct V2AdmissionRequest {
     pub initiative_id: String,
-    pub plan_bundle:   Vec<u8>,
+    pub plan_bundle: Vec<u8>,
     pub bundle_sha256: BundleSha256,
-    pub signature:     [u8; 64],
-    pub signed_by:     OperatorFingerprint,
+    pub signature: [u8; 64],
+    pub signed_by: OperatorFingerprint,
 }
 
 // ===========================================================================
@@ -273,7 +284,7 @@ pub struct V2AdmissionRequest {
 /// pubkey bytes (looked up via step 8). Held so the caller can hand
 /// both to the transactional half without re-running any work.
 struct PreTxOk {
-    bundle:       PlanBundle,
+    bundle: PlanBundle,
     pubkey_bytes: [u8; 32],
 }
 
@@ -282,14 +293,14 @@ struct PreTxOk {
 /// On success returns the decoded bundle (so step 11 + step 12 can
 /// reuse the work) and the operator's 32-byte Ed25519 public key.
 fn pre_tx_checks(
-    req:    &V2AdmissionRequest,
+    req: &V2AdmissionRequest,
     policy: &PolicyBundle,
 ) -> Result<PreTxOk, V2AdmissionError> {
     // Step 2 — recompute SHA-256(plan_bundle) and compare.
     let computed = crypto_bundle_sha256(&req.plan_bundle);
     if computed != req.bundle_sha256 {
         return Err(V2AdmissionError::Sha256Mismatch {
-            wire_hex:     req.bundle_sha256.to_hex(),
+            wire_hex: req.bundle_sha256.to_hex(),
             computed_hex: computed.to_hex(),
         });
     }
@@ -301,9 +312,9 @@ fn pre_tx_checks(
     let bundle_len = req.plan_bundle.len() as u64;
     if bundle_len > limits.max_bundle_bytes {
         return Err(V2AdmissionError::SizeCap {
-            which:    SizeCapWhich::BundleBytes,
+            which: SizeCapWhich::BundleBytes,
             observed: bundle_len,
-            limit:    limits.max_bundle_bytes,
+            limit: limits.max_bundle_bytes,
         });
     }
 
@@ -327,18 +338,18 @@ fn pre_tx_checks(
     let artifact_count = bundle.artifacts.len() as u64;
     if artifact_count > limits.max_artifact_count as u64 {
         return Err(V2AdmissionError::SizeCap {
-            which:    SizeCapWhich::ArtifactCount,
+            which: SizeCapWhich::ArtifactCount,
             observed: artifact_count,
-            limit:    limits.max_artifact_count as u64,
+            limit: limits.max_artifact_count as u64,
         });
     }
     for a in &bundle.artifacts {
         let len = a.bytes.len() as u64;
         if len > limits.max_artifact_bytes {
             return Err(V2AdmissionError::SizeCap {
-                which:    SizeCapWhich::ArtifactBytes,
+                which: SizeCapWhich::ArtifactBytes,
                 observed: len,
-                limit:    limits.max_artifact_bytes,
+                limit: limits.max_artifact_bytes,
             });
         }
     }
@@ -350,7 +361,9 @@ fn pre_tx_checks(
         V2AdmissionError::FirstArtifactNotPlanToml(String::new())
     })?;
     if first.name != "plan.toml" {
-        return Err(V2AdmissionError::FirstArtifactNotPlanToml(first.name.clone()));
+        return Err(V2AdmissionError::FirstArtifactNotPlanToml(
+            first.name.clone(),
+        ));
     }
 
     // Step 7 — artifact name discipline (§3.3). The CLI's path
@@ -371,9 +384,9 @@ fn pre_tx_checks(
     // as a hex-encoded string; we hex-encode the 8-byte signed_by
     // and compare.
     let signed_by_hex = req.signed_by.to_hex();
-    let entry = policy.operator_entry(&signed_by_hex).ok_or_else(|| {
-        V2AdmissionError::UnknownSigner(signed_by_hex.clone())
-    })?;
+    let entry = policy
+        .operator_entry(&signed_by_hex)
+        .ok_or_else(|| V2AdmissionError::UnknownSigner(signed_by_hex.clone()))?;
     let pubkey_bytes_vec = hex::decode(&entry.pubkey_hex).map_err(|e| {
         V2AdmissionError::PolicyOperatorPubkeyInvalid(format!(
             "operator '{signed_by_hex}' pubkey_hex: {e}",
@@ -391,7 +404,10 @@ fn pre_tx_checks(
     raxis_crypto::verify::verify_ed25519(&pubkey_bytes, &sig_input, &req.signature)
         .map_err(|e| V2AdmissionError::SignatureInvalid(e.to_string()))?;
 
-    Ok(PreTxOk { bundle, pubkey_bytes })
+    Ok(PreTxOk {
+        bundle,
+        pubkey_bytes,
+    })
 }
 
 /// Validate an artifact name per §3.3:
@@ -431,12 +447,12 @@ fn validate_artifact_name(name: &str) -> Result<(), &'static str> {
 /// terminal-rejection-class error, the transaction has already
 /// recorded a TerminallyRejected nonce row before being returned.
 fn run_admission_tx(
-    req:           &V2AdmissionRequest,
-    bundle:        &PlanBundle,
-    plan_bundle:   &[u8],
+    req: &V2AdmissionRequest,
+    bundle: &PlanBundle,
+    plan_bundle: &[u8],
     now_unix_secs: i64,
-    policy:        &PolicyBundle,
-    store:         &Store,
+    policy: &PolicyBundle,
+    store: &Store,
 ) -> Result<String, V2AdmissionError> {
     let mut conn = store.lock_sync();
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -446,22 +462,22 @@ fn run_admission_tx(
     // Step 10a — freshness window (V2.1 only).
     if let Some(signed_at) = bundle.signed_at_unix_secs {
         let signing = policy.plan_signing();
-        let now_u   = now_unix_secs.max(0) as u64;
+        let now_u = now_unix_secs.max(0) as u64;
         // signed_at vs now_u using i128 to avoid u64 wrap-around.
         let signed_at_i128 = signed_at as i128;
-        let now_i128       = now_u as i128;
-        let age_i128       = now_i128 - signed_at_i128;
+        let now_i128 = now_u as i128;
+        let age_i128 = now_i128 - signed_at_i128;
         if age_i128 > signing.max_plan_bundle_age_secs as i128 {
             return Err(V2AdmissionError::Expired {
                 signed_at,
-                now:     now_unix_secs,
+                now: now_unix_secs,
                 max_age: signing.max_plan_bundle_age_secs,
             });
         }
         if -age_i128 > signing.max_clock_skew_secs as i128 {
             return Err(V2AdmissionError::FromFuture {
                 signed_at,
-                now:      now_unix_secs,
+                now: now_unix_secs,
                 max_skew: signing.max_clock_skew_secs,
             });
         }
@@ -472,9 +488,9 @@ fn run_admission_tx(
     if let Some(nonce) = nonce_opt {
         if let Some(prior) = pb_store::nonce_status_in_tx(&tx, &nonce)? {
             return Err(V2AdmissionError::Replay {
-                previous_outcome:       prior.outcome,
+                previous_outcome: prior.outcome,
                 previous_initiative_id: prior.initiative_id,
-                first_seen_at:          prior.first_seen_at_unix_secs,
+                first_seen_at: prior.first_seen_at_unix_secs,
             });
         }
     }
@@ -483,13 +499,13 @@ fn run_admission_tx(
     // see module-level docs for why the full §5 shift-left chain is
     // deferred to approve_plan).
     let plan_toml_bytes = &bundle.artifacts[0].bytes;
-    let plan_toml_str   = std::str::from_utf8(plan_toml_bytes).map_err(|e| {
+    let plan_toml_str = std::str::from_utf8(plan_toml_bytes).map_err(|e| {
         V2AdmissionError::PlanInvalidToml(format!("plan.toml is not valid UTF-8: {e}"))
     });
     let parse_result = match plan_toml_str {
-        Ok(s) => toml::from_str::<toml::Value>(s).map(|_| ()).map_err(|e| {
-            V2AdmissionError::PlanInvalidToml(format!("plan.toml parse error: {e}"))
-        }),
+        Ok(s) => toml::from_str::<toml::Value>(s)
+            .map(|_| ())
+            .map_err(|e| V2AdmissionError::PlanInvalidToml(format!("plan.toml parse error: {e}"))),
         Err(e) => Err(e),
     };
     if let Err(e) = parse_result {
@@ -611,16 +627,16 @@ fn run_admission_tx(
 /// pass `raxis_types::unix_now_secs() as i64` immediately before the
 /// call.
 pub fn create_initiative_v2(
-    req:           V2AdmissionRequest,
+    req: V2AdmissionRequest,
     now_unix_secs: i64,
-    policy:        &PolicyBundle,
-    store:         &Store,
-    audit:         &dyn AuditSink,
+    policy: &PolicyBundle,
+    store: &Store,
+    audit: &dyn AuditSink,
 ) -> Result<V2InitiativeCreated, V2AdmissionError> {
     // Steps 2–9: cheap pre-transactional checks.
     let pre = pre_tx_checks(&req, policy)?;
-    let _   = pre.pubkey_bytes; // signature already verified; bytes
-                                 // not needed downstream.
+    let _ = pre.pubkey_bytes; // signature already verified; bytes
+                              // not needed downstream.
 
     // Steps 10a, 10b, 11, 12: transactional admission half.
     let initiative_id = run_admission_tx(
@@ -637,13 +653,17 @@ pub fn create_initiative_v2(
     // failure here is logged but not propagated — the store is
     // already consistent and the operator's intent has been
     // honoured.
-    let signed_at = pre.bundle.signed_at_unix_secs.map(|s| s as i64).unwrap_or(0);
+    let signed_at = pre
+        .bundle
+        .signed_at_unix_secs
+        .map(|s| s as i64)
+        .unwrap_or(0);
     let signed_by_hex = req.signed_by.to_hex();
     if let Err(e) = audit.emit(
         AuditEventKind::InitiativeCreated {
             initiative_id: initiative_id.clone(),
-            plan_hash:     req.bundle_sha256.to_hex(),
-            signed_by:     signed_by_hex.clone(),
+            plan_hash: req.bundle_sha256.to_hex(),
+            signed_by: signed_by_hex.clone(),
             signed_at,
         },
         None,
@@ -660,7 +680,7 @@ pub fn create_initiative_v2(
 
     Ok(V2InitiativeCreated {
         initiative_id,
-        status:        "Draft".to_owned(),
+        status: "Draft".to_owned(),
         bundle_sha256: req.bundle_sha256,
     })
 }
@@ -671,21 +691,15 @@ pub fn create_initiative_v2(
 /// O(bundle_size) crypto work plus a SQLite transaction, which the
 /// async runtime should not block on.
 pub async fn create_initiative_v2_blocking(
-    req:           V2AdmissionRequest,
+    req: V2AdmissionRequest,
     now_unix_secs: i64,
-    policy:        Arc<ArcSwap<PolicyBundle>>,
-    store:         Arc<Store>,
-    audit:         Arc<dyn AuditSink>,
+    policy: Arc<ArcSwap<PolicyBundle>>,
+    store: Arc<Store>,
+    audit: Arc<dyn AuditSink>,
 ) -> Result<V2InitiativeCreated, V2AdmissionError> {
     tokio::task::spawn_blocking(move || {
         let snapshot = policy.load_full();
-        create_initiative_v2(
-            req,
-            now_unix_secs,
-            &snapshot,
-            &store,
-            audit.as_ref(),
-        )
+        create_initiative_v2(req, now_unix_secs, &snapshot, &store, audit.as_ref())
     })
     .await
     .unwrap_or_else(|e| {
@@ -706,11 +720,11 @@ pub async fn create_initiative_v2_blocking(
 mod tests {
     use super::*;
     use ed25519_dalek::{Signer, SigningKey};
-    use raxis_test_support::FakeAuditSink;
     use raxis_crypto::{
         bundle_sha256 as crypto_bundle_sha256, canonical_encode, mint_bundle_nonce,
         sha256_of_artifact_bytes,
     };
+    use raxis_test_support::FakeAuditSink;
     use raxis_test_support::{ephemeral_cert, mem_store};
     use raxis_types::{BundleArtifact, PlanBundle};
 
@@ -720,15 +734,15 @@ mod tests {
     /// signing key fingerprint matches OperatorFingerprint construction
     /// so the §8.1 step 8 lookup resolves cleanly.
     struct OperatorFixture {
-        signing_key:        SigningKey,
-        pubkey_bytes:       [u8; 32],
-        fingerprint:        OperatorFingerprint,
-        fingerprint_16hex:  String, // 16 hex chars = 8 bytes (SHA-256[:8])
+        signing_key: SigningKey,
+        pubkey_bytes: [u8; 32],
+        fingerprint: OperatorFingerprint,
+        fingerprint_16hex: String, // 16 hex chars = 8 bytes (SHA-256[:8])
     }
 
     impl OperatorFixture {
         fn new(seed: u8) -> Self {
-            let signing_key  = SigningKey::from_bytes(&[seed; 32]);
+            let signing_key = SigningKey::from_bytes(&[seed; 32]);
             let pubkey_bytes = signing_key.verifying_key().to_bytes();
             let digest = *sha256_of_artifact_bytes(&pubkey_bytes).as_bytes();
             let mut fp = [0u8; 8];
@@ -755,9 +769,9 @@ mod tests {
             // valid by construction.
             raxis_policy::OperatorEntry {
                 pubkey_fingerprint: self.fingerprint_16hex.clone(),
-                display_name:       "test-operator".to_owned(),
-                pubkey_hex:         hex::encode(self.pubkey_bytes),
-                permitted_ops:      cert.permitted_ops.clone(),
+                display_name: "test-operator".to_owned(),
+                pubkey_hex: hex::encode(self.pubkey_bytes),
+                permitted_ops: cert.permitted_ops.clone(),
                 cert,
                 force_misconfig_bypass: false,
             }
@@ -773,9 +787,7 @@ mod tests {
     }
 
     /// Build a fresh V2.1 plan bundle around a small valid plan.toml.
-    fn build_v2_1_bundle(
-        signed_at_unix_secs: u64,
-    ) -> PlanBundle {
+    fn build_v2_1_bundle(signed_at_unix_secs: u64) -> PlanBundle {
         let plan_toml_bytes = b"[meta]\nepoch = 1\n".to_vec();
         let plan_sha = sha256_of_artifact_bytes(&plan_toml_bytes);
         PlanBundle::new_v2_1(
@@ -784,8 +796,8 @@ mod tests {
             mint_bundle_nonce().expect("mint nonce"),
             "myplan".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  plan_toml_bytes,
+                name: "plan.toml".to_owned(),
+                bytes: plan_toml_bytes,
                 sha256: plan_sha,
             }],
         )
@@ -794,8 +806,8 @@ mod tests {
     /// Sign a bundle with the operator fixture and return a
     /// fully-populated admission request.
     fn sign_to_request(
-        op:           &OperatorFixture,
-        bundle:       &PlanBundle,
+        op: &OperatorFixture,
+        bundle: &PlanBundle,
         initiative_id: &str,
     ) -> V2AdmissionRequest {
         let canonical = canonical_encode(bundle).expect("canonical_encode");
@@ -804,10 +816,10 @@ mod tests {
         let sig = op.signing_key.sign(&sig_input);
         V2AdmissionRequest {
             initiative_id: initiative_id.to_owned(),
-            plan_bundle:   canonical,
+            plan_bundle: canonical,
             bundle_sha256: bundle_sha,
-            signature:     sig.to_bytes(),
-            signed_by:     op.fingerprint,
+            signature: sig.to_bytes(),
+            signed_by: op.fingerprint,
         }
     }
 
@@ -815,17 +827,17 @@ mod tests {
 
     #[test]
     fn admit_happy_path_seals_bundle_and_records_admitted_nonce() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
         let bundle = build_v2_1_bundle(now as u64);
-        let req    = sign_to_request(&op, &bundle, "init-happy-1");
+        let req = sign_to_request(&op, &bundle, "init-happy-1");
 
         let result = create_initiative_v2(req, now, &policy, &store, &audit).unwrap();
         assert_eq!(result.initiative_id, "init-happy-1");
-        assert_eq!(result.status,        "Draft");
+        assert_eq!(result.status, "Draft");
 
         // Audit event emitted (post-commit) for the admission.
         let captured = audit.events();
@@ -834,17 +846,21 @@ mod tests {
 
         // initiatives row landed in Draft state with plan_bundle_sha256.
         let conn = store.lock_sync();
-        let state: String = conn.query_row(
-            "SELECT state FROM initiatives WHERE initiative_id=?1",
-            rusqlite::params!["init-happy-1"],
-            |r| r.get(0),
-        ).unwrap();
+        let state: String = conn
+            .query_row(
+                "SELECT state FROM initiatives WHERE initiative_id=?1",
+                rusqlite::params!["init-happy-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(state, "Draft");
-        let bundle_sha_blob: Vec<u8> = conn.query_row(
-            "SELECT plan_bundle_sha256 FROM initiatives WHERE initiative_id=?1",
-            rusqlite::params!["init-happy-1"],
-            |r| r.get(0),
-        ).unwrap();
+        let bundle_sha_blob: Vec<u8> = conn
+            .query_row(
+                "SELECT plan_bundle_sha256 FROM initiatives WHERE initiative_id=?1",
+                rusqlite::params!["init-happy-1"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(bundle_sha_blob.len(), 32);
     }
 
@@ -852,9 +868,9 @@ mod tests {
 
     #[test]
     fn step2_sha256_mismatch_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
         let bundle = build_v2_1_bundle(now as u64);
@@ -868,9 +884,9 @@ mod tests {
 
     #[test]
     fn step3_bundle_too_large_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
 
@@ -886,8 +902,8 @@ mod tests {
             mint_bundle_nonce().unwrap(),
             "big".to_owned(),
             vec![BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  big_plan,
+                name: "plan.toml".to_owned(),
+                bytes: big_plan,
                 sha256: plan_sha,
             }],
         );
@@ -901,18 +917,22 @@ mod tests {
 
     #[test]
     fn step4a_v2_0_bundle_with_policy_off_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op); // accept_unfresh_v2_0_bundles=false (default)
         let now: i64 = 1_700_000_000;
 
         let plan_bytes = b"[meta]\nepoch=1\n".to_vec();
-        let plan_sha   = sha256_of_artifact_bytes(&plan_bytes);
+        let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
         let bundle = PlanBundle::new_v2_0_legacy(
             now as u64,
             "legacy".to_owned(),
-            vec![BundleArtifact { name: "plan.toml".to_owned(), bytes: plan_bytes, sha256: plan_sha }],
+            vec![BundleArtifact {
+                name: "plan.toml".to_owned(),
+                bytes: plan_bytes,
+                sha256: plan_sha,
+            }],
         );
         let req = sign_to_request(&op, &bundle, "init-v20-deprecated");
 
@@ -922,9 +942,9 @@ mod tests {
 
     #[test]
     fn step6_first_artifact_not_plan_toml_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
 
@@ -932,47 +952,53 @@ mod tests {
         // == "plan.toml"; this test simulates a hostile CLI that
         // submits a bundle with the wrong first artifact.
         let pirate_bytes = b"# not plan.toml\n".to_vec();
-        let pirate_sha   = sha256_of_artifact_bytes(&pirate_bytes);
+        let pirate_sha = sha256_of_artifact_bytes(&pirate_bytes);
         let bundle = PlanBundle::new_v2_1(
-            now as u64, now as u64,
+            now as u64,
+            now as u64,
             mint_bundle_nonce().unwrap(),
             "rogue".to_owned(),
             vec![BundleArtifact {
-                name:   "definitely-not-plan.toml".to_owned(),
-                bytes:  pirate_bytes,
+                name: "definitely-not-plan.toml".to_owned(),
+                bytes: pirate_bytes,
                 sha256: pirate_sha,
             }],
         );
         let req = sign_to_request(&op, &bundle, "init-rogue-first");
 
         let err = create_initiative_v2(req, now, &policy, &store, &audit).unwrap_err();
-        assert_eq!(err.fail_code(), "FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML");
+        assert_eq!(
+            err.fail_code(),
+            "FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML"
+        );
     }
 
     #[test]
     fn step7_artifact_name_path_escape_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
 
         let plan_bytes = b"[meta]\nepoch=1\n".to_vec();
-        let plan_sha   = sha256_of_artifact_bytes(&plan_bytes);
-        let bad_bytes  = b"hello".to_vec();
-        let bad_sha    = sha256_of_artifact_bytes(&bad_bytes);
+        let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
+        let bad_bytes = b"hello".to_vec();
+        let bad_sha = sha256_of_artifact_bytes(&bad_bytes);
         let bundle = PlanBundle::new_v2_1(
-            now as u64, now as u64,
+            now as u64,
+            now as u64,
             mint_bundle_nonce().unwrap(),
             "ok".to_owned(),
             vec![
                 BundleArtifact {
                     name: "plan.toml".to_owned(),
-                    bytes: plan_bytes, sha256: plan_sha,
+                    bytes: plan_bytes,
+                    sha256: plan_sha,
                 },
                 BundleArtifact {
-                    name:   "../escape.txt".to_owned(),
-                    bytes:  bad_bytes,
+                    name: "../escape.txt".to_owned(),
+                    bytes: bad_bytes,
                     sha256: bad_sha,
                 },
             ],
@@ -985,15 +1011,15 @@ mod tests {
 
     #[test]
     fn step8_unknown_signer_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
         let op_known = OperatorFixture::new(0x42);
         let op_other = OperatorFixture::new(0x99);
         // Policy only knows op_known; we sign with op_other.
         let policy = build_policy(&op_known);
         let now: i64 = 1_700_000_000;
         let bundle = build_v2_1_bundle(now as u64);
-        let req    = sign_to_request(&op_other, &bundle, "init-unknown-signer");
+        let req = sign_to_request(&op_other, &bundle, "init-unknown-signer");
 
         let err = create_initiative_v2(req, now, &policy, &store, &audit).unwrap_err();
         assert_eq!(err.fail_code(), "FAIL_UNKNOWN_SIGNER");
@@ -1001,9 +1027,9 @@ mod tests {
 
     #[test]
     fn step9_signature_invalid_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
         let bundle = build_v2_1_bundle(now as u64);
@@ -1019,16 +1045,16 @@ mod tests {
 
     #[test]
     fn step10a_freshness_expired_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         // Default policy.max_plan_bundle_age_secs = 86_400 (24 h).
         // Submit a bundle signed 25 h ago.
         let now: i64 = 1_700_000_000;
         let signed_at_old = now - (25 * 60 * 60);
         let bundle = build_v2_1_bundle(signed_at_old as u64);
-        let req    = sign_to_request(&op, &bundle, "init-expired");
+        let req = sign_to_request(&op, &bundle, "init-expired");
 
         let err = create_initiative_v2(req, now, &policy, &store, &audit).unwrap_err();
         assert_eq!(err.fail_code(), "FAIL_PLAN_BUNDLE_EXPIRED");
@@ -1036,16 +1062,16 @@ mod tests {
 
     #[test]
     fn step10a_from_future_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         // Default policy.max_clock_skew_secs = 300 (5 min).
         // Submit a bundle signed 10 min in the future.
         let now: i64 = 1_700_000_000;
         let signed_at_future = now + (10 * 60);
         let bundle = build_v2_1_bundle(signed_at_future as u64);
-        let req    = sign_to_request(&op, &bundle, "init-future");
+        let req = sign_to_request(&op, &bundle, "init-future");
 
         let err = create_initiative_v2(req, now, &policy, &store, &audit).unwrap_err();
         assert_eq!(err.fail_code(), "FAIL_PLAN_BUNDLE_FROM_FUTURE");
@@ -1053,9 +1079,9 @@ mod tests {
 
     #[test]
     fn step10b_nonce_replay_after_admit_is_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
         let bundle = build_v2_1_bundle(now as u64);
@@ -1069,7 +1095,12 @@ mod tests {
         let req2 = sign_to_request(&op, &bundle, "init-replay-2");
         let err = create_initiative_v2(req2, now, &policy, &store, &audit).unwrap_err();
         assert_eq!(err.fail_code(), "FAIL_PLAN_BUNDLE_REPLAY");
-        if let V2AdmissionError::Replay { previous_outcome, previous_initiative_id, .. } = err {
+        if let V2AdmissionError::Replay {
+            previous_outcome,
+            previous_initiative_id,
+            ..
+        } = err
+        {
             assert_eq!(previous_outcome, PlanBundleNonceOutcome::Admitted);
             assert_eq!(previous_initiative_id.as_deref(), Some("init-replay-1"));
         } else {
@@ -1079,9 +1110,9 @@ mod tests {
 
     #[test]
     fn step11_invalid_toml_records_terminally_rejected_nonce() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
 
@@ -1089,12 +1120,14 @@ mod tests {
         let bad_toml = b"this is not toml ! @ # $".to_vec();
         let plan_sha = sha256_of_artifact_bytes(&bad_toml);
         let bundle = PlanBundle::new_v2_1(
-            now as u64, now as u64,
+            now as u64,
+            now as u64,
             mint_bundle_nonce().unwrap(),
             "bad".to_owned(),
             vec![BundleArtifact {
                 name: "plan.toml".to_owned(),
-                bytes: bad_toml, sha256: plan_sha,
+                bytes: bad_toml,
+                sha256: plan_sha,
             }],
         );
         let nonce_in_bundle = bundle.bundle_nonce.unwrap();
@@ -1114,18 +1147,21 @@ mod tests {
 
         // And the initiatives table has NO row for the rejected
         // initiative — sealing only happens on the success path.
-        let count: i64 = tx.query_row(
-            "SELECT COUNT(*) FROM initiatives WHERE initiative_id=?1",
-            rusqlite::params!["init-bad-toml"], |r| r.get(0),
-        ).unwrap();
+        let count: i64 = tx
+            .query_row(
+                "SELECT COUNT(*) FROM initiatives WHERE initiative_id=?1",
+                rusqlite::params!["init-bad-toml"],
+                |r| r.get(0),
+            )
+            .unwrap();
         assert_eq!(count, 0);
     }
 
     #[test]
     fn step10b_replay_after_terminal_reject_is_also_rejected() {
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let policy = build_policy(&op);
         let now: i64 = 1_700_000_000;
 
@@ -1133,12 +1169,14 @@ mod tests {
         let bad_toml = b"this is not toml".to_vec();
         let plan_sha = sha256_of_artifact_bytes(&bad_toml);
         let bundle = PlanBundle::new_v2_1(
-            now as u64, now as u64,
+            now as u64,
+            now as u64,
             mint_bundle_nonce().unwrap(),
             "bad".to_owned(),
             vec![BundleArtifact {
                 name: "plan.toml".to_owned(),
-                bytes: bad_toml, sha256: plan_sha,
+                bytes: bad_toml,
+                sha256: plan_sha,
             }],
         );
         let req1 = sign_to_request(&op, &bundle, "init-bad-1");
@@ -1149,7 +1187,12 @@ mod tests {
         let req2 = sign_to_request(&op, &bundle, "init-bad-2");
         let err = create_initiative_v2(req2, now, &policy, &store, &audit).unwrap_err();
         assert_eq!(err.fail_code(), "FAIL_PLAN_BUNDLE_REPLAY");
-        if let V2AdmissionError::Replay { previous_outcome, previous_initiative_id, .. } = err {
+        if let V2AdmissionError::Replay {
+            previous_outcome,
+            previous_initiative_id,
+            ..
+        } = err
+        {
             assert_eq!(previous_outcome, PlanBundleNonceOutcome::TerminallyRejected);
             assert_eq!(previous_initiative_id, None);
         } else {
@@ -1164,21 +1207,22 @@ mod tests {
         // accept_unfresh_v2_0_bundles=true — V2.0 bundles admit
         // without freshness/nonce checks. There is no replay
         // protection in this mode (no nonce); document the trade-off.
-        let store  = mem_store();
-        let audit  = FakeAuditSink::new();
-        let op     = OperatorFixture::new(0x42);
+        let store = mem_store();
+        let audit = FakeAuditSink::new();
+        let op = OperatorFixture::new(0x42);
         let mut policy = build_policy(&op);
         policy.set_plan_signing_accept_unfresh_v2_0_for_tests(true);
 
         let now: i64 = 1_700_000_000;
         let plan_bytes = b"[meta]\nepoch=1\n".to_vec();
-        let plan_sha   = sha256_of_artifact_bytes(&plan_bytes);
+        let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
         let bundle = PlanBundle::new_v2_0_legacy(
             now as u64,
             "legacy".to_owned(),
             vec![BundleArtifact {
                 name: "plan.toml".to_owned(),
-                bytes: plan_bytes, sha256: plan_sha,
+                bytes: plan_bytes,
+                sha256: plan_sha,
             }],
         );
         let req = sign_to_request(&op, &bundle, "init-v20-ok");
@@ -1196,13 +1240,16 @@ mod tests {
 
     #[test]
     fn artifact_name_rejects_leading_slash() {
-        assert_eq!(super::validate_artifact_name("/etc/passwd"), Err("absolute_path"));
+        assert_eq!(
+            super::validate_artifact_name("/etc/passwd"),
+            Err("absolute_path")
+        );
     }
 
     #[test]
     fn artifact_name_rejects_dotdot_segment() {
-        assert_eq!(super::validate_artifact_name("a/../b"),  Err("path_escape"));
-        assert_eq!(super::validate_artifact_name("../"),     Err("path_escape"));
+        assert_eq!(super::validate_artifact_name("a/../b"), Err("path_escape"));
+        assert_eq!(super::validate_artifact_name("../"), Err("path_escape"));
     }
 
     #[test]
@@ -1224,4 +1271,3 @@ mod tests {
         assert_eq!(super::validate_artifact_name("spam..ham"), Ok(()));
     }
 }
-

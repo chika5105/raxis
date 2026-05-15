@@ -133,9 +133,7 @@ pub fn open_in_best_browser(url: &str) -> OpenOutcome {
             );
             try_system(url).unwrap_or_else(|| print_only(url))
         }
-        HostEnvironment::SystemDefault => {
-            try_system(url).unwrap_or_else(|| print_only(url))
-        }
+        HostEnvironment::SystemDefault => try_system(url).unwrap_or_else(|| print_only(url)),
     }
 }
 
@@ -144,9 +142,7 @@ pub fn cursor_cli_path() -> Option<PathBuf> {
         return Some(p);
     }
     if cfg!(target_os = "macos") {
-        let bundled = PathBuf::from(
-            "/Applications/Cursor.app/Contents/Resources/app/bin/cursor",
-        );
+        let bundled = PathBuf::from("/Applications/Cursor.app/Contents/Resources/app/bin/cursor");
         if bundled.exists() {
             return Some(bundled);
         }

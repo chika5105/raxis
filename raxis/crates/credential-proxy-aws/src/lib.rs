@@ -103,13 +103,13 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use raxis_audit_tools::AuditSink;
 use raxis_credential_proxy_cloud_shared::{CloudHttpClient, TokenCache};
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -118,7 +118,7 @@ use tokio::net::{TcpListener, TcpStream};
 pub mod forwarding;
 pub mod restriction;
 
-pub use forwarding::{AWS_XML_CONTENT_TYPE, ForwardOutcome, ForwardingConfig, StsCacheValue};
+pub use forwarding::{ForwardOutcome, ForwardingConfig, StsCacheValue, AWS_XML_CONTENT_TYPE};
 pub use restriction::Restrictions;
 
 // ---------------------------------------------------------------------------
@@ -131,13 +131,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -154,27 +157,27 @@ impl OwnedConsumer {
 pub struct ProxyConfig {
     /// Address the inbound listener binds to. Production wires
     /// `127.0.0.1:0`.
-    pub listen_addr:     String,
+    pub listen_addr: String,
     /// Credential to resolve per request. Bytes must parse as
     /// either `KEY=VALUE` env-style or as a JSON object with
     /// `AccessKeyId` + `SecretAccessKey` (and optional `Token`).
     pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:        OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Lease length the proxy advertises in `Expiration`. SDKs
     /// will refresh shortly before this window closes.
-    pub lease_seconds:   u64,
+    pub lease_seconds: u64,
     /// Optional IAM role ARN the proxy mirrors back into the
     /// response body. Operator-declared in `[[tasks.credentials]]`.
-    pub role_arn:        Option<String>,
+    pub role_arn: Option<String>,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:    Restrictions,
+    pub restrictions: Restrictions,
     /// V3 forwarding configuration. When `Some`, the proxy
     /// drives a real `sts:AssumeRole` exchange against the
     /// closed-allowlist STS endpoint instead of mirroring the
     /// long-lived IAM key. See `specs/v3/cloud-proxy-forwarding.md`.
-    pub forwarding:      Option<ForwardingConfig>,
+    pub forwarding: Option<ForwardingConfig>,
 }
 
 // ---------------------------------------------------------------------------
@@ -189,9 +192,9 @@ pub struct ProxyStats {
     /// Number of requests that returned a credential.
     pub credentials_served: AtomicU32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   AtomicU32,
+    pub requests_blocked: AtomicU32,
     /// Bytes in the served credential bodies.
-    pub bytes_served:       AtomicU64,
+    pub bytes_served: AtomicU64,
 }
 
 impl ProxyStats {
@@ -200,8 +203,8 @@ impl ProxyStats {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
             credentials_served: self.credentials_served.load(Ordering::Relaxed),
-            requests_blocked:   self.requests_blocked  .load(Ordering::Relaxed),
-            bytes_served:       self.bytes_served      .load(Ordering::Relaxed),
+            requests_blocked: self.requests_blocked.load(Ordering::Relaxed),
+            bytes_served: self.bytes_served.load(Ordering::Relaxed),
         }
     }
 }
@@ -214,9 +217,9 @@ pub struct ProxyStatsSnapshot {
     /// Number of requests that returned a credential.
     pub credentials_served: u32,
     /// Number of requests rejected by `Restrictions`.
-    pub requests_blocked:   u32,
+    pub requests_blocked: u32,
     /// Bytes in the served credential bodies.
-    pub bytes_served:       u64,
+    pub bytes_served: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -245,18 +248,18 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Path the agent requested (`/creds`, etc.) — never the
         /// SDK request body.
-        path:        String,
+        path: String,
         /// SHA-256 of `"<METHOD> <path>"` so reviewers can
         /// fingerprint the call shape.
         path_sha256: String,
         /// IAM role ARN mirrored to the SDK response (or empty
         /// if not declared).
-        role_arn:    String,
+        role_arn: String,
         /// Operator-declared service scope. Echoed verbatim from
         /// `Restrictions::allowed_services`. Empty when no
         /// service-level intent was declared. Used by reviewers
@@ -267,9 +270,9 @@ pub enum AuditEvent {
         /// Operator-declared region scope. Echoed verbatim from
         /// `Restrictions::allowed_regions`. Same enforcement
         /// model as `allowed_services`.
-        allowed_regions:  Vec<String>,
+        allowed_regions: Vec<String>,
         /// True if a restriction blocked this request.
-        blocked:     bool,
+        blocked: bool,
     },
 }
 
@@ -284,7 +287,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error.
         source: std::io::Error,
     },
@@ -299,18 +302,18 @@ pub enum ProxyError {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 struct ContainerCredentialResponse {
-    access_key_id:     String,
+    access_key_id: String,
     secret_access_key: String,
     /// Optional session token (only present when the upstream
     /// envelope carries one).
     #[serde(skip_serializing_if = "Option::is_none")]
-    token:             Option<String>,
+    token: Option<String>,
     /// ISO-8601 / RFC 3339 expiration timestamp.
-    expiration:        String,
+    expiration: String,
     /// IAM role ARN. When the decl does not declare one we still
     /// emit an empty string so SDKs that read the field do not
     /// trip on `null`.
-    role_arn:          String,
+    role_arn: String,
 }
 
 /// Internal envelope the proxy resolves the credential into. The
@@ -319,9 +322,9 @@ struct ContainerCredentialResponse {
 /// `AccessKeyId` / `SecretAccessKey` / `Token` fields.
 #[derive(Debug, Clone)]
 struct ResolvedKey {
-    access_key_id:     String,
+    access_key_id: String,
     secret_access_key: String,
-    token:             Option<String>,
+    token: Option<String>,
 }
 
 fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
@@ -330,38 +333,50 @@ fn parse_credential_body(body: &str) -> Result<ResolvedKey, &'static str> {
         // JSON form.
         let v: serde_json::Value = serde_json::from_str(trimmed)
             .map_err(|_| "credential body is not valid JSON despite leading `{`")?;
-        let obj = v.as_object().ok_or("JSON credential body is not an object")?;
+        let obj = v
+            .as_object()
+            .ok_or("JSON credential body is not an object")?;
         let access_key_id = pick_str(obj, &["AccessKeyId", "aws_access_key_id"])
             .ok_or("missing AccessKeyId / aws_access_key_id")?
             .to_owned();
         let secret_access_key = pick_str(obj, &["SecretAccessKey", "aws_secret_access_key"])
             .ok_or("missing SecretAccessKey / aws_secret_access_key")?
             .to_owned();
-        let token = pick_str(obj, &["Token", "SessionToken", "aws_session_token"])
-            .map(str::to_owned);
-        Ok(ResolvedKey { access_key_id, secret_access_key, token })
+        let token =
+            pick_str(obj, &["Token", "SessionToken", "aws_session_token"]).map(str::to_owned);
+        Ok(ResolvedKey {
+            access_key_id,
+            secret_access_key,
+            token,
+        })
     } else {
         // Env-style form.
-        let mut access_key_id     = None;
+        let mut access_key_id = None;
         let mut secret_access_key = None;
-        let mut token             = None;
+        let mut token = None;
         for line in body.lines() {
             let line = line.trim();
-            if line.is_empty() || line.starts_with('#') { continue; }
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
             if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
                 let v = v.trim().trim_matches(['"', '\''].as_ref());
                 match k {
-                    "AWS_ACCESS_KEY_ID"     => access_key_id     = Some(v.to_owned()),
+                    "AWS_ACCESS_KEY_ID" => access_key_id = Some(v.to_owned()),
                     "AWS_SECRET_ACCESS_KEY" => secret_access_key = Some(v.to_owned()),
-                    "AWS_SESSION_TOKEN"     => token             = Some(v.to_owned()),
+                    "AWS_SESSION_TOKEN" => token = Some(v.to_owned()),
                     _ => {}
                 }
             }
         }
-        let access_key_id     = access_key_id.ok_or("missing AWS_ACCESS_KEY_ID")?;
+        let access_key_id = access_key_id.ok_or("missing AWS_ACCESS_KEY_ID")?;
         let secret_access_key = secret_access_key.ok_or("missing AWS_SECRET_ACCESS_KEY")?;
-        Ok(ResolvedKey { access_key_id, secret_access_key, token })
+        Ok(ResolvedKey {
+            access_key_id,
+            secret_access_key,
+            token,
+        })
     }
 }
 
@@ -383,14 +398,14 @@ fn pick_str<'a>(
 
 /// AWS-IMDS-compatible credential proxy.
 pub struct AwsProxy {
-    listener:    TcpListener,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
+    listener: TcpListener,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
     /// V3 forwarding glue — only used when
     /// [`ProxyConfig::forwarding`] is `Some`.
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<StsCacheValue>>>,
 }
@@ -402,12 +417,13 @@ impl AwsProxy {
     /// HTTP client, token cache, and audit sink.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -416,7 +432,7 @@ impl AwsProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  None,
+            audit_sink: None,
             http_client: None,
             token_cache: None,
         })
@@ -428,16 +444,17 @@ impl AwsProxy {
     /// the four V3 audit events through `audit_sink` (in
     /// addition to the existing V2 `AwsCredentialServed`).
     pub async fn bind_v3(
-        backend:     Arc<dyn CredentialBackend>,
-        config:      ProxyConfig,
-        audit:       Arc<dyn AuditChannel>,
-        audit_sink:  Arc<dyn AuditSink>,
+        backend: Arc<dyn CredentialBackend>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
+        audit_sink: Arc<dyn AuditSink>,
         http_client: Arc<CloudHttpClient>,
         token_cache: Arc<TokenCache<StsCacheValue>>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -446,7 +463,7 @@ impl AwsProxy {
             config,
             stats: Arc::new(ProxyStats::default()),
             audit,
-            audit_sink:  Some(audit_sink),
+            audit_sink: Some(audit_sink),
             http_client: Some(http_client),
             token_cache: Some(token_cache),
         })
@@ -472,19 +489,29 @@ impl AwsProxy {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
-                    let backend     = Arc::clone(&self.backend);
-                    let config      = self.config.clone();
-                    let stats       = Arc::clone(&self.stats);
-                    let audit       = Arc::clone(&self.audit);
-                    let audit_sink  = self.audit_sink.clone();
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
+                    let backend = Arc::clone(&self.backend);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
+                    let audit_sink = self.audit_sink.clone();
                     let http_client = self.http_client.clone();
                     let token_cache = self.token_cache.clone();
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(
-                            stream, backend, config, stats, audit,
-                            audit_sink, http_client, token_cache,
-                        ).await {
+                            stream,
+                            backend,
+                            config,
+                            stats,
+                            audit,
+                            audit_sink,
+                            http_client,
+                            token_cache,
+                        )
+                        .await
+                        {
                             tracing::warn!(error = %e, "aws proxy connection ended with error");
                         }
                     });
@@ -505,12 +532,12 @@ impl AwsProxy {
 
 #[allow(clippy::too_many_arguments)]
 async fn serve_one(
-    mut stream:  TcpStream,
-    backend:     Arc<dyn CredentialBackend>,
-    config:      ProxyConfig,
-    stats:       Arc<ProxyStats>,
-    audit:       Arc<dyn AuditChannel>,
-    audit_sink:  Option<Arc<dyn AuditSink>>,
+    mut stream: TcpStream,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
+    audit_sink: Option<Arc<dyn AuditSink>>,
     http_client: Option<Arc<CloudHttpClient>>,
     token_cache: Option<Arc<TokenCache<StsCacheValue>>>,
 ) -> std::io::Result<()> {
@@ -519,9 +546,13 @@ async fn serve_one(
     let mut chunk = [0u8; 1024];
     loop {
         let n = stream.read(&mut chunk).await?;
-        if n == 0 { break; }
+        if n == 0 {
+            break;
+        }
         buf.extend_from_slice(&chunk[..n]);
-        if buf.windows(4).any(|w| w == b"\r\n\r\n") { break; }
+        if buf.windows(4).any(|w| w == b"\r\n\r\n") {
+            break;
+        }
         if buf.len() > 8192 {
             // Defence: refuse oversized headers. The IMDS surface
             // does not need bodies; keep the bound tight.
@@ -529,18 +560,18 @@ async fn serve_one(
             return Ok(());
         }
     }
-    if buf.is_empty() { return Ok(()); }
+    if buf.is_empty() {
+        return Ok(());
+    }
 
     // Parse with httparse.
     let mut headers = [httparse::EMPTY_HEADER; 32];
-    let mut req     = httparse::Request::new(&mut headers);
+    let mut req = httparse::Request::new(&mut headers);
     let (method, path) = match req.parse(&buf) {
-        Ok(httparse::Status::Complete(_)) => {
-            (
-                req.method.unwrap_or("GET").to_owned(),
-                req.path.unwrap_or("/").to_owned(),
-            )
-        }
+        Ok(httparse::Status::Complete(_)) => (
+            req.method.unwrap_or("GET").to_owned(),
+            req.path.unwrap_or("/").to_owned(),
+        ),
         _ => {
             write_status(&mut stream, 400, "Bad Request").await?;
             return Ok(());
@@ -566,7 +597,7 @@ async fn serve_one(
     };
     let body_str = match resolved.as_utf8() {
         Some(s) => s.to_owned(),
-        None    => {
+        None => {
             tracing::warn!("aws proxy credential body is not UTF-8");
             write_status(&mut stream, 502, "Bad Gateway").await?;
             return Ok(());
@@ -595,33 +626,32 @@ async fn serve_one(
     ) {
         let session_id = format!("{}:{}", config.consumer.kind, config.consumer.id);
         let outcome = forwarding::forward_or_serve_from_cache(
-            fwd, http, cache, sink,
+            fwd,
+            http,
+            cache,
+            sink,
             &session_id,
             config.credential_name.as_str(),
             &key.access_key_id,
             &key.secret_access_key,
-        ).await;
+        )
+        .await;
         match outcome {
             ForwardOutcome::Ok(body) => {
-                write_full_response(
-                    &mut stream,
-                    200, "OK",
-                    "application/json",
-                    &body,
-                ).await?;
+                write_full_response(&mut stream, 200, "OK", "application/json", &body).await?;
                 stats.credentials_served.fetch_add(1, Ordering::Relaxed);
-                stats.bytes_served.fetch_add(body.len() as u64, Ordering::Relaxed);
+                stats
+                    .bytes_served
+                    .fetch_add(body.len() as u64, Ordering::Relaxed);
                 audit.emit(audit_event(&config, &method, &path, false));
             }
             ForwardOutcome::UpstreamEnvelope { status, body } => {
                 let reason = upstream_status_reason_phrase(status);
-                write_full_response(
-                    &mut stream,
-                    status, reason,
-                    AWS_XML_CONTENT_TYPE,
-                    &body,
-                ).await?;
-                stats.bytes_served.fetch_add(body.len() as u64, Ordering::Relaxed);
+                write_full_response(&mut stream, status, reason, AWS_XML_CONTENT_TYPE, &body)
+                    .await?;
+                stats
+                    .bytes_served
+                    .fetch_add(body.len() as u64, Ordering::Relaxed);
                 // V3 envelope passthrough is NOT a V2 "blocked"
                 // — the V2 audit event is omitted on the
                 // forwarding-error path so the V2 wire shape is
@@ -635,14 +665,17 @@ async fn serve_one(
     }
 
     // V2 emulator path (forwarding disabled).
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
     let expiration = format_iso8601_z(now + config.lease_seconds);
     let resp_body = ContainerCredentialResponse {
-        access_key_id:     key.access_key_id,
+        access_key_id: key.access_key_id,
         secret_access_key: key.secret_access_key,
-        token:             key.token,
+        token: key.token,
         expiration,
-        role_arn:          config.role_arn.clone().unwrap_or_default(),
+        role_arn: config.role_arn.clone().unwrap_or_default(),
     };
     let body = serde_json::to_vec(&resp_body)
         .map_err(|e| std::io::Error::other(format!("json serialise: {e}")))?;
@@ -662,7 +695,9 @@ async fn serve_one(
     stream.flush().await?;
 
     stats.credentials_served.fetch_add(1, Ordering::Relaxed);
-    stats.bytes_served.fetch_add(body_len as u64, Ordering::Relaxed);
+    stats
+        .bytes_served
+        .fetch_add(body_len as u64, Ordering::Relaxed);
     audit.emit(audit_event(&config, &method, &path, false));
     Ok(())
 }
@@ -695,11 +730,11 @@ fn upstream_status_reason_phrase(status: u16) -> &'static str {
 /// headers + body) in one shot. Used by both the V2 and V3
 /// success / error paths.
 async fn write_full_response(
-    stream:       &mut TcpStream,
-    status:       u16,
-    reason:       &str,
+    stream: &mut TcpStream,
+    status: u16,
+    reason: &str,
     content_type: &str,
-    body:         &[u8],
+    body: &[u8],
 ) -> std::io::Result<()> {
     let header = format!(
         "HTTP/1.1 {status} {reason}\r\n\
@@ -715,24 +750,14 @@ async fn write_full_response(
     stream.flush().await
 }
 
-async fn write_status(
-    stream: &mut TcpStream,
-    code:   u16,
-    reason: &str,
-) -> std::io::Result<()> {
-    let line = format!(
-        "HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
-    );
+async fn write_status(stream: &mut TcpStream, code: u16, reason: &str) -> std::io::Result<()> {
+    let line =
+        format!("HTTP/1.1 {code} {reason}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",);
     stream.write_all(line.as_bytes()).await?;
     stream.flush().await
 }
 
-fn audit_event(
-    config: &ProxyConfig,
-    method: &str,
-    path:   &str,
-    blocked: bool,
-) -> AuditEvent {
+fn audit_event(config: &ProxyConfig, method: &str, path: &str, blocked: bool) -> AuditEvent {
     use sha2::{Digest, Sha256};
     let mut h = Sha256::new();
     h.update(method.as_bytes());
@@ -741,14 +766,16 @@ fn audit_event(
     let path_sha256 = hex::encode(h.finalize());
     AuditEvent::AwsCredentialServed {
         timestamp_unix_seconds: SystemTime::now()
-            .duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0),
-        consumer:    config.consumer.clone(),
-        credential:  config.credential_name.clone(),
-        path:        path.to_owned(),
+            .duration_since(UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        consumer: config.consumer.clone(),
+        credential: config.credential_name.clone(),
+        path: path.to_owned(),
         path_sha256,
-        role_arn:    config.role_arn.clone().unwrap_or_default(),
+        role_arn: config.role_arn.clone().unwrap_or_default(),
         allowed_services: config.restrictions.allowed_services.clone(),
-        allowed_regions:  config.restrictions.allowed_regions.clone(),
+        allowed_regions: config.restrictions.allowed_regions.clone(),
         blocked,
     }
 }
@@ -767,15 +794,19 @@ fn format_iso8601_z(secs_since_epoch: u64) -> String {
 /// translation used by every modern date lib. Domain: 1970-01-01
 /// onward through year 9999.
 fn unix_to_civil(secs: u64) -> (i64, u32, u32, u32, u32, u32) {
-    let days  = (secs / 86_400) as i64;
+    let days = (secs / 86_400) as i64;
     let secs_of_day = (secs % 86_400) as u32;
     let hour = secs_of_day / 3600;
-    let min  = (secs_of_day / 60) % 60;
-    let sec  = secs_of_day % 60;
+    let min = (secs_of_day / 60) % 60;
+    let sec = secs_of_day % 60;
 
     // Howard Hinnant — civil_from_days, days from 1970-01-01.
     let z = days + 719_468;
-    let era = if z >= 0 { z / 146_097 } else { (z - 146_096) / 146_097 };
+    let era = if z >= 0 {
+        z / 146_097
+    } else {
+        (z - 146_096) / 146_097
+    };
     let doe = (z - era * 146_097) as u64;
     let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
     let y = (yoe as i64) + era * 400;
@@ -801,7 +832,7 @@ mod tests {
             AWS_ACCESS_KEY_ID=AKIAEXAMPLE\n\
             AWS_SECRET_ACCESS_KEY=secret\n";
         let k = parse_credential_body(body).unwrap();
-        assert_eq!(k.access_key_id,     "AKIAEXAMPLE");
+        assert_eq!(k.access_key_id, "AKIAEXAMPLE");
         assert_eq!(k.secret_access_key, "secret");
         assert_eq!(k.token, None);
     }
@@ -824,9 +855,9 @@ mod tests {
             "Token":           "tok"
         }"#;
         let k = parse_credential_body(body).unwrap();
-        assert_eq!(k.access_key_id,     "AKIAEXAMPLE");
+        assert_eq!(k.access_key_id, "AKIAEXAMPLE");
         assert_eq!(k.secret_access_key, "secret");
-        assert_eq!(k.token.as_deref(),  Some("tok"));
+        assert_eq!(k.token.as_deref(), Some("tok"));
     }
 
     #[test]
@@ -837,8 +868,8 @@ mod tests {
             "aws_session_token":     "tok"
         }"#;
         let k = parse_credential_body(body).unwrap();
-        assert_eq!(k.access_key_id,     "AKIAEXAMPLE");
-        assert_eq!(k.token.as_deref(),  Some("tok"));
+        assert_eq!(k.access_key_id, "AKIAEXAMPLE");
+        assert_eq!(k.token.as_deref(), Some("tok"));
     }
 
     #[test]

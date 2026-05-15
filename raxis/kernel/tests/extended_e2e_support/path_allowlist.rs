@@ -102,8 +102,8 @@ impl PathAllowlistPositiveWitness {
     #[must_use]
     pub fn for_realistic_plan(workdir: &Path) -> Self {
         Self {
-            task_id:       TASK_ALLOWLIST_POSITIVE.to_owned(),
-            workdir:       workdir.to_path_buf(),
+            task_id: TASK_ALLOWLIST_POSITIVE.to_owned(),
+            workdir: workdir.to_path_buf(),
             expected_path: PathBuf::from(EXPECTED_GENERATED_PATH),
         }
     }
@@ -125,22 +125,28 @@ impl PathAllowlistPositiveWitness {
 }
 
 impl EnforcementWitness for PathAllowlistPositiveWitness {
-    fn name(&self) -> &'static str { "path-allowlist-positive" }
+    fn name(&self) -> &'static str {
+        "path-allowlist-positive"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
-        let chain_positive = chain.iter().any(|ev| matches!(
-            typed(ev),
-            Some(AuditEventKind::IntentAccepted {
-                task_id, head_sha: Some(_), ..
-            }) if task_id == self.task_id
-        ));
-        let chain_negative_clean = chain.iter().all(|ev| !matches!(
-            typed(ev),
-            Some(AuditEventKind::IntentRejected {
-                task_id, error_code, ..
-            }) if task_id == self.task_id
-                && error_code == "FAIL_TASK_PATH_NOT_ALLOWED"
-        ));
+        let chain_positive = chain.iter().any(|ev| {
+            matches!(
+                typed(ev),
+                Some(AuditEventKind::IntentAccepted {
+                    task_id, head_sha: Some(_), ..
+                }) if task_id == self.task_id
+            )
+        });
+        let chain_negative_clean = chain.iter().all(|ev| {
+            !matches!(
+                typed(ev),
+                Some(AuditEventKind::IntentRejected {
+                    task_id, error_code, ..
+                }) if task_id == self.task_id
+                    && error_code == "FAIL_TASK_PATH_NOT_ALLOWED"
+            )
+        });
 
         chain_positive && chain_negative_clean && self.disk_positive()
     }
@@ -148,35 +154,33 @@ impl EnforcementWitness for PathAllowlistPositiveWitness {
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
         let admissions = chain
             .iter()
-            .filter(|ev| matches!(
-                typed(ev),
-                Some(AuditEventKind::IntentAccepted {
-                    task_id, head_sha: Some(_), ..
-                }) if task_id == self.task_id
-            ))
+            .filter(|ev| {
+                matches!(
+                    typed(ev),
+                    Some(AuditEventKind::IntentAccepted {
+                        task_id, head_sha: Some(_), ..
+                    }) if task_id == self.task_id
+                )
+            })
             .count();
         let false_rejections: Vec<u64> = chain
             .iter()
             .filter_map(|ev| match typed(ev) {
                 Some(AuditEventKind::IntentRejected {
-                    task_id, error_code, ..
-                }) if task_id == self.task_id
-                    && error_code == "FAIL_TASK_PATH_NOT_ALLOWED" =>
-                {
+                    task_id,
+                    error_code,
+                    ..
+                }) if task_id == self.task_id && error_code == "FAIL_TASK_PATH_NOT_ALLOWED" => {
                     Some(ev.seq)
                 }
                 _ => None,
             })
             .collect();
-        let total_rejections =
-            events_by_kind(chain, "IntentRejected").len();
+        let total_rejections = events_by_kind(chain, "IntentRejected").len();
         let abs = self.absolute_expected_path();
         let disk_state = match std::fs::metadata(&abs) {
-            Ok(m) if m.is_file() => format!(
-                "file present (len={} bytes)",
-                m.len(),
-            ),
-            Ok(_)  => "path exists but is not a regular file".to_owned(),
+            Ok(m) if m.is_file() => format!("file present (len={} bytes)", m.len(),),
+            Ok(_) => "path exists but is not a regular file".to_owned(),
             Err(e) => format!("not present ({e})"),
         };
         format!(
@@ -187,10 +191,10 @@ impl EnforcementWitness for PathAllowlistPositiveWitness {
              expected disk path: {abs}\n  \
              disk state:         {disk_state}\n  \
              false-rejection seqs: {seqs:?}",
-            task            = self.task_id,
-            n_false_rej     = false_rejections.len(),
-            abs             = abs.display(),
-            seqs            = false_rejections,
+            task = self.task_id,
+            n_false_rej = false_rejections.len(),
+            abs = abs.display(),
+            seqs = false_rejections,
         )
     }
 }
@@ -212,59 +216,69 @@ mod tests {
         let event_kind = match &kind {
             AuditEventKind::IntentAccepted { .. } => "IntentAccepted",
             AuditEventKind::IntentRejected { .. } => "IntentRejected",
-            _                                     => "Other",
+            _ => "Other",
         }
         .to_owned();
         let (task_id, session_id) = match &kind {
             AuditEventKind::IntentAccepted {
-                task_id, session_id, ..
+                task_id,
+                session_id,
+                ..
             } => (Some(task_id.clone()), Some(session_id.clone())),
             AuditEventKind::IntentRejected {
-                task_id, session_id, ..
+                task_id,
+                session_id,
+                ..
             } => (Some(task_id.clone()), Some(session_id.clone())),
             _ => (None, None),
         };
         AuditEvent {
             seq,
-            event_id:      Uuid::nil(),
+            event_id: Uuid::nil(),
             event_kind,
             session_id,
             task_id,
             initiative_id: None,
-            payload:       serde_json::to_value(&kind).unwrap(),
-            emitted_at:    1700000000 + seq as i64,
-            prev_sha256:   "0".repeat(64),
+            payload: serde_json::to_value(&kind).unwrap(),
+            emitted_at: 1700000000 + seq as i64,
+            prev_sha256: "0".repeat(64),
         }
     }
 
     fn witness_for(tmpdir: &Path) -> PathAllowlistPositiveWitness {
         PathAllowlistPositiveWitness {
-            task_id:       TASK_ALLOWLIST_POSITIVE.to_owned(),
-            workdir:       tmpdir.to_path_buf(),
+            task_id: TASK_ALLOWLIST_POSITIVE.to_owned(),
+            workdir: tmpdir.to_path_buf(),
             expected_path: PathBuf::from(EXPECTED_GENERATED_PATH),
         }
     }
 
     fn make_intent_accepted_commit(seq: u64, task_id: &str) -> AuditEvent {
-        make_event(seq, AuditEventKind::IntentAccepted {
-            task_id:         task_id.to_owned(),
-            session_id:      format!("sess-{task_id}"),
-            intent_kind:     "CommitDelta".to_owned(),
-            base_sha:        Some("deadbeef".to_owned()),
-            head_sha:        Some("cafef00d".to_owned()),
-            sequence_number: 1,
-            remaining_units: 99,
-        })
+        make_event(
+            seq,
+            AuditEventKind::IntentAccepted {
+                task_id: task_id.to_owned(),
+                session_id: format!("sess-{task_id}"),
+                intent_kind: "CommitDelta".to_owned(),
+                base_sha: Some("deadbeef".to_owned()),
+                head_sha: Some("cafef00d".to_owned()),
+                sequence_number: 1,
+                remaining_units: 99,
+            },
+        )
     }
 
     fn make_intent_rejected(seq: u64, task_id: &str, code: &str) -> AuditEvent {
-        make_event(seq, AuditEventKind::IntentRejected {
-            task_id:         task_id.to_owned(),
-            session_id:      format!("sess-{task_id}"),
-            intent_kind:     "CommitDelta".to_owned(),
-            error_code:      code.to_owned(),
-            sequence_number: 2,
-        })
+        make_event(
+            seq,
+            AuditEventKind::IntentRejected {
+                task_id: task_id.to_owned(),
+                session_id: format!("sess-{task_id}"),
+                intent_kind: "CommitDelta".to_owned(),
+                error_code: code.to_owned(),
+                sequence_number: 2,
+            },
+        )
     }
 
     fn seed_expected_file(tmpdir: &Path) {
@@ -277,9 +291,7 @@ mod tests {
     fn witness_satisfied_when_admission_clean_and_disk_present() {
         let tmpdir = tempfile::tempdir().unwrap();
         seed_expected_file(tmpdir.path());
-        let chain = vec![
-            make_intent_accepted_commit(0, TASK_ALLOWLIST_POSITIVE),
-        ];
+        let chain = vec![make_intent_accepted_commit(0, TASK_ALLOWLIST_POSITIVE)];
         let w = witness_for(tmpdir.path());
         assert!(
             w.satisfied_by(&chain),
@@ -291,9 +303,7 @@ mod tests {
     #[test]
     fn witness_unsatisfied_when_disk_missing() {
         let tmpdir = tempfile::tempdir().unwrap();
-        let chain = vec![
-            make_intent_accepted_commit(0, TASK_ALLOWLIST_POSITIVE),
-        ];
+        let chain = vec![make_intent_accepted_commit(0, TASK_ALLOWLIST_POSITIVE)];
         let w = witness_for(tmpdir.path());
         assert!(!w.satisfied_by(&chain));
         assert!(w.diagnostic(&chain).contains("not present"));
@@ -304,9 +314,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         seed_expected_file(tmpdir.path());
         // Commit admission for a DIFFERENT task does not count.
-        let chain = vec![
-            make_intent_accepted_commit(0, "some-other-task"),
-        ];
+        let chain = vec![make_intent_accepted_commit(0, "some-other-task")];
         let w = witness_for(tmpdir.path());
         assert!(!w.satisfied_by(&chain));
     }
@@ -316,8 +324,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         seed_expected_file(tmpdir.path());
         let chain = vec![
-            make_intent_rejected(0, TASK_ALLOWLIST_POSITIVE,
-                "FAIL_TASK_PATH_NOT_ALLOWED"),
+            make_intent_rejected(0, TASK_ALLOWLIST_POSITIVE, "FAIL_TASK_PATH_NOT_ALLOWED"),
             make_intent_accepted_commit(1, TASK_ALLOWLIST_POSITIVE),
         ];
         let w = witness_for(tmpdir.path());
@@ -335,8 +342,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         seed_expected_file(tmpdir.path());
         let chain = vec![
-            make_intent_rejected(0, "inject-evil",
-                "FAIL_TASK_PATH_NOT_ALLOWED"),
+            make_intent_rejected(0, "inject-evil", "FAIL_TASK_PATH_NOT_ALLOWED"),
             make_intent_accepted_commit(1, TASK_ALLOWLIST_POSITIVE),
         ];
         let w = witness_for(tmpdir.path());

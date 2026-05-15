@@ -67,10 +67,7 @@ use crate::GlobalFlags;
 /// `0700`) on Unix.
 ///
 /// Side effects: invalidates every pre-rotation operator JWT.
-pub fn run_rotate_jwt_secret(
-    flags: &GlobalFlags,
-    args: &[String],
-) -> Result<(), CliError> {
+pub fn run_rotate_jwt_secret(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut json = false;
     for a in args {
         match a.as_str() {

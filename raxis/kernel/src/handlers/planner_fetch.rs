@@ -58,9 +58,7 @@ use std::sync::Arc;
 use raxis_audit_tools::AuditEventKind;
 use raxis_egress_admission::StallSignal;
 use raxis_ipc::message::FetchKind;
-use raxis_types::{
-    PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, SessionAgentType,
-};
+use raxis_types::{PlannerFetchKind, PlannerFetchRequest, PlannerFetchResponse, SessionAgentType};
 use uuid::Uuid;
 
 use crate::authority::session::get_session_by_token;
@@ -84,10 +82,10 @@ const HARD_TIMEOUT_FLOOR_MS: u32 = 1_000;
 /// this module's tests so the wire never drifts.
 mod errors {
     pub const SESSION_TOKEN_MISMATCH: &str = "FAIL_SESSION_TOKEN_MISMATCH";
-    pub const PLANNER_FETCH_DENIED:   &str = "FAIL_PLANNER_FETCH_DENIED";
-    pub const REVIEWER_DENIED:        &str = "FAIL_PLANNER_FETCH_DENIED_REVIEWER";
-    pub const GATEWAY_UNAVAILABLE:    &str = "GatewayUnavailable";
-    pub const NETWORK_ERROR:          &str = "NetworkError";
+    pub const PLANNER_FETCH_DENIED: &str = "FAIL_PLANNER_FETCH_DENIED";
+    pub const REVIEWER_DENIED: &str = "FAIL_PLANNER_FETCH_DENIED_REVIEWER";
+    pub const GATEWAY_UNAVAILABLE: &str = "GatewayUnavailable";
+    pub const NETWORK_ERROR: &str = "NetworkError";
 }
 
 /// Saturating conversion of `Instant::elapsed()` to the wire-level
@@ -123,7 +121,7 @@ fn elapsed_ms_clamped(started: std::time::Instant) -> u32 {
 /// planner gets a typed reply it can match on.
 pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> PlannerFetchResponse {
     let request_id = req.request_id;
-    let started    = std::time::Instant::now();
+    let started = std::time::Instant::now();
 
     // ── Step 1: resolve session token → SessionRow ────────────────
     //
@@ -133,11 +131,13 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // anchor.
     let session = match resolve_session(&req.session_token, ctx).await {
         Some(row) => row,
-        None      => return failure_response(
-            request_id,
-            elapsed_ms_clamped(started),
-            errors::SESSION_TOKEN_MISMATCH,
-        ),
+        None => {
+            return failure_response(
+                request_id,
+                elapsed_ms_clamped(started),
+                errors::SESSION_TOKEN_MISMATCH,
+            )
+        }
     };
 
     // ── Step 2: dispatch matrix ──────────────────────────────────
@@ -192,7 +192,7 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
     // it as `GatewayUnavailable` so the planner can decide whether
     // to retry or fall through to a single-attempt failure.
     let gateway_token = ctx.gateway.expected_token().await.unwrap_or_default();
-    let session_uuid  = Uuid::parse_str(&session.session_id).ok();
+    let session_uuid = Uuid::parse_str(&session.session_id).ok();
 
     // V2 reviewer-egress-defaults-decision.md §7 — capture the
     // URL pre-call so we can extract the host/port for stall
@@ -252,21 +252,17 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
         Ok(fr) => PlannerFetchResponse {
             request_id,
             status_code: fr.status_code,
-            headers:     fr.headers,
-            body_bytes:  fr.body_bytes,
-            latency_ms:  fr.latency_ms.max(latency_ms),
-            error:       None,
+            headers: fr.headers,
+            body_bytes: fr.body_bytes,
+            latency_ms: fr.latency_ms.max(latency_ms),
+            error: None,
         },
-        Err(GatewayCallError::Unavailable) => failure_response(
-            request_id,
-            latency_ms,
-            errors::GATEWAY_UNAVAILABLE,
-        ),
-        Err(GatewayCallError::Dropped) => failure_response(
-            request_id,
-            latency_ms,
-            errors::NETWORK_ERROR,
-        ),
+        Err(GatewayCallError::Unavailable) => {
+            failure_response(request_id, latency_ms, errors::GATEWAY_UNAVAILABLE)
+        }
+        Err(GatewayCallError::Dropped) => {
+            failure_response(request_id, latency_ms, errors::NETWORK_ERROR)
+        }
         Err(GatewayCallError::GatewayError(msg)) => {
             // V2 reviewer-egress-defaults-decision.md §7: feed
             // `DomainNotAllowed` denials into the kernel-wide
@@ -291,11 +287,9 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
             }
             failure_response(request_id, latency_ms, &msg)
         }
-        Err(GatewayCallError::UnexpectedReply) => failure_response(
-            request_id,
-            latency_ms,
-            errors::NETWORK_ERROR,
-        ),
+        Err(GatewayCallError::UnexpectedReply) => {
+            failure_response(request_id, latency_ms, errors::NETWORK_ERROR)
+        }
     }
 }
 
@@ -312,9 +306,9 @@ pub async fn handle(req: PlannerFetchRequest, ctx: &Arc<HandlerContext>) -> Plan
 /// propagated up — the underlying gateway error is what the
 /// planner sees.
 fn feed_stall_tracker_for_domain_not_allowed(
-    ctx:        &Arc<HandlerContext>,
+    ctx: &Arc<HandlerContext>,
     session_id: &str,
-    url:        &str,
+    url: &str,
 ) {
     let (host, port) = match extract_host_port(url) {
         Some(pair) => pair,
@@ -329,13 +323,13 @@ fn feed_stall_tracker_for_domain_not_allowed(
     if let StallSignal::Detected(emit) = signal {
         if let Err(e) = ctx.audit.emit(
             AuditEventKind::SessionEgressStallDetected {
-                session_id:            emit.session_id,
-                host_or_sni:           emit.host_or_sni,
-                original_dst_port:     emit.original_dst_port,
-                reason:                emit.reason,
+                session_id: emit.session_id,
+                host_or_sni: emit.host_or_sni,
+                original_dst_port: emit.original_dst_port,
+                reason: emit.reason,
                 block_count_in_window: emit.block_count_in_window,
-                window_seconds:        emit.window_seconds,
-                source:                "kernel_mediated_fetch".to_owned(),
+                window_seconds: emit.window_seconds,
+                source: "kernel_mediated_fetch".to_owned(),
             },
             Some(session_id),
             None,
@@ -360,21 +354,21 @@ fn feed_stall_tracker_for_domain_not_allowed(
 fn extract_host_port(url: &str) -> Option<(String, u16)> {
     let after_scheme = url.split_once("://")?;
     let scheme = after_scheme.0;
-    let rest   = after_scheme.1;
+    let rest = after_scheme.1;
     let host_with_path = rest.split('/').next()?;
     let (host, port_str) = match host_with_path.rsplit_once(':') {
         Some((h, p)) => (h, Some(p)),
-        None         => (host_with_path, None),
+        None => (host_with_path, None),
     };
     if host.is_empty() {
         return None;
     }
     let port = match port_str.and_then(|p| p.parse::<u16>().ok()) {
         Some(p) => p,
-        None    => match scheme {
+        None => match scheme {
             "https" => 443,
-            "http"  => 80,
-            _       => 0,
+            "http" => 80,
+            _ => 0,
         },
     };
     Some((host.to_owned(), port))
@@ -391,10 +385,10 @@ fn failure_response(request_id: Uuid, latency_ms: u32, error: &str) -> PlannerFe
     PlannerFetchResponse {
         request_id,
         status_code: None,
-        headers:     Vec::new(),
-        body_bytes:  None,
+        headers: Vec::new(),
+        body_bytes: None,
         latency_ms,
-        error:       Some(error.to_owned()),
+        error: Some(error.to_owned()),
     }
 }
 
@@ -419,27 +413,45 @@ mod tests {
     /// retry classifiers match on.
     #[test]
     fn error_codes_pinned() {
-        assert_eq!(errors::SESSION_TOKEN_MISMATCH, "FAIL_SESSION_TOKEN_MISMATCH");
+        assert_eq!(
+            errors::SESSION_TOKEN_MISMATCH,
+            "FAIL_SESSION_TOKEN_MISMATCH"
+        );
         assert_eq!(errors::PLANNER_FETCH_DENIED, "FAIL_PLANNER_FETCH_DENIED");
-        assert_eq!(errors::REVIEWER_DENIED, "FAIL_PLANNER_FETCH_DENIED_REVIEWER");
+        assert_eq!(
+            errors::REVIEWER_DENIED,
+            "FAIL_PLANNER_FETCH_DENIED_REVIEWER"
+        );
         assert_eq!(errors::GATEWAY_UNAVAILABLE, "GatewayUnavailable");
         assert_eq!(errors::NETWORK_ERROR, "NetworkError");
     }
 
     #[test]
     fn timeout_clamp_bounds() {
-        assert_eq!(0u32.clamp(HARD_TIMEOUT_FLOOR_MS, HARD_TIMEOUT_CEILING_MS), 1_000);
+        assert_eq!(
+            0u32.clamp(HARD_TIMEOUT_FLOOR_MS, HARD_TIMEOUT_CEILING_MS),
+            1_000
+        );
         assert_eq!(
             999_999u32.clamp(HARD_TIMEOUT_FLOOR_MS, HARD_TIMEOUT_CEILING_MS),
             120_000,
         );
-        assert_eq!(60_000u32.clamp(HARD_TIMEOUT_FLOOR_MS, HARD_TIMEOUT_CEILING_MS), 60_000);
+        assert_eq!(
+            60_000u32.clamp(HARD_TIMEOUT_FLOOR_MS, HARD_TIMEOUT_CEILING_MS),
+            60_000
+        );
     }
 
     #[test]
     fn fetch_kind_mapping_is_one_to_one() {
-        assert_eq!(map_fetch_kind(PlannerFetchKind::Inference), FetchKind::Inference);
-        assert_eq!(map_fetch_kind(PlannerFetchKind::DataFetch), FetchKind::DataFetch);
+        assert_eq!(
+            map_fetch_kind(PlannerFetchKind::Inference),
+            FetchKind::Inference
+        );
+        assert_eq!(
+            map_fetch_kind(PlannerFetchKind::DataFetch),
+            FetchKind::DataFetch
+        );
     }
 
     // ─── V2 reviewer-egress-defaults-decision.md §7 ─────────────
@@ -494,8 +506,14 @@ mod tests {
     /// `u32::try_from(u128)` shape the helper uses.
     #[test]
     fn elapsed_ms_saturates_instead_of_wrapping() {
-        assert_eq!(u32::try_from(u128::from(u32::MAX)).unwrap_or(u32::MAX), u32::MAX);
-        assert_eq!(u32::try_from(u128::from(u32::MAX) + 1).unwrap_or(u32::MAX), u32::MAX);
+        assert_eq!(
+            u32::try_from(u128::from(u32::MAX)).unwrap_or(u32::MAX),
+            u32::MAX
+        );
+        assert_eq!(
+            u32::try_from(u128::from(u32::MAX) + 1).unwrap_or(u32::MAX),
+            u32::MAX
+        );
         assert_eq!(u32::try_from(u128::MAX).unwrap_or(u32::MAX), u32::MAX);
         assert_eq!(u32::try_from(0u128).unwrap_or(u32::MAX), 0);
         assert_eq!(u32::try_from(120_000u128).unwrap_or(u32::MAX), 120_000);

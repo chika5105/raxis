@@ -319,14 +319,14 @@ pub struct ObservabilityPusherTlsConfig {
 
 const MIN_SEGMENT_BYTES: u64 = 1 * 1024 * 1024;
 const MAX_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
-const MIN_TOTAL_BYTES:   u64 = 16 * 1024 * 1024;
-const MAX_TOTAL_BYTES:   u64 = 16 * 1024 * 1024 * 1024;
-const MIN_QUEUE_DEPTH:   usize = 256;
-const MAX_QUEUE_DEPTH:   usize = 1_048_576;
+const MIN_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;
+const MIN_QUEUE_DEPTH: usize = 256;
+const MAX_QUEUE_DEPTH: usize = 1_048_576;
 
 const DEFAULT_SEGMENT_BYTES: u64 = 16 * 1024 * 1024;
-const DEFAULT_TOTAL_BYTES:   u64 = 512 * 1024 * 1024;
-const DEFAULT_QUEUE_DEPTH:   usize = 8192;
+const DEFAULT_TOTAL_BYTES: u64 = 512 * 1024 * 1024;
+const DEFAULT_QUEUE_DEPTH: usize = 8192;
 
 const MIN_ATTRS_PER_SPAN: usize = 4;
 const MAX_ATTRS_PER_SPAN: usize = 128;
@@ -334,7 +334,7 @@ const MAX_EVENTS_PER_SPAN: usize = 64;
 
 const DEFAULT_ATTRS_PER_SPAN: usize = 32;
 const DEFAULT_EVENTS_PER_SPAN: usize = 16;
-const DEFAULT_SAMPLE_RATE:    f64 = 0.1;
+const DEFAULT_SAMPLE_RATE: f64 = 0.1;
 
 const MIN_EXPORT_INTERVAL_MS: u128 = 1_000;
 const MAX_EXPORT_INTERVAL_MS: u128 = 300_000;
@@ -343,14 +343,14 @@ const DEFAULT_EXPORT_INTERVAL_MS: u128 = 15_000;
 const MAX_BUCKETS_LEN: usize = 64;
 
 const MAX_RESOURCE_VALUE_BYTES: usize = 256;
-const MAX_RESOURCE_KEYS:          usize = 64;
+const MAX_RESOURCE_KEYS: usize = 64;
 
-const MIN_OTLP_BATCH_SIZE:    usize = 1;
-const MAX_OTLP_BATCH_SIZE:    usize = 8192;
+const MIN_OTLP_BATCH_SIZE: usize = 1;
+const MAX_OTLP_BATCH_SIZE: usize = 8192;
 const DEFAULT_OTLP_BATCH_SIZE: usize = 512;
 
-const MIN_OTLP_INFLIGHT:    usize = 1;
-const MAX_OTLP_INFLIGHT:    usize = 64;
+const MIN_OTLP_INFLIGHT: usize = 1;
+const MAX_OTLP_INFLIGHT: usize = 64;
 const DEFAULT_OTLP_INFLIGHT: usize = 4;
 
 const MIN_FLUSH_INTERVAL_MS: u128 = 100;
@@ -361,11 +361,11 @@ const MIN_EXPORT_TIMEOUT_MS: u128 = 1_000;
 const MAX_EXPORT_TIMEOUT_MS: u128 = 60_000;
 const DEFAULT_EXPORT_TIMEOUT_MS: u128 = 10_000;
 
-const MIN_BACKOFF_MS:        u128 = 10;
-const MAX_BACKOFF_MS:        u128 = 300_000;
+const MIN_BACKOFF_MS: u128 = 10;
+const MAX_BACKOFF_MS: u128 = 300_000;
 const DEFAULT_BACKOFF_INIT_MS: u128 = 500;
-const DEFAULT_BACKOFF_MAX_MS:  u128 = 30_000;
-const DEFAULT_BACKOFF_JITTER:  f64  = 0.25;
+const DEFAULT_BACKOFF_MAX_MS: u128 = 30_000;
+const DEFAULT_BACKOFF_JITTER: f64 = 0.25;
 
 /// Reserved OTel resource-attribute prefixes operators MUST NOT
 /// override. The check is case-insensitive and matches the start of
@@ -382,14 +382,21 @@ const RESERVED_RESOURCE_PREFIXES: &[&str] = &[
 /// HTTP/2 / OTLP headers that are reserved and MUST NOT be set by
 /// the operator. Lower-case match.
 const RESERVED_HEADER_KEYS: &[&str] = &[
-    "user-agent", "content-type", "content-length",
-    "te", "host", "transfer-encoding", "te-trailers",
-    ":method", ":path", ":scheme", ":authority",
+    "user-agent",
+    "content-type",
+    "content-length",
+    "te",
+    "host",
+    "transfer-encoding",
+    "te-trailers",
+    ":method",
+    ":path",
+    ":scheme",
+    ":authority",
 ];
 
 const DEFAULT_HISTOGRAM_BUCKETS: &[f64] = &[
-    1.0, 5.0, 10.0, 25.0, 50.0, 100.0,
-    250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
+    1.0, 5.0, 10.0, 25.0, 50.0, 100.0, 250.0, 500.0, 1000.0, 2500.0, 5000.0, 10000.0,
 ];
 
 impl ObservabilityConfig {
@@ -402,50 +409,62 @@ impl ObservabilityConfig {
         raw: &ObservabilitySection,
         permitted_credential_names: &std::collections::HashSet<&str>,
     ) -> Result<Self, PolicyError> {
-        let ring     = validate_ring(&raw.ring)?;
-        let traces   = validate_traces(&raw.traces)?;
-        let metrics  = validate_metrics(&raw.metrics)?;
+        let ring = validate_ring(&raw.ring)?;
+        let traces = validate_traces(&raw.traces)?;
+        let metrics = validate_metrics(&raw.metrics)?;
         let resource = validate_resource(&raw.resource, raw.enabled)?;
 
         let pusher = match (raw.enabled, raw.pusher.as_ref()) {
-            (true,  None) => return Err(fail("FAIL_OBS_PUSHER_REQUIRED",
-                "[observability] enabled = true but [observability.pusher] is missing".to_owned())),
-            (true,  Some(p)) => Some(validate_pusher(p, permitted_credential_names)?),
+            (true, None) => {
+                return Err(fail(
+                    "FAIL_OBS_PUSHER_REQUIRED",
+                    "[observability] enabled = true but [observability.pusher] is missing"
+                        .to_owned(),
+                ))
+            }
+            (true, Some(p)) => Some(validate_pusher(p, permitted_credential_names)?),
             (false, Some(p)) => Some(validate_pusher(p, permitted_credential_names)?),
-            (false, None)    => None,
+            (false, None) => None,
         };
 
-        Ok(Self { enabled: raw.enabled, ring, traces, metrics, resource, pusher })
+        Ok(Self {
+            enabled: raw.enabled,
+            ring,
+            traces,
+            metrics,
+            resource,
+            pusher,
+        })
     }
 
     /// Default disabled config. Used by the kernel binary when the
     /// `[observability]` section is omitted entirely.
     pub fn disabled_default() -> Self {
         Self {
-            enabled:  false,
-            ring:     ObservabilityRingConfig {
-                dir:               String::new(),
+            enabled: false,
+            ring: ObservabilityRingConfig {
+                dir: String::new(),
                 segment_max_bytes: DEFAULT_SEGMENT_BYTES,
-                max_total_bytes:   DEFAULT_TOTAL_BYTES,
-                max_queue_depth:   DEFAULT_QUEUE_DEPTH,
+                max_total_bytes: DEFAULT_TOTAL_BYTES,
+                max_queue_depth: DEFAULT_QUEUE_DEPTH,
             },
-            traces:   ObservabilityTracesConfig {
-                enabled:             true,
-                sample_rate:         DEFAULT_SAMPLE_RATE,
-                max_attrs_per_span:  DEFAULT_ATTRS_PER_SPAN,
+            traces: ObservabilityTracesConfig {
+                enabled: true,
+                sample_rate: DEFAULT_SAMPLE_RATE,
+                max_attrs_per_span: DEFAULT_ATTRS_PER_SPAN,
                 max_events_per_span: DEFAULT_EVENTS_PER_SPAN,
             },
-            metrics:  ObservabilityMetricsConfig {
-                enabled:           true,
-                export_interval:   Duration::from_millis(DEFAULT_EXPORT_INTERVAL_MS as u64),
+            metrics: ObservabilityMetricsConfig {
+                enabled: true,
+                export_interval: Duration::from_millis(DEFAULT_EXPORT_INTERVAL_MS as u64),
                 histogram_buckets: DEFAULT_HISTOGRAM_BUCKETS.to_vec(),
             },
             resource: ObservabilityResourceConfig {
                 service_name: "raxis-kernel".to_owned(),
-                environment:  String::new(),
-                extra:        BTreeMap::new(),
+                environment: String::new(),
+                extra: BTreeMap::new(),
             },
-            pusher:   None,
+            pusher: None,
         }
     }
 }
@@ -457,30 +476,43 @@ impl ObservabilityConfig {
 fn validate_ring(s: &ObservabilityRingSection) -> Result<ObservabilityRingConfig, PolicyError> {
     let segment_max_bytes = s.segment_max_bytes.unwrap_or(DEFAULT_SEGMENT_BYTES);
     if !(MIN_SEGMENT_BYTES..=MAX_SEGMENT_BYTES).contains(&segment_max_bytes) {
-        return Err(fail("FAIL_OBS_RING_SEGMENT_SIZE", format!(
-            "[observability.ring] segment_max_bytes ({segment_max_bytes}) must be in \
+        return Err(fail(
+            "FAIL_OBS_RING_SEGMENT_SIZE",
+            format!(
+                "[observability.ring] segment_max_bytes ({segment_max_bytes}) must be in \
              [{MIN_SEGMENT_BYTES}, {MAX_SEGMENT_BYTES}] bytes"
-        )));
+            ),
+        ));
     }
     let max_total_bytes = s.max_total_bytes.unwrap_or(DEFAULT_TOTAL_BYTES);
     if !(MIN_TOTAL_BYTES..=MAX_TOTAL_BYTES).contains(&max_total_bytes) {
-        return Err(fail("FAIL_OBS_RING_TOTAL_SIZE", format!(
-            "[observability.ring] max_total_bytes ({max_total_bytes}) must be in \
+        return Err(fail(
+            "FAIL_OBS_RING_TOTAL_SIZE",
+            format!(
+                "[observability.ring] max_total_bytes ({max_total_bytes}) must be in \
              [{MIN_TOTAL_BYTES}, {MAX_TOTAL_BYTES}] bytes"
-        )));
+            ),
+        ));
     }
     if max_total_bytes < segment_max_bytes.saturating_mul(4) {
-        return Err(fail("FAIL_OBS_RING_TOTAL_TOO_SMALL", format!(
-            "[observability.ring] max_total_bytes ({max_total_bytes}) must be >= \
-             4 × segment_max_bytes ({})", segment_max_bytes * 4
-        )));
+        return Err(fail(
+            "FAIL_OBS_RING_TOTAL_TOO_SMALL",
+            format!(
+                "[observability.ring] max_total_bytes ({max_total_bytes}) must be >= \
+             4 × segment_max_bytes ({})",
+                segment_max_bytes * 4
+            ),
+        ));
     }
     let max_queue_depth = s.max_queue_depth.unwrap_or(DEFAULT_QUEUE_DEPTH);
     if !(MIN_QUEUE_DEPTH..=MAX_QUEUE_DEPTH).contains(&max_queue_depth) {
-        return Err(fail("FAIL_OBS_RING_QUEUE_DEPTH", format!(
-            "[observability.ring] max_queue_depth ({max_queue_depth}) must be in \
+        return Err(fail(
+            "FAIL_OBS_RING_QUEUE_DEPTH",
+            format!(
+                "[observability.ring] max_queue_depth ({max_queue_depth}) must be in \
              [{MIN_QUEUE_DEPTH}, {MAX_QUEUE_DEPTH}]"
-        )));
+            ),
+        ));
     }
     Ok(ObservabilityRingConfig {
         dir: s.dir.clone(),
@@ -490,26 +522,35 @@ fn validate_ring(s: &ObservabilityRingSection) -> Result<ObservabilityRingConfig
     })
 }
 
-fn validate_traces(s: &ObservabilityTracesSection) -> Result<ObservabilityTracesConfig, PolicyError> {
+fn validate_traces(
+    s: &ObservabilityTracesSection,
+) -> Result<ObservabilityTracesConfig, PolicyError> {
     let sample_rate = s.sample_rate.unwrap_or(DEFAULT_SAMPLE_RATE);
     if !(0.0..=1.0).contains(&sample_rate) || !sample_rate.is_finite() {
-        return Err(fail("FAIL_OBS_TRACES_SAMPLE_RATE", format!(
-            "[observability.traces] sample_rate ({sample_rate}) must be in [0.0, 1.0]"
-        )));
+        return Err(fail(
+            "FAIL_OBS_TRACES_SAMPLE_RATE",
+            format!("[observability.traces] sample_rate ({sample_rate}) must be in [0.0, 1.0]"),
+        ));
     }
     let max_attrs_per_span = s.max_attrs_per_span.unwrap_or(DEFAULT_ATTRS_PER_SPAN);
     if !(MIN_ATTRS_PER_SPAN..=MAX_ATTRS_PER_SPAN).contains(&max_attrs_per_span) {
-        return Err(fail("FAIL_OBS_TRACES_LIMITS", format!(
-            "[observability.traces] max_attrs_per_span ({max_attrs_per_span}) must be in \
+        return Err(fail(
+            "FAIL_OBS_TRACES_LIMITS",
+            format!(
+                "[observability.traces] max_attrs_per_span ({max_attrs_per_span}) must be in \
              [{MIN_ATTRS_PER_SPAN}, {MAX_ATTRS_PER_SPAN}]"
-        )));
+            ),
+        ));
     }
     let max_events_per_span = s.max_events_per_span.unwrap_or(DEFAULT_EVENTS_PER_SPAN);
     if max_events_per_span > MAX_EVENTS_PER_SPAN {
-        return Err(fail("FAIL_OBS_TRACES_LIMITS", format!(
-            "[observability.traces] max_events_per_span ({max_events_per_span}) must be in \
+        return Err(fail(
+            "FAIL_OBS_TRACES_LIMITS",
+            format!(
+                "[observability.traces] max_events_per_span ({max_events_per_span}) must be in \
              [0, {MAX_EVENTS_PER_SPAN}]"
-        )));
+            ),
+        ));
     }
     Ok(ObservabilityTracesConfig {
         enabled: s.enabled.unwrap_or(true),
@@ -519,34 +560,47 @@ fn validate_traces(s: &ObservabilityTracesSection) -> Result<ObservabilityTraces
     })
 }
 
-fn validate_metrics(s: &ObservabilityMetricsSection) -> Result<ObservabilityMetricsConfig, PolicyError> {
+fn validate_metrics(
+    s: &ObservabilityMetricsSection,
+) -> Result<ObservabilityMetricsConfig, PolicyError> {
     let export_interval = match s.export_interval.as_deref() {
         Some(spec) => parse_duration_in_range(spec, MIN_EXPORT_INTERVAL_MS, MAX_EXPORT_INTERVAL_MS)
-            .map_err(|reason| fail("FAIL_OBS_METRICS_INTERVAL", format!(
-                "[observability.metrics] export_interval = {spec:?} {reason}"
-            )))?,
+            .map_err(|reason| {
+                fail(
+                    "FAIL_OBS_METRICS_INTERVAL",
+                    format!("[observability.metrics] export_interval = {spec:?} {reason}"),
+                )
+            })?,
         None => Duration::from_millis(DEFAULT_EXPORT_INTERVAL_MS as u64),
     };
     let histogram_buckets = match &s.histogram_buckets {
         Some(b) => b.clone(),
-        None    => DEFAULT_HISTOGRAM_BUCKETS.to_vec(),
+        None => DEFAULT_HISTOGRAM_BUCKETS.to_vec(),
     };
     if histogram_buckets.is_empty() {
-        return Err(fail("FAIL_OBS_METRICS_BUCKETS",
-            "[observability.metrics] histogram_buckets must not be empty".to_owned()));
+        return Err(fail(
+            "FAIL_OBS_METRICS_BUCKETS",
+            "[observability.metrics] histogram_buckets must not be empty".to_owned(),
+        ));
     }
     if histogram_buckets.len() > MAX_BUCKETS_LEN {
-        return Err(fail("FAIL_OBS_METRICS_BUCKETS", format!(
-            "[observability.metrics] histogram_buckets has {} entries; max {MAX_BUCKETS_LEN}",
-            histogram_buckets.len()
-        )));
+        return Err(fail(
+            "FAIL_OBS_METRICS_BUCKETS",
+            format!(
+                "[observability.metrics] histogram_buckets has {} entries; max {MAX_BUCKETS_LEN}",
+                histogram_buckets.len()
+            ),
+        ));
     }
     let mut prev = 0.0_f64;
     for (i, b) in histogram_buckets.iter().enumerate() {
         if !b.is_finite() || *b <= 0.0 {
-            return Err(fail("FAIL_OBS_METRICS_BUCKETS", format!(
+            return Err(fail(
+                "FAIL_OBS_METRICS_BUCKETS",
+                format!(
                 "[observability.metrics] histogram_buckets[{i}] = {b}: must be positive and finite"
-            )));
+            ),
+            ));
         }
         if i > 0 && *b <= prev {
             return Err(fail("FAIL_OBS_METRICS_BUCKETS", format!(
@@ -569,54 +623,80 @@ fn validate_resource(
     let service_name = match s.service_name.as_deref() {
         Some(v) if !v.trim().is_empty() => v.trim().to_owned(),
         _ if !enabled => "raxis-kernel".to_owned(),
-        _ => return Err(fail("FAIL_OBS_RESOURCE_SERVICE_NAME",
-            "[observability.resource] service_name must be a non-empty string".to_owned())),
+        _ => {
+            return Err(fail(
+                "FAIL_OBS_RESOURCE_SERVICE_NAME",
+                "[observability.resource] service_name must be a non-empty string".to_owned(),
+            ))
+        }
     };
     let environment = s.environment.clone().unwrap_or_default();
     if s.extra.len() > MAX_RESOURCE_KEYS {
-        return Err(fail("FAIL_OBS_RESOURCE_KEY_FORMAT", format!(
-            "[observability.resource.extra] has {} keys; max {MAX_RESOURCE_KEYS}", s.extra.len()
-        )));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_KEY_FORMAT",
+            format!(
+                "[observability.resource.extra] has {} keys; max {MAX_RESOURCE_KEYS}",
+                s.extra.len()
+            ),
+        ));
     }
     for (key, val) in &s.extra {
         validate_resource_key(key)?;
         validate_resource_value(key, val)?;
     }
-    Ok(ObservabilityResourceConfig { service_name, environment, extra: s.extra.clone() })
+    Ok(ObservabilityResourceConfig {
+        service_name,
+        environment,
+        extra: s.extra.clone(),
+    })
 }
 
 fn validate_resource_key(key: &str) -> Result<(), PolicyError> {
     if key.is_empty() {
-        return Err(fail("FAIL_OBS_RESOURCE_KEY_FORMAT",
-            "[observability.resource.extra] key must be non-empty".to_owned()));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_KEY_FORMAT",
+            "[observability.resource.extra] key must be non-empty".to_owned(),
+        ));
     }
     if key.len() > 64 {
-        return Err(fail("FAIL_OBS_RESOURCE_KEY_FORMAT", format!(
-            "[observability.resource.extra] key {key:?} exceeds 64 bytes"
-        )));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_KEY_FORMAT",
+            format!("[observability.resource.extra] key {key:?} exceeds 64 bytes"),
+        ));
     }
     let lower = key.to_ascii_lowercase();
     for prefix in RESERVED_RESOURCE_PREFIXES {
         if lower.starts_with(prefix) {
-            return Err(fail("FAIL_OBS_RESOURCE_RESERVED", format!(
+            return Err(fail(
+                "FAIL_OBS_RESOURCE_RESERVED",
+                format!(
                 "[observability.resource.extra] key {key:?} starts with reserved prefix {prefix:?}"
-            )));
+            ),
+            ));
         }
     }
     let mut chars = key.chars();
-    let first = chars.next().ok_or_else(|| fail("FAIL_OBS_RESOURCE_KEY_FORMAT",
-        "[observability.resource.extra] empty key".to_owned()))?;
+    let first = chars.next().ok_or_else(|| {
+        fail(
+            "FAIL_OBS_RESOURCE_KEY_FORMAT",
+            "[observability.resource.extra] empty key".to_owned(),
+        )
+    })?;
     if !first.is_ascii_lowercase() {
-        return Err(fail("FAIL_OBS_RESOURCE_KEY_FORMAT", format!(
-            "[observability.resource.extra] key {key:?}: first char must match [a-z]"
-        )));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_KEY_FORMAT",
+            format!("[observability.resource.extra] key {key:?}: first char must match [a-z]"),
+        ));
     }
     for c in chars {
         if !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == '-') {
-            return Err(fail("FAIL_OBS_RESOURCE_KEY_FORMAT", format!(
-                "[observability.resource.extra] key {key:?} contains illegal char {c:?}; \
+            return Err(fail(
+                "FAIL_OBS_RESOURCE_KEY_FORMAT",
+                format!(
+                    "[observability.resource.extra] key {key:?} contains illegal char {c:?}; \
                  allowed: [a-z0-9_-]"
-            )));
+                ),
+            ));
         }
     }
     Ok(())
@@ -624,15 +704,20 @@ fn validate_resource_key(key: &str) -> Result<(), PolicyError> {
 
 fn validate_resource_value(key: &str, value: &str) -> Result<(), PolicyError> {
     if value.is_empty() {
-        return Err(fail("FAIL_OBS_RESOURCE_VALUE", format!(
-            "[observability.resource.extra.{key}] must be a non-empty UTF-8 string"
-        )));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_VALUE",
+            format!("[observability.resource.extra.{key}] must be a non-empty UTF-8 string"),
+        ));
     }
     if value.len() > MAX_RESOURCE_VALUE_BYTES {
-        return Err(fail("FAIL_OBS_RESOURCE_VALUE", format!(
-            "[observability.resource.extra.{key}] exceeds {MAX_RESOURCE_VALUE_BYTES} bytes \
-             (got {} bytes)", value.len()
-        )));
+        return Err(fail(
+            "FAIL_OBS_RESOURCE_VALUE",
+            format!(
+                "[observability.resource.extra.{key}] exceeds {MAX_RESOURCE_VALUE_BYTES} bytes \
+             (got {} bytes)",
+                value.len()
+            ),
+        ));
     }
     Ok(())
 }
@@ -643,8 +728,10 @@ fn validate_pusher(
 ) -> Result<ObservabilityPusherConfig, PolicyError> {
     let endpoint = p.otlp_endpoint.trim();
     if endpoint.is_empty() {
-        return Err(fail("FAIL_OBS_OTLP_ENDPOINT",
-            "[observability.pusher] otlp_endpoint must be a non-empty URL".to_owned()));
+        return Err(fail(
+            "FAIL_OBS_OTLP_ENDPOINT",
+            "[observability.pusher] otlp_endpoint must be a non-empty URL".to_owned(),
+        ));
     }
     if !(endpoint.starts_with("http://") || endpoint.starts_with("https://")) {
         return Err(fail("FAIL_OBS_OTLP_ENDPOINT", format!(
@@ -654,9 +741,14 @@ fn validate_pusher(
     let otlp_protocol = match p.otlp_protocol.as_deref().unwrap_or("grpc") {
         "grpc" => "grpc".to_owned(),
         "http" => "http".to_owned(),
-        other  => return Err(fail("FAIL_OBS_OTLP_PROTOCOL", format!(
+        other => {
+            return Err(fail(
+                "FAIL_OBS_OTLP_PROTOCOL",
+                format!(
             "[observability.pusher] otlp_protocol = {other:?} must be one of {{\"grpc\", \"http\"}}"
-        ))),
+        ),
+            ))
+        }
     };
     let otlp_compression = match p.otlp_compression.as_deref().unwrap_or("gzip") {
         "none" => "none".to_owned(),
@@ -668,69 +760,98 @@ fn validate_pusher(
     };
     let otlp_export_timeout = match p.otlp_export_timeout.as_deref() {
         Some(spec) => parse_duration_in_range(spec, MIN_EXPORT_TIMEOUT_MS, MAX_EXPORT_TIMEOUT_MS)
-            .map_err(|reason| fail("FAIL_OBS_OTLP_EXPORT_TIMEOUT", format!(
-                "[observability.pusher] otlp_export_timeout = {spec:?} {reason}"
-            )))?,
+            .map_err(|reason| {
+            fail(
+                "FAIL_OBS_OTLP_EXPORT_TIMEOUT",
+                format!("[observability.pusher] otlp_export_timeout = {spec:?} {reason}"),
+            )
+        })?,
         None => Duration::from_millis(DEFAULT_EXPORT_TIMEOUT_MS as u64),
     };
     let otlp_batch_size = p.otlp_batch_size.unwrap_or(DEFAULT_OTLP_BATCH_SIZE);
     if !(MIN_OTLP_BATCH_SIZE..=MAX_OTLP_BATCH_SIZE).contains(&otlp_batch_size) {
-        return Err(fail("FAIL_OBS_OTLP_BATCH_SIZE", format!(
-            "[observability.pusher] otlp_batch_size ({otlp_batch_size}) must be in \
+        return Err(fail(
+            "FAIL_OBS_OTLP_BATCH_SIZE",
+            format!(
+                "[observability.pusher] otlp_batch_size ({otlp_batch_size}) must be in \
              [{MIN_OTLP_BATCH_SIZE}, {MAX_OTLP_BATCH_SIZE}]"
-        )));
+            ),
+        ));
     }
     let otlp_flush_interval = match p.otlp_flush_interval.as_deref() {
         Some(spec) => parse_duration_in_range(spec, MIN_FLUSH_INTERVAL_MS, MAX_FLUSH_INTERVAL_MS)
-            .map_err(|reason| fail("FAIL_OBS_OTLP_FLUSH_INTERVAL", format!(
-                "[observability.pusher] otlp_flush_interval = {spec:?} {reason}"
-            )))?,
+            .map_err(|reason| {
+            fail(
+                "FAIL_OBS_OTLP_FLUSH_INTERVAL",
+                format!("[observability.pusher] otlp_flush_interval = {spec:?} {reason}"),
+            )
+        })?,
         None => Duration::from_millis(DEFAULT_FLUSH_INTERVAL_MS as u64),
     };
     let otlp_max_inflight = p.otlp_max_inflight.unwrap_or(DEFAULT_OTLP_INFLIGHT);
     if !(MIN_OTLP_INFLIGHT..=MAX_OTLP_INFLIGHT).contains(&otlp_max_inflight) {
-        return Err(fail("FAIL_OBS_OTLP_INFLIGHT", format!(
-            "[observability.pusher] otlp_max_inflight ({otlp_max_inflight}) must be in \
+        return Err(fail(
+            "FAIL_OBS_OTLP_INFLIGHT",
+            format!(
+                "[observability.pusher] otlp_max_inflight ({otlp_max_inflight}) must be in \
              [{MIN_OTLP_INFLIGHT}, {MAX_OTLP_INFLIGHT}]"
-        )));
+            ),
+        ));
     }
     let backoff_initial = match p.backoff_initial.as_deref() {
-        Some(spec) => parse_duration_in_range(spec, MIN_BACKOFF_MS, MAX_BACKOFF_MS)
-            .map_err(|reason| fail("FAIL_OBS_BACKOFF", format!(
-                "[observability.pusher] backoff_initial = {spec:?} {reason}"
-            )))?,
+        Some(spec) => {
+            parse_duration_in_range(spec, MIN_BACKOFF_MS, MAX_BACKOFF_MS).map_err(|reason| {
+                fail(
+                    "FAIL_OBS_BACKOFF",
+                    format!("[observability.pusher] backoff_initial = {spec:?} {reason}"),
+                )
+            })?
+        }
         None => Duration::from_millis(DEFAULT_BACKOFF_INIT_MS as u64),
     };
     let backoff_max = match p.backoff_max.as_deref() {
-        Some(spec) => parse_duration_in_range(spec, MIN_BACKOFF_MS, MAX_BACKOFF_MS)
-            .map_err(|reason| fail("FAIL_OBS_BACKOFF", format!(
-                "[observability.pusher] backoff_max = {spec:?} {reason}"
-            )))?,
+        Some(spec) => {
+            parse_duration_in_range(spec, MIN_BACKOFF_MS, MAX_BACKOFF_MS).map_err(|reason| {
+                fail(
+                    "FAIL_OBS_BACKOFF",
+                    format!("[observability.pusher] backoff_max = {spec:?} {reason}"),
+                )
+            })?
+        }
         None => Duration::from_millis(DEFAULT_BACKOFF_MAX_MS as u64),
     };
     if backoff_initial > backoff_max {
-        return Err(fail("FAIL_OBS_BACKOFF", format!(
-            "[observability.pusher] backoff_initial ({backoff_initial:?}) > \
+        return Err(fail(
+            "FAIL_OBS_BACKOFF",
+            format!(
+                "[observability.pusher] backoff_initial ({backoff_initial:?}) > \
              backoff_max ({backoff_max:?})"
-        )));
+            ),
+        ));
     }
     let backoff_jitter = p.backoff_jitter.unwrap_or(DEFAULT_BACKOFF_JITTER);
     if !(0.0..=1.0).contains(&backoff_jitter) || !backoff_jitter.is_finite() {
-        return Err(fail("FAIL_OBS_JITTER", format!(
-            "[observability.pusher] backoff_jitter ({backoff_jitter}) must be in [0.0, 1.0]"
-        )));
+        return Err(fail(
+            "FAIL_OBS_JITTER",
+            format!(
+                "[observability.pusher] backoff_jitter ({backoff_jitter}) must be in [0.0, 1.0]"
+            ),
+        ));
     }
     // TLS: cert and key go together.
     let cert_set = !p.tls.cert_file.trim().is_empty();
-    let key_set  = !p.tls.key_file.trim().is_empty();
+    let key_set = !p.tls.key_file.trim().is_empty();
     if cert_set != key_set {
-        return Err(fail("FAIL_OBS_TLS_PARTIAL",
-            "[observability.pusher.tls] cert_file and key_file must be both set or both empty".to_owned()));
+        return Err(fail(
+            "FAIL_OBS_TLS_PARTIAL",
+            "[observability.pusher.tls] cert_file and key_file must be both set or both empty"
+                .to_owned(),
+        ));
     }
     let tls = ObservabilityPusherTlsConfig {
         cert_file: p.tls.cert_file.trim().to_owned(),
-        key_file:  p.tls.key_file.trim().to_owned(),
-        ca_file:   p.tls.ca_file.trim().to_owned(),
+        key_file: p.tls.key_file.trim().to_owned(),
+        ca_file: p.tls.ca_file.trim().to_owned(),
     };
     // Headers.
     for (k, v) in &p.headers {
@@ -755,34 +876,43 @@ fn validate_pusher(
 
 fn validate_header_key(key: &str) -> Result<(), PolicyError> {
     if key.is_empty() {
-        return Err(fail("FAIL_OBS_HEADER_KEY",
-            "[observability.pusher.headers] key must be non-empty".to_owned()));
+        return Err(fail(
+            "FAIL_OBS_HEADER_KEY",
+            "[observability.pusher.headers] key must be non-empty".to_owned(),
+        ));
     }
     if key.len() > 64 {
-        return Err(fail("FAIL_OBS_HEADER_KEY", format!(
-            "[observability.pusher.headers] key {key:?} exceeds 64 bytes"
-        )));
+        return Err(fail(
+            "FAIL_OBS_HEADER_KEY",
+            format!("[observability.pusher.headers] key {key:?} exceeds 64 bytes"),
+        ));
     }
     let lower = key.to_ascii_lowercase();
     if RESERVED_HEADER_KEYS.contains(&lower.as_str()) {
-        return Err(fail("FAIL_OBS_HEADER_KEY", format!(
-            "[observability.pusher.headers] key {key:?} is reserved (HTTP/2 / OTLP framing)"
-        )));
+        return Err(fail(
+            "FAIL_OBS_HEADER_KEY",
+            format!(
+                "[observability.pusher.headers] key {key:?} is reserved (HTTP/2 / OTLP framing)"
+            ),
+        ));
     }
     for c in key.chars() {
         if !(c.is_ascii_alphanumeric() || c == '_' || c == '-') {
-            return Err(fail("FAIL_OBS_HEADER_KEY", format!(
-                "[observability.pusher.headers] key {key:?} contains illegal char {c:?}; \
+            return Err(fail(
+                "FAIL_OBS_HEADER_KEY",
+                format!(
+                    "[observability.pusher.headers] key {key:?} contains illegal char {c:?}; \
                  allowed: [a-zA-Z0-9_-]"
-            )));
+                ),
+            ));
         }
     }
     Ok(())
 }
 
 fn validate_header_value(
-    key:                   &str,
-    value:                 &str,
+    key: &str,
+    value: &str,
     permitted_credentials: &std::collections::HashSet<&str>,
 ) -> Result<(), PolicyError> {
     if let Some(cred_name) = value.strip_prefix("@cred:") {
@@ -800,19 +930,27 @@ fn validate_header_value(
         return Ok(());
     }
     if value.is_empty() {
-        return Err(fail("FAIL_OBS_HEADER_VALUE", format!(
-            "[observability.pusher.headers.{key}] must be non-empty"
-        )));
+        return Err(fail(
+            "FAIL_OBS_HEADER_VALUE",
+            format!("[observability.pusher.headers.{key}] must be non-empty"),
+        ));
     }
     if value.len() > 256 {
-        return Err(fail("FAIL_OBS_HEADER_VALUE", format!(
-            "[observability.pusher.headers.{key}] exceeds 256 bytes (got {} bytes)", value.len()
-        )));
+        return Err(fail(
+            "FAIL_OBS_HEADER_VALUE",
+            format!(
+                "[observability.pusher.headers.{key}] exceeds 256 bytes (got {} bytes)",
+                value.len()
+            ),
+        ));
     }
     if value.contains('\r') || value.contains('\n') {
-        return Err(fail("FAIL_OBS_HEADER_VALUE", format!(
+        return Err(fail(
+            "FAIL_OBS_HEADER_VALUE",
+            format!(
             "[observability.pusher.headers.{key}] contains illegal CR/LF (header injection guard)"
-        )));
+        ),
+        ));
     }
     Ok(())
 }
@@ -824,21 +962,25 @@ fn validate_header_value(
 /// Parse a duration string like "15s", "500ms", "1m". Accepts
 /// suffixes `ms`, `s`, `m`. The result must lie within
 /// `[min_ms, max_ms]`.
-fn parse_duration_in_range(
-    spec:    &str,
-    min_ms:  u128,
-    max_ms:  u128,
-) -> Result<Duration, String> {
+fn parse_duration_in_range(spec: &str, min_ms: u128, max_ms: u128) -> Result<Duration, String> {
     let spec = spec.trim();
-    let (n_str, mult_ms): (&str, u128) =
-        if let Some(rest) = spec.strip_suffix("ms") { (rest.trim(), 1) }
-        else if let Some(rest) = spec.strip_suffix('s')  { (rest.trim(), 1_000) }
-        else if let Some(rest) = spec.strip_suffix('m')  { (rest.trim(), 60_000) }
-        else { return Err("must end in `ms`, `s`, or `m` (e.g. \"500ms\", \"15s\", \"5m\")".to_owned()); };
-    let n: u64 = n_str.parse().map_err(|_| format!("could not parse {n_str:?} as a non-negative integer"))?;
+    let (n_str, mult_ms): (&str, u128) = if let Some(rest) = spec.strip_suffix("ms") {
+        (rest.trim(), 1)
+    } else if let Some(rest) = spec.strip_suffix('s') {
+        (rest.trim(), 1_000)
+    } else if let Some(rest) = spec.strip_suffix('m') {
+        (rest.trim(), 60_000)
+    } else {
+        return Err("must end in `ms`, `s`, or `m` (e.g. \"500ms\", \"15s\", \"5m\")".to_owned());
+    };
+    let n: u64 = n_str
+        .parse()
+        .map_err(|_| format!("could not parse {n_str:?} as a non-negative integer"))?;
     let total_ms = (n as u128).saturating_mul(mult_ms);
     if total_ms < min_ms || total_ms > max_ms {
-        return Err(format!("must be in [{min_ms} ms, {max_ms} ms]; got {total_ms} ms"));
+        return Err(format!(
+            "must be in [{min_ms} ms, {max_ms} ms]; got {total_ms} ms"
+        ));
     }
     Ok(Duration::from_millis(total_ms.min(u64::MAX as u128) as u64))
 }
@@ -856,7 +998,9 @@ mod tests {
     use super::*;
     use std::collections::HashSet;
 
-    fn empty_creds() -> HashSet<&'static str> { HashSet::new() }
+    fn empty_creds() -> HashSet<&'static str> {
+        HashSet::new()
+    }
 
     fn full_section() -> ObservabilitySection {
         ObservabilitySection {
@@ -864,8 +1008,8 @@ mod tests {
             ring: ObservabilityRingSection {
                 dir: "".to_owned(),
                 segment_max_bytes: Some(16 * 1024 * 1024),
-                max_total_bytes:   Some(512 * 1024 * 1024),
-                max_queue_depth:   Some(8192),
+                max_total_bytes: Some(512 * 1024 * 1024),
+                max_queue_depth: Some(8192),
             },
             traces: ObservabilityTracesSection {
                 enabled: Some(true),
@@ -880,7 +1024,7 @@ mod tests {
             },
             resource: ObservabilityResourceSection {
                 service_name: Some("raxis-kernel".to_owned()),
-                environment:  Some("production".to_owned()),
+                environment: Some("production".to_owned()),
                 extra: BTreeMap::new(),
             },
             pusher: Some(ObservabilityPusherSection {
@@ -927,8 +1071,10 @@ mod tests {
         let mut raw = full_section();
         raw.pusher = None;
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_PUSHER_REQUIRED")),
-            "expected FAIL_OBS_PUSHER_REQUIRED");
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_PUSHER_REQUIRED")),
+            "expected FAIL_OBS_PUSHER_REQUIRED"
+        );
     }
 
     #[test]
@@ -936,16 +1082,20 @@ mod tests {
         let mut raw = full_section();
         raw.ring.segment_max_bytes = Some(512); // < 1 MiB
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RING_SEGMENT_SIZE")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RING_SEGMENT_SIZE"))
+        );
     }
 
     #[test]
     fn ring_total_lt_4x_segment_fails() {
         let mut raw = full_section();
         raw.ring.segment_max_bytes = Some(64 * 1024 * 1024);
-        raw.ring.max_total_bytes   = Some(64 * 1024 * 1024);   // = 1 × segment
+        raw.ring.max_total_bytes = Some(64 * 1024 * 1024); // = 1 × segment
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RING_TOTAL_TOO_SMALL")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RING_TOTAL_TOO_SMALL"))
+        );
     }
 
     #[test]
@@ -953,7 +1103,9 @@ mod tests {
         let mut raw = full_section();
         raw.traces.sample_rate = Some(1.5);
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TRACES_SAMPLE_RATE")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TRACES_SAMPLE_RATE"))
+        );
     }
 
     #[test]
@@ -961,7 +1113,9 @@ mod tests {
         let mut raw = full_section();
         raw.traces.max_attrs_per_span = Some(2);
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TRACES_LIMITS")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TRACES_LIMITS"))
+        );
     }
 
     #[test]
@@ -969,7 +1123,9 @@ mod tests {
         let mut raw = full_section();
         raw.metrics.histogram_buckets = Some(vec![1.0, 5.0, 5.0, 10.0]);
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_BUCKETS")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_BUCKETS"))
+        );
     }
 
     #[test]
@@ -977,23 +1133,33 @@ mod tests {
         let mut raw = full_section();
         raw.metrics.histogram_buckets = Some(vec![1.0, f64::NAN]);
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_BUCKETS")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_BUCKETS"))
+        );
     }
 
     #[test]
     fn resource_extra_reserved_prefix_fails() {
         let mut raw = full_section();
-        raw.resource.extra.insert("raxis.thing".to_owned(), "v".to_owned());
+        raw.resource
+            .extra
+            .insert("raxis.thing".to_owned(), "v".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_RESERVED")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_RESERVED"))
+        );
     }
 
     #[test]
     fn resource_extra_bad_key_format_fails() {
         let mut raw = full_section();
-        raw.resource.extra.insert("Bad-Key!".to_owned(), "v".to_owned());
+        raw.resource
+            .extra
+            .insert("Bad-Key!".to_owned(), "v".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_KEY_FORMAT")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_KEY_FORMAT"))
+        );
     }
 
     #[test]
@@ -1001,7 +1167,9 @@ mod tests {
         let mut raw = full_section();
         raw.resource.extra.insert("k".to_owned(), "x".repeat(257));
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_VALUE")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_RESOURCE_VALUE"))
+        );
     }
 
     #[test]
@@ -1009,7 +1177,9 @@ mod tests {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().otlp_endpoint = "not-a-url".to_owned();
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_ENDPOINT")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_ENDPOINT"))
+        );
     }
 
     #[test]
@@ -1017,7 +1187,9 @@ mod tests {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().otlp_protocol = Some("ftp".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_PROTOCOL")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_PROTOCOL"))
+        );
     }
 
     #[test]
@@ -1025,14 +1197,16 @@ mod tests {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().otlp_compression = Some("brotli".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_COMPRESSION")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_OTLP_COMPRESSION"))
+        );
     }
 
     #[test]
     fn pusher_backoff_initial_must_be_le_max() {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().backoff_initial = Some("60s".to_owned());
-        raw.pusher.as_mut().unwrap().backoff_max     = Some("30s".to_owned());
+        raw.pusher.as_mut().unwrap().backoff_max = Some("30s".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
         assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_BACKOFF")));
     }
@@ -1042,27 +1216,36 @@ mod tests {
         let mut raw = full_section();
         raw.pusher.as_mut().unwrap().tls = ObservabilityPusherTlsSection {
             cert_file: "/etc/ssl/cert.pem".to_owned(),
-            key_file:  "".to_owned(),
-            ca_file:   "".to_owned(),
+            key_file: "".to_owned(),
+            ca_file: "".to_owned(),
         };
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TLS_PARTIAL")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_TLS_PARTIAL"))
+        );
     }
 
     #[test]
     fn pusher_headers_unknown_credential_fails() {
         let mut raw = full_section();
-        raw.pusher.as_mut().unwrap().headers
+        raw.pusher
+            .as_mut()
+            .unwrap()
+            .headers
             .insert("authorization".to_owned(), "@cred:nonexistent".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_CRED_UNKNOWN")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_CRED_UNKNOWN"))
+        );
     }
 
     #[test]
     fn pusher_headers_known_credential_passes() {
         let mut raw = full_section();
-        raw.pusher.as_mut().unwrap().headers
-            .insert("authorization".to_owned(), "@cred:datadog-otel-token".to_owned());
+        raw.pusher.as_mut().unwrap().headers.insert(
+            "authorization".to_owned(),
+            "@cred:datadog-otel-token".to_owned(),
+        );
         let mut creds = HashSet::new();
         creds.insert("datadog-otel-token");
         ObservabilityConfig::validate(&raw, &creds).expect("valid");
@@ -1071,19 +1254,28 @@ mod tests {
     #[test]
     fn pusher_headers_reserved_key_fails() {
         let mut raw = full_section();
-        raw.pusher.as_mut().unwrap().headers
+        raw.pusher
+            .as_mut()
+            .unwrap()
+            .headers
             .insert("Content-Type".to_owned(), "application/json".to_owned());
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_KEY")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_KEY"))
+        );
     }
 
     #[test]
     fn pusher_headers_crlf_value_fails() {
         let mut raw = full_section();
-        raw.pusher.as_mut().unwrap().headers
-            .insert("x-tenant-id".to_owned(), "platform\r\nX-Injected: 1".to_owned());
+        raw.pusher.as_mut().unwrap().headers.insert(
+            "x-tenant-id".to_owned(),
+            "platform\r\nX-Injected: 1".to_owned(),
+        );
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_VALUE")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_HEADER_VALUE"))
+        );
     }
 
     #[test]
@@ -1113,7 +1305,9 @@ mod tests {
         let mut raw = full_section();
         raw.metrics.export_interval = Some("500ms".to_owned()); // < 1s floor
         let err = ObservabilityConfig::validate(&raw, &empty_creds()).unwrap_err();
-        assert!(matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_INTERVAL")));
+        assert!(
+            matches!(err, PolicyError::MalformedArtifact(s) if s.contains("FAIL_OBS_METRICS_INTERVAL"))
+        );
     }
 
     #[test]
@@ -1122,6 +1316,9 @@ mod tests {
         raw.enabled = false;
         let cfg = ObservabilityConfig::validate(&raw, &empty_creds()).expect("valid");
         assert!(!cfg.enabled);
-        assert!(cfg.pusher.is_some(), "operator-supplied pusher block is preserved for `enabled=false` dry runs");
+        assert!(
+            cfg.pusher.is_some(),
+            "operator-supplied pusher block is preserved for `enabled=false` dry runs"
+        );
     }
 }

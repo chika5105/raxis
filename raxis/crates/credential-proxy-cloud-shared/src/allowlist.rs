@@ -32,18 +32,34 @@ use crate::audit::CloudProvider;
 /// requires updating both this constant AND
 /// `specs/v3/cloud-proxy-forwarding.md §3`.
 const AWS_REGIONS: &[&str] = &[
-    "us-east-1",      "us-east-2",      "us-west-1",      "us-west-2",
+    "us-east-1",
+    "us-east-2",
+    "us-west-1",
+    "us-west-2",
     "af-south-1",
-    "ap-east-1",      "ap-south-1",     "ap-south-2",
-    "ap-southeast-1", "ap-southeast-2", "ap-southeast-3", "ap-southeast-4",
-    "ap-northeast-1", "ap-northeast-2", "ap-northeast-3",
-    "ca-central-1",   "ca-west-1",
-    "eu-central-1",   "eu-central-2",
+    "ap-east-1",
+    "ap-south-1",
+    "ap-south-2",
+    "ap-southeast-1",
+    "ap-southeast-2",
+    "ap-southeast-3",
+    "ap-southeast-4",
+    "ap-northeast-1",
+    "ap-northeast-2",
+    "ap-northeast-3",
+    "ca-central-1",
+    "ca-west-1",
+    "eu-central-1",
+    "eu-central-2",
     "eu-north-1",
-    "eu-south-1",     "eu-south-2",
-    "eu-west-1",      "eu-west-2",      "eu-west-3",
+    "eu-south-1",
+    "eu-south-2",
+    "eu-west-1",
+    "eu-west-2",
+    "eu-west-3",
     "il-central-1",
-    "me-central-1",   "me-south-1",
+    "me-central-1",
+    "me-south-1",
     "sa-east-1",
 ];
 
@@ -56,13 +72,16 @@ const AWS_REGIONS: &[&str] = &[
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CloudUpstreamHost {
     provider: CloudProvider,
-    host:     String,
+    host: String,
 }
 
 impl CloudUpstreamHost {
     /// `sts.amazonaws.com` (global STS, treated as `us-east-1`).
     pub fn aws_global() -> Self {
-        Self { provider: CloudProvider::Aws, host: "sts.amazonaws.com".to_owned() }
+        Self {
+            provider: CloudProvider::Aws,
+            host: "sts.amazonaws.com".to_owned(),
+        }
     }
 
     /// `sts.{region}.amazonaws.com`. Fails closed for unknown
@@ -77,30 +96,42 @@ impl CloudUpstreamHost {
         }
         Ok(Self {
             provider: CloudProvider::Aws,
-            host:     format!("sts.{region_lower}.amazonaws.com"),
+            host: format!("sts.{region_lower}.amazonaws.com"),
         })
     }
 
     /// `oauth2.googleapis.com`.
     pub fn gcp_oauth2() -> Self {
-        Self { provider: CloudProvider::Gcp, host: "oauth2.googleapis.com".to_owned() }
+        Self {
+            provider: CloudProvider::Gcp,
+            host: "oauth2.googleapis.com".to_owned(),
+        }
     }
 
     /// `login.microsoftonline.com`. Tenant GUID lives in the URL
     /// path, not the host — the path is validated at request-build
     /// time.
     pub fn azure_login() -> Self {
-        Self { provider: CloudProvider::Azure, host: "login.microsoftonline.com".to_owned() }
+        Self {
+            provider: CloudProvider::Azure,
+            host: "login.microsoftonline.com".to_owned(),
+        }
     }
 
     /// Provider tag (for audit + metrics).
-    pub fn provider(&self) -> CloudProvider { self.provider }
+    pub fn provider(&self) -> CloudProvider {
+        self.provider
+    }
 
     /// FQDN. Always ASCII lowercase.
-    pub fn host(&self) -> &str { &self.host }
+    pub fn host(&self) -> &str {
+        &self.host
+    }
 
     /// Fully-qualified `https://` base URL.
-    pub fn https_base(&self) -> String { format!("https://{}", self.host) }
+    pub fn https_base(&self) -> String {
+        format!("https://{}", self.host)
+    }
 
     /// Match against a candidate URL host, case-insensitive and
     /// trailing-dot-tolerant. Used by the HTTP client constructor
@@ -142,7 +173,7 @@ pub enum AllowlistError {
         /// Expected FQDN from the constructed `CloudUpstreamHost`.
         expected: String,
         /// Host parsed from the dispatched URL.
-        actual:   String,
+        actual: String,
     },
 
     /// Candidate URL was not `https://`. Plain HTTP is rejected
@@ -167,20 +198,19 @@ pub enum AllowlistError {
 /// [`AllowlistError`].
 pub fn validate_upstream_url(
     expected: &CloudUpstreamHost,
-    url:      &str,
+    url: &str,
 ) -> Result<(), AllowlistError> {
-    let parsed = url::Url::parse(url)
-        .map_err(|e| AllowlistError::MalformedUrl(e.to_string()))?;
+    let parsed = url::Url::parse(url).map_err(|e| AllowlistError::MalformedUrl(e.to_string()))?;
     if parsed.scheme() != "https" {
         return Err(AllowlistError::NonHttpsScheme(parsed.scheme().to_owned()));
     }
-    let host = parsed.host_str().ok_or_else(|| {
-        AllowlistError::MalformedUrl("URL has no host".to_owned())
-    })?;
+    let host = parsed
+        .host_str()
+        .ok_or_else(|| AllowlistError::MalformedUrl("URL has no host".to_owned()))?;
     if !expected.matches(host) {
         return Err(AllowlistError::HostMismatch {
             expected: expected.host().to_owned(),
-            actual:   host.to_owned(),
+            actual: host.to_owned(),
         });
     }
     Ok(())
@@ -228,8 +258,14 @@ mod tests {
 
     #[test]
     fn gcp_and_azure_construct() {
-        assert_eq!(CloudUpstreamHost::gcp_oauth2().host(), "oauth2.googleapis.com");
-        assert_eq!(CloudUpstreamHost::azure_login().host(), "login.microsoftonline.com");
+        assert_eq!(
+            CloudUpstreamHost::gcp_oauth2().host(),
+            "oauth2.googleapis.com"
+        );
+        assert_eq!(
+            CloudUpstreamHost::azure_login().host(),
+            "login.microsoftonline.com"
+        );
     }
 
     #[test]

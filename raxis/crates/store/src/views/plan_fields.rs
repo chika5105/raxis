@@ -48,10 +48,10 @@ use crate::Table;
 /// dependency-direction rule in `views/mod.rs`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PlanPathFields {
-    pub path_allowlist:            Vec<String>,
+    pub path_allowlist: Vec<String>,
     pub path_export_to_successors: bool,
-    pub path_export_globs:         Vec<String>,
-    pub path_scope_override:       bool,
+    pub path_export_globs: Vec<String>,
+    pub path_scope_override: bool,
 }
 
 /// `[plan.initiative]` metadata pulled out of the same plan TOML
@@ -62,7 +62,7 @@ pub struct PlanPathFields {
 /// substitute initiative_id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct InitiativeMeta {
-    pub title:       String,
+    pub title: String,
     pub description: String,
 }
 
@@ -80,16 +80,14 @@ pub enum PlanFieldsError {
          row — the plan blob is missing or the initiative has not been admitted yet"
     )]
     PlanArtifactMissing {
-        task_id:       String,
+        task_id: String,
         initiative_id: String,
     },
 
-    #[error(
-        "plan TOML for initiative {initiative_id:?} could not be parsed: {reason}"
-    )]
+    #[error("plan TOML for initiative {initiative_id:?} could not be parsed: {reason}")]
     PlanInvalid {
         initiative_id: String,
-        reason:        String,
+        reason: String,
     },
 
     #[error(
@@ -98,7 +96,7 @@ pub enum PlanFieldsError {
     )]
     TaskNotInPlan {
         initiative_id: String,
-        task_id:       String,
+        task_id: String,
     },
 }
 
@@ -117,12 +115,9 @@ pub enum PlanFieldsError {
 ///   kernel's [`raxis_kernel::initiatives::plan_registry::TaskPlanFields`]
 ///   struct.
 /// - `Err(...)` — see [`PlanFieldsError`] for the typed failure cases.
-pub fn reveal_for_task(
-    conn:    &RoConn,
-    task_id: &str,
-) -> Result<PlanPathFields, PlanFieldsError> {
+pub fn reveal_for_task(conn: &RoConn, task_id: &str) -> Result<PlanPathFields, PlanFieldsError> {
     let initiative_id = lookup_initiative_id(conn, task_id)?;
-    let plan_bytes    = lookup_plan_bytes(conn, &initiative_id, task_id)?;
+    let plan_bytes = lookup_plan_bytes(conn, &initiative_id, task_id)?;
 
     let plan_toml = String::from_utf8_lossy(&plan_bytes);
     parse_plan_path_fields(&plan_toml, &initiative_id, task_id)
@@ -158,7 +153,7 @@ pub fn reveal_for_task(
 /// boundary keeps every caller consistent (no second ad-hoc SQL
 /// path drifting against `lookup_plan_bytes`).
 pub fn submitted_toml_for_initiative(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<Option<Vec<u8>>, PlanFieldsError> {
     match lookup_plan_bytes(conn, initiative_id, initiative_id) {
@@ -179,13 +174,13 @@ pub fn submitted_toml_for_initiative(
 /// missing plan blob entirely) — those are operator-visible
 /// diagnostics, not blank-view paper-cuts.
 pub fn reveal_initiative_meta(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<InitiativeMeta, PlanFieldsError> {
     // `task_id` is only used in the error variants below — pass the
     // initiative_id as a stand-in so the diagnostic is still useful.
     let plan_bytes = lookup_plan_bytes(conn, initiative_id, initiative_id)?;
-    let plan_toml  = String::from_utf8_lossy(&plan_bytes);
+    let plan_toml = String::from_utf8_lossy(&plan_bytes);
     parse_initiative_meta(&plan_toml, initiative_id)
 }
 
@@ -194,10 +189,7 @@ pub fn reveal_initiative_meta(
 //             entry point.
 // ────────────────────────────────────────────────────────────────────
 
-fn lookup_initiative_id(
-    conn:    &RoConn,
-    task_id: &str,
-) -> Result<String, PlanFieldsError> {
+fn lookup_initiative_id(conn: &RoConn, task_id: &str) -> Result<String, PlanFieldsError> {
     let sql = format!(
         "SELECT initiative_id FROM {} WHERE task_id = ?1",
         Table::Tasks.as_str(),
@@ -211,9 +203,9 @@ fn lookup_initiative_id(
 }
 
 fn lookup_plan_bytes(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
-    task_id:       &str,
+    task_id: &str,
 ) -> Result<Vec<u8>, PlanFieldsError> {
     // V1 (legacy `signed_plan_artifacts`): every pre-V2 plan
     // wrote here. Try this first because it's a single-row
@@ -223,7 +215,9 @@ fn lookup_plan_bytes(
         Table::SignedPlanArtifacts.as_str(),
     );
     let v1: Option<Vec<u8>> = conn
-        .query_row(&sql_v1, rusqlite::params![initiative_id], |r| r.get::<_, Vec<u8>>(0))
+        .query_row(&sql_v1, rusqlite::params![initiative_id], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
         .optional()?;
     if let Some(bytes) = v1 {
         return Ok(bytes);
@@ -242,17 +236,19 @@ fn lookup_plan_bytes(
          WHERE i.initiative_id = ?1 AND pba.artifact_name = 'plan.toml' \
          LIMIT 1",
         init = Table::Initiatives.as_str(),
-        pba  = Table::PlanBundleArtifacts.as_str(),
+        pba = Table::PlanBundleArtifacts.as_str(),
     );
     let v2: Option<Vec<u8>> = conn
-        .query_row(&sql_v2, rusqlite::params![initiative_id], |r| r.get::<_, Vec<u8>>(0))
+        .query_row(&sql_v2, rusqlite::params![initiative_id], |r| {
+            r.get::<_, Vec<u8>>(0)
+        })
         .optional()?;
     if let Some(bytes) = v2 {
         return Ok(bytes);
     }
 
     Err(PlanFieldsError::PlanArtifactMissing {
-        task_id:       task_id.to_owned(),
+        task_id: task_id.to_owned(),
         initiative_id: initiative_id.to_owned(),
     })
 }
@@ -267,41 +263,38 @@ fn lookup_plan_bytes(
 /// parser is the production path; this one exists so the read-only
 /// CLI doesn't have to depend on `raxis-kernel`.
 fn parse_plan_path_fields(
-    plan_toml:     &str,
+    plan_toml: &str,
     initiative_id: &str,
-    task_id:       &str,
+    task_id: &str,
 ) -> Result<PlanPathFields, PlanFieldsError> {
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        PlanFieldsError::PlanInvalid {
-            initiative_id: initiative_id.to_owned(),
-            reason:        format!("TOML parse error: {e}"),
-        }
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| PlanFieldsError::PlanInvalid {
+        initiative_id: initiative_id.to_owned(),
+        reason: format!("TOML parse error: {e}"),
     })?;
 
-    let tasks_array = doc
-        .get("tasks")
-        .and_then(|v| v.as_array())
-        .ok_or_else(|| PlanFieldsError::PlanInvalid {
+    let tasks_array = doc.get("tasks").and_then(|v| v.as_array()).ok_or_else(|| {
+        PlanFieldsError::PlanInvalid {
             initiative_id: initiative_id.to_owned(),
-            reason:        "plan TOML missing [[tasks]] array".to_owned(),
-        })?;
+            reason: "plan TOML missing [[tasks]] array".to_owned(),
+        }
+    })?;
 
     let entry = tasks_array
         .iter()
         .find(|t| t.get("task_id").and_then(|v| v.as_str()) == Some(task_id))
         .ok_or_else(|| PlanFieldsError::TaskNotInPlan {
             initiative_id: initiative_id.to_owned(),
-            task_id:       task_id.to_owned(),
+            task_id: task_id.to_owned(),
         })?;
 
     Ok(PlanPathFields {
-        path_allowlist:            string_array(entry, "path_allowlist"),
+        path_allowlist: string_array(entry, "path_allowlist"),
         path_export_to_successors: entry
             .get("path_export_to_successors")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
-        path_export_globs:         string_array(entry, "path_export_globs"),
-        path_scope_override:       entry
+        path_export_globs: string_array(entry, "path_export_globs"),
+        path_scope_override: entry
             .get("path_scope_override")
             .and_then(|v| v.as_bool())
             .unwrap_or(false),
@@ -315,14 +308,12 @@ fn parse_plan_path_fields(
 /// do NOT 500 on a missing block: the only invariant we enforce is
 /// "the TOML parses".
 fn parse_initiative_meta(
-    plan_toml:     &str,
+    plan_toml: &str,
     initiative_id: &str,
 ) -> Result<InitiativeMeta, PlanFieldsError> {
-    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| {
-        PlanFieldsError::PlanInvalid {
-            initiative_id: initiative_id.to_owned(),
-            reason:        format!("TOML parse error: {e}"),
-        }
+    let doc: toml::Value = toml::from_str(plan_toml).map_err(|e| PlanFieldsError::PlanInvalid {
+        initiative_id: initiative_id.to_owned(),
+        reason: format!("TOML parse error: {e}"),
     })?;
 
     let block = doc
@@ -374,13 +365,13 @@ mod tests {
     /// the tempdir (kept alive for the test) and the (initiative,
     /// task) ids.
     fn fresh_store_with_plan(plan_toml: &str) -> (TempDir, String, String) {
-        const INITIATIVES:           &str = Table::Initiatives.as_str();
-        const TASKS:                 &str = Table::Tasks.as_str();
+        const INITIATIVES: &str = Table::Initiatives.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         const SIGNED_PLAN_ARTIFACTS: &str = Table::SignedPlanArtifacts.as_str();
-        let tmp           = TempDir::new().unwrap();
-        let db            = tmp.path().join("kernel.db");
+        let tmp = TempDir::new().unwrap();
+        let db = tmp.path().join("kernel.db");
         let initiative_id = "init-1".to_owned();
-        let task_id       = "t-1".to_owned();
+        let task_id = "t-1".to_owned();
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
@@ -392,23 +383,27 @@ mod tests {
                 ),
                 rusqlite::params![&initiative_id],
             ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {TASKS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {TASKS} \
                      (task_id, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
                      VALUES (?1, ?2, 'default', 'Running', 'op', 1, 1, 1)"
-                ),
-                rusqlite::params![&task_id, &initiative_id],
-            ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
+                    ),
+                    rusqlite::params![&task_id, &initiative_id],
+                )
+                .unwrap();
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {SIGNED_PLAN_ARTIFACTS} \
                      (initiative_id, plan_bytes, plan_sig, stored_at) \
                      VALUES (?1, ?2, x'00', 1)"
-                ),
-                rusqlite::params![&initiative_id, plan_toml.as_bytes()],
-            ).unwrap();
+                    ),
+                    rusqlite::params![&initiative_id, plan_toml.as_bytes()],
+                )
+                .unwrap();
         }
         (tmp, initiative_id, task_id)
     }
@@ -448,7 +443,7 @@ mod tests {
         let conn = open_ro(tmp.path()).unwrap();
 
         let f = reveal_for_task(&conn, &task).expect("present");
-        assert_eq!(f.path_allowlist,    vec!["src/**", "tests/**", "README.md"]);
+        assert_eq!(f.path_allowlist, vec!["src/**", "tests/**", "README.md"]);
         assert!(f.path_export_to_successors);
         assert_eq!(f.path_export_globs, vec!["src/ipc/**", "src/auth/**"]);
         assert!(f.path_scope_override);
@@ -465,7 +460,7 @@ mod tests {
         "#;
         let (tmp, _init, task) = fresh_store_with_plan(plan);
         let conn = open_ro(tmp.path()).unwrap();
-        let f    = reveal_for_task(&conn, &task).unwrap();
+        let f = reveal_for_task(&conn, &task).unwrap();
         assert_eq!(f.path_allowlist, vec!["src/**", "ok.rs"]);
     }
 
@@ -491,9 +486,9 @@ mod tests {
         // `tasks` but the plan blob is gone" — every other miss path
         // should fail loud, not silently render lockdown defaults.
         const INITIATIVES: &str = Table::Initiatives.as_str();
-        const TASKS:       &str = Table::Tasks.as_str();
+        const TASKS: &str = Table::Tasks.as_str();
         let tmp = TempDir::new().unwrap();
-        let db  = tmp.path().join("kernel.db");
+        let db = tmp.path().join("kernel.db");
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
@@ -505,20 +500,25 @@ mod tests {
                 ),
                 [],
             ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {TASKS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {TASKS} \
                      (task_id, initiative_id, lane_id, state, actor, \
                       policy_epoch, admitted_at, transitioned_at) \
                      VALUES ('t-x', 'init-x', 'default', 'Admitted', 'op', 1, 1, 1)"
-                ),
-                [],
-            ).unwrap();
+                    ),
+                    [],
+                )
+                .unwrap();
         }
         let conn = open_ro(tmp.path()).unwrap();
-        let err  = reveal_for_task(&conn, "t-x").unwrap_err();
+        let err = reveal_for_task(&conn, "t-x").unwrap_err();
         match err {
-            PlanFieldsError::PlanArtifactMissing { task_id, initiative_id } => {
+            PlanFieldsError::PlanArtifactMissing {
+                task_id,
+                initiative_id,
+            } => {
                 assert_eq!(task_id, "t-x");
                 assert_eq!(initiative_id, "init-x");
             }
@@ -534,7 +534,10 @@ mod tests {
 
         let err = reveal_for_task(&conn, &task).unwrap_err();
         match err {
-            PlanFieldsError::PlanInvalid { initiative_id, reason } => {
+            PlanFieldsError::PlanInvalid {
+                initiative_id,
+                reason,
+            } => {
                 assert_eq!(initiative_id, init);
                 assert!(reason.contains("TOML parse error"), "got: {reason}");
             }
@@ -550,7 +553,10 @@ mod tests {
 
         let err = reveal_for_task(&conn, &task).unwrap_err();
         match err {
-            PlanFieldsError::PlanInvalid { initiative_id, reason } => {
+            PlanFieldsError::PlanInvalid {
+                initiative_id,
+                reason,
+            } => {
                 assert_eq!(initiative_id, init);
                 assert!(reason.contains("[[tasks]] array"), "got: {reason}");
             }
@@ -570,7 +576,10 @@ mod tests {
 
         let err = reveal_for_task(&conn, &task).unwrap_err();
         match err {
-            PlanFieldsError::TaskNotInPlan { initiative_id, task_id } => {
+            PlanFieldsError::TaskNotInPlan {
+                initiative_id,
+                task_id,
+            } => {
                 assert_eq!(initiative_id, init);
                 assert_eq!(task_id, task);
             }
@@ -601,19 +610,21 @@ mod tests {
     fn submitted_toml_returns_none_when_no_plan_artifact_row_exists() {
         const INITIATIVES: &str = Table::Initiatives.as_str();
         let tmp = TempDir::new().unwrap();
-        let db  = tmp.path().join("kernel.db");
+        let db = tmp.path().join("kernel.db");
         {
             let store = Store::open(&db).unwrap();
             let guard = store.lock_sync();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {INITIATIVES} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {INITIATIVES} \
                      (initiative_id, state, terminal_criteria_json, \
                       plan_artifact_sha256, created_at) \
                      VALUES ('init-empty', 'Draft', '{{}}', 'sha-x', 1)"
-                ),
-                [],
-            ).unwrap();
+                    ),
+                    [],
+                )
+                .unwrap();
         }
         let conn = open_ro(tmp.path()).unwrap();
         assert_eq!(

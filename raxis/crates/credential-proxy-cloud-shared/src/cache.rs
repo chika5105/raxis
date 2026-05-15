@@ -41,11 +41,15 @@ pub struct CacheKey(String);
 
 impl CacheKey {
     /// Construct from an already-rendered stable key string.
-    pub fn new(s: impl Into<String>) -> Self { Self(s.into()) }
+    pub fn new(s: impl Into<String>) -> Self {
+        Self(s.into())
+    }
 
     /// Borrow the inner key string. Useful for tracing / debug
     /// paths (never includes credential material).
-    pub fn as_str(&self) -> &str { &self.0 }
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
 }
 
 impl std::fmt::Display for CacheKey {
@@ -60,9 +64,9 @@ impl std::fmt::Display for CacheKey {
 /// zeroising wrapper (e.g. `secrecy::SecretBox<...>`).
 pub struct CachedToken<T: Send + Sync + 'static> {
     /// Provider-specific short-lived credential payload.
-    pub payload:      Arc<T>,
+    pub payload: Arc<T>,
     /// Wall-clock instant the upstream said this expires.
-    pub expires_at:   Instant,
+    pub expires_at: Instant,
     /// When the cache observed / installed this entry.
     pub refreshed_at: Instant,
 }
@@ -70,8 +74,8 @@ pub struct CachedToken<T: Send + Sync + 'static> {
 impl<T: Send + Sync + 'static> Clone for CachedToken<T> {
     fn clone(&self) -> Self {
         Self {
-            payload:      Arc::clone(&self.payload),
-            expires_at:   self.expires_at,
+            payload: Arc::clone(&self.payload),
+            expires_at: self.expires_at,
             refreshed_at: self.refreshed_at,
         }
     }
@@ -112,7 +116,7 @@ impl<T: Send + Sync + 'static> CachedToken<T> {
 pub struct TokenCache<T: Send + Sync + 'static> {
     /// Mapping of key → cached token. Only ever contains
     /// successfully-installed tokens.
-    tokens:        RwLock<HashMap<CacheKey, CachedToken<T>>>,
+    tokens: RwLock<HashMap<CacheKey, CachedToken<T>>>,
     /// Per-key refresh-lock map. Used to enforce single-flight
     /// refresh — at most one task at a time may refresh a given
     /// key.
@@ -139,14 +143,16 @@ impl<T: Send + Sync + 'static> TokenCache<T> {
             safety_window
         };
         Self {
-            tokens:        RwLock::new(HashMap::new()),
+            tokens: RwLock::new(HashMap::new()),
             refresh_locks: Mutex::new(HashMap::new()),
             safety_window: clamped,
         }
     }
 
     /// Configured safety window.
-    pub fn safety_window(&self) -> Duration { self.safety_window }
+    pub fn safety_window(&self) -> Duration {
+        self.safety_window
+    }
 
     /// Look up a key and return a clone of the cached token
     /// when present and not expired. Returns `None` when the
@@ -165,16 +171,11 @@ impl<T: Send + Sync + 'static> TokenCache<T> {
 
     /// Insert (or replace) a cache entry. Used by the per-provider
     /// proxy after a successful upstream exchange.
-    pub async fn insert(
-        &self,
-        key:        CacheKey,
-        payload:    T,
-        expires_in: Duration,
-    ) {
+    pub async fn insert(&self, key: CacheKey, payload: T, expires_in: Duration) {
         let now = Instant::now();
         let entry = CachedToken {
-            payload:      Arc::new(payload),
-            expires_at:   now + expires_in,
+            payload: Arc::new(payload),
+            expires_at: now + expires_in,
             refreshed_at: now,
         };
         let mut guard = self.tokens.write().await;
@@ -261,11 +262,13 @@ mod tests {
     #[tokio::test]
     async fn fresh_insert_and_get_round_trip() {
         let cache: TokenCache<DummyToken> = TokenCache::new(Duration::from_secs(60));
-        cache.insert(
-            CacheKey::new("k1"),
-            DummyToken { value: "v1".into() },
-            Duration::from_secs(300),
-        ).await;
+        cache
+            .insert(
+                CacheKey::new("k1"),
+                DummyToken { value: "v1".into() },
+                Duration::from_secs(300),
+            )
+            .await;
         let got = cache.get(&CacheKey::new("k1")).await.unwrap();
         assert_eq!(got.payload.value, "v1");
         assert!(got.ttl_remaining() > Duration::from_secs(60));
@@ -281,11 +284,13 @@ mod tests {
     #[tokio::test]
     async fn stale_within_safety_window_is_still_served() {
         let cache: TokenCache<DummyToken> = TokenCache::new(Duration::from_secs(60));
-        cache.insert(
-            CacheKey::new("k1"),
-            DummyToken { value: "v1".into() },
-            Duration::from_secs(30),       // less than safety window
-        ).await;
+        cache
+            .insert(
+                CacheKey::new("k1"),
+                DummyToken { value: "v1".into() },
+                Duration::from_secs(30), // less than safety window
+            )
+            .await;
         let got = cache.get(&CacheKey::new("k1")).await.unwrap();
         assert!(got.is_stale(Duration::from_secs(60)));
         assert!(!got.is_expired());
@@ -300,11 +305,13 @@ mod tests {
     #[tokio::test]
     async fn evict_clears_entry() {
         let cache: TokenCache<DummyToken> = TokenCache::new(Duration::from_secs(60));
-        cache.insert(
-            CacheKey::new("k1"),
-            DummyToken { value: "v".into() },
-            Duration::from_secs(300),
-        ).await;
+        cache
+            .insert(
+                CacheKey::new("k1"),
+                DummyToken { value: "v".into() },
+                Duration::from_secs(300),
+            )
+            .await;
         cache.evict(&CacheKey::new("k1")).await;
         assert!(cache.get(&CacheKey::new("k1")).await.is_none());
     }
@@ -312,8 +319,20 @@ mod tests {
     #[tokio::test]
     async fn clear_drops_every_entry() {
         let cache: TokenCache<DummyToken> = TokenCache::new(Duration::from_secs(60));
-        cache.insert(CacheKey::new("a"), DummyToken { value: "1".into() }, Duration::from_secs(300)).await;
-        cache.insert(CacheKey::new("b"), DummyToken { value: "2".into() }, Duration::from_secs(300)).await;
+        cache
+            .insert(
+                CacheKey::new("a"),
+                DummyToken { value: "1".into() },
+                Duration::from_secs(300),
+            )
+            .await;
+        cache
+            .insert(
+                CacheKey::new("b"),
+                DummyToken { value: "2".into() },
+                Duration::from_secs(300),
+            )
+            .await;
         assert_eq!(cache.len().await, 2);
         cache.clear().await;
         assert_eq!(cache.len().await, 0);
@@ -321,8 +340,7 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_lock_is_single_flight() {
-        let cache: Arc<TokenCache<DummyToken>> =
-            Arc::new(TokenCache::new(Duration::from_secs(60)));
+        let cache: Arc<TokenCache<DummyToken>> = Arc::new(TokenCache::new(Duration::from_secs(60)));
         // No pre-existing entry — the refresh lock should still
         // be acquirable on first call.
         let guard1 = cache.take_refresh_lock(&CacheKey::new("k1")).await;
@@ -331,6 +349,9 @@ mod tests {
         assert!(guard2.is_none(), "second concurrent call must NOT acquire");
         drop(guard1);
         let guard3 = cache.take_refresh_lock(&CacheKey::new("k1")).await;
-        assert!(guard3.is_some(), "after first drop, third call must acquire");
+        assert!(
+            guard3.is_some(),
+            "after first drop, third call must acquire"
+        );
     }
 }

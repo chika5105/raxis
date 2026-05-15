@@ -56,19 +56,21 @@ pub fn build_blob_url(host: &str, repo: &str, digest: &OciDigest) -> String {
 /// * 5xx                 → `RegistryServerError`
 /// * I/O on staging file → `Io`
 pub(crate) async fn stream_blob_to_staging(
-    client:        &reqwest::Client,
-    host:          &str,
-    repository:    &str,
-    digest:        &OciDigest,
-    bearer_token:  Option<&str>,
-    staging_path:  &Path,
+    client: &reqwest::Client,
+    host: &str,
+    repository: &str,
+    digest: &OciDigest,
+    bearer_token: Option<&str>,
+    staging_path: &Path,
 ) -> Result<OciDigest, ImageResolverError> {
     let url = build_blob_url(host, repository, digest);
 
     if let Some(parent) = staging_path.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|source| ImageResolverError::Io {
-                path: parent.to_path_buf(), source,
+                path: parent.to_path_buf(),
+                source,
             })?;
     }
 
@@ -83,67 +85,80 @@ pub(crate) async fn stream_blob_to_staging(
     // Distinguish kernel pulls in registry access logs.
     req = req.header(reqwest::header::USER_AGENT, "raxis-image-cache/v2");
 
-    let resp = req.send().await.map_err(|e| ImageResolverError::RegistryUnreachable {
-        host:   host.to_owned(),
-        detail: format!("HTTP request failed: {e}"),
-    })?;
+    let resp = req
+        .send()
+        .await
+        .map_err(|e| ImageResolverError::RegistryUnreachable {
+            host: host.to_owned(),
+            detail: format!("HTTP request failed: {e}"),
+        })?;
 
     let status = resp.status();
     if status.is_client_error() {
         return Err(match status.as_u16() {
             401 | 403 => ImageResolverError::RegistryAuthRejected {
-                host:       host.to_owned(),
+                host: host.to_owned(),
                 repository: repository.to_owned(),
             },
             404 => ImageResolverError::RegistryNotFound {
-                host:       host.to_owned(),
+                host: host.to_owned(),
                 repository: repository.to_owned(),
-                digest:     *digest,
+                digest: *digest,
             },
             _ => ImageResolverError::RegistryServerError {
-                host:   host.to_owned(),
+                host: host.to_owned(),
                 status: status.as_u16(),
             },
         });
     }
     if status.is_server_error() {
         return Err(ImageResolverError::RegistryServerError {
-            host:   host.to_owned(),
+            host: host.to_owned(),
             status: status.as_u16(),
         });
     }
     if !status.is_success() {
         return Err(ImageResolverError::RegistryServerError {
-            host:   host.to_owned(),
+            host: host.to_owned(),
             status: status.as_u16(),
         });
     }
 
     // Stream the body to disk while hashing.
-    let mut file = File::create(staging_path).await
+    let mut file = File::create(staging_path)
+        .await
         .map_err(|source| ImageResolverError::Io {
-            path: staging_path.to_path_buf(), source,
+            path: staging_path.to_path_buf(),
+            source,
         })?;
 
     let mut hasher = Sha256::new();
     let mut stream = resp.bytes_stream();
     while let Some(chunk) = stream.next().await {
         let chunk = chunk.map_err(|e| ImageResolverError::RegistryUnreachable {
-            host:   host.to_owned(),
+            host: host.to_owned(),
             detail: format!("HTTP body chunk failed: {e}"),
         })?;
         hasher.update(&chunk);
-        file.write_all(&chunk).await
+        file.write_all(&chunk)
+            .await
             .map_err(|source| ImageResolverError::Io {
-                path: staging_path.to_path_buf(), source,
+                path: staging_path.to_path_buf(),
+                source,
             })?;
     }
-    file.flush().await.map_err(|source| ImageResolverError::Io {
-        path: staging_path.to_path_buf(), source,
-    })?;
-    file.sync_all().await.map_err(|source| ImageResolverError::Io {
-        path: staging_path.to_path_buf(), source,
-    })?;
+    file.flush()
+        .await
+        .map_err(|source| ImageResolverError::Io {
+            path: staging_path.to_path_buf(),
+            source,
+        })?;
+    file.sync_all()
+        .await
+        .map_err(|source| ImageResolverError::Io {
+            path: staging_path.to_path_buf(),
+            source,
+        })?;
 
     let mut bytes = [0u8; 32];
     bytes.copy_from_slice(&hasher.finalize());
@@ -154,19 +169,21 @@ pub(crate) async fn stream_blob_to_staging(
 /// XFS, btrfs, ZFS) `rename(2)` is atomic when source and target
 /// live on the same device, which our cache layout guarantees
 /// (everything lives under `<root>/blobs/sha256/<aa>/`).
-pub(crate) async fn atomic_rename(
-    from: &Path,
-    to:   &PathBuf,
-) -> Result<(), ImageResolverError> {
+pub(crate) async fn atomic_rename(from: &Path, to: &PathBuf) -> Result<(), ImageResolverError> {
     if let Some(parent) = to.parent() {
-        tokio::fs::create_dir_all(parent).await
+        tokio::fs::create_dir_all(parent)
+            .await
             .map_err(|source| ImageResolverError::Io {
-                path: parent.to_path_buf(), source,
+                path: parent.to_path_buf(),
+                source,
             })?;
     }
-    tokio::fs::rename(from, to).await.map_err(|source| ImageResolverError::Io {
-        path: to.clone(), source,
-    })
+    tokio::fs::rename(from, to)
+        .await
+        .map_err(|source| ImageResolverError::Io {
+            path: to.clone(),
+            source,
+        })
 }
 
 /// Best-effort cleanup of a partial staging file. Surfaces no error
@@ -182,7 +199,8 @@ mod tests {
 
     fn d() -> OciDigest {
         "sha256:abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234abcd1234"
-            .parse().unwrap()
+            .parse()
+            .unwrap()
     }
 
     #[test]

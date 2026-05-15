@@ -64,7 +64,7 @@ pub enum ApiError {
         /// HTTP status code (e.g. 400, 500).
         status: u16,
         /// Response body (typically a JSON `{ "fault_message": "..." }`).
-        body:   String,
+        body: String,
     },
     /// JSON serialization or response-parse failure.
     #[error("json: {0}")]
@@ -99,7 +99,7 @@ pub struct FirecrackerApi {
     /// Per-call deadline. The Firecracker boot sequence is fast
     /// (single-digit ms per API call); a 5s default catches stalled
     /// VMMs without making boot-failure tests slow.
-    timeout:  Duration,
+    timeout: Duration,
 }
 
 impl FirecrackerApi {
@@ -108,7 +108,7 @@ impl FirecrackerApi {
     pub fn new(api_sock: impl Into<PathBuf>) -> Self {
         Self {
             api_sock: api_sock.into(),
-            timeout:  Duration::from_secs(5),
+            timeout: Duration::from_secs(5),
         }
     }
 
@@ -179,8 +179,8 @@ impl FirecrackerApi {
     fn request<T: Serialize>(
         &self,
         method: &str,
-        path:   &str,
-        body:   Option<&T>,
+        path: &str,
+        body: Option<&T>,
     ) -> Result<HttpResponse, ApiError> {
         let mut stream = UnixStream::connect(&self.api_sock).map_err(ApiError::Transport)?;
         stream
@@ -206,7 +206,7 @@ impl FirecrackerApi {
         } else {
             Err(ApiError::Status {
                 status: response.status,
-                body:   response.body_string(),
+                body: response.body_string(),
             })
         }
     }
@@ -215,8 +215,8 @@ impl FirecrackerApi {
     fn request<T: Serialize>(
         &self,
         _method: &str,
-        _path:   &str,
-        _body:   Option<&T>,
+        _path: &str,
+        _body: Option<&T>,
     ) -> Result<HttpResponse, ApiError> {
         Err(ApiError::NotSupportedOnTarget)
     }
@@ -254,7 +254,7 @@ pub(crate) fn build_http_request(method: &str, path: &str, body: Option<&[u8]>) 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct HttpResponse {
     pub status: u16,
-    pub body:   Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 impl HttpResponse {
@@ -269,7 +269,7 @@ impl HttpResponse {
 /// `Content-Length`; rejects chunked encoding (Firecracker never uses
 /// it). Caller passes a hard deadline for the entire response.
 pub(crate) fn read_http_response<R: Read>(
-    reader:   &mut R,
+    reader: &mut R,
     deadline: Instant,
 ) -> Result<HttpResponse, ApiError> {
     // Read headers (everything up to and including the first blank
@@ -290,7 +290,7 @@ pub(crate) fn read_http_response<R: Read>(
         if let Some(end) = find_double_crlf(&header_buf) {
             // Headers end at `end + 4`.
             let raw_headers = &header_buf[..end];
-            let body_start  = end + 4;
+            let body_start = end + 4;
             let already_in_buf = header_buf.len().saturating_sub(body_start);
 
             let (status, content_length) = parse_status_and_content_length(raw_headers)?;
@@ -391,13 +391,13 @@ pub struct BootSource {
 pub struct Drive {
     /// Stable identifier (e.g. `"rootfs"`, `"data"`). Path-encoded
     /// into the URL.
-    pub drive_id:        String,
+    pub drive_id: String,
     /// Host path of the backing image.
-    pub path_on_host:    PathBuf,
+    pub path_on_host: PathBuf,
     /// `true` ⇒ this drive is the rootfs (`/dev/vda` on the guest).
-    pub is_root_device:  bool,
+    pub is_root_device: bool,
     /// `true` ⇒ guest sees it as read-only.
-    pub is_read_only:    bool,
+    pub is_read_only: bool,
 }
 
 /// `/machine-config` payload.
@@ -424,14 +424,14 @@ pub struct MachineConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct VsockConfig {
     /// Stable identifier — Firecracker accepts a free-form string.
-    pub vsock_id:     String,
+    pub vsock_id: String,
     /// Guest-side context id. Host CID is always 2; planner-VM CIDs
     /// start at 3 in V2.
-    pub guest_cid:    u32,
+    pub guest_cid: u32,
     /// Host UDS path the VMM uses to expose the guest's vsock device.
     /// The guest sees `vhost-vsock`; the host sees a UDS that accepts
     /// `CONNECT <port>` lines.
-    pub uds_path:     PathBuf,
+    pub uds_path: PathBuf,
 }
 
 /// `/actions` payload.
@@ -510,8 +510,7 @@ mod tests {
     #[test]
     fn response_parser_handles_body_split_across_reads() {
         // Two chunks: headers + first byte of body, then rest of body.
-        let raw =
-            b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
+        let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\nhello";
         let mut cursor = std::io::Cursor::new(raw.as_ref());
         let r = read_http_response(&mut cursor, Instant::now() + Duration::from_secs(1)).unwrap();
         assert_eq!(r.status, 200);
@@ -522,8 +521,8 @@ mod tests {
     fn response_parser_rejects_eof_inside_headers() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n";
         let mut cursor = std::io::Cursor::new(raw.as_ref());
-        let err = read_http_response(&mut cursor, Instant::now() + Duration::from_secs(1))
-            .unwrap_err();
+        let err =
+            read_http_response(&mut cursor, Instant::now() + Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, ApiError::MalformedResponse(_)));
     }
 
@@ -531,8 +530,8 @@ mod tests {
     fn response_parser_rejects_eof_before_body_complete() {
         let raw = b"HTTP/1.1 200 OK\r\nContent-Length: 10\r\n\r\nhi";
         let mut cursor = std::io::Cursor::new(raw.as_ref());
-        let err = read_http_response(&mut cursor, Instant::now() + Duration::from_secs(1))
-            .unwrap_err();
+        let err =
+            read_http_response(&mut cursor, Instant::now() + Duration::from_secs(1)).unwrap_err();
         assert!(matches!(err, ApiError::MalformedResponse(_)));
     }
 
@@ -542,8 +541,8 @@ mod tests {
     fn boot_source_serializes_to_canonical_firecracker_shape() {
         let bs = BootSource {
             kernel_image_path: PathBuf::from("/var/raxis/kernel/vmlinux.bin"),
-            boot_args:         Some("console=ttyS0 reboot=k panic=1".to_owned()),
-            initrd_path:       None,
+            boot_args: Some("console=ttyS0 reboot=k panic=1".to_owned()),
+            initrd_path: None,
         };
         let v: serde_json::Value = serde_json::to_value(&bs).unwrap();
         assert_eq!(v["kernel_image_path"], "/var/raxis/kernel/vmlinux.bin");
@@ -555,10 +554,10 @@ mod tests {
     #[test]
     fn drive_serializes_with_required_fields() {
         let d = Drive {
-            drive_id:       "rootfs".to_owned(),
-            path_on_host:   PathBuf::from("/var/raxis/img/orchestrator-rootfs.img"),
+            drive_id: "rootfs".to_owned(),
+            path_on_host: PathBuf::from("/var/raxis/img/orchestrator-rootfs.img"),
             is_root_device: true,
-            is_read_only:   true,
+            is_read_only: true,
         };
         let v: serde_json::Value = serde_json::to_value(&d).unwrap();
         assert_eq!(v["drive_id"], "rootfs");
@@ -569,9 +568,9 @@ mod tests {
     #[test]
     fn machine_config_pins_smt_default_to_false() {
         let m = MachineConfig {
-            vcpu_count:   1,
+            vcpu_count: 1,
             mem_size_mib: 256,
-            smt:          false,
+            smt: false,
         };
         let v: serde_json::Value = serde_json::to_value(&m).unwrap();
         assert_eq!(v["smt"], false);
@@ -580,9 +579,9 @@ mod tests {
     #[test]
     fn vsock_config_carries_guest_cid_and_uds() {
         let c = VsockConfig {
-            vsock_id:  "raxis-vsock".to_owned(),
+            vsock_id: "raxis-vsock".to_owned(),
             guest_cid: 42,
-            uds_path:  PathBuf::from("/run/raxis/vsock-42.sock"),
+            uds_path: PathBuf::from("/run/raxis/vsock-42.sock"),
         };
         let v: serde_json::Value = serde_json::to_value(&c).unwrap();
         assert_eq!(v["guest_cid"], 42);
@@ -591,11 +590,15 @@ mod tests {
 
     #[test]
     fn action_type_serializes_to_pascal_case() {
-        let a = Action { action_type: ActionType::InstanceStart };
+        let a = Action {
+            action_type: ActionType::InstanceStart,
+        };
         let v: serde_json::Value = serde_json::to_value(&a).unwrap();
         assert_eq!(v["action_type"], "InstanceStart");
 
-        let a2 = Action { action_type: ActionType::SendCtrlAltDel };
+        let a2 = Action {
+            action_type: ActionType::SendCtrlAltDel,
+        };
         let v2: serde_json::Value = serde_json::to_value(&a2).unwrap();
         assert_eq!(v2["action_type"], "SendCtrlAltDel");
     }
@@ -622,10 +625,7 @@ mod tests {
     fn end_to_end_put_machine_config_round_trips_against_in_test_server() {
         use std::os::unix::net::UnixListener;
 
-        let dir = std::env::temp_dir().join(format!(
-            "raxis-fcapi-test-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("raxis-fcapi-test-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let sock = dir.join("api.sock");
         let _ = std::fs::remove_file(&sock);
@@ -674,9 +674,9 @@ mod tests {
 
         let api = FirecrackerApi::new(&sock).with_timeout(Duration::from_secs(2));
         api.put_machine_config(&MachineConfig {
-            vcpu_count:   2,
+            vcpu_count: 2,
             mem_size_mib: 256,
-            smt:          false,
+            smt: false,
         })
         .expect("put_machine_config must succeed against the test server");
 

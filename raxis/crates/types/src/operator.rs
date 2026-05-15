@@ -10,8 +10,8 @@
 // top-level IPC types on that socket.
 
 use crate::{
-    CapabilityClass, DelegationId, EscalationId, InitiativeId, InitiativeState,
-    OperatorErrorCode, Role, SessionId, TaskId, TaskState, TerminalCriteria,
+    CapabilityClass, DelegationId, EscalationId, InitiativeId, InitiativeState, OperatorErrorCode,
+    Role, SessionId, TaskId, TaskState, TerminalCriteria,
 };
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
@@ -130,7 +130,7 @@ pub enum OperatorRequest {
     /// `plan_toml_path` against the active policy.
     EstimateCost {
         plan_toml_path: PathBuf,
-        plan_sig_path:  PathBuf,
+        plan_sig_path: PathBuf,
     },
 
     /// `operator-ergonomics.md §12.3`. Runs the same admission
@@ -140,7 +140,7 @@ pub enum OperatorRequest {
     /// admission errors a real submission would raise.
     DryRunAdmit {
         plan_toml_path: PathBuf,
-        plan_sig_path:  PathBuf,
+        plan_sig_path: PathBuf,
     },
 
     /// `operator-ergonomics.md §13.4`. Streams `KernelPush` events for
@@ -183,10 +183,18 @@ pub struct ApprovalScope {
 #[serde(tag = "result", rename_all = "PascalCase")]
 pub enum OperatorResponse {
     // --- success variants ---
-    InitiativeCreated { initiative_id: InitiativeId },
-    PlanApproved { initiative_id: InitiativeId },
-    PlanRejected { initiative_id: InitiativeId },
-    InitiativeAborted { initiative_id: InitiativeId },
+    InitiativeCreated {
+        initiative_id: InitiativeId,
+    },
+    PlanApproved {
+        initiative_id: InitiativeId,
+    },
+    PlanRejected {
+        initiative_id: InitiativeId,
+    },
+    InitiativeAborted {
+        initiative_id: InitiativeId,
+    },
 
     SessionCreated {
         session_id: SessionId,
@@ -206,7 +214,9 @@ pub enum OperatorResponse {
         revoked_at: crate::id::UnixSeconds,
     },
 
-    TaskAborted { task_id: TaskId },
+    TaskAborted {
+        task_id: TaskId,
+    },
     TaskResumed {
         task_id: TaskId,
         prior_state: TaskState,
@@ -256,7 +266,7 @@ pub enum OperatorResponse {
     },
     DryRunAdmitted {
         target_ref: String,
-        warnings:   Vec<String>,
+        warnings: Vec<String>,
     },
     InitiativeSubscribed {
         initiative_id: InitiativeId,
@@ -289,8 +299,12 @@ pub enum OperatorResponse {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "PascalCase")]
 pub enum OperatorErrorDetail {
-    TaskNotResumable { current_state: TaskState },
-    TaskNotRetryable { current_state: TaskState },
+    TaskNotResumable {
+        current_state: TaskState,
+    },
+    TaskNotRetryable {
+        current_state: TaskState,
+    },
     InitiativeTerminal {
         initiative_state: InitiativeState,
         terminal_criteria: TerminalCriteria,

@@ -74,11 +74,11 @@ pub async fn bind_default_listener() -> io::Result<TcpListener> {
 /// process. Without a token A3 cannot authenticate to the kernel
 /// and the loop refuses to start.
 pub async fn accept_loop_a3(
-    listener:       TcpListener,
-    host_cid:       u32,
+    listener: TcpListener,
+    host_cid: u32,
     admission_port: u32,
-    tunnel_port:    u32,
-    session_token:  String,
+    tunnel_port: u32,
+    session_token: String,
 ) -> Result<(), AcceptLoopError> {
     eprintln!(
         "raxis-tproxy(A3): listening 0.0.0.0:3129; kernel admission \
@@ -87,16 +87,10 @@ pub async fn accept_loop_a3(
     );
     loop {
         let (agent, _peer) = listener.accept().await?;
-        let token  = session_token.clone();
+        let token = session_token.clone();
         tokio::spawn(async move {
-            let _ = handle_one_a3_connection(
-                agent,
-                host_cid,
-                admission_port,
-                tunnel_port,
-                token,
-            )
-            .await;
+            let _ =
+                handle_one_a3_connection(agent, host_cid, admission_port, tunnel_port, token).await;
         });
     }
 }
@@ -128,11 +122,11 @@ pub enum A3ConnectionError {
 
 #[cfg(target_os = "linux")]
 async fn handle_one_a3_connection(
-    mut agent:      TcpStream,
-    host_cid:       u32,
+    mut agent: TcpStream,
+    host_cid: u32,
     admission_port: u32,
-    tunnel_port:    u32,
-    session_token:  String,
+    tunnel_port: u32,
+    session_token: String,
 ) -> Result<(), A3ConnectionError> {
     use raxis_types::TproxyProtocol;
     use tokio_vsock::{VsockAddr, VsockStream};
@@ -147,12 +141,12 @@ async fn handle_one_a3_connection(
     };
     let protocol = match peeked.kind {
         crate::peek::PeekKind::TlsClientHello => TproxyProtocol::Tls,
-        crate::peek::PeekKind::Http           => TproxyProtocol::Http,
+        crate::peek::PeekKind::Http => TproxyProtocol::Http,
     };
     let (sni, host_header) = match protocol {
-        TproxyProtocol::Tls  => (peeked.host_or_sni.clone(), None),
+        TproxyProtocol::Tls => (peeked.host_or_sni.clone(), None),
         TproxyProtocol::Http => (None, peeked.host_or_sni.clone()),
-        TproxyProtocol::Tcp  => (None, None),
+        TproxyProtocol::Tcp => (None, None),
     };
 
     // Open the admission vsock channel.
@@ -204,11 +198,11 @@ async fn handle_one_a3_connection(
 // library docs build.
 #[cfg(not(target_os = "linux"))]
 async fn handle_one_a3_connection(
-    _agent:          TcpStream,
-    _host_cid:       u32,
+    _agent: TcpStream,
+    _host_cid: u32,
     _admission_port: u32,
-    _tunnel_port:    u32,
-    _session_token:  String,
+    _tunnel_port: u32,
+    _session_token: String,
 ) -> Result<(), A3ConnectionError> {
     Err(A3ConnectionError::Io(io::Error::new(
         io::ErrorKind::Unsupported,
@@ -221,12 +215,15 @@ async fn handle_one_a3_connection(
 // ---------------------------------------------------------------------------
 
 fn original_dst_v4(stream: &TcpStream) -> io::Result<SocketAddr> {
-    use nix::sys::socket::sockopt::OriginalDst;
     use nix::sys::socket::getsockopt;
+    use nix::sys::socket::sockopt::OriginalDst;
     let raw_fd = stream.as_raw_fd();
     let fd = unsafe { std::os::fd::BorrowedFd::borrow_raw(raw_fd) };
     let dst = getsockopt(&fd, OriginalDst).map_err(|e| {
-        io::Error::new(io::ErrorKind::Other, format!("getsockopt SO_ORIGINAL_DST: {e}"))
+        io::Error::new(
+            io::ErrorKind::Other,
+            format!("getsockopt SO_ORIGINAL_DST: {e}"),
+        )
     })?;
     let port = u16::from_be(dst.sin_port);
     let ip_bytes = u32::from_be(dst.sin_addr.s_addr).to_be_bytes();

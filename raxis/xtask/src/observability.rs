@@ -388,12 +388,18 @@ fn otel_collector_exposition_url() -> String {
 pub fn print_url_block() {
     let mut out = std::io::stderr().lock();
     let _ = writeln!(out, "==> observability surface (project={COMPOSE_PROJECT})");
-    let _ = writeln!(out, "    Grafana    : {} (admin/{GRAFANA_ADMIN_PASS}, anonymous Viewer OK)",
-        grafana_home_url());
+    let _ = writeln!(
+        out,
+        "    Grafana    : {} (admin/{GRAFANA_ADMIN_PASS}, anonymous Viewer OK)",
+        grafana_home_url()
+    );
     let _ = writeln!(out, "    Prometheus : {}", prometheus_home_url());
     let _ = writeln!(out, "    Prom targets: {}", prometheus_targets_url());
-    let _ = writeln!(out, "    OTLP/HTTP  : {} (kernel `[observability]` push target)",
-        otel_otlp_http_url());
+    let _ = writeln!(
+        out,
+        "    OTLP/HTTP  : {} (kernel `[observability]` push target)",
+        otel_otlp_http_url()
+    );
     let _ = writeln!(out, "    OTel zPages: {}", otel_health_url());
     let _ = writeln!(out, "    OTel self  : {}", otel_self_metrics_url());
     let _ = writeln!(out, "    OTel→Prom  : {}", otel_collector_exposition_url());

@@ -47,8 +47,8 @@ use serde::{Deserialize, Serialize};
 use crate::errors::CliError;
 use crate::GlobalFlags;
 
-const INBOX_REL_PATH:  &[&str] = &["notifications", "inbox.jsonl"];
-const DEFAULT_LIMIT:   usize   = 50;
+const INBOX_REL_PATH: &[&str] = &["notifications", "inbox.jsonl"];
+const DEFAULT_LIMIT: usize = 50;
 const HUMAN_SUMMARY_TRUNC: usize = 80;
 
 // ────────────────────────────────────────────────────────────────────
@@ -63,13 +63,13 @@ const HUMAN_SUMMARY_TRUNC: usize = 80;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct InboxRecord {
     #[serde(default)]
-    notified_at:   i64,
+    notified_at: i64,
     #[serde(default)]
-    event_kind:    String,
+    event_kind: String,
     #[serde(default)]
-    event_seq:     u64,
+    event_seq: u64,
     #[serde(default)]
-    payload:       serde_json::Value,
+    payload: serde_json::Value,
     #[serde(default)]
     human_summary: String,
 }
@@ -109,10 +109,10 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 #[derive(Debug, Clone, Default)]
 struct InboxOpts {
-    kind:                 Option<String>,
-    since_unix_secs:      Option<i64>,
-    limit:                Option<usize>,
-    json:                 bool,
+    kind: Option<String>,
+    since_unix_secs: Option<i64>,
+    limit: Option<usize>,
+    json: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<InboxOpts, CliError> {
@@ -137,9 +137,7 @@ fn parse_args(args: &[String]) -> Result<InboxOpts, CliError> {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if n == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
                 opts.limit = Some(n);
             }
@@ -171,12 +169,15 @@ fn arg_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, 
 fn parse_since(raw: &str) -> Result<i64, CliError> {
     if let Some(rest) = raw.strip_prefix("unix-secs:") {
         return rest.parse::<i64>().map_err(|_| {
-            CliError::Usage(format!("--since unix-secs:N must be an integer, got {rest:?}"))
+            CliError::Usage(format!(
+                "--since unix-secs:N must be an integer, got {rest:?}"
+            ))
         });
     }
-    let last = raw.chars().last().ok_or_else(|| {
-        CliError::Usage("--since cannot be empty".to_owned())
-    })?;
+    let last = raw
+        .chars()
+        .last()
+        .ok_or_else(|| CliError::Usage("--since cannot be empty".to_owned()))?;
     let unit_secs = match last {
         's' => 1_i64,
         'm' => 60,
@@ -190,9 +191,7 @@ fn parse_since(raw: &str) -> Result<i64, CliError> {
     };
     let n: i64 = raw[..raw.len() - last.len_utf8()]
         .parse()
-        .map_err(|_| {
-            CliError::Usage(format!("--since prefix must be an integer, got {raw:?}"))
-        })?;
+        .map_err(|_| CliError::Usage(format!("--since prefix must be an integer, got {raw:?}")))?;
     let now = unix_now_secs() as i64;
     Ok(now - n.saturating_mul(unit_secs))
 }
@@ -233,12 +232,9 @@ fn inbox_path(data_dir: &Path) -> PathBuf {
 ///   - records that match the user's filter (newest-last, capped to
 ///     `opts.limit`);
 ///   - the count of lines we could not parse (for a footer warning).
-fn read_filtered(
-    path: &Path,
-    opts: &InboxOpts,
-) -> Result<(Vec<InboxRecord>, u64), CliError> {
+fn read_filtered(path: &Path, opts: &InboxOpts) -> Result<(Vec<InboxRecord>, u64), CliError> {
     let file = std::fs::File::open(path).map_err(|e| CliError::Io {
-        path:   path.display().to_string(),
+        path: path.display().to_string(),
         source: e,
     })?;
     let reader = BufReader::new(file);
@@ -300,12 +296,7 @@ fn filter_match(rec: &InboxRecord, opts: &InboxOpts) -> bool {
 // Rendering — human
 // ────────────────────────────────────────────────────────────────────
 
-fn render_human<W: Write>(
-    out:            &mut W,
-    rows:           &[InboxRecord],
-    parse_failures: u64,
-    path:           &Path,
-) {
+fn render_human<W: Write>(out: &mut W, rows: &[InboxRecord], parse_failures: u64, path: &Path) {
     let _ = writeln!(
         out,
         "Inbox at {} ({n} record{plural}{warn}):",
@@ -313,8 +304,10 @@ fn render_human<W: Write>(
         n = rows.len(),
         plural = if rows.len() == 1 { "" } else { "s" },
         warn = if parse_failures > 0 {
-            format!(", {parse_failures} unparsable line{p}",
-                p = if parse_failures == 1 { "" } else { "s" })
+            format!(
+                ", {parse_failures} unparsable line{p}",
+                p = if parse_failures == 1 { "" } else { "s" }
+            )
         } else {
             String::new()
         },
@@ -327,9 +320,9 @@ fn render_human<W: Write>(
         let _ = writeln!(
             out,
             "  [{ts:>10}] seq={seq:<6} {kind:<32} {summary}",
-            ts      = r.notified_at,
-            seq     = r.event_seq,
-            kind    = truncate(&r.event_kind, 32),
+            ts = r.notified_at,
+            seq = r.event_seq,
+            kind = truncate(&r.event_kind, 32),
             summary = truncate(&r.human_summary, HUMAN_SUMMARY_TRUNC),
         );
     }
@@ -405,9 +398,9 @@ mod tests {
         let now = unix_now_secs() as i64;
         assert!((parse_since("0s").unwrap() - now).abs() <= 5);
         assert!((parse_since("60s").unwrap() - (now - 60)).abs() <= 5);
-        assert!((parse_since("2m").unwrap()  - (now - 120)).abs() <= 5);
-        assert!((parse_since("1h").unwrap()  - (now - 3_600)).abs() <= 5);
-        assert!((parse_since("1d").unwrap()  - (now - 86_400)).abs() <= 5);
+        assert!((parse_since("2m").unwrap() - (now - 120)).abs() <= 5);
+        assert!((parse_since("1h").unwrap() - (now - 3_600)).abs() <= 5);
+        assert!((parse_since("1d").unwrap() - (now - 86_400)).abs() <= 5);
     }
 
     #[test]
@@ -432,11 +425,7 @@ mod tests {
 
     #[test]
     fn parse_args_rejects_zero_limit() {
-        let err = parse_args(&[
-            "--limit".to_owned(),
-            "0".to_owned(),
-        ])
-        .unwrap_err();
+        let err = parse_args(&["--limit".to_owned(), "0".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
@@ -513,7 +502,10 @@ mod tests {
             ],
         );
         let path = inbox_path(tmp.path());
-        let opts = InboxOpts { limit: Some(2), ..Default::default() };
+        let opts = InboxOpts {
+            limit: Some(2),
+            ..Default::default()
+        };
         let (rows, _) = read_filtered(&path, &opts).unwrap();
         let seqs: Vec<u64> = rows.iter().map(|r| r.event_seq).collect();
         assert_eq!(seqs, vec![2, 3]);
@@ -522,15 +514,13 @@ mod tests {
     #[test]
     fn render_human_renders_count_and_summary_lines() {
         let mut buf: Vec<u8> = Vec::new();
-        let rows = vec![
-            InboxRecord {
-                notified_at:   100,
-                event_kind:    "EscalationApproved".to_owned(),
-                event_seq:     42,
-                payload:       serde_json::json!({}),
-                human_summary: "approved by chika".to_owned(),
-            },
-        ];
+        let rows = vec![InboxRecord {
+            notified_at: 100,
+            event_kind: "EscalationApproved".to_owned(),
+            event_seq: 42,
+            payload: serde_json::json!({}),
+            human_summary: "approved by chika".to_owned(),
+        }];
         render_human(&mut buf, &rows, 0, Path::new("/tmp/inbox.jsonl"));
         let s = String::from_utf8(buf).unwrap();
         assert!(s.contains("1 record"), "got: {s}");
@@ -560,17 +550,17 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         let rows = vec![
             InboxRecord {
-                notified_at:   100,
-                event_kind:    "Foo".to_owned(),
-                event_seq:     1,
-                payload:       serde_json::json!({"k":"v"}),
+                notified_at: 100,
+                event_kind: "Foo".to_owned(),
+                event_seq: 1,
+                payload: serde_json::json!({"k":"v"}),
                 human_summary: "s1".to_owned(),
             },
             InboxRecord {
-                notified_at:   200,
-                event_kind:    "Bar".to_owned(),
-                event_seq:     2,
-                payload:       serde_json::json!({}),
+                notified_at: 200,
+                event_kind: "Bar".to_owned(),
+                event_seq: 2,
+                payload: serde_json::json!({}),
                 human_summary: "s2".to_owned(),
             },
         ];

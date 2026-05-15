@@ -41,31 +41,49 @@ pub enum AttrValue {
 }
 
 impl From<&str> for AttrValue {
-    fn from(s: &str) -> Self { Self::Str(s.to_owned()) }
+    fn from(s: &str) -> Self {
+        Self::Str(s.to_owned())
+    }
 }
 impl From<String> for AttrValue {
-    fn from(s: String) -> Self { Self::Str(s) }
+    fn from(s: String) -> Self {
+        Self::Str(s)
+    }
 }
 impl From<i64> for AttrValue {
-    fn from(v: i64) -> Self { Self::I64(v) }
+    fn from(v: i64) -> Self {
+        Self::I64(v)
+    }
 }
 impl From<u64> for AttrValue {
-    fn from(v: u64) -> Self { Self::I64(v as i64) }
+    fn from(v: u64) -> Self {
+        Self::I64(v as i64)
+    }
 }
 impl From<u32> for AttrValue {
-    fn from(v: u32) -> Self { Self::I64(v as i64) }
+    fn from(v: u32) -> Self {
+        Self::I64(v as i64)
+    }
 }
 impl From<i32> for AttrValue {
-    fn from(v: i32) -> Self { Self::I64(v as i64) }
+    fn from(v: i32) -> Self {
+        Self::I64(v as i64)
+    }
 }
 impl From<usize> for AttrValue {
-    fn from(v: usize) -> Self { Self::I64(v as i64) }
+    fn from(v: usize) -> Self {
+        Self::I64(v as i64)
+    }
 }
 impl From<f64> for AttrValue {
-    fn from(v: f64) -> Self { Self::F64(v) }
+    fn from(v: f64) -> Self {
+        Self::F64(v)
+    }
 }
 impl From<bool> for AttrValue {
-    fn from(v: bool) -> Self { Self::Bool(v) }
+    fn from(v: bool) -> Self {
+        Self::Bool(v)
+    }
 }
 
 /// Sorted attribute map. We use [`BTreeMap`] (not `HashMap`) so the
@@ -114,18 +132,18 @@ impl SpanName {
     /// OTel-canonical name this span ships under.
     pub fn as_otel_name(&self) -> &'static str {
         match self {
-            Self::IntentAdmission         => "raxis.intent.admission",
-            Self::GatewayFetch            => "raxis.gateway.fetch",
-            Self::VerifierExecution       => "raxis.verifier.execution",
-            Self::CredentialProxyRequest  => "raxis.credential_proxy.request",
-            Self::NotificationDispatch    => "raxis.notification.dispatch",
-            Self::OperatorIpc             => "raxis.operator.ipc",
-            Self::EscalationLifecycle     => "raxis.escalation.lifecycle",
-            Self::SessionSpawn            => "raxis.session.spawn",
-            Self::PolicyEpochAdvance      => "raxis.policy.epoch.advance",
-            Self::AuditEmit               => "raxis.audit.emit",
-            Self::BreakglassActivation    => "raxis.breakglass.activation",
-            Self::BreakglassAction        => "raxis.breakglass.action",
+            Self::IntentAdmission => "raxis.intent.admission",
+            Self::GatewayFetch => "raxis.gateway.fetch",
+            Self::VerifierExecution => "raxis.verifier.execution",
+            Self::CredentialProxyRequest => "raxis.credential_proxy.request",
+            Self::NotificationDispatch => "raxis.notification.dispatch",
+            Self::OperatorIpc => "raxis.operator.ipc",
+            Self::EscalationLifecycle => "raxis.escalation.lifecycle",
+            Self::SessionSpawn => "raxis.session.spawn",
+            Self::PolicyEpochAdvance => "raxis.policy.epoch.advance",
+            Self::AuditEmit => "raxis.audit.emit",
+            Self::BreakglassActivation => "raxis.breakglass.activation",
+            Self::BreakglassAction => "raxis.breakglass.action",
         }
     }
 }
@@ -198,12 +216,12 @@ pub enum EventName {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpanEvent {
     /// Closed-list event name.
-    pub name:        EventName,
+    pub name: EventName,
     /// Wallclock at event time; nanoseconds since UNIX epoch.
-    pub unix_nanos:  u64,
+    pub unix_nanos: u64,
     /// Closed-allow-list attribute map.
     #[serde(default)]
-    pub attrs:       AttrMap,
+    pub attrs: AttrMap,
 }
 
 /// One completed authority-side span. Pure data; no I/O; no time
@@ -212,29 +230,29 @@ pub struct SpanEvent {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SpanData {
     /// 16-byte trace identifier. Zero is reserved (means "unset").
-    pub trace_id:        [u8; 16],
+    pub trace_id: [u8; 16],
     /// 8-byte span identifier within the trace. Zero is reserved.
-    pub span_id:         [u8; 8],
+    pub span_id: [u8; 8],
     /// Optional parent span; `None` for trace roots.
-    pub parent_span_id:  Option<[u8; 8]>,
+    pub parent_span_id: Option<[u8; 8]>,
     /// Closed-list span name; emitted as the OTel canonical name on the wire.
-    pub name:            SpanName,
+    pub name: SpanName,
     /// OTel kind. Mostly `Internal` and `Client` on the authority side.
-    pub kind:            SpanKind,
+    pub kind: SpanKind,
     /// Wallclock at span start; ns since UNIX epoch.
     pub start_unix_nanos: u64,
     /// Wallclock at span end; ns since UNIX epoch. Always ≥ start.
-    pub end_unix_nanos:  u64,
+    pub end_unix_nanos: u64,
     /// Pass / fail status. See [`SpanStatus`] semantics.
-    pub status:          SpanStatus,
+    pub status: SpanStatus,
     /// Optional one-line human-readable status message; the redactor
     /// caps it at 256 bytes.
-    pub status_message:  Option<String>,
+    pub status_message: Option<String>,
     /// Closed-allow-list attribute map (sorted by key).
-    pub attrs:           AttrMap,
+    pub attrs: AttrMap,
     /// Optional within-span events; bounded by hub config.
     #[serde(default)]
-    pub events:          Vec<SpanEvent>,
+    pub events: Vec<SpanEvent>,
 }
 
 impl SpanData {
@@ -505,95 +523,101 @@ impl MetricName {
     /// OTel-canonical metric name on the wire.
     pub fn as_otel_name(&self) -> &'static str {
         match self {
-            Self::IntentAdmissionDuration         => "raxis.intent.admission.duration",
-            Self::IntentAdmissionTotal            => "raxis.intent.admission.total",
-            Self::GatewayFetchDuration            => "raxis.gateway.fetch.duration",
-            Self::GatewayFetchTotal               => "raxis.gateway.fetch.total",
-            Self::VerifierExecutionDuration       => "raxis.verifier.execution.duration",
-            Self::VerifierExecutionTotal          => "raxis.verifier.execution.total",
-            Self::TokensConsumed                  => "raxis.tokens.consumed",
-            Self::CircuitBreakerState             => "raxis.circuit_breaker.state",
-            Self::CredentialProxyRequestDuration  => "raxis.credential_proxy.request.duration",
-            Self::NotificationDeliveryDuration    => "raxis.notification.delivery.duration",
-            Self::NotificationDeliveryTotal       => "raxis.notification.delivery.total",
-            Self::SessionsActive                  => "raxis.session.active",
-            Self::AuditChainLength                => "raxis.audit.chain.length",
-            Self::EscalationsOpen                 => "raxis.escalation.open",
-            Self::EscalationsClosedTotal          => "raxis.escalation.closed.total",
-            Self::BudgetReserved                  => "raxis.budget.reserved",
-            Self::BudgetExceededTotal             => "raxis.budget.exceeded.total",
-            Self::ObservabilityDroppedTotal       => "raxis.observability.dropped.total",
+            Self::IntentAdmissionDuration => "raxis.intent.admission.duration",
+            Self::IntentAdmissionTotal => "raxis.intent.admission.total",
+            Self::GatewayFetchDuration => "raxis.gateway.fetch.duration",
+            Self::GatewayFetchTotal => "raxis.gateway.fetch.total",
+            Self::VerifierExecutionDuration => "raxis.verifier.execution.duration",
+            Self::VerifierExecutionTotal => "raxis.verifier.execution.total",
+            Self::TokensConsumed => "raxis.tokens.consumed",
+            Self::CircuitBreakerState => "raxis.circuit_breaker.state",
+            Self::CredentialProxyRequestDuration => "raxis.credential_proxy.request.duration",
+            Self::NotificationDeliveryDuration => "raxis.notification.delivery.duration",
+            Self::NotificationDeliveryTotal => "raxis.notification.delivery.total",
+            Self::SessionsActive => "raxis.session.active",
+            Self::AuditChainLength => "raxis.audit.chain.length",
+            Self::EscalationsOpen => "raxis.escalation.open",
+            Self::EscalationsClosedTotal => "raxis.escalation.closed.total",
+            Self::BudgetReserved => "raxis.budget.reserved",
+            Self::BudgetExceededTotal => "raxis.budget.exceeded.total",
+            Self::ObservabilityDroppedTotal => "raxis.observability.dropped.total",
 
             // V3 perf-telemetry expansion.
-            Self::IsolationSpawnColdBootDuration       => "raxis.isolation.spawn.cold_boot.duration",
-            Self::IsolationSpawnHostInitDuration       => "raxis.isolation.spawn.host_init.duration",
-            Self::IsolationSpawnGuestInitDuration      => "raxis.isolation.spawn.guest_init.duration",
-            Self::IsolationSpawnVsockHandshakeDuration => "raxis.isolation.spawn.vsock_handshake.duration",
-            Self::IsolationSpawnTotal                  => "raxis.isolation.spawn.total",
-            Self::IsolationRespawnAttemptedTotal       => "raxis.isolation.respawn_attempted.total",
-            Self::IntentAdmitPredicateEvaluatedTotal   => "raxis.intent.admit_predicate.evaluated.total",
-            Self::IsolationFailedFinalTotal            => "raxis.isolation.failed_final.total",
-            Self::IsolationScaleEventTotal             => "raxis.isolation.scale.event.total",
-            Self::IsolationScaleDeferredTotal          => "raxis.isolation.scale.deferred.total",
+            Self::IsolationSpawnColdBootDuration => "raxis.isolation.spawn.cold_boot.duration",
+            Self::IsolationSpawnHostInitDuration => "raxis.isolation.spawn.host_init.duration",
+            Self::IsolationSpawnGuestInitDuration => "raxis.isolation.spawn.guest_init.duration",
+            Self::IsolationSpawnVsockHandshakeDuration => {
+                "raxis.isolation.spawn.vsock_handshake.duration"
+            }
+            Self::IsolationSpawnTotal => "raxis.isolation.spawn.total",
+            Self::IsolationRespawnAttemptedTotal => "raxis.isolation.respawn_attempted.total",
+            Self::IntentAdmitPredicateEvaluatedTotal => {
+                "raxis.intent.admit_predicate.evaluated.total"
+            }
+            Self::IsolationFailedFinalTotal => "raxis.isolation.failed_final.total",
+            Self::IsolationScaleEventTotal => "raxis.isolation.scale.event.total",
+            Self::IsolationScaleDeferredTotal => "raxis.isolation.scale.deferred.total",
 
-            Self::SessionLifecycleTransitionTotal      => "raxis.session.lifecycle.transition.total",
-            Self::SessionDuration                      => "raxis.session.duration",
-            Self::InitiativeDuration                   => "raxis.initiative.duration",
-            Self::InitiativeTaskInFlight               => "raxis.initiative.task.in_flight",
+            Self::SessionLifecycleTransitionTotal => "raxis.session.lifecycle.transition.total",
+            Self::SessionDuration => "raxis.session.duration",
+            Self::InitiativeDuration => "raxis.initiative.duration",
+            Self::InitiativeTaskInFlight => "raxis.initiative.task.in_flight",
 
-            Self::AuditEventAppendDuration             => "raxis.audit.event.append.duration",
-            Self::AuditEventConfirmedDuration          => "raxis.audit.event.confirmed.duration",
-            Self::AuditEventAppendTotal                => "raxis.audit.event.append.total",
-            Self::AuditFsyncFailureTotal               => "raxis.audit.fsync.failure.total",
-            Self::AuditChainLag                        => "raxis.audit.chain.lag",
+            Self::AuditEventAppendDuration => "raxis.audit.event.append.duration",
+            Self::AuditEventConfirmedDuration => "raxis.audit.event.confirmed.duration",
+            Self::AuditEventAppendTotal => "raxis.audit.event.append.total",
+            Self::AuditFsyncFailureTotal => "raxis.audit.fsync.failure.total",
+            Self::AuditChainLag => "raxis.audit.chain.lag",
 
-            Self::PlannerInferenceDuration             => "raxis.planner.inference.duration",
-            Self::PlannerInferenceTokensTotal          => "raxis.planner.inference.tokens.total",
-            Self::PlannerDispatchTurnTotal             => "raxis.planner.dispatch.turn.total",
-            Self::PlannerToolCallDuration              => "raxis.planner.tool_call.duration",
-            Self::PlannerRetryTotal                    => "raxis.planner.retry.total",
+            Self::PlannerInferenceDuration => "raxis.planner.inference.duration",
+            Self::PlannerInferenceTokensTotal => "raxis.planner.inference.tokens.total",
+            Self::PlannerDispatchTurnTotal => "raxis.planner.dispatch.turn.total",
+            Self::PlannerToolCallDuration => "raxis.planner.tool_call.duration",
+            Self::PlannerRetryTotal => "raxis.planner.retry.total",
 
-            Self::CredentialProxyConnectionDuration    => "raxis.credential_proxy.connection.duration",
-            Self::CredentialProxyConnectionTotal       => "raxis.credential_proxy.connection.total",
-            Self::CredentialProxyStatementDuration     => "raxis.credential_proxy.statement.duration",
-            Self::CredentialProxyBytesTotal            => "raxis.credential_proxy.bytes.total",
-            Self::CredentialProxyPolicyBlockTotal      => "raxis.credential_proxy.policy_block.total",
+            Self::CredentialProxyConnectionDuration => "raxis.credential_proxy.connection.duration",
+            Self::CredentialProxyConnectionTotal => "raxis.credential_proxy.connection.total",
+            Self::CredentialProxyStatementDuration => "raxis.credential_proxy.statement.duration",
+            Self::CredentialProxyBytesTotal => "raxis.credential_proxy.bytes.total",
+            Self::CredentialProxyPolicyBlockTotal => "raxis.credential_proxy.policy_block.total",
 
-            Self::EgressAllowlistCheckDuration         => "raxis.egress.allowlist.check.duration",
-            Self::EgressAllowlistBlockTotal            => "raxis.egress.allowlist.block.total",
-            Self::GatewayUpstreamDuration              => "raxis.gateway.upstream.duration",
+            Self::EgressAllowlistCheckDuration => "raxis.egress.allowlist.check.duration",
+            Self::EgressAllowlistBlockTotal => "raxis.egress.allowlist.block.total",
+            Self::GatewayUpstreamDuration => "raxis.gateway.upstream.duration",
 
-            Self::EgressAdmitTotal                     => "raxis.egress.admit.total",
-            Self::EgressDenyTotal                      => "raxis.egress.deny.total",
-            Self::EgressDefaultProviderGrantTotal      => "raxis.egress.default_provider_grant.total",
-            Self::EgressStallDetectedTotal             => "raxis.egress.stall_detected.total",
-            Self::CredentialProxySubstitutionTotal     => "raxis.credential_proxy.substitution.total",
+            Self::EgressAdmitTotal => "raxis.egress.admit.total",
+            Self::EgressDenyTotal => "raxis.egress.deny.total",
+            Self::EgressDefaultProviderGrantTotal => "raxis.egress.default_provider_grant.total",
+            Self::EgressStallDetectedTotal => "raxis.egress.stall_detected.total",
+            Self::CredentialProxySubstitutionTotal => "raxis.credential_proxy.substitution.total",
 
-            Self::DashboardHttpRequestDuration         => "raxis.dashboard.http.request.duration",
-            Self::DashboardSseConnectionActive         => "raxis.dashboard.sse.connection.active",
-            Self::DashboardSseEventTotal               => "raxis.dashboard.sse.event.total",
-            Self::DashboardSseLagDuration              => "raxis.dashboard.sse.lag.duration",
+            Self::DashboardHttpRequestDuration => "raxis.dashboard.http.request.duration",
+            Self::DashboardSseConnectionActive => "raxis.dashboard.sse.connection.active",
+            Self::DashboardSseEventTotal => "raxis.dashboard.sse.event.total",
+            Self::DashboardSseLagDuration => "raxis.dashboard.sse.lag.duration",
 
-            Self::ReviewerReviewDuration               => "raxis.reviewer.review.duration",
-            Self::ReviewerOutcomeTotal                 => "raxis.reviewer.outcome.total",
-            Self::ReviewerDisagreementTotal            => "raxis.reviewer.disagreement.total",
-            Self::ReviewRevisionRound                  => "raxis.review.revision_round",
+            Self::ReviewerReviewDuration => "raxis.reviewer.review.duration",
+            Self::ReviewerOutcomeTotal => "raxis.reviewer.outcome.total",
+            Self::ReviewerDisagreementTotal => "raxis.reviewer.disagreement.total",
+            Self::ReviewRevisionRound => "raxis.review.revision_round",
 
-            Self::GitWorktreeProvisionDuration         => "raxis.git.worktree.provision.duration",
-            Self::GitMergeDuration                     => "raxis.git.merge.duration",
-            Self::GitCommitTotal                       => "raxis.git.commit.total",
+            Self::GitWorktreeProvisionDuration => "raxis.git.worktree.provision.duration",
+            Self::GitMergeDuration => "raxis.git.merge.duration",
+            Self::GitCommitTotal => "raxis.git.commit.total",
 
-            Self::KernelUptimeSeconds                  => "raxis.kernel.uptime.seconds",
+            Self::KernelUptimeSeconds => "raxis.kernel.uptime.seconds",
 
-            Self::KernelRespawnTotal                   => "raxis.kernel.respawn.total",
-            Self::KernelRespawnDuration                => "raxis.kernel.respawn.duration",
-            Self::SupervisorRefusedRestartTotal        => "raxis.supervisor.refused_restart.total",
+            Self::KernelRespawnTotal => "raxis.kernel.respawn.total",
+            Self::KernelRespawnDuration => "raxis.kernel.respawn.duration",
+            Self::SupervisorRefusedRestartTotal => "raxis.supervisor.refused_restart.total",
 
-            Self::OperatorIpcDuration                  => "raxis.operator.ipc.duration",
-            Self::OperatorIpcTotal                     => "raxis.operator.ipc.total",
-            Self::KernelSubstrateIpcRoundtripDuration  => "raxis.kernel.substrate.ipc.roundtrip.duration",
-            Self::KernelSubstrateIpcMessagesTotal      => "raxis.kernel.substrate.ipc.messages.total",
-            Self::KernelSubstrateIpcInflight           => "raxis.kernel.substrate.ipc.inflight",
+            Self::OperatorIpcDuration => "raxis.operator.ipc.duration",
+            Self::OperatorIpcTotal => "raxis.operator.ipc.total",
+            Self::KernelSubstrateIpcRoundtripDuration => {
+                "raxis.kernel.substrate.ipc.roundtrip.duration"
+            }
+            Self::KernelSubstrateIpcMessagesTotal => "raxis.kernel.substrate.ipc.messages.total",
+            Self::KernelSubstrateIpcInflight => "raxis.kernel.substrate.ipc.inflight",
         }
     }
 
@@ -711,11 +735,9 @@ impl MetricName {
             | Self::OperatorIpcDuration
             | Self::KernelSubstrateIpcRoundtripDuration => Unit::Milliseconds,
 
-            Self::TokensConsumed
-            | Self::PlannerInferenceTokensTotal => Unit::Tokens,
+            Self::TokensConsumed | Self::PlannerInferenceTokensTotal => Unit::Tokens,
 
-            Self::SessionsActive
-            | Self::DashboardSseConnectionActive => Unit::Connections,
+            Self::SessionsActive | Self::DashboardSseConnectionActive => Unit::Connections,
 
             _ => Unit::None,
         }
@@ -761,10 +783,10 @@ impl Unit {
     pub fn symbol(&self) -> &'static str {
         match self {
             Self::Milliseconds => "ms",
-            Self::Bytes        => "By",
-            Self::Tokens       => "{tokens}",
-            Self::Connections  => "{connections}",
-            Self::None         => "",
+            Self::Bytes => "By",
+            Self::Tokens => "{tokens}",
+            Self::Connections => "{connections}",
+            Self::None => "",
         }
     }
 }
@@ -773,16 +795,16 @@ impl EventName {
     /// Stable string label used as the OTLP `Span.Event.name` field.
     pub fn as_str(&self) -> &'static str {
         match self {
-            Self::GateRequired             => "gate.required",
-            Self::GateSatisfied            => "gate.satisfied",
-            Self::GateMissing              => "gate.missing",
-            Self::VerifierSpawned          => "verifier.spawned",
-            Self::BudgetReserved           => "budget.reserved",
-            Self::BudgetReleased           => "budget.released",
-            Self::InferenceTokensReported  => "inference.tokens_reported",
-            Self::CircuitOpened            => "circuit.opened",
-            Self::CircuitClosed            => "circuit.closed",
-            Self::HeartbeatTick            => "heartbeat.tick",
+            Self::GateRequired => "gate.required",
+            Self::GateSatisfied => "gate.satisfied",
+            Self::GateMissing => "gate.missing",
+            Self::VerifierSpawned => "verifier.spawned",
+            Self::BudgetReserved => "budget.reserved",
+            Self::BudgetReleased => "budget.released",
+            Self::InferenceTokensReported => "inference.tokens_reported",
+            Self::CircuitOpened => "circuit.opened",
+            Self::CircuitClosed => "circuit.closed",
+            Self::HeartbeatTick => "heartbeat.tick",
         }
     }
 }
@@ -802,15 +824,15 @@ pub enum DataPoint {
         /// Bucket boundaries (length N).
         buckets: Vec<f64>,
         /// Bucket counts (length N+1: `[≤bucket_0, ≤bucket_1, …, >bucket_{N-1}]`).
-        counts:  Vec<u64>,
+        counts: Vec<u64>,
         /// Sum of all observations.
-        sum:     f64,
+        sum: f64,
         /// Count of all observations.
-        count:   u64,
+        count: u64,
         /// Minimum observation value.
-        min:     f64,
+        min: f64,
         /// Maximum observation value.
-        max:     f64,
+        max: f64,
     },
 }
 
@@ -818,17 +840,17 @@ pub enum DataPoint {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MetricData {
     /// Closed-list metric name; emitted as the OTel canonical name.
-    pub name:         MetricName,
+    pub name: MetricName,
     /// Counter / gauge / histogram.
-    pub metric_type:  MetricType,
+    pub metric_type: MetricType,
     /// Bounded enum of physical units.
-    pub unit:         Unit,
+    pub unit: Unit,
     /// Stable label set (sorted by key on the wire).
-    pub labels:       AttrMap,
+    pub labels: AttrMap,
     /// Sum or histogram payload.
-    pub datapoint:    DataPoint,
+    pub datapoint: DataPoint,
     /// Wallclock at observation time; ns since UNIX epoch.
-    pub unix_nanos:   u64,
+    pub unix_nanos: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -842,23 +864,26 @@ mod tests {
     #[test]
     fn span_data_roundtrips_as_json_line() {
         let span = SpanData {
-            trace_id:         [1; 16],
-            span_id:          [2; 8],
-            parent_span_id:   None,
-            name:             SpanName::IntentAdmission,
-            kind:             SpanKind::Internal,
+            trace_id: [1; 16],
+            span_id: [2; 8],
+            parent_span_id: None,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 1_000_000_000,
-            end_unix_nanos:   1_500_000_000,
-            status:           SpanStatus::Ok,
-            status_message:   None,
-            attrs:            {
+            end_unix_nanos: 1_500_000_000,
+            status: SpanStatus::Ok,
+            status_message: None,
+            attrs: {
                 let mut a = AttrMap::new();
-                a.insert("intent_kind".to_owned(), AttrValue::Str("CompleteTask".to_owned()));
-                a.insert("verdict".to_owned(),     AttrValue::Str("Accepted".to_owned()));
-                a.insert("latency_ms".to_owned(),  AttrValue::I64(500));
+                a.insert(
+                    "intent_kind".to_owned(),
+                    AttrValue::Str("CompleteTask".to_owned()),
+                );
+                a.insert("verdict".to_owned(), AttrValue::Str("Accepted".to_owned()));
+                a.insert("latency_ms".to_owned(), AttrValue::I64(500));
                 a
             },
-            events:           vec![],
+            events: vec![],
         };
         let json = serde_json::to_string(&span).expect("serialise");
         let back: SpanData = serde_json::from_str(&json).expect("deserialise");
@@ -868,23 +893,23 @@ mod tests {
     #[test]
     fn metric_data_histogram_roundtrips() {
         let m = MetricData {
-            name:         MetricName::IntentAdmissionDuration,
-            metric_type:  MetricType::Histogram,
-            unit:         Unit::Milliseconds,
-            labels:       {
+            name: MetricName::IntentAdmissionDuration,
+            metric_type: MetricType::Histogram,
+            unit: Unit::Milliseconds,
+            labels: {
                 let mut l = AttrMap::new();
                 l.insert("verdict".to_owned(), AttrValue::Str("Accepted".to_owned()));
                 l
             },
-            datapoint:    DataPoint::Histo {
+            datapoint: DataPoint::Histo {
                 buckets: vec![1.0, 5.0, 10.0],
-                counts:  vec![0, 1, 0, 0],
-                sum:     3.5,
-                count:   1,
-                min:     3.5,
-                max:     3.5,
+                counts: vec![0, 1, 0, 0],
+                sum: 3.5,
+                count: 1,
+                min: 3.5,
+                max: 3.5,
             },
-            unix_nanos:   2_000_000_000,
+            unix_nanos: 2_000_000_000,
         };
         let json = serde_json::to_string(&m).expect("serialise");
         let back: MetricData = serde_json::from_str(&json).expect("deserialise");
@@ -893,33 +918,48 @@ mod tests {
 
     #[test]
     fn span_name_otel_names_match_spec() {
-        assert_eq!(SpanName::IntentAdmission.as_otel_name(), "raxis.intent.admission");
-        assert_eq!(SpanName::GatewayFetch.as_otel_name(),    "raxis.gateway.fetch");
-        assert_eq!(SpanName::BreakglassAction.as_otel_name(), "raxis.breakglass.action");
+        assert_eq!(
+            SpanName::IntentAdmission.as_otel_name(),
+            "raxis.intent.admission"
+        );
+        assert_eq!(SpanName::GatewayFetch.as_otel_name(), "raxis.gateway.fetch");
+        assert_eq!(
+            SpanName::BreakglassAction.as_otel_name(),
+            "raxis.breakglass.action"
+        );
     }
 
     #[test]
     fn metric_name_default_types_match_spec() {
-        assert_eq!(MetricName::IntentAdmissionDuration.default_type(), MetricType::Histogram);
-        assert_eq!(MetricName::IntentAdmissionTotal.default_type(),    MetricType::Counter);
-        assert_eq!(MetricName::SessionsActive.default_type(),          MetricType::Gauge);
-        assert_eq!(MetricName::CircuitBreakerState.default_type(),     MetricType::Gauge);
+        assert_eq!(
+            MetricName::IntentAdmissionDuration.default_type(),
+            MetricType::Histogram
+        );
+        assert_eq!(
+            MetricName::IntentAdmissionTotal.default_type(),
+            MetricType::Counter
+        );
+        assert_eq!(MetricName::SessionsActive.default_type(), MetricType::Gauge);
+        assert_eq!(
+            MetricName::CircuitBreakerState.default_type(),
+            MetricType::Gauge
+        );
     }
 
     #[test]
     fn span_data_duration_ms_is_correct() {
         let span = SpanData {
-            trace_id:         [0; 16],
-            span_id:          [0; 8],
-            parent_span_id:   None,
-            name:             SpanName::IntentAdmission,
-            kind:             SpanKind::Internal,
+            trace_id: [0; 16],
+            span_id: [0; 8],
+            parent_span_id: None,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 1_000_000_000,
-            end_unix_nanos:   1_500_000_000,  // +500ms
-            status:           SpanStatus::Ok,
-            status_message:   None,
-            attrs:            AttrMap::new(),
-            events:           vec![],
+            end_unix_nanos: 1_500_000_000, // +500ms
+            status: SpanStatus::Ok,
+            status_message: None,
+            attrs: AttrMap::new(),
+            events: vec![],
         };
         assert_eq!(span.duration_ms(), 500);
     }
@@ -927,18 +967,22 @@ mod tests {
     #[test]
     fn span_data_duration_handles_underflow() {
         let span = SpanData {
-            trace_id:         [0; 16],
-            span_id:          [0; 8],
-            parent_span_id:   None,
-            name:             SpanName::IntentAdmission,
-            kind:             SpanKind::Internal,
+            trace_id: [0; 16],
+            span_id: [0; 8],
+            parent_span_id: None,
+            name: SpanName::IntentAdmission,
+            kind: SpanKind::Internal,
             start_unix_nanos: 2_000_000_000,
-            end_unix_nanos:   1_000_000_000,  // intentionally inverted
-            status:           SpanStatus::Ok,
-            status_message:   None,
-            attrs:            AttrMap::new(),
-            events:           vec![],
+            end_unix_nanos: 1_000_000_000, // intentionally inverted
+            status: SpanStatus::Ok,
+            status_message: None,
+            attrs: AttrMap::new(),
+            events: vec![],
         };
-        assert_eq!(span.duration_ms(), 0, "saturating sub on inverted timestamps");
+        assert_eq!(
+            span.duration_ms(),
+            0,
+            "saturating sub on inverted timestamps"
+        );
     }
 }

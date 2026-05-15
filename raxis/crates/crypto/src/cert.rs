@@ -128,12 +128,12 @@ impl From<CryptoError> for CertError {
             CryptoError::SignatureInvalid(err) => CertError::SelfSignatureInvalid(err.to_string()),
             CryptoError::MalformedPublicKey(s) => CertError::MalformedPubkey(s),
             CryptoError::MalformedSignature(s) => CertError::MalformedSelfSig(s),
-            CryptoError::HexDecode(e)          => CertError::HexDecode(e.to_string()),
-            CryptoError::Rng(e)                => CertError::HexDecode(e.to_string()),
+            CryptoError::HexDecode(e) => CertError::HexDecode(e.to_string()),
+            CryptoError::Rng(e) => CertError::HexDecode(e.to_string()),
             // Cert verification never enters the plan-bundle code path.
             // If it ever does, surface the codec error through the
             // structurally-closest variant rather than `panic!`-ing.
-            CryptoError::PlanBundleEncode(e)   => CertError::HexDecode(e.to_string()),
+            CryptoError::PlanBundleEncode(e) => CertError::HexDecode(e.to_string()),
         }
     }
 }
@@ -172,15 +172,15 @@ impl From<CryptoError> for CertError {
 /// The caller does NOT need to pre-sort; this avoids the entire
 /// class of "I sorted it differently than the verifier did" bugs.
 pub fn cert_canonical_signing_input(
-    kind:                    CertKind,
-    display_name:            &str,
-    pubkey_hex:              &str,
-    not_before:              i64,
-    not_after:               i64,
+    kind: CertKind,
+    display_name: &str,
+    pubkey_hex: &str,
+    not_before: i64,
+    not_after: i64,
     warn_before_expiry_days: u32,
-    grace_period_days:       u32,
-    permitted_ops:           &[String],
-    contact_info:            Option<&str>,
+    grace_period_days: u32,
+    permitted_ops: &[String],
+    contact_info: Option<&str>,
 ) -> Vec<u8> {
     let ops_csv = canonicalize_ops(permitted_ops).join(",");
     let contact = contact_info.unwrap_or("");
@@ -244,10 +244,10 @@ pub fn sign_cert(cert: &OperatorCert, signing_key: &SigningKey) -> String {
 /// `raxis cert verify` and the kernel-side bundle-validate step
 /// both go through.
 pub fn verify_cert_self_signature(cert: &OperatorCert) -> Result<(), CertError> {
-    let pubkey_bytes = hex::decode(&cert.pubkey_hex)
-        .map_err(|e| CertError::HexDecode(e.to_string()))?;
-    let sig_bytes = hex::decode(&cert.self_sig_hex)
-        .map_err(|e| CertError::HexDecode(e.to_string()))?;
+    let pubkey_bytes =
+        hex::decode(&cert.pubkey_hex).map_err(|e| CertError::HexDecode(e.to_string()))?;
+    let sig_bytes =
+        hex::decode(&cert.self_sig_hex).map_err(|e| CertError::HexDecode(e.to_string()))?;
     let msg = cert_canonical_signing_input(
         cert.kind,
         &cert.display_name,
@@ -306,14 +306,14 @@ pub fn validate_cert_structurally(cert: &OperatorCert) -> Vec<CertError> {
             if cert.not_before > cert.not_after {
                 errs.push(CertError::InvertedValidityWindow {
                     not_before: cert.not_before,
-                    not_after:  cert.not_after,
+                    not_after: cert.not_after,
                 });
             }
             let validity_secs = cert.not_after.saturating_sub(cert.not_before);
             let warn_secs = (cert.warn_before_expiry_days as i64).saturating_mul(86_400);
             if validity_secs > 0 && warn_secs >= validity_secs {
                 errs.push(CertError::WarnWindowExceedsValidity {
-                    warn:          cert.warn_before_expiry_days,
+                    warn: cert.warn_before_expiry_days,
                     validity_secs,
                 });
             }
@@ -327,9 +327,7 @@ pub fn validate_cert_structurally(cert: &OperatorCert) -> Vec<CertError> {
             // case) is misconfig.
             let canonical = canonicalize_ops(&cert.permitted_ops);
             if canonical.as_slice() != ["RotateEpoch".to_owned()].as_slice() {
-                errs.push(CertError::EmergencyHasWrongPermissions {
-                    got: canonical,
-                });
+                errs.push(CertError::EmergencyHasWrongPermissions { got: canonical });
             }
             // EmergencyRecovery MUST have not_before = 0 and not_after = 0
             // (the "ignored" sentinel). Setting any other value implies
@@ -337,7 +335,7 @@ pub fn validate_cert_structurally(cert: &OperatorCert) -> Vec<CertError> {
             if cert.not_before != 0 || cert.not_after != 0 {
                 errs.push(CertError::EmergencyHasValidityWindow {
                     not_before: cert.not_before,
-                    not_after:  cert.not_after,
+                    not_after: cert.not_after,
                 });
             }
         }
@@ -404,7 +402,7 @@ pub enum CertStatus {
         /// to `Rotation` at the admission gate (both deny the op);
         /// the distinction is preserved for downstream tooling
         /// (audit replay, kernel-side session-termination — V3).
-        reason:     RevocationReason,
+        reason: RevocationReason,
         /// Unix seconds at which the revocation took effect.
         revoked_at: i64,
     },
@@ -418,9 +416,7 @@ impl CertStatus {
     pub fn allows_new_commitments(&self) -> bool {
         matches!(
             self,
-            CertStatus::Active
-                | CertStatus::Expiring { .. }
-                | CertStatus::AlwaysActiveEmergency,
+            CertStatus::Active | CertStatus::Expiring { .. } | CertStatus::AlwaysActiveEmergency,
         )
     }
 
@@ -442,13 +438,13 @@ impl CertStatus {
     /// output. Operators grep these.
     pub fn tag(&self) -> &'static str {
         match self {
-            CertStatus::Active                => "active",
-            CertStatus::Expiring { .. }       => "expiring",
-            CertStatus::Grace { .. }          => "grace",
-            CertStatus::Expired { .. }        => "expired",
-            CertStatus::NotYetValid { .. }    => "not_yet_valid",
+            CertStatus::Active => "active",
+            CertStatus::Expiring { .. } => "expiring",
+            CertStatus::Grace { .. } => "grace",
+            CertStatus::Expired { .. } => "expired",
+            CertStatus::NotYetValid { .. } => "not_yet_valid",
             CertStatus::AlwaysActiveEmergency => "always_active_emergency",
-            CertStatus::Revoked { .. }        => "revoked",
+            CertStatus::Revoked { .. } => "revoked",
         }
     }
 }
@@ -470,10 +466,10 @@ pub fn cert_status(cert: &OperatorCert, now: i64) -> CertStatus {
         };
     }
 
-    let warn_secs  = (cert.warn_before_expiry_days as i64).saturating_mul(86_400);
+    let warn_secs = (cert.warn_before_expiry_days as i64).saturating_mul(86_400);
     let grace_secs = (cert.grace_period_days as i64).saturating_mul(86_400);
     let warn_start = cert.not_after.saturating_sub(warn_secs);
-    let grace_end  = cert.not_after.saturating_add(grace_secs);
+    let grace_end = cert.not_after.saturating_add(grace_secs);
 
     if now < warn_start {
         CertStatus::Active
@@ -528,9 +524,9 @@ pub fn cert_status(cert: &OperatorCert, now: i64) -> CertStatus {
 /// uniform within the crate.
 pub fn revocation_canonical_signing_input(
     subject_pubkey_hex: &str,
-    reason:             RevocationReason,
-    revoked_at:         i64,
-    reference:          &str,
+    reason: RevocationReason,
+    revoked_at: i64,
+    reference: &str,
 ) -> Vec<u8> {
     format!(
         "raxis-cert-revocation/v1|{}|{}|{}|{}",
@@ -547,17 +543,12 @@ pub fn revocation_canonical_signing_input(
 /// `record.revoked_by_signature_hex`.
 pub fn sign_revocation(
     subject_pubkey_hex: &str,
-    reason:             RevocationReason,
-    revoked_at:         i64,
-    reference:          &str,
-    signing_key:        &SigningKey,
+    reason: RevocationReason,
+    revoked_at: i64,
+    reference: &str,
+    signing_key: &SigningKey,
 ) -> String {
-    let msg = revocation_canonical_signing_input(
-        subject_pubkey_hex,
-        reason,
-        revoked_at,
-        reference,
-    );
+    let msg = revocation_canonical_signing_input(subject_pubkey_hex, reason, revoked_at, reference);
     let sig = signing_key.sign(&msg);
     hex::encode(sig.to_bytes())
 }
@@ -579,18 +570,24 @@ pub fn verify_revocation_signature(record: &RevocationRecord) -> Result<(), Cert
         )));
     }
     if !is_valid_lowercase_hex(&record.revoked_by_pubkey_hex, 64) {
-        return Err(CertError::MalformedPubkey(record.revoked_by_pubkey_hex.clone()));
+        return Err(CertError::MalformedPubkey(
+            record.revoked_by_pubkey_hex.clone(),
+        ));
     }
     if !is_valid_lowercase_hex(&record.revoked_by_signature_hex, 128) {
-        return Err(CertError::MalformedSelfSig(record.revoked_by_signature_hex.clone()));
+        return Err(CertError::MalformedSelfSig(
+            record.revoked_by_signature_hex.clone(),
+        ));
     }
     if !is_valid_lowercase_hex(&record.subject_pubkey_hex, 64) {
-        return Err(CertError::MalformedPubkey(record.subject_pubkey_hex.clone()));
+        return Err(CertError::MalformedPubkey(
+            record.subject_pubkey_hex.clone(),
+        ));
     }
 
     let pubkey = hex::decode(&record.revoked_by_pubkey_hex)
         .map_err(|e| CertError::HexDecode(e.to_string()))?;
-    let sig    = hex::decode(&record.revoked_by_signature_hex)
+    let sig = hex::decode(&record.revoked_by_signature_hex)
         .map_err(|e| CertError::HexDecode(e.to_string()))?;
     let msg = revocation_canonical_signing_input(
         &record.subject_pubkey_hex,
@@ -610,7 +607,7 @@ pub fn verify_revocation_signature(record: &RevocationRecord) -> Result<(), Cert
 /// V2_GAPS §D1 — admission-time revocation gate.
 pub fn cert_status_with_revocation<F>(
     cert: &OperatorCert,
-    now:  i64,
+    now: i64,
     revocation_lookup: F,
 ) -> CertStatus
 where
@@ -649,16 +646,16 @@ mod tests {
     /// is freshly minted from `test_signing_key`.
     fn fixture_standard_cert(now: i64) -> OperatorCert {
         let mut c = OperatorCert {
-            kind:                    CertKind::Standard,
-            display_name:            "Chika".to_owned(),
-            pubkey_hex:              test_pubkey_hex(),
-            not_before:              now - 86_400,
-            not_after:               now + 90 * 86_400,
+            kind: CertKind::Standard,
+            display_name: "Chika".to_owned(),
+            pubkey_hex: test_pubkey_hex(),
+            not_before: now - 86_400,
+            not_after: now + 90 * 86_400,
             warn_before_expiry_days: 30,
-            grace_period_days:       7,
-            permitted_ops:           vec!["CreateInitiative".to_owned()],
-            contact_info:            Some("chika@example.com".to_owned()),
-            self_sig_hex:            String::new(),
+            grace_period_days: 7,
+            permitted_ops: vec!["CreateInitiative".to_owned()],
+            contact_info: Some("chika@example.com".to_owned()),
+            self_sig_hex: String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &test_signing_key());
         c
@@ -666,16 +663,16 @@ mod tests {
 
     fn fixture_emergency_cert() -> OperatorCert {
         let mut c = OperatorCert {
-            kind:                    CertKind::EmergencyRecovery,
-            display_name:            "Break-glass — offline storage".to_owned(),
-            pubkey_hex:              test_pubkey_hex(),
-            not_before:              0,
-            not_after:               0,
+            kind: CertKind::EmergencyRecovery,
+            display_name: "Break-glass — offline storage".to_owned(),
+            pubkey_hex: test_pubkey_hex(),
+            not_before: 0,
+            not_after: 0,
             warn_before_expiry_days: 0,
-            grace_period_days:       0,
-            permitted_ops:           vec!["RotateEpoch".to_owned()],
-            contact_info:            None,
-            self_sig_hex:            String::new(),
+            grace_period_days: 0,
+            permitted_ops: vec!["RotateEpoch".to_owned()],
+            contact_info: None,
+            self_sig_hex: String::new(),
         };
         c.self_sig_hex = sign_cert(&c, &test_signing_key());
         c
@@ -717,12 +714,18 @@ mod tests {
             CertKind::Standard,
             "Chika",
             "aa".repeat(32).as_str(),
-            0, 0, 0, 0,
+            0,
+            0,
+            0,
+            0,
             &["CreateInitiative".to_owned()],
             None,
         );
         let s = std::str::from_utf8(&bytes).unwrap();
-        assert!(s.ends_with("|"), "trailing-empty-contact must be present: {s}");
+        assert!(
+            s.ends_with("|"),
+            "trailing-empty-contact must be present: {s}"
+        );
     }
 
     #[test]
@@ -731,14 +734,24 @@ mod tests {
         // identical bytes regardless. This test pins that the sort
         // is built-in, NOT a caller responsibility.
         let unsorted = cert_canonical_signing_input(
-            CertKind::Standard, "X", "aa".repeat(32).as_str(),
-            0, 0, 0, 0,
+            CertKind::Standard,
+            "X",
+            "aa".repeat(32).as_str(),
+            0,
+            0,
+            0,
+            0,
             &["CreateInitiative".to_owned(), "AbortTask".to_owned()],
             None,
         );
         let presorted = cert_canonical_signing_input(
-            CertKind::Standard, "X", "aa".repeat(32).as_str(),
-            0, 0, 0, 0,
+            CertKind::Standard,
+            "X",
+            "aa".repeat(32).as_str(),
+            0,
+            0,
+            0,
+            0,
             &["AbortTask".to_owned(), "CreateInitiative".to_owned()],
             None,
         );
@@ -750,14 +763,24 @@ mod tests {
         // Defensive: a TOML with duplicate entries shouldn't change
         // the signing input vs the same TOML without duplicates.
         let with_dup = cert_canonical_signing_input(
-            CertKind::Standard, "X", "aa".repeat(32).as_str(),
-            0, 0, 0, 0,
+            CertKind::Standard,
+            "X",
+            "aa".repeat(32).as_str(),
+            0,
+            0,
+            0,
+            0,
             &["AbortTask".to_owned(), "AbortTask".to_owned()],
             None,
         );
         let no_dup = cert_canonical_signing_input(
-            CertKind::Standard, "X", "aa".repeat(32).as_str(),
-            0, 0, 0, 0,
+            CertKind::Standard,
+            "X",
+            "aa".repeat(32).as_str(),
+            0,
+            0,
+            0,
+            0,
             &["AbortTask".to_owned()],
             None,
         );
@@ -769,15 +792,13 @@ mod tests {
     #[test]
     fn freshly_minted_standard_cert_self_verifies() {
         let cert = fixture_standard_cert(1_700_000_000);
-        verify_cert_self_signature(&cert)
-            .expect("freshly-minted cert must self-verify");
+        verify_cert_self_signature(&cert).expect("freshly-minted cert must self-verify");
     }
 
     #[test]
     fn freshly_minted_emergency_cert_self_verifies() {
         let cert = fixture_emergency_cert();
-        verify_cert_self_signature(&cert)
-            .expect("emergency cert must self-verify");
+        verify_cert_self_signature(&cert).expect("emergency cert must self-verify");
     }
 
     #[test]
@@ -789,28 +810,38 @@ mod tests {
 
         let mut t1 = base.clone();
         t1.display_name = "Mallory".to_owned();
-        assert!(verify_cert_self_signature(&t1).is_err(),
-            "display_name change must invalidate sig");
+        assert!(
+            verify_cert_self_signature(&t1).is_err(),
+            "display_name change must invalidate sig"
+        );
 
         let mut t2 = base.clone();
         t2.not_after = base.not_after + 86_400;
-        assert!(verify_cert_self_signature(&t2).is_err(),
-            "not_after change must invalidate sig");
+        assert!(
+            verify_cert_self_signature(&t2).is_err(),
+            "not_after change must invalidate sig"
+        );
 
         let mut t3 = base.clone();
         t3.permitted_ops = vec!["RotateEpoch".to_owned()];
-        assert!(verify_cert_self_signature(&t3).is_err(),
-            "permitted_ops change must invalidate sig");
+        assert!(
+            verify_cert_self_signature(&t3).is_err(),
+            "permitted_ops change must invalidate sig"
+        );
 
         let mut t4 = base.clone();
         t4.contact_info = Some("attacker@evil.example".to_owned());
-        assert!(verify_cert_self_signature(&t4).is_err(),
-            "contact_info change must invalidate sig");
+        assert!(
+            verify_cert_self_signature(&t4).is_err(),
+            "contact_info change must invalidate sig"
+        );
 
         let mut t5 = base;
         t5.kind = CertKind::EmergencyRecovery;
-        assert!(verify_cert_self_signature(&t5).is_err(),
-            "kind change must invalidate sig");
+        assert!(
+            verify_cert_self_signature(&t5).is_err(),
+            "kind change must invalidate sig"
+        );
     }
 
     #[test]
@@ -821,8 +852,10 @@ mod tests {
         let mut cert = fixture_standard_cert(1_700_000_000);
         let other_key = SigningKey::from_bytes(&[0xCDu8; 32]);
         cert.self_sig_hex = sign_cert(&cert, &other_key);
-        assert!(verify_cert_self_signature(&cert).is_err(),
-            "signature by non-cert-key must be rejected");
+        assert!(
+            verify_cert_self_signature(&cert).is_err(),
+            "signature by non-cert-key must be rejected"
+        );
     }
 
     // ── validate_cert_structurally ────────────────────────────────────
@@ -844,8 +877,11 @@ mod tests {
         let mut cert = fixture_standard_cert(1_700_000_000);
         cert.not_before = cert.not_after + 1;
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::InvertedValidityWindow { .. })),
-            "got: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, CertError::InvertedValidityWindow { .. })),
+            "got: {errs:?}"
+        );
     }
 
     #[test]
@@ -856,8 +892,11 @@ mod tests {
         // Re-sign so we don't also fail on signature mismatch.
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::WarnWindowExceedsValidity { .. })),
-            "got: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, CertError::WarnWindowExceedsValidity { .. })),
+            "got: {errs:?}"
+        );
     }
 
     #[test]
@@ -866,7 +905,9 @@ mod tests {
         cert.display_name = String::new();
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::DisplayNameLength { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, CertError::DisplayNameLength { .. })));
     }
 
     #[test]
@@ -875,7 +916,9 @@ mod tests {
         cert.permitted_ops = vec![];
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::StandardCertHasNoPermissions)));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, CertError::StandardCertHasNoPermissions)));
     }
 
     /// **Structural break-glass enforcement** — pin that the
@@ -893,13 +936,18 @@ mod tests {
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
 
         let errs = validate_cert_structurally(&cert);
-        let got = errs.iter().find_map(|e| match e {
-            CertError::EmergencyHasWrongPermissions { got } => Some(got.clone()),
-            _ => None,
-        }).expect("must surface EmergencyHasWrongPermissions");
-        assert!(got.contains(&"CreateInitiative".to_owned()),
+        let got = errs
+            .iter()
+            .find_map(|e| match e {
+                CertError::EmergencyHasWrongPermissions { got } => Some(got.clone()),
+                _ => None,
+            })
+            .expect("must surface EmergencyHasWrongPermissions");
+        assert!(
+            got.contains(&"CreateInitiative".to_owned()),
             "the violating permission must appear in the error payload for operator visibility; \
-             got: {got:?}");
+             got: {got:?}"
+        );
     }
 
     #[test]
@@ -908,7 +956,9 @@ mod tests {
         cert.permitted_ops = vec!["AbortInitiative".to_owned()];
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::EmergencyHasWrongPermissions { .. })));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, CertError::EmergencyHasWrongPermissions { .. })));
     }
 
     #[test]
@@ -917,8 +967,11 @@ mod tests {
         cert.not_after = 1_731_536_000;
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::EmergencyHasValidityWindow { .. })),
-            "got: {errs:?}");
+        assert!(
+            errs.iter()
+                .any(|e| matches!(e, CertError::EmergencyHasValidityWindow { .. })),
+            "got: {errs:?}"
+        );
     }
 
     #[test]
@@ -928,7 +981,9 @@ mod tests {
         // Don't bother re-signing — we're testing the structural
         // check, which runs before the signature check.
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.iter().any(|e| matches!(e, CertError::MalformedPubkey(_))));
+        assert!(errs
+            .iter()
+            .any(|e| matches!(e, CertError::MalformedPubkey(_))));
     }
 
     #[test]
@@ -937,11 +992,14 @@ mod tests {
         // collect both, so an operator running `raxis cert verify`
         // sees the full picture in one invocation.
         let mut cert = fixture_standard_cert(1_700_000_000);
-        cert.display_name = String::new();              // violation 1
-        cert.permitted_ops = vec![];                    // violation 2
+        cert.display_name = String::new(); // violation 1
+        cert.permitted_ops = vec![]; // violation 2
         cert.self_sig_hex = sign_cert(&cert, &test_signing_key());
         let errs = validate_cert_structurally(&cert);
-        assert!(errs.len() >= 2, "must collect all violations; got: {errs:?}");
+        assert!(
+            errs.len() >= 2,
+            "must collect all violations; got: {errs:?}"
+        );
     }
 
     // ── cert_status / four-zone state machine ─────────────────────────
@@ -974,7 +1032,9 @@ mod tests {
         let cert = fixture_standard_cert(now);
         let in_grace = cert.not_after + 3 * 86_400;
         match cert_status(&cert, in_grace) {
-            CertStatus::Grace { secs_until_grace_end } => {
+            CertStatus::Grace {
+                secs_until_grace_end,
+            } => {
                 assert_eq!(secs_until_grace_end, 4 * 86_400);
             }
             other => panic!("expected Grace, got {other:?}"),
@@ -1012,9 +1072,15 @@ mod tests {
     fn emergency_cert_is_always_active_regardless_of_clock() {
         let cert = fixture_emergency_cert();
         // Past, present, far future — all return AlwaysActiveEmergency.
-        assert_eq!(cert_status(&cert, 0),                    CertStatus::AlwaysActiveEmergency);
-        assert_eq!(cert_status(&cert, 1_700_000_000),        CertStatus::AlwaysActiveEmergency);
-        assert_eq!(cert_status(&cert, 99_999_999_999),       CertStatus::AlwaysActiveEmergency);
+        assert_eq!(cert_status(&cert, 0), CertStatus::AlwaysActiveEmergency);
+        assert_eq!(
+            cert_status(&cert, 1_700_000_000),
+            CertStatus::AlwaysActiveEmergency
+        );
+        assert_eq!(
+            cert_status(&cert, 99_999_999_999),
+            CertStatus::AlwaysActiveEmergency
+        );
     }
 
     // ── CertStatus::allows_* ──────────────────────────────────────────
@@ -1022,37 +1088,89 @@ mod tests {
     #[test]
     fn active_and_expiring_allow_new_commitments_grace_does_not() {
         assert!(CertStatus::Active.allows_new_commitments());
-        assert!(CertStatus::Expiring { secs_until_expiry: 1 }.allows_new_commitments());
+        assert!(CertStatus::Expiring {
+            secs_until_expiry: 1
+        }
+        .allows_new_commitments());
         assert!(CertStatus::AlwaysActiveEmergency.allows_new_commitments());
-        assert!(!CertStatus::Grace { secs_until_grace_end: 1 }.allows_new_commitments());
-        assert!(!CertStatus::Expired { secs_since_expiry: 1 }.allows_new_commitments());
-        assert!(!CertStatus::NotYetValid { secs_until_active: 1 }.allows_new_commitments());
+        assert!(!CertStatus::Grace {
+            secs_until_grace_end: 1
+        }
+        .allows_new_commitments());
+        assert!(!CertStatus::Expired {
+            secs_since_expiry: 1
+        }
+        .allows_new_commitments());
+        assert!(!CertStatus::NotYetValid {
+            secs_until_active: 1
+        }
+        .allows_new_commitments());
     }
 
     #[test]
     fn active_expiring_grace_allow_recovery_ops_expired_does_not() {
         assert!(CertStatus::Active.allows_recovery_ops());
-        assert!(CertStatus::Expiring { secs_until_expiry: 1 }.allows_recovery_ops());
-        assert!(CertStatus::Grace { secs_until_grace_end: 1 }.allows_recovery_ops());
+        assert!(CertStatus::Expiring {
+            secs_until_expiry: 1
+        }
+        .allows_recovery_ops());
+        assert!(CertStatus::Grace {
+            secs_until_grace_end: 1
+        }
+        .allows_recovery_ops());
         assert!(CertStatus::AlwaysActiveEmergency.allows_recovery_ops());
-        assert!(!CertStatus::Expired { secs_since_expiry: 1 }.allows_recovery_ops());
-        assert!(!CertStatus::NotYetValid { secs_until_active: 1 }.allows_recovery_ops());
+        assert!(!CertStatus::Expired {
+            secs_since_expiry: 1
+        }
+        .allows_recovery_ops());
+        assert!(!CertStatus::NotYetValid {
+            secs_until_active: 1
+        }
+        .allows_recovery_ops());
     }
 
     #[test]
     fn cert_status_tag_strings_are_pinned() {
         // Audit dashboards and grep recipes depend on these strings.
-        assert_eq!(CertStatus::Active.tag(),                                 "active");
-        assert_eq!(CertStatus::Expiring { secs_until_expiry: 0 }.tag(),      "expiring");
-        assert_eq!(CertStatus::Grace { secs_until_grace_end: 0 }.tag(),      "grace");
-        assert_eq!(CertStatus::Expired { secs_since_expiry: 0 }.tag(),       "expired");
-        assert_eq!(CertStatus::NotYetValid { secs_until_active: 0 }.tag(),   "not_yet_valid");
-        assert_eq!(CertStatus::AlwaysActiveEmergency.tag(),                  "always_active_emergency");
+        assert_eq!(CertStatus::Active.tag(), "active");
+        assert_eq!(
+            CertStatus::Expiring {
+                secs_until_expiry: 0
+            }
+            .tag(),
+            "expiring"
+        );
+        assert_eq!(
+            CertStatus::Grace {
+                secs_until_grace_end: 0
+            }
+            .tag(),
+            "grace"
+        );
+        assert_eq!(
+            CertStatus::Expired {
+                secs_since_expiry: 0
+            }
+            .tag(),
+            "expired"
+        );
+        assert_eq!(
+            CertStatus::NotYetValid {
+                secs_until_active: 0
+            }
+            .tag(),
+            "not_yet_valid"
+        );
+        assert_eq!(
+            CertStatus::AlwaysActiveEmergency.tag(),
+            "always_active_emergency"
+        );
         assert_eq!(
             CertStatus::Revoked {
-                reason:     RevocationReason::Compromise,
+                reason: RevocationReason::Compromise,
                 revoked_at: 1_700_000_000,
-            }.tag(),
+            }
+            .tag(),
             "revoked",
         );
     }
@@ -1079,8 +1197,8 @@ mod tests {
     #[test]
     fn revocation_signature_round_trips() {
         let signing = test_signing_key();
-        let pubkey  = test_pubkey_hex();
-        let now     = 1_700_000_000_i64;
+        let pubkey = test_pubkey_hex();
+        let now = 1_700_000_000_i64;
         let sig_hex = sign_revocation(
             &pubkey,
             RevocationReason::Rotation,
@@ -1089,39 +1207,44 @@ mod tests {
             &signing,
         );
         let record = RevocationRecord {
-            subject_pubkey_hex:        "bb".repeat(32),
-            subject_fingerprint:       "00".repeat(16),
-            reason:                    RevocationReason::Rotation,
-            revoked_at:                now,
-            reference:                 "ticket-7".into(),
-            revoked_by_pubkey_hex:     "cc".repeat(32),
-            revoked_by_signature_hex:  sig_hex.clone(),
-            signing_input_version:     "raxis-cert-revocation/v1".into(),
+            subject_pubkey_hex: "bb".repeat(32),
+            subject_fingerprint: "00".repeat(16),
+            reason: RevocationReason::Rotation,
+            revoked_at: now,
+            reference: "ticket-7".into(),
+            revoked_by_pubkey_hex: "cc".repeat(32),
+            revoked_by_signature_hex: sig_hex.clone(),
+            signing_input_version: "raxis-cert-revocation/v1".into(),
         };
         // Mismatched subject — verification fails because the
         // canonical input includes the subject pubkey and the
         // signer / pubkey-on-record disagree.
         let err = verify_revocation_signature(&record).unwrap_err();
-        assert!(matches!(err, CertError::SelfSignatureInvalid(_) | CertError::HexDecode(_)),
-            "expected SelfSignatureInvalid, got {err:?}");
+        assert!(
+            matches!(
+                err,
+                CertError::SelfSignatureInvalid(_) | CertError::HexDecode(_)
+            ),
+            "expected SelfSignatureInvalid, got {err:?}"
+        );
 
         // Now build a record whose subject + signing-key are
         // consistent with the actual signed bytes.
         let consistent = RevocationRecord {
-            subject_pubkey_hex:        pubkey.clone(),
-            subject_fingerprint:       "00".repeat(16),
-            reason:                    RevocationReason::Rotation,
-            revoked_at:                now,
-            reference:                 "ticket-7".into(),
-            revoked_by_pubkey_hex:     pubkey.clone(),
-            revoked_by_signature_hex:  sign_revocation(
+            subject_pubkey_hex: pubkey.clone(),
+            subject_fingerprint: "00".repeat(16),
+            reason: RevocationReason::Rotation,
+            revoked_at: now,
+            reference: "ticket-7".into(),
+            revoked_by_pubkey_hex: pubkey.clone(),
+            revoked_by_signature_hex: sign_revocation(
                 &pubkey,
                 RevocationReason::Rotation,
                 now,
                 "ticket-7",
                 &signing,
             ),
-            signing_input_version:     "raxis-cert-revocation/v1".into(),
+            signing_input_version: "raxis-cert-revocation/v1".into(),
         };
         verify_revocation_signature(&consistent).expect("valid sig");
     }
@@ -1129,14 +1252,14 @@ mod tests {
     #[test]
     fn revocation_signature_rejects_unknown_version() {
         let mut record = RevocationRecord {
-            subject_pubkey_hex:        test_pubkey_hex(),
-            subject_fingerprint:       "00".repeat(16),
-            reason:                    RevocationReason::Rotation,
-            revoked_at:                0,
-            reference:                 "x".into(),
-            revoked_by_pubkey_hex:     test_pubkey_hex(),
-            revoked_by_signature_hex:  "00".repeat(64),
-            signing_input_version:     "raxis-cert-revocation/v9".into(),
+            subject_pubkey_hex: test_pubkey_hex(),
+            subject_fingerprint: "00".repeat(16),
+            reason: RevocationReason::Rotation,
+            revoked_at: 0,
+            reference: "x".into(),
+            revoked_by_pubkey_hex: test_pubkey_hex(),
+            revoked_by_signature_hex: "00".repeat(64),
+            signing_input_version: "raxis-cert-revocation/v9".into(),
         };
         record.revoked_by_signature_hex = sign_revocation(
             &record.subject_pubkey_hex,
@@ -1146,22 +1269,20 @@ mod tests {
             &test_signing_key(),
         );
         let err = verify_revocation_signature(&record).unwrap_err();
-        assert!(matches!(err, CertError::SelfSignatureInvalid(_)),
-            "unknown version must reject: {err:?}");
+        assert!(
+            matches!(err, CertError::SelfSignatureInvalid(_)),
+            "unknown version must reject: {err:?}"
+        );
     }
 
     #[test]
     fn cert_status_with_revocation_returns_revoked_when_lookup_hits() {
-        let now  = 1_700_000_000_i64;
+        let now = 1_700_000_000_i64;
         let cert = fixture_standard_cert(now);
-        let status = cert_status_with_revocation(
-            &cert,
-            now,
-            |pk| {
-                assert_eq!(pk, cert.pubkey_hex);
-                Some((RevocationReason::Compromise, now - 86_400))
-            },
-        );
+        let status = cert_status_with_revocation(&cert, now, |pk| {
+            assert_eq!(pk, cert.pubkey_hex);
+            Some((RevocationReason::Compromise, now - 86_400))
+        });
         match status {
             CertStatus::Revoked { reason, revoked_at } => {
                 assert_eq!(reason, RevocationReason::Compromise);
@@ -1173,7 +1294,7 @@ mod tests {
 
     #[test]
     fn cert_status_with_revocation_falls_through_when_lookup_misses() {
-        let now  = 1_700_000_000_i64;
+        let now = 1_700_000_000_i64;
         let cert = fixture_standard_cert(now);
         let status = cert_status_with_revocation(&cert, now, |_| None);
         assert_eq!(status, CertStatus::Active);
@@ -1182,7 +1303,7 @@ mod tests {
     #[test]
     fn revoked_status_denies_all_ops() {
         let s = CertStatus::Revoked {
-            reason:     RevocationReason::Rotation,
+            reason: RevocationReason::Rotation,
             revoked_at: 0,
         };
         assert!(!s.allows_new_commitments());
@@ -1201,7 +1322,7 @@ mod tests {
     #[test]
     fn cert_kind_parse_returns_none_for_unknown() {
         assert_eq!(CertKind::parse("ReadOnly"), None);
-        assert_eq!(CertKind::parse(""),         None);
+        assert_eq!(CertKind::parse(""), None);
         assert_eq!(CertKind::parse("standard"), None, "case-sensitive");
     }
 }

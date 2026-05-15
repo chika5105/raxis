@@ -91,7 +91,7 @@ pub enum StagingError {
     #[error("staging filesystem write failed: {path}: {reason}")]
     StageWriteFailed {
         /// Absolute path the write targeted.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying I/O reason.
         reason: String,
     },
@@ -103,7 +103,7 @@ pub enum StagingError {
     #[error("staging destroy failed: {path}: {reason}")]
     DestroyFailed {
         /// Absolute path that failed to delete.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying I/O reason.
         reason: String,
     },
@@ -199,8 +199,8 @@ pub fn stage(inputs: &StageInputs) -> Result<StagedWorktree, StagingError> {
 
     let worktrees_dir = inputs.data_dir.join(WORKTREES_DIR);
     let worktree_root = worktrees_dir.join(&inputs.session_uuid);
-    let raxis_dir     = worktree_root.join(RAXIS_DIR);
-    let bundles_dir   = raxis_dir.join(BUNDLES_DIRNAME);
+    let raxis_dir = worktree_root.join(RAXIS_DIR);
+    let bundles_dir = raxis_dir.join(BUNDLES_DIRNAME);
 
     // Layout creation is mkdir-p across three nested levels.
     create_dir_all(&bundles_dir)?;
@@ -208,11 +208,7 @@ pub fn stage(inputs: &StageInputs) -> Result<StagedWorktree, StagingError> {
     let prompt_path = raxis_dir.join(SYSTEM_PROMPT_FILENAME);
     write_file(&prompt_path, inputs.system_prompt.as_bytes())?;
 
-    let env_body = render_session_env(
-        &inputs.session_token,
-        inputs.vsock_cid,
-        inputs.vsock_port,
-    );
+    let env_body = render_session_env(&inputs.session_token, inputs.vsock_cid, inputs.vsock_port);
     let env_path = raxis_dir.join(SESSION_ENV_FILENAME);
     write_file(&env_path, env_body.as_bytes())?;
 
@@ -222,9 +218,9 @@ pub fn stage(inputs: &StageInputs) -> Result<StagedWorktree, StagingError> {
     // clone strategy in Steps 23/24/24b before spawning the VM.
     let content_hash = digest_staged_files(&prompt_path, &env_path)?;
     let mount = WorkspaceMount {
-        host_path:    worktree_root.clone(),
-        guest_path:   GUEST_WORKSPACE_PATH.to_owned(),
-        mode:         inputs.mount_mode,
+        host_path: worktree_root.clone(),
+        guest_path: GUEST_WORKSPACE_PATH.to_owned(),
+        mode: inputs.mount_mode,
         content_hash: Some(content_hash),
     };
 
@@ -251,7 +247,7 @@ pub fn destroy(worktree_root: &Path) -> Result<(), StagingError> {
         return Ok(());
     }
     std::fs::remove_dir_all(worktree_root).map_err(|e| StagingError::DestroyFailed {
-        path:   worktree_root.to_path_buf(),
+        path: worktree_root.to_path_buf(),
         reason: e.to_string(),
     })
 }
@@ -285,14 +281,14 @@ pub fn render_session_env(token: &str, cid: u32, port: u32) -> String {
 
 fn create_dir_all(path: &Path) -> Result<(), StagingError> {
     std::fs::create_dir_all(path).map_err(|e| StagingError::StageWriteFailed {
-        path:   path.to_path_buf(),
+        path: path.to_path_buf(),
         reason: e.to_string(),
     })
 }
 
 fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StagingError> {
     std::fs::write(path, bytes).map_err(|e| StagingError::StageWriteFailed {
-        path:   path.to_path_buf(),
+        path: path.to_path_buf(),
         reason: e.to_string(),
     })
 }
@@ -301,15 +297,13 @@ fn write_file(path: &Path, bytes: &[u8]) -> Result<(), StagingError> {
 /// `prompt_bytes || env_bytes`. The substrate records this into
 /// the audit event so an external auditor can reconstruct the bytes
 /// the guest saw.
-fn digest_staged_files(prompt_path: &Path, env_path: &Path)
-    -> Result<ContentHash, StagingError>
-{
+fn digest_staged_files(prompt_path: &Path, env_path: &Path) -> Result<ContentHash, StagingError> {
     let prompt = std::fs::read(prompt_path).map_err(|e| StagingError::StageWriteFailed {
-        path:   prompt_path.to_path_buf(),
+        path: prompt_path.to_path_buf(),
         reason: e.to_string(),
     })?;
     let env = std::fs::read(env_path).map_err(|e| StagingError::StageWriteFailed {
-        path:   env_path.to_path_buf(),
+        path: env_path.to_path_buf(),
         reason: e.to_string(),
     })?;
     let mut hasher = Sha256::new();
@@ -334,12 +328,12 @@ mod tests {
     fn fixture_inputs(data_dir: PathBuf, uuid: &str) -> StageInputs {
         StageInputs {
             data_dir,
-            session_uuid:  uuid.to_owned(),
+            session_uuid: uuid.to_owned(),
             system_prompt: "You are an Executor. Follow the contract.".to_owned(),
             session_token: "tok-test-1".to_owned(),
-            vsock_cid:     7,
-            vsock_port:    1024,
-            mount_mode:    MountMode::ReadWrite,
+            vsock_cid: 7,
+            vsock_port: 1024,
+            mount_mode: MountMode::ReadWrite,
         }
     }
 
@@ -361,10 +355,7 @@ mod tests {
         let mut inputs = fixture_inputs(tmp.path().to_path_buf(), "uuid-prompt");
         inputs.system_prompt = "Strict-mode banner\n----\nrules.".to_owned();
         let staged = stage(&inputs).unwrap();
-        let body = std::fs::read_to_string(
-            staged.raxis_dir.join(SYSTEM_PROMPT_FILENAME),
-        )
-        .unwrap();
+        let body = std::fs::read_to_string(staged.raxis_dir.join(SYSTEM_PROMPT_FILENAME)).unwrap();
         assert_eq!(body, "Strict-mode banner\n----\nrules.");
     }
 
@@ -372,7 +363,11 @@ mod tests {
     fn stage_renders_session_env_three_lines() {
         let env = render_session_env("tok-XYZ", 42, 1025);
         let lines: Vec<&str> = env.lines().collect();
-        assert_eq!(lines.len(), 3, "session.env must have exactly 3 lines, got {env:?}");
+        assert_eq!(
+            lines.len(),
+            3,
+            "session.env must have exactly 3 lines, got {env:?}"
+        );
         assert_eq!(lines[0], "RAXIS_SESSION_TOKEN=tok-XYZ");
         assert_eq!(lines[1], "RAXIS_VSOCK_CID=42");
         assert_eq!(lines[2], "RAXIS_VSOCK_PORT=1025");
@@ -384,11 +379,13 @@ mod tests {
         let inputs = fixture_inputs(tmp.path().to_path_buf(), "uuid-mount");
         let staged = stage(&inputs).unwrap();
         assert_eq!(staged.mount.guest_path, GUEST_WORKSPACE_PATH);
-        assert_eq!(staged.mount.host_path,  staged.worktree_root);
-        assert_eq!(staged.mount.mode,       MountMode::ReadWrite);
-        assert!(staged.mount.content_hash.is_some(),
+        assert_eq!(staged.mount.host_path, staged.worktree_root);
+        assert_eq!(staged.mount.mode, MountMode::ReadWrite);
+        assert!(
+            staged.mount.content_hash.is_some(),
             "Step 10 requires a content_hash so the audit chain can record \
-             the exact .raxis bytes the guest saw");
+             the exact .raxis bytes the guest saw"
+        );
     }
 
     #[test]
@@ -409,8 +406,8 @@ mod tests {
         let tmp2 = tempdir().unwrap();
         let mut inputs_b = fixture_inputs(tmp2.path().to_path_buf(), "uuid-a");
         inputs_b.session_token = inputs_a.session_token.clone();
-        inputs_b.vsock_cid     = inputs_a.vsock_cid;
-        inputs_b.vsock_port    = inputs_a.vsock_port;
+        inputs_b.vsock_cid = inputs_a.vsock_cid;
+        inputs_b.vsock_port = inputs_a.vsock_port;
         inputs_b.system_prompt = inputs_a.system_prompt.clone();
         let staged_b = stage(&inputs_b).unwrap();
 
@@ -435,14 +432,16 @@ mod tests {
         let tmp = tempdir().unwrap();
         let inputs_a = fixture_inputs(tmp.path().to_path_buf(), "uuid-tok-a");
         let mut inputs_b = inputs_a.clone();
-        inputs_b.session_uuid  = "uuid-tok-b".to_owned();
+        inputs_b.session_uuid = "uuid-tok-b".to_owned();
         inputs_b.session_token = "tok-different".to_owned();
 
         let a = stage(&inputs_a).unwrap();
         let b = stage(&inputs_b).unwrap();
-        assert_ne!(a.mount.content_hash, b.mount.content_hash,
+        assert_ne!(
+            a.mount.content_hash, b.mount.content_hash,
             "different session tokens must produce different content hashes \
-             so the audit chain can detect a swapped token at replay time");
+             so the audit chain can detect a swapped token at replay time"
+        );
     }
 
     #[test]

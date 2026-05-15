@@ -43,35 +43,34 @@
 //! MySQL crate) so the slice has zero external runtime dependencies
 //! beyond the proxy crate itself.
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Context, Result};
 use raxis_credentials::{
-    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
 use raxis_credential_proxy_mysql::{
-    NoopAuditChannel, OwnedConsumer, ProxyConfig, MysqlProxy, Restrictions,
-    wire::{frame_packet, PacketHeader, cmd as mysql_cmd},
+    wire::{cmd as mysql_cmd, frame_packet, PacketHeader},
+    MysqlProxy, NoopAuditChannel, OwnedConsumer, ProxyConfig, Restrictions,
 };
 
 /// Default upstream URL — the loopback published by
 /// `live-e2e/docker-compose.e2e.yml` for the MySQL 8.0.36 container.
 /// Operators can override via `RAXIS_LIVE_MYSQL_URL`.
-const DEFAULT_UPSTREAM_URL: &str =
-    "mysql://raxis_test:raxis_test_pass@127.0.0.1:33099/raxis_e2e";
+const DEFAULT_UPSTREAM_URL: &str = "mysql://raxis_test:raxis_test_pass@127.0.0.1:33099/raxis_e2e";
 
 /// Loopback host:port the docker-compose MySQL publishes; used for
 /// the slice's TCP preflight.
 const MYSQL_HOST_PORT: &str = "127.0.0.1:33099";
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -88,16 +87,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub async fn run() -> Result<()> {
@@ -122,19 +130,19 @@ pub async fn run() -> Result<()> {
     let hermetic = false;
 
     let backend = Arc::new(LiveBackend {
-        value:    upstream_url.as_bytes().to_vec(),
+        value: upstream_url.as_bytes().to_vec(),
         resolves: AtomicU32::new(0),
     });
 
     let credential_name = CredentialName::try_from("live-e2e".to_owned())
         .map_err(|e| anyhow!("CredentialName: {e}"))?;
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: credential_name.clone(),
-        consumer:        OwnedConsumer::new("live-e2e", "mysql-slice"),
-        server_version:  "8.0.30-raxis-handshake".to_owned(),
-        restrictions:    Restrictions::select_only(),
-        log_content:     false,
+        consumer: OwnedConsumer::new("live-e2e", "mysql-slice"),
+        server_version: "8.0.30-raxis-handshake".to_owned(),
+        restrictions: Restrictions::select_only(),
+        log_content: false,
     };
 
     let proxy = MysqlProxy::bind(
@@ -153,16 +161,19 @@ pub async fn run() -> Result<()> {
     tokio::time::sleep(Duration::from_millis(50)).await;
 
     // Drive a real MySQL handshake.
-    let mut sock = TcpStream::connect(proxy_addr).await
+    let mut sock = TcpStream::connect(proxy_addr)
+        .await
         .context("connect to MysqlProxy")?;
 
     // 1. Read HandshakeV10 (seq=0).
-    let (h0, payload0) = read_packet(&mut sock).await
+    let (h0, payload0) = read_packet(&mut sock)
+        .await
         .context("read HandshakeV10")?
         .ok_or_else(|| anyhow!("EOF before HandshakeV10"))?;
     if h0.sequence_id != 0 {
         return Err(anyhow!(
-            "expected HandshakeV10 seq=0, got seq={}", h0.sequence_id,
+            "expected HandshakeV10 seq=0, got seq={}",
+            h0.sequence_id,
         ));
     }
     if payload0.first().copied() != Some(0x0a) {
@@ -196,17 +207,20 @@ pub async fn run() -> Result<()> {
     handshake_response.push(0);
     // auth-plugin name NUL-terminated.
     handshake_response.extend_from_slice(b"mysql_native_password\0");
-    sock.write_all(&frame_packet(&handshake_response, 1)).await
+    sock.write_all(&frame_packet(&handshake_response, 1))
+        .await
         .context("write HandshakeResponse41")?;
     sock.flush().await.context("flush HandshakeResponse41")?;
 
     // 3. Read OK_Packet (seq=2).
-    let (h2, payload2) = read_packet(&mut sock).await
+    let (h2, payload2) = read_packet(&mut sock)
+        .await
         .context("read OK_Packet")?
         .ok_or_else(|| anyhow!("EOF before OK_Packet"))?;
     if h2.sequence_id != 2 {
         return Err(anyhow!(
-            "expected OK_Packet seq=2, got seq={}", h2.sequence_id,
+            "expected OK_Packet seq=2, got seq={}",
+            h2.sequence_id,
         ));
     }
     if payload2.first().copied() != Some(0x00) {
@@ -218,10 +232,12 @@ pub async fn run() -> Result<()> {
 
     // 4. COM_PING — proxy must reply OK_Packet.
     let ping_payload = vec![mysql_cmd::PING];
-    sock.write_all(&frame_packet(&ping_payload, 0)).await
+    sock.write_all(&frame_packet(&ping_payload, 0))
+        .await
         .context("write COM_PING")?;
     sock.flush().await?;
-    let (_h_ping, payload_ping) = read_packet(&mut sock).await
+    let (_h_ping, payload_ping) = read_packet(&mut sock)
+        .await
         .context("read OK after PING")?
         .ok_or_else(|| anyhow!("EOF after PING"))?;
     if payload_ping.first().copied() != Some(0x00) {
@@ -246,33 +262,30 @@ pub async fn run() -> Result<()> {
     //    INSERT's own ERR_Packet rather than a leftover ColumnDef.
     let mut select_payload = vec![mysql_cmd::QUERY];
     select_payload.extend_from_slice(b"SELECT 1");
-    sock.write_all(&frame_packet(&select_payload, 0)).await
+    sock.write_all(&frame_packet(&select_payload, 0))
+        .await
         .context("write COM_QUERY SELECT")?;
     sock.flush().await?;
-    let (_h_sel, payload_sel) = read_packet(&mut sock).await
+    let (_h_sel, payload_sel) = read_packet(&mut sock)
+        .await
         .context("read SELECT response")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
     match payload_sel.first().copied() {
         Some(0xff) | Some(0x00) => {
             tracing::info!(
-                first_byte = format!("{:#04x}",
-                    payload_sel.first().copied().unwrap_or(0)),
+                first_byte = format!("{:#04x}", payload_sel.first().copied().unwrap_or(0)),
                 "slice mysql-proxy: SELECT short-form reply",
             );
         }
         Some(_) => {
-            let column_count = payload_sel
-                .first()
-                .copied()
-                .unwrap_or(0) as u64;
+            let column_count = payload_sel.first().copied().unwrap_or(0) as u64;
             let mut eof_seen = 0;
             let mut frames_read = 1;
             while eof_seen < 2 {
-                let (_h, p) = read_packet(&mut sock).await
+                let (_h, p) = read_packet(&mut sock)
+                    .await
                     .context("drain SELECT result-set frame")?
-                    .ok_or_else(|| anyhow!(
-                        "EOF mid-result-set after {frames_read} frames",
-                    ))?;
+                    .ok_or_else(|| anyhow!("EOF mid-result-set after {frames_read} frames",))?;
                 frames_read += 1;
                 if !p.is_empty() && p[0] == 0xfe && p.len() < 9 {
                     eof_seen += 1;
@@ -281,8 +294,7 @@ pub async fn run() -> Result<()> {
                 }
             }
             tracing::info!(
-                first_byte = format!("{:#04x}",
-                    payload_sel.first().copied().unwrap_or(0)),
+                first_byte = format!("{:#04x}", payload_sel.first().copied().unwrap_or(0)),
                 column_count,
                 frames_read,
                 "slice mysql-proxy: SELECT result-set drained",
@@ -297,10 +309,12 @@ pub async fn run() -> Result<()> {
     //    ERR_Packet under allow_only_select.
     let mut insert_payload = vec![mysql_cmd::QUERY];
     insert_payload.extend_from_slice(b"INSERT INTO t VALUES (1)");
-    sock.write_all(&frame_packet(&insert_payload, 0)).await
+    sock.write_all(&frame_packet(&insert_payload, 0))
+        .await
         .context("write COM_QUERY INSERT")?;
     sock.flush().await?;
-    let (_h_ins, payload_ins) = read_packet(&mut sock).await
+    let (_h_ins, payload_ins) = read_packet(&mut sock)
+        .await
         .context("read INSERT response")?
         .ok_or_else(|| anyhow!("EOF after INSERT"))?;
     if payload_ins.first().copied() != Some(0xff) {
@@ -310,9 +324,11 @@ pub async fn run() -> Result<()> {
         ));
     }
     // Spot-check the SQLSTATE marker.
-    let marker_pos = payload_ins.iter().position(|&b| b == b'#')
+    let marker_pos = payload_ins
+        .iter()
+        .position(|&b| b == b'#')
         .ok_or_else(|| anyhow!("ERR_Packet missing '#' SQLSTATE marker"))?;
-    let sqlstate = &payload_ins[marker_pos + 1 .. marker_pos + 6];
+    let sqlstate = &payload_ins[marker_pos + 1..marker_pos + 6];
     if sqlstate != b"42501" {
         return Err(anyhow!(
             "ERR_Packet sqlstate {:?} != 42501",
@@ -322,31 +338,32 @@ pub async fn run() -> Result<()> {
 
     // 7. COM_QUIT — server closes.
     let quit_payload = vec![mysql_cmd::QUIT];
-    sock.write_all(&frame_packet(&quit_payload, 0)).await
+    sock.write_all(&frame_packet(&quit_payload, 0))
+        .await
         .context("write COM_QUIT")?;
     sock.flush().await?;
     let mut tail = [0u8; 1];
-    let _ = tokio::time::timeout(
-        Duration::from_secs(1),
-        sock.read_exact(&mut tail),
-    ).await;
+    let _ = tokio::time::timeout(Duration::from_secs(1), sock.read_exact(&mut tail)).await;
     drop(sock);
 
     // 8. Verify counters.
     let snap = stats.snapshot();
     if snap.connections_served < 1 {
         return Err(anyhow!(
-            "expected ≥1 connection_served, got {}", snap.connections_served,
+            "expected ≥1 connection_served, got {}",
+            snap.connections_served,
         ));
     }
     if snap.queries_audited != 2 {
         return Err(anyhow!(
-            "expected queries_audited=2, got {}", snap.queries_audited,
+            "expected queries_audited=2, got {}",
+            snap.queries_audited,
         ));
     }
     if snap.queries_blocked != 1 {
         return Err(anyhow!(
-            "expected queries_blocked=1, got {}", snap.queries_blocked,
+            "expected queries_blocked=1, got {}",
+            snap.queries_blocked,
         ));
     }
     if backend.resolves.load(Ordering::Relaxed) < 1 {
@@ -370,11 +387,11 @@ pub async fn run() -> Result<()> {
 
     tracing::info!(
         connections_served = snap.connections_served,
-        queries_audited    = snap.queries_audited,
-        queries_blocked    = snap.queries_blocked,
+        queries_audited = snap.queries_audited,
+        queries_blocked = snap.queries_blocked,
         upstream_succeeded = snap.upstream_connects_succeeded,
-        upstream_failed    = snap.upstream_connects_failed,
-        backend_resolves   = backend.resolves.load(Ordering::Relaxed),
+        upstream_failed = snap.upstream_connects_failed,
+        backend_resolves = backend.resolves.load(Ordering::Relaxed),
         "mysql-proxy slice OK",
     );
     Ok(())
@@ -384,10 +401,7 @@ pub async fn run() -> Result<()> {
 /// when the container isn't running so the operator immediately
 /// knows to bring up the compose stack.
 async fn require_mysql_container() -> Result<()> {
-    match tokio::time::timeout(
-        Duration::from_secs(2),
-        TcpStream::connect(MYSQL_HOST_PORT),
-    ).await {
+    match tokio::time::timeout(Duration::from_secs(2), TcpStream::connect(MYSQL_HOST_PORT)).await {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "mysql container not reachable at {MYSQL_HOST_PORT}: {e}\n\
@@ -410,8 +424,8 @@ async fn read_packet(sock: &mut TcpStream) -> Result<Option<(PacketHeader, Vec<u
     }
     let h = PacketHeader::parse(header);
     let mut payload = vec![0u8; h.payload_len];
-    sock.read_exact(&mut payload).await
+    sock.read_exact(&mut payload)
+        .await
         .context("read MySQL packet payload")?;
     Ok(Some((h, payload)))
 }
-

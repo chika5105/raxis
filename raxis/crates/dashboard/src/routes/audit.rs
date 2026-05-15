@@ -47,7 +47,9 @@ pub struct ListQuery {
     pub initiative_id: Option<String>,
 }
 
-fn default_limit() -> u32 { 100 }
+fn default_limit() -> u32 {
+    100
+}
 
 /// `GET /api/audit`.
 pub async fn list<D>(
@@ -59,11 +61,10 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let rows = state.data.list_audit(
-        q.cursor,
-        q.limit.clamp(1, 500),
-        q.initiative_id.as_deref(),
-    )?;
+    let rows =
+        state
+            .data
+            .list_audit(q.cursor, q.limit.clamp(1, 500), q.initiative_id.as_deref())?;
     Ok(Json(rows))
 }
 
@@ -80,7 +81,9 @@ pub struct RecentQuery {
     pub limit: u32,
 }
 
-fn default_recent_limit() -> u32 { 10 }
+fn default_recent_limit() -> u32 {
+    10
+}
 
 /// Maximum chain rows the recent-activity handler walks before
 /// giving up and returning whatever it has accumulated. The
@@ -183,7 +186,9 @@ fn require_read(op: &AuthorizedOperator) -> ApiResult<()> {
         && !op.has_role(DashboardRole::WritePolicy)
         && !op.has_role(DashboardRole::Admin)
     {
-        return Err(ApiError::Forbidden { required: "read".into() });
+        return Err(ApiError::Forbidden {
+            required: "read".into(),
+        });
     }
     Ok(())
 }

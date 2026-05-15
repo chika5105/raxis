@@ -88,13 +88,13 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-const TRUST_ANCHOR_HEX_VAR:    &str = "RAXIS_KERNEL_SIGNING_KEY_HEX";
-const TRUST_ANCHOR_PATH_VAR:   &str = "RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH";
-const REVIEWER_DIGEST_HEX_VAR:     &str = "RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX";
+const TRUST_ANCHOR_HEX_VAR: &str = "RAXIS_KERNEL_SIGNING_KEY_HEX";
+const TRUST_ANCHOR_PATH_VAR: &str = "RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH";
+const REVIEWER_DIGEST_HEX_VAR: &str = "RAXIS_EXPECTED_REVIEWER_IMAGE_DIGEST_HEX";
 const ORCHESTRATOR_DIGEST_HEX_VAR: &str = "RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIGEST_HEX";
-const TRUST_ANCHOR_LEN_BYTES:  usize = 32;
-const TRUST_ANCHOR_LEN_HEX:    usize = TRUST_ANCHOR_LEN_BYTES * 2;
-const TRUST_ANCHOR_OUT_FILE:   &str = "trust_anchor.rs";
+const TRUST_ANCHOR_LEN_BYTES: usize = 32;
+const TRUST_ANCHOR_LEN_HEX: usize = TRUST_ANCHOR_LEN_BYTES * 2;
+const TRUST_ANCHOR_OUT_FILE: &str = "trust_anchor.rs";
 
 fn main() {
     // Re-run the build script when any input variable changes.
@@ -106,13 +106,12 @@ fn main() {
     println!("cargo:rerun-if-env-changed={ORCHESTRATOR_DIGEST_HEX_VAR}");
     println!("cargo:rerun-if-changed=build.rs");
 
-    let trust_anchor          = resolve_trust_anchor_bytes();
-    let reviewer_digest       = resolve_role_digest(REVIEWER_DIGEST_HEX_VAR);
-    let orchestrator_digest   = resolve_role_digest(ORCHESTRATOR_DIGEST_HEX_VAR);
+    let trust_anchor = resolve_trust_anchor_bytes();
+    let reviewer_digest = resolve_role_digest(REVIEWER_DIGEST_HEX_VAR);
+    let orchestrator_digest = resolve_role_digest(ORCHESTRATOR_DIGEST_HEX_VAR);
 
-    let out_dir = env::var_os("OUT_DIR")
-        .expect("cargo always sets OUT_DIR for build scripts");
-    let dest    = PathBuf::from(out_dir).join(TRUST_ANCHOR_OUT_FILE);
+    let out_dir = env::var_os("OUT_DIR").expect("cargo always sets OUT_DIR for build scripts");
+    let dest = PathBuf::from(out_dir).join(TRUST_ANCHOR_OUT_FILE);
     fs::write(
         &dest,
         render_anchor_module(&trust_anchor, &reviewer_digest, &orchestrator_digest),
@@ -142,8 +141,7 @@ fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
     if let Ok(hex_input) = env::var(TRUST_ANCHOR_HEX_VAR) {
         let trimmed = hex_input.trim();
         if !trimmed.is_empty() {
-            return decode_hex(trimmed)
-                .unwrap_or_else(|e| panic!("{TRUST_ANCHOR_HEX_VAR}: {e}"));
+            return decode_hex(trimmed).unwrap_or_else(|e| panic!("{TRUST_ANCHOR_HEX_VAR}: {e}"));
         }
     }
 
@@ -168,15 +166,14 @@ fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
 /// when unset; panics on a mistyped non-empty value.
 fn resolve_role_digest(env_var: &str) -> [u8; TRUST_ANCHOR_LEN_BYTES] {
     let raw = match env::var(env_var) {
-        Ok(s)  => s,
+        Ok(s) => s,
         Err(_) => return [0u8; TRUST_ANCHOR_LEN_BYTES],
     };
     let trimmed = raw.trim();
     if trimmed.is_empty() {
         return [0u8; TRUST_ANCHOR_LEN_BYTES];
     }
-    decode_hex(trimmed)
-        .unwrap_or_else(|e| panic!("{env_var}: {e}"))
+    decode_hex(trimmed).unwrap_or_else(|e| panic!("{env_var}: {e}"))
 }
 
 fn decode_hex(input: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {
@@ -203,13 +200,12 @@ fn nybble(c: u8) -> Option<u8> {
         b'0'..=b'9' => Some(c - b'0'),
         b'a'..=b'f' => Some(c - b'a' + 10),
         b'A'..=b'F' => Some(c - b'A' + 10),
-        _           => None,
+        _ => None,
     }
 }
 
 fn read_raw_bytes(path: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {
-    let raw = fs::read(path)
-        .map_err(|e| format!("cannot read {path}: {e}"))?;
+    let raw = fs::read(path).map_err(|e| format!("cannot read {path}: {e}"))?;
     if raw.len() != TRUST_ANCHOR_LEN_BYTES {
         return Err(format!(
             "expected exactly {TRUST_ANCHOR_LEN_BYTES} bytes (got {} bytes from {path})",
@@ -222,8 +218,8 @@ fn read_raw_bytes(path: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {
 }
 
 fn render_anchor_module(
-    trust_anchor:        &[u8; TRUST_ANCHOR_LEN_BYTES],
-    reviewer_digest:     &[u8; TRUST_ANCHOR_LEN_BYTES],
+    trust_anchor: &[u8; TRUST_ANCHOR_LEN_BYTES],
+    reviewer_digest: &[u8; TRUST_ANCHOR_LEN_BYTES],
     orchestrator_digest: &[u8; TRUST_ANCHOR_LEN_BYTES],
 ) -> String {
     let mut s = String::with_capacity(4096);
@@ -239,9 +235,13 @@ fn render_anchor_module(
          // `EXPECTED_REVIEWER_IMAGE_DIGEST`, and\n\
          // `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST`.\n",
     );
-    push_byte_array(&mut s, "GENERATED_KERNEL_SIGNING_KEY_BYTES",   trust_anchor);
-    push_byte_array(&mut s, "GENERATED_REVIEWER_IMAGE_DIGEST",      reviewer_digest);
-    push_byte_array(&mut s, "GENERATED_ORCHESTRATOR_IMAGE_DIGEST",  orchestrator_digest);
+    push_byte_array(&mut s, "GENERATED_KERNEL_SIGNING_KEY_BYTES", trust_anchor);
+    push_byte_array(&mut s, "GENERATED_REVIEWER_IMAGE_DIGEST", reviewer_digest);
+    push_byte_array(
+        &mut s,
+        "GENERATED_ORCHESTRATOR_IMAGE_DIGEST",
+        orchestrator_digest,
+    );
     s
 }
 

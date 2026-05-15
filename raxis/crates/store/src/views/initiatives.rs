@@ -22,26 +22,26 @@ use crate::Table;
 /// 1:1 with the `initiatives` DDL (kernel-store.md §2.5.1 Table 2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitiativeRow {
-    pub initiative_id:           String,
-    pub state:                   String,
-    pub plan_artifact_sha256:    String,
-    pub created_at:              u64,
-    pub approved_at:             Option<u64>,
-    pub completed_at:            Option<u64>,
+    pub initiative_id: String,
+    pub state: String,
+    pub plan_artifact_sha256: String,
+    pub created_at: u64,
+    pub approved_at: Option<u64>,
+    pub completed_at: Option<u64>,
 }
 
 /// Per-state row count. All seven FSM states from kernel-store.md
 /// §2.5.1 Table 2 + a `total` aggregate.
 #[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize)]
 pub struct InitiativeStateCounts {
-    pub draft:         u64,
+    pub draft: u64,
     pub approved_plan: u64,
-    pub executing:     u64,
-    pub blocked:       u64,
-    pub completed:     u64,
-    pub failed:        u64,
-    pub aborted:       u64,
-    pub total:         u64,
+    pub executing: u64,
+    pub blocked: u64,
+    pub completed: u64,
+    pub failed: u64,
+    pub aborted: u64,
+    pub total: u64,
 }
 
 #[derive(Debug, Error)]
@@ -57,21 +57,19 @@ pub fn counts_by_state(conn: &RoConn) -> Result<InitiativeStateCounts, Initiativ
         "SELECT state, COUNT(*) FROM {} GROUP BY state",
         Table::Initiatives.as_str(),
     ))?;
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?))
-    })?;
+    let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
 
     for row in rows {
         let (state, count) = row?;
         let n = count.max(0) as u64;
         match state.as_str() {
-            "Draft"        => counts.draft = n,
+            "Draft" => counts.draft = n,
             "ApprovedPlan" => counts.approved_plan = n,
-            "Executing"    => counts.executing = n,
-            "Blocked"      => counts.blocked = n,
-            "Completed"    => counts.completed = n,
-            "Failed"       => counts.failed = n,
-            "Aborted"      => counts.aborted = n,
+            "Executing" => counts.executing = n,
+            "Blocked" => counts.blocked = n,
+            "Completed" => counts.completed = n,
+            "Failed" => counts.failed = n,
+            "Aborted" => counts.aborted = n,
             // Future states migrate gracefully — see tasks.rs note.
             _ => {}
         }
@@ -96,21 +94,27 @@ pub fn counts_by_state(conn: &RoConn) -> Result<InitiativeStateCounts, Initiativ
 /// A column with the wrong width surfaces as
 /// [`InitiativeViewError::Sqlite`] (rusqlite's `FromSqlError`).
 pub fn plan_bundle_sha256_by_id(
-    conn:          &RoConn,
+    conn: &RoConn,
     initiative_id: &str,
 ) -> Result<Option<raxis_types::BundleSha256>, InitiativeViewError> {
-    let row = conn.query_row(
-        &format!(
-            "SELECT plan_bundle_sha256 \
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT plan_bundle_sha256 \
              FROM {} WHERE initiative_id = ?1",
-            Table::Initiatives.as_str(),
-        ),
-        rusqlite::params![initiative_id],
-        |r| r.get::<_, Option<Vec<u8>>>(0),
-    ).optional()?;
+                Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![initiative_id],
+            |r| r.get::<_, Option<Vec<u8>>>(0),
+        )
+        .optional()?;
 
-    let Some(blob_opt) = row else { return Ok(None); };
-    let Some(blob) = blob_opt else { return Ok(None); };
+    let Some(blob_opt) = row else {
+        return Ok(None);
+    };
+    let Some(blob) = blob_opt else {
+        return Ok(None);
+    };
 
     let arr: [u8; 32] = blob.as_slice().try_into().map_err(|_| {
         // Surface as a structured rusqlite error: the DDL CHECK
@@ -145,18 +149,17 @@ pub fn plan_bundle_sha256_by_id(
 /// Returns `Ok(false)` when the initiative does not exist (callers
 /// already validate existence via [`by_id`]) so the recovery scan can
 /// stay narrow.
-pub fn git_apply_pending(
-    conn:          &RoConn,
-    initiative_id: &str,
-) -> Result<bool, InitiativeViewError> {
-    let pending: Option<i64> = conn.query_row(
-        &format!(
-            "SELECT git_apply_pending FROM {} WHERE initiative_id = ?1",
-            Table::Initiatives.as_str(),
-        ),
-        rusqlite::params![initiative_id],
-        |r| r.get(0),
-    ).optional()?;
+pub fn git_apply_pending(conn: &RoConn, initiative_id: &str) -> Result<bool, InitiativeViewError> {
+    let pending: Option<i64> = conn
+        .query_row(
+            &format!(
+                "SELECT git_apply_pending FROM {} WHERE initiative_id = ?1",
+                Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![initiative_id],
+            |r| r.get(0),
+        )
+        .optional()?;
     Ok(pending.unwrap_or(0) != 0)
 }
 
@@ -169,9 +172,7 @@ pub fn git_apply_pending(
 /// O(initiatives). Boot recovery iterates this list and, for each
 /// id, looks up the most recent `IntegrationMergeCompleted` audit
 /// event to recover the merge commit SHA + target ref to re-apply.
-pub fn pending_git_apply_ids(
-    conn: &RoConn,
-) -> Result<Vec<String>, InitiativeViewError> {
+pub fn pending_git_apply_ids(conn: &RoConn) -> Result<Vec<String>, InitiativeViewError> {
     let mut stmt = conn.prepare(&format!(
         "SELECT initiative_id FROM {} WHERE git_apply_pending = 1 \
          ORDER BY created_at ASC",
@@ -184,24 +185,31 @@ pub fn pending_git_apply_ids(
 }
 
 /// Look up a single initiative by id. Returns `None` when missing.
-pub fn by_id(conn: &RoConn, initiative_id: &str) -> Result<Option<InitiativeRow>, InitiativeViewError> {
-    let row = conn.query_row(
-        &format!(
-            "SELECT initiative_id, state, plan_artifact_sha256, \
+pub fn by_id(
+    conn: &RoConn,
+    initiative_id: &str,
+) -> Result<Option<InitiativeRow>, InitiativeViewError> {
+    let row = conn
+        .query_row(
+            &format!(
+                "SELECT initiative_id, state, plan_artifact_sha256, \
                     created_at, approved_at, completed_at \
              FROM {} WHERE initiative_id = ?1",
-            Table::Initiatives.as_str(),
-        ),
-        rusqlite::params![initiative_id],
-        |r| Ok(InitiativeRow {
-            initiative_id:        r.get(0)?,
-            state:                r.get(1)?,
-            plan_artifact_sha256: r.get(2)?,
-            created_at:           r.get::<_, i64>(3)?.max(0) as u64,
-            approved_at:          r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
-            completed_at:         r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
-        }),
-    ).optional()?;
+                Table::Initiatives.as_str(),
+            ),
+            rusqlite::params![initiative_id],
+            |r| {
+                Ok(InitiativeRow {
+                    initiative_id: r.get(0)?,
+                    state: r.get(1)?,
+                    plan_artifact_sha256: r.get(2)?,
+                    created_at: r.get::<_, i64>(3)?.max(0) as u64,
+                    approved_at: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+                    completed_at: r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
+                })
+            },
+        )
+        .optional()?;
     Ok(row)
 }
 
@@ -240,12 +248,12 @@ pub fn list(
 
 fn map_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeRow> {
     Ok(InitiativeRow {
-        initiative_id:        r.get(0)?,
-        state:                r.get(1)?,
+        initiative_id: r.get(0)?,
+        state: r.get(1)?,
         plan_artifact_sha256: r.get(2)?,
-        created_at:           r.get::<_, i64>(3)?.max(0) as u64,
-        approved_at:          r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
-        completed_at:         r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
+        created_at: r.get::<_, i64>(3)?.max(0) as u64,
+        approved_at: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+        completed_at: r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
     })
 }
 
@@ -302,7 +310,7 @@ pub enum InitiativeListFilter {
 /// "what initiatives match the filter?" and "is each one frozen?".
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct InitiativeListRow {
-    pub initiative:  InitiativeRow,
+    pub initiative: InitiativeRow,
     /// `true` iff a row exists in `initiative_quarantines` for this
     /// `initiative_id`. The CLI surfaces this as a `[Q]` marker (or
     /// `quarantined: true` in JSON) on every row.
@@ -319,18 +327,19 @@ pub struct InitiativeListRow {
 /// filter is `Active` / `Completed`, and the `initiative_quarantines`
 /// PRIMARY KEY when the filter is `Quarantined`.
 pub fn list_filtered(
-    conn:   &RoConn,
+    conn: &RoConn,
     filter: InitiativeListFilter,
-    limit:  usize,
+    limit: usize,
 ) -> Result<Vec<InitiativeListRow>, InitiativeViewError> {
     let initiatives = Table::Initiatives.as_str();
     let quarantines = Table::InitiativeQuarantines.as_str();
 
     let where_clause = match filter {
-        InitiativeListFilter::All         => String::new(),
-        InitiativeListFilter::Active      => " WHERE i.state IN \
-            ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')".to_owned(),
-        InitiativeListFilter::Completed   => " WHERE i.state = 'Completed'".to_owned(),
+        InitiativeListFilter::All => String::new(),
+        InitiativeListFilter::Active => " WHERE i.state IN \
+            ('Draft', 'ApprovedPlan', 'Executing', 'Blocked')"
+            .to_owned(),
+        InitiativeListFilter::Completed => " WHERE i.state = 'Completed'".to_owned(),
         InitiativeListFilter::Quarantined => " WHERE q.initiative_id IS NOT NULL".to_owned(),
     };
 
@@ -373,7 +382,7 @@ pub fn list_filtered(
 /// success). MUST be called inside the kernel's Phase 1 SQLite
 /// transaction so the flag flips atomically with the intent record.
 pub fn set_git_apply_pending(
-    conn:          &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     initiative_id: &str,
 ) -> Result<usize, rusqlite::Error> {
     conn.execute(
@@ -392,7 +401,7 @@ pub fn set_git_apply_pending(
 ///   * by boot recovery after the merge is verified or successfully
 ///     re-applied.
 pub fn clear_git_apply_pending(
-    conn:          &rusqlite::Connection,
+    conn: &rusqlite::Connection,
     initiative_id: &str,
 ) -> Result<usize, rusqlite::Error> {
     conn.execute(
@@ -406,12 +415,12 @@ pub fn clear_git_apply_pending(
 
 fn map_list_row(r: &rusqlite::Row<'_>) -> rusqlite::Result<InitiativeListRow> {
     let initiative = InitiativeRow {
-        initiative_id:        r.get(0)?,
-        state:                r.get(1)?,
+        initiative_id: r.get(0)?,
+        state: r.get(1)?,
         plan_artifact_sha256: r.get(2)?,
-        created_at:           r.get::<_, i64>(3)?.max(0) as u64,
-        approved_at:          r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
-        completed_at:         r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
+        created_at: r.get::<_, i64>(3)?.max(0) as u64,
+        approved_at: r.get::<_, Option<i64>>(4)?.map(|v| v.max(0) as u64),
+        completed_at: r.get::<_, Option<i64>>(5)?.map(|v| v.max(0) as u64),
     };
     let quarantined: i64 = r.get(6)?;
     Ok(InitiativeListRow {
@@ -433,11 +442,11 @@ mod tests {
         let guard = store.lock_sync();
         const INITIATIVES: &str = Table::Initiatives.as_str();
         for (id, state, created) in [
-            ("init-old",   "Completed",    100_i64),
-            ("init-mid",   "Executing",    200),
-            ("init-fresh", "Draft",        300),
-            ("init-fail",  "Failed",       150),
-            ("init-other", "Executing",    250),
+            ("init-old", "Completed", 100_i64),
+            ("init-mid", "Executing", 200),
+            ("init-fresh", "Draft", 300),
+            ("init-fail", "Failed", 150),
+            ("init-other", "Executing", 250),
         ] {
             guard.execute(
                 &format!(
@@ -464,18 +473,17 @@ mod tests {
         let store = Store::open(&db).unwrap();
         let guard = store.lock_sync();
         const QUARANTINES: &str = Table::InitiativeQuarantines.as_str();
-        for (id, qa) in [
-            ("init-fresh", 310_i64),
-            ("init-old",   105),
-        ] {
-            guard.execute(
-                &format!(
-                    "INSERT INTO {QUARANTINES} \
+        for (id, qa) in [("init-fresh", 310_i64), ("init-old", 105)] {
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {QUARANTINES} \
                      (initiative_id, quarantined_at, quarantined_by, reason) \
                      VALUES (?1, ?2, '00112233445566778899aabbccddeeff', 'test')"
-                ),
-                rusqlite::params![id, qa],
-            ).unwrap();
+                    ),
+                    rusqlite::params![id, qa],
+                )
+                .unwrap();
         }
         tmp
     }
@@ -527,7 +535,9 @@ mod tests {
         // operator distinguishes via `by_id` paired with this helper.
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
-        assert!(plan_bundle_sha256_by_id(&conn, "init-fresh").unwrap().is_none());
+        assert!(plan_bundle_sha256_by_id(&conn, "init-fresh")
+            .unwrap()
+            .is_none());
     }
 
     #[test]
@@ -543,12 +553,13 @@ mod tests {
         let bundle_sha_arr = [0xABu8; 32];
         let bundle_sha = raxis_types::BundleSha256::new(bundle_sha_arr);
         let bundle = raxis_types::PlanBundle::new_v2_1(
-            100, 200,
+            100,
+            200,
             raxis_types::BundleNonce::new([0xCDu8; 16]),
             "myplan".to_owned(),
             vec![raxis_types::BundleArtifact {
-                name:   "plan.toml".to_owned(),
-                bytes:  b"[orchestrator]\n".to_vec(),
+                name: "plan.toml".to_owned(),
+                bytes: b"[orchestrator]\n".to_vec(),
                 sha256: {
                     use sha2::{Digest, Sha256};
                     let mut h = Sha256::new();
@@ -559,19 +570,20 @@ mod tests {
         );
         {
             let mut conn = store.lock_sync();
-            let tx = conn.transaction_with_behavior(
-                rusqlite::TransactionBehavior::Immediate,
-            ).unwrap();
+            let tx = conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
             crate::plan_bundles::insert_bundle(
-                &tx, &bundle_sha,
+                &tx,
+                &bundle_sha,
                 b"placeholder-canonical-bytes",
                 &[0x77u8; 64],
                 &raxis_types::OperatorFingerprint::new([0x88u8; 8]),
-                &bundle, 1_700_000_999,
-            ).unwrap();
-            crate::plan_bundles::insert_artifacts(
-                &tx, &bundle_sha, &bundle.artifacts,
-            ).unwrap();
+                &bundle,
+                1_700_000_999,
+            )
+            .unwrap();
+            crate::plan_bundles::insert_artifacts(&tx, &bundle_sha, &bundle.artifacts).unwrap();
             const INITIATIVES: &str = Table::Initiatives.as_str();
             tx.execute(
                 &format!(
@@ -581,11 +593,13 @@ mod tests {
                      VALUES ('init-v2', 'Draft', '{{}}', 'fallback-sha', ?1, 1700000000)"
                 ),
                 rusqlite::params![bundle_sha_arr.as_slice()],
-            ).unwrap();
+            )
+            .unwrap();
             tx.commit().unwrap();
         }
         let conn = open_ro(tmp.path()).unwrap();
-        let sha = plan_bundle_sha256_by_id(&conn, "init-v2").unwrap()
+        let sha = plan_bundle_sha256_by_id(&conn, "init-v2")
+            .unwrap()
             .expect("V2 bundle sha should round-trip");
         assert_eq!(sha.as_bytes(), &[0xABu8; 32]);
     }
@@ -596,7 +610,16 @@ mod tests {
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list(&conn, None, 10).unwrap();
         let ids: Vec<&str> = rows.iter().map(|r| r.initiative_id.as_str()).collect();
-        assert_eq!(ids, vec!["init-fresh", "init-other", "init-mid", "init-fail", "init-old"]);
+        assert_eq!(
+            ids,
+            vec![
+                "init-fresh",
+                "init-other",
+                "init-mid",
+                "init-fail",
+                "init-old"
+            ]
+        );
     }
 
     #[test]
@@ -617,10 +640,24 @@ mod tests {
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::All, 10).unwrap();
-        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
-        assert_eq!(ids, vec!["init-fresh", "init-other", "init-mid", "init-fail", "init-old"]);
-        assert!(rows.iter().all(|r| !r.quarantined),
-            "no quarantine rows seeded => every row.quarantined must be false");
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r.initiative.initiative_id.as_str())
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                "init-fresh",
+                "init-other",
+                "init-mid",
+                "init-fail",
+                "init-old"
+            ]
+        );
+        assert!(
+            rows.iter().all(|r| !r.quarantined),
+            "no quarantine rows seeded => every row.quarantined must be false"
+        );
     }
 
     #[test]
@@ -628,7 +665,10 @@ mod tests {
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::Active, 10).unwrap();
-        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r.initiative.initiative_id.as_str())
+            .collect();
         // Active = Draft + ApprovedPlan + Executing + Blocked. Seed has
         // one Draft (init-fresh) and two Executing (init-other, init-mid),
         // plus terminal Completed (init-old) and Failed (init-fail).
@@ -640,7 +680,10 @@ mod tests {
         let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::Completed, 10).unwrap();
-        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r.initiative.initiative_id.as_str())
+            .collect();
         // `Failed` and `Aborted` MUST NOT leak into the Completed bucket.
         // The semantic is "what shipped", not "what ended".
         assert_eq!(ids, vec!["init-old"]);
@@ -648,13 +691,18 @@ mod tests {
 
     #[test]
     fn list_filtered_quarantined_returns_only_quarantined_rows() {
-        let tmp  = fresh_store_with_seed_and_quarantines();
+        let tmp = fresh_store_with_seed_and_quarantines();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::Quarantined, 10).unwrap();
-        let ids: Vec<&str> = rows.iter().map(|r| r.initiative.initiative_id.as_str()).collect();
+        let ids: Vec<&str> = rows
+            .iter()
+            .map(|r| r.initiative.initiative_id.as_str())
+            .collect();
         assert_eq!(ids, vec!["init-fresh", "init-old"]);
-        assert!(rows.iter().all(|r| r.quarantined),
-            "every row of the Quarantined bucket MUST carry quarantined=true");
+        assert!(
+            rows.iter().all(|r| r.quarantined),
+            "every row of the Quarantined bucket MUST carry quarantined=true"
+        );
     }
 
     #[test]
@@ -662,20 +710,30 @@ mod tests {
         // `init-fresh` is Draft (active) AND quarantined — the bucket
         // is "active", but the per-row flag MUST be true so the CLI
         // can render `[Q]` on the row.
-        let tmp  = fresh_store_with_seed_and_quarantines();
+        let tmp = fresh_store_with_seed_and_quarantines();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::Active, 10).unwrap();
-        let fresh = rows.iter().find(|r| r.initiative.initiative_id == "init-fresh")
+        let fresh = rows
+            .iter()
+            .find(|r| r.initiative.initiative_id == "init-fresh")
             .expect("init-fresh must appear in the Active bucket");
-        assert!(fresh.quarantined, "Active row MUST surface quarantined=true when overlap holds");
-        let mid = rows.iter().find(|r| r.initiative.initiative_id == "init-mid")
+        assert!(
+            fresh.quarantined,
+            "Active row MUST surface quarantined=true when overlap holds"
+        );
+        let mid = rows
+            .iter()
+            .find(|r| r.initiative.initiative_id == "init-mid")
             .expect("init-mid must appear in the Active bucket");
-        assert!(!mid.quarantined, "non-quarantined Active row MUST surface quarantined=false");
+        assert!(
+            !mid.quarantined,
+            "non-quarantined Active row MUST surface quarantined=false"
+        );
     }
 
     #[test]
     fn list_filtered_respects_limit() {
-        let tmp  = fresh_store_with_seed();
+        let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         let rows = list_filtered(&conn, InitiativeListFilter::All, 2).unwrap();
         assert_eq!(rows.len(), 2);
@@ -690,14 +748,14 @@ mod tests {
     fn git_apply_pending_returns_false_for_fresh_initiative() {
         // A newly-inserted initiative has the migration-16 default
         // `git_apply_pending = 0` and so the read helper returns false.
-        let tmp  = fresh_store_with_seed();
+        let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         assert!(!git_apply_pending(&conn, "init-fresh").unwrap());
     }
 
     #[test]
     fn git_apply_pending_returns_false_for_missing_initiative() {
-        let tmp  = fresh_store_with_seed();
+        let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         // Recovery scan must not blow up on missing rows; the
         // pre-flight check treats missing-as-not-pending so the
@@ -780,10 +838,13 @@ mod tests {
 
     #[test]
     fn list_filtered_returns_empty_when_no_match() {
-        let tmp  = fresh_store_with_seed();
+        let tmp = fresh_store_with_seed();
         let conn = open_ro(tmp.path()).unwrap();
         // No quarantine rows seeded => Quarantined bucket is empty.
         let rows = list_filtered(&conn, InitiativeListFilter::Quarantined, 10).unwrap();
-        assert!(rows.is_empty(), "Quarantined bucket MUST be empty when no rows; got {rows:?}");
+        assert!(
+            rows.is_empty(),
+            "Quarantined bucket MUST be empty when no rows; got {rows:?}"
+        );
     }
 }

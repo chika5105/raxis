@@ -21,9 +21,9 @@
 // Every subsequent OperatorRequest on the connection skips re-auth;
 // the permitted_ops set is checked per-request by the dispatcher.
 
-use raxis_policy::PolicyBundle;
-use raxis_crypto::verify::verify_ed25519;
 use raxis_crypto::token::generate_operator_challenge;
+use raxis_crypto::verify::verify_ed25519;
+use raxis_policy::PolicyBundle;
 
 /// Challenge envelope sent from kernel to operator at connect time.
 ///
@@ -77,7 +77,9 @@ pub struct AuthenticatedOperator {
 pub enum ChallengeResult {
     Ok(AuthenticatedOperator),
     /// Operator fingerprint not in policy, or signature invalid.
-    Unauthorized { reason: String },
+    Unauthorized {
+        reason: String,
+    },
 }
 
 /// Generate a fresh challenge envelope.
@@ -203,11 +205,15 @@ mod tests {
     #[test]
     fn challenge_decoded_bytes_validates_length_and_hex() {
         // Valid: 64 hex chars.
-        let ok = ChallengeEnvelope { challenge_hex: "ab".repeat(32) };
+        let ok = ChallengeEnvelope {
+            challenge_hex: "ab".repeat(32),
+        };
         assert!(ok.decoded_bytes().is_some());
 
         // Wrong length: 30 bytes / 60 hex chars.
-        let short = ChallengeEnvelope { challenge_hex: "ab".repeat(30) };
+        let short = ChallengeEnvelope {
+            challenge_hex: "ab".repeat(30),
+        };
         assert!(short.decoded_bytes().is_none());
 
         // Non-hex character.

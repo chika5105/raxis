@@ -135,16 +135,22 @@ pub async fn spawn_and_supervise(
                     reason: reason.clone(),
                     total_attempts: 0,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             );
-            return SupervisorShutdown::Quarantined { reason, total_attempts: 0 };
+            return SupervisorShutdown::Quarantined {
+                reason,
+                total_attempts: 0,
+            };
         }
     }
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"gateway_supervisor_start\",\
          \"binary_path\":\"{}\",\"max_respawns\":{},\"embedded\":{}}}",
-        cfg.binary_path, cfg.max_consecutive_respawns,
+        cfg.binary_path,
+        cfg.max_consecutive_respawns,
         crate::gateway::embedded::is_embedded(),
     );
 
@@ -177,7 +183,9 @@ pub async fn spawn_and_supervise(
                         reason: format!("token mint failure: {e}"),
                         total_attempts: attempt,
                     },
-                    None, None, None,
+                    None,
+                    None,
+                    None,
                 );
                 return SupervisorShutdown::Quarantined {
                     reason: format!("token mint failure: {e}"),
@@ -206,9 +214,14 @@ pub async fn spawn_and_supervise(
                             reason: reason.clone(),
                             total_attempts: attempt,
                         },
-                        None, None, None,
+                        None,
+                        None,
+                        None,
                     );
-                    return SupervisorShutdown::Quarantined { reason, total_attempts: attempt };
+                    return SupervisorShutdown::Quarantined {
+                        reason,
+                        total_attempts: attempt,
+                    };
                 }
                 let backoff = compute_backoff(cfg.respawn_backoff_ms, consecutive_crashes);
                 if let Some(early) = sleep_or_shutdown(backoff, &mut shutdown_rx).await {
@@ -234,7 +247,9 @@ pub async fn spawn_and_supervise(
                 binary_path: cfg.binary_path.clone(),
                 attempt,
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
 
         // Wait for either child exit OR kernel shutdown.
@@ -285,7 +300,9 @@ pub async fn spawn_and_supervise(
                 exit_code,
                 attempt,
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
 
         // Decide: respawn or quarantine?
@@ -303,19 +320,25 @@ pub async fn spawn_and_supervise(
                     reason: reason.clone(),
                     total_attempts: attempt,
                 },
-                None, None, None,
+                None,
+                None,
+                None,
             );
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"gateway_quarantined\",\
                  \"reason\":\"{reason}\",\"total_attempts\":{attempt}}}"
             );
-            return SupervisorShutdown::Quarantined { reason, total_attempts: attempt };
+            return SupervisorShutdown::Quarantined {
+                reason,
+                total_attempts: attempt,
+            };
         }
         let backoff = compute_backoff(cfg.respawn_backoff_ms, consecutive_crashes);
         eprintln!(
             "{{\"level\":\"info\",\"event\":\"gateway_respawn_backoff\",\
              \"backoff_ms\":{},\"consecutive_crashes\":{}}}",
-            backoff.as_millis(), consecutive_crashes
+            backoff.as_millis(),
+            consecutive_crashes
         );
         if let Some(early) = sleep_or_shutdown(backoff, &mut shutdown_rx).await {
             return early;
@@ -329,9 +352,8 @@ pub async fn spawn_and_supervise(
 
 /// Mint a fresh 32-byte CSPRNG token, hex-encode for the env var.
 fn mint_token() -> Result<String, SupervisorError> {
-    let bytes: [u8; 32] = try_random_array().map_err(|e| {
-        SupervisorError::TokenMint(format!("{e}"))
-    })?;
+    let bytes: [u8; 32] =
+        try_random_array().map_err(|e| SupervisorError::TokenMint(format!("{e}")))?;
     Ok(hex::encode(bytes))
 }
 
@@ -340,9 +362,9 @@ fn mint_token() -> Result<String, SupervisorError> {
 /// (operators tail one stream, not two).
 fn spawn_child(
     binary_path: &str,
-    token:        &str,
-    socket_path:  &Path,
-    data_dir:     &Path,
+    token: &str,
+    socket_path: &Path,
+    data_dir: &Path,
 ) -> Result<Child, std::io::Error> {
     let mut cmd = Command::new(binary_path);
     cmd.env_clear()
@@ -530,8 +552,10 @@ mod tests {
                 return candidate;
             }
         }
-        panic!("no `false` binary found at /usr/bin/false or /bin/false; \
-                cannot run supervisor crash-path tests");
+        panic!(
+            "no `false` binary found at /usr/bin/false or /bin/false; \
+                cannot run supervisor crash-path tests"
+        );
     }
 
     fn locate_sleep_binary() -> &'static str {
@@ -614,16 +638,20 @@ mod tests {
             .expect("supervisor must wind down within 5s after shutdown signal")
             .expect("supervisor task must not panic");
 
-        assert!(matches!(outcome, SupervisorShutdown::Stopped),
-            "expected Stopped, got {outcome:?}");
+        assert!(
+            matches!(outcome, SupervisorShutdown::Stopped),
+            "expected Stopped, got {outcome:?}"
+        );
         // Note: /bin/sleep ignores arguments differently — depending on
         // OS it may or may not even be a valid command path. We only
         // assert "at least one GatewaySpawned"; if /bin/sleep is missing
         // the supervisor would treat that as a spawn failure and the
         // test would still surface the issue via the assertion below.
-        assert!(count_events_of(&audit, "GatewaySpawned") >= 1,
+        assert!(
+            count_events_of(&audit, "GatewaySpawned") >= 1,
             "expected at least one GatewaySpawned audit event; captured: {:?}",
-            audit.event_kinds());
+            audit.event_kinds()
+        );
     }
 
     // ── Always-crashing child: respawn + quarantine ──────────────────
@@ -653,27 +681,37 @@ mod tests {
 
         // Outcome MUST be Quarantined with total_attempts > max.
         match outcome {
-            SupervisorShutdown::Quarantined { total_attempts, reason } => {
+            SupervisorShutdown::Quarantined {
+                total_attempts,
+                reason,
+            } => {
                 // We allow `>= 3` rather than exactly `3` because the
                 // supervisor increments crash count BEFORE the cap
                 // check on the next iteration; this lets us survive
                 // off-by-one debates about "max means inclusive or
                 // exclusive". The asserted invariant is that we DID
                 // exceed `max`.
-                assert!(total_attempts >= 3,
-                    "expected total_attempts > max=2, got {total_attempts}; reason: {reason}");
+                assert!(
+                    total_attempts >= 3,
+                    "expected total_attempts > max=2, got {total_attempts}; reason: {reason}"
+                );
             }
             other => panic!("expected Quarantined, got {other:?}"),
         }
 
         // Audit shape: at least 3 spawns (original + retries up to
         // max + 1), at least 3 crashes, exactly 1 quarantine.
-        assert!(count_events_of(&audit, "GatewaySpawned") >= 3,
+        assert!(
+            count_events_of(&audit, "GatewaySpawned") >= 3,
             "expected ≥3 GatewaySpawned; got {:?}",
-            audit.event_kinds());
+            audit.event_kinds()
+        );
         assert!(count_events_of(&audit, "GatewayCrashed") >= 3);
-        assert_eq!(count_events_of(&audit, "GatewayQuarantined"), 1,
-            "exactly one quarantine event should be emitted on the terminal attempt");
+        assert_eq!(
+            count_events_of(&audit, "GatewayQuarantined"),
+            1,
+            "exactly one quarantine event should be emitted on the terminal attempt"
+        );
     }
 
     // ── Spawn failure: missing binary path ───────────────────────────
@@ -706,13 +744,18 @@ mod tests {
         // would silently shift the audit shape.
         match outcome {
             SupervisorShutdown::Quarantined { reason, .. } => {
-                assert!(reason.contains("repeated spawn failure"),
-                    "reason should explain spawn failure; got: {reason}");
+                assert!(
+                    reason.contains("repeated spawn failure"),
+                    "reason should explain spawn failure; got: {reason}"
+                );
             }
             other => panic!("expected Quarantined, got {other:?}"),
         }
-        assert_eq!(count_events_of(&audit, "GatewaySpawned"), 0,
-            "spawn failures must NOT emit GatewaySpawned");
+        assert_eq!(
+            count_events_of(&audit, "GatewaySpawned"),
+            0,
+            "spawn failures must NOT emit GatewaySpawned"
+        );
         assert_eq!(count_events_of(&audit, "GatewayQuarantined"), 1);
     }
 
@@ -750,8 +793,10 @@ mod tests {
             .expect("supervisor must respond to shutdown during back-off within 2s")
             .expect("supervisor must not panic");
 
-        assert!(matches!(outcome, SupervisorShutdown::Stopped),
-            "expected Stopped, got {outcome:?}");
+        assert!(
+            matches!(outcome, SupervisorShutdown::Stopped),
+            "expected Stopped, got {outcome:?}"
+        );
         // Quarantine MUST NOT have been emitted — operator wanted
         // shutdown, not auto-quarantine.
         assert_eq!(count_events_of(&audit, "GatewayQuarantined"), 0);

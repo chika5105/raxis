@@ -84,19 +84,19 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 #[derive(Debug, Clone)]
 struct WitnessesOpts {
-    task_id:       String,
-    gate_filter:   Option<String>,
+    task_id: String,
+    gate_filter: Option<String>,
     result_filter: Option<String>,
-    limit:         usize,
-    json:          bool,
+    limit: usize,
+    json: bool,
 }
 
 fn parse_args(args: &[String]) -> Result<WitnessesOpts, CliError> {
-    let mut task_id:       Option<String> = None;
-    let mut gate_filter:   Option<String> = None;
+    let mut task_id: Option<String> = None;
+    let mut gate_filter: Option<String> = None;
     let mut result_filter: Option<String> = None;
-    let mut limit:         usize          = DEFAULT_LIMIT;
-    let mut json:          bool           = false;
+    let mut limit: usize = DEFAULT_LIMIT;
+    let mut json: bool = false;
 
     let mut i = 0;
     while i < args.len() {
@@ -110,8 +110,8 @@ fn parse_args(args: &[String]) -> Result<WitnessesOpts, CliError> {
                 let v = arg_value(args, i, "--result")?;
                 // Validate against the spec's three result_class values.
                 let canonical = match v.to_ascii_lowercase().as_str() {
-                    "pass"         => "Pass",
-                    "fail"         => "Fail",
+                    "pass" => "Pass",
+                    "fail" => "Fail",
                     "inconclusive" => "Inconclusive",
                     other => {
                         return Err(CliError::Usage(format!(
@@ -128,9 +128,7 @@ fn parse_args(args: &[String]) -> Result<WitnessesOpts, CliError> {
                     CliError::Usage(format!("--limit must be a positive integer, got {raw:?}"))
                 })?;
                 if n == 0 {
-                    return Err(CliError::Usage(
-                        "--limit must be greater than 0".to_owned(),
-                    ));
+                    return Err(CliError::Usage("--limit must be greater than 0".to_owned()));
                 }
                 limit = n;
             }
@@ -152,11 +150,16 @@ fn parse_args(args: &[String]) -> Result<WitnessesOpts, CliError> {
         i += 1;
     }
 
-    let task_id = task_id.ok_or_else(|| {
-        CliError::Usage("usage: raxis witnesses <task_id> [flags]".to_owned())
-    })?;
+    let task_id = task_id
+        .ok_or_else(|| CliError::Usage("usage: raxis witnesses <task_id> [flags]".to_owned()))?;
 
-    Ok(WitnessesOpts { task_id, gate_filter, result_filter, limit, json })
+    Ok(WitnessesOpts {
+        task_id,
+        gate_filter,
+        result_filter,
+        limit,
+        json,
+    })
 }
 
 fn arg_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, CliError> {
@@ -207,8 +210,8 @@ fn render_human<W: Write>(out: &mut W, task_id: &str, rows: &[WitnessRow]) {
         out,
         "Witnesses for task {task_id} ({n} row{plural}):",
         task_id = task_id,
-        n       = rows.len(),
-        plural  = if rows.len() == 1 { "" } else { "s" },
+        n = rows.len(),
+        plural = if rows.len() == 1 { "" } else { "s" },
     );
     if rows.is_empty() {
         let _ = writeln!(out, "  (no matching rows)");
@@ -217,20 +220,20 @@ fn render_human<W: Write>(out: &mut W, task_id: &str, rows: &[WitnessRow]) {
     let _ = writeln!(
         out,
         "  {run:<24} {gate:<16} {result:<14} {recorded:>12}  blob_sha256",
-        run      = "verifier_run_id",
-        gate     = "gate_type",
-        result   = "result_class",
+        run = "verifier_run_id",
+        gate = "gate_type",
+        result = "result_class",
         recorded = "recorded_at",
     );
     for r in rows {
         let _ = writeln!(
             out,
             "  {run:<24} {gate:<16} {result:<14} {recorded:>12}  {blob}",
-            run      = truncate(&r.verifier_run_id, 24),
-            gate     = truncate(&r.gate_type, 16),
-            result   = truncate(&r.result_class, 14),
+            run = truncate(&r.verifier_run_id, 24),
+            gate = truncate(&r.gate_type, 16),
+            result = truncate(&r.result_class, 14),
             recorded = r.recorded_at,
-            blob     = truncate(&r.blob_sha256, 64),
+            blob = truncate(&r.blob_sha256, 64),
         );
     }
 }
@@ -278,12 +281,12 @@ mod tests {
     fn row(run: &str, gate: &str, result: &str, recorded: u64) -> WitnessRow {
         WitnessRow {
             verifier_run_id: run.to_owned(),
-            task_id:         "t-1".to_owned(),
-            gate_type:       gate.to_owned(),
-            result_class:    result.to_owned(),
-            evaluation_sha:  "eval-sha".to_owned(),
-            blob_sha256:     format!("blob-{run}"),
-            recorded_at:     recorded,
+            task_id: "t-1".to_owned(),
+            gate_type: gate.to_owned(),
+            result_class: result.to_owned(),
+            evaluation_sha: "eval-sha".to_owned(),
+            blob_sha256: format!("blob-{run}"),
+            recorded_at: recorded,
         }
     }
 
@@ -304,7 +307,8 @@ mod tests {
             "--limit".to_owned(),
             "3".to_owned(),
             "--json".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(o.task_id, "task-1");
         assert_eq!(o.gate_filter.as_deref(), Some("tests"));
         assert_eq!(o.result_filter.as_deref(), Some("Fail"));
@@ -318,38 +322,33 @@ mod tests {
             "t-1".to_owned(),
             "--result".to_owned(),
             "INCONCLUSIVE".to_owned(),
-        ]).unwrap();
+        ])
+        .unwrap();
         assert_eq!(o.result_filter.as_deref(), Some("Inconclusive"));
     }
 
     #[test]
     fn parse_args_rejects_unknown_result() {
-        let err = parse_args(&[
-            "t-1".to_owned(),
-            "--result".to_owned(),
-            "Maybe".to_owned(),
-        ]).unwrap_err();
+        let err =
+            parse_args(&["t-1".to_owned(), "--result".to_owned(), "Maybe".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]
     fn parse_args_rejects_zero_limit() {
-        let err = parse_args(&[
-            "t-1".to_owned(),
-            "--limit".to_owned(),
-            "0".to_owned(),
-        ]).unwrap_err();
+        let err =
+            parse_args(&["t-1".to_owned(), "--limit".to_owned(), "0".to_owned()]).unwrap_err();
         assert!(matches!(err, CliError::Usage(_)));
     }
 
     #[test]
     fn filter_match_passes_when_no_filters_configured() {
         let opts = WitnessesOpts {
-            task_id:       "t-1".to_owned(),
-            gate_filter:   None,
+            task_id: "t-1".to_owned(),
+            gate_filter: None,
             result_filter: None,
-            limit:         100,
-            json:          false,
+            limit: 100,
+            json: false,
         };
         assert!(filter_match(&row("r1", "tests", "Pass", 1), &opts));
     }
@@ -357,11 +356,11 @@ mod tests {
     #[test]
     fn filter_match_drops_rows_failing_gate_or_result() {
         let opts = WitnessesOpts {
-            task_id:       "t-1".to_owned(),
-            gate_filter:   Some("tests".to_owned()),
+            task_id: "t-1".to_owned(),
+            gate_filter: Some("tests".to_owned()),
             result_filter: Some("Pass".to_owned()),
-            limit:         100,
-            json:          false,
+            limit: 100,
+            json: false,
         };
         assert!(filter_match(&row("r1", "tests", "Pass", 1), &opts));
         assert!(!filter_match(&row("r2", "tests", "Fail", 1), &opts));

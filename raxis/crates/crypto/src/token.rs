@@ -140,7 +140,10 @@ pub fn ct_eq(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
-    let diff: u8 = a.iter().zip(b.iter()).fold(0u8, |acc, (&x, &y)| acc | (x ^ y));
+    let diff: u8 = a
+        .iter()
+        .zip(b.iter())
+        .fold(0u8, |acc, (&x, &y)| acc | (x ^ y));
     diff == 0
 }
 
@@ -157,7 +160,10 @@ mod tests {
         let mut buf = [0u8; 32];
         try_random_bytes(&mut buf).expect("OS CSPRNG must succeed in test env");
         // Probability of an all-zero 32-byte buffer from a healthy CSPRNG is 2^-256.
-        assert!(buf.iter().any(|&b| b != 0), "buffer should not be all zeros");
+        assert!(
+            buf.iter().any(|&b| b != 0),
+            "buffer should not be all zeros"
+        );
     }
 
     #[test]
@@ -217,6 +223,9 @@ mod tests {
     fn tokens_are_unique() {
         let a = generate_session_token().expect("rng");
         let b = generate_session_token().expect("rng");
-        assert_ne!(a, b, "two tokens should be different (collision probability ~2^-256)");
+        assert_ne!(
+            a, b,
+            "two tokens should be different (collision probability ~2^-256)"
+        );
     }
 }

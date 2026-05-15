@@ -41,7 +41,7 @@ pub const LOG_FILENAME: &str = "supervisor.stderr.log";
 /// interleaving lines.
 #[derive(Debug)]
 pub struct SupervisorLog {
-    path:   PathBuf,
+    path: PathBuf,
     writer: Mutex<std::fs::File>,
 }
 
@@ -52,10 +52,7 @@ impl SupervisorLog {
     pub fn open(data_dir: &Path) -> std::io::Result<Self> {
         std::fs::create_dir_all(data_dir)?;
         let path = data_dir.join(LOG_FILENAME);
-        let file = OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(&path)?;
+        let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
             writer: Mutex::new(file),

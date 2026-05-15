@@ -185,9 +185,8 @@ pub fn load_or_mint(data_dir: &Path) -> Result<(SecretFile, LoadOutcome), LoadEr
     let path = secret_path(data_dir);
     match std::fs::read(&path) {
         Ok(bytes) => {
-            let file: SecretFile = serde_json::from_slice(&bytes).map_err(|e| {
-                LoadError::Corrupt(format!("JSON: {e}"))
-            })?;
+            let file: SecretFile = serde_json::from_slice(&bytes)
+                .map_err(|e| LoadError::Corrupt(format!("JSON: {e}")))?;
             // Sanity-check the secret bytes can decode at the
             // expected length so the caller never sees a
             // corrupt file as `Reloaded`.
@@ -221,9 +220,8 @@ pub fn rotate(data_dir: &Path) -> Result<SecretFile, LoadError> {
     let path = secret_path(data_dir);
     let prev_generation = match std::fs::read(&path) {
         Ok(bytes) => {
-            let file: SecretFile = serde_json::from_slice(&bytes).map_err(|e| {
-                LoadError::Corrupt(format!("JSON: {e}"))
-            })?;
+            let file: SecretFile = serde_json::from_slice(&bytes)
+                .map_err(|e| LoadError::Corrupt(format!("JSON: {e}")))?;
             file.generation
         }
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
@@ -260,14 +258,12 @@ fn write_secret_file(path: &Path, file: &SecretFile) -> Result<(), LoadError> {
             use std::os::unix::fs::PermissionsExt;
             let mut perms = std::fs::metadata(parent)?.permissions();
             perms.set_mode(0o700);
-            std::fs::set_permissions(parent, perms).map_err(|e| {
-                LoadError::PermissionTighten(format!("auth dir 0700: {e}"))
-            })?;
+            std::fs::set_permissions(parent, perms)
+                .map_err(|e| LoadError::PermissionTighten(format!("auth dir 0700: {e}")))?;
         }
     }
-    let bytes = serde_json::to_vec_pretty(file).map_err(|e| {
-        LoadError::Corrupt(format!("JSON serialize: {e}"))
-    })?;
+    let bytes = serde_json::to_vec_pretty(file)
+        .map_err(|e| LoadError::Corrupt(format!("JSON serialize: {e}")))?;
     let tmp = path.with_extension("secret.tmp");
     std::fs::write(&tmp, &bytes)?;
     // Tighten the tempfile to 0600 BEFORE the rename so the
@@ -277,9 +273,8 @@ fn write_secret_file(path: &Path, file: &SecretFile) -> Result<(), LoadError> {
     {
         use std::os::unix::fs::PermissionsExt;
         let perms = std::fs::Permissions::from_mode(0o600);
-        std::fs::set_permissions(&tmp, perms).map_err(|e| {
-            LoadError::PermissionTighten(format!("secret file 0600: {e}"))
-        })?;
+        std::fs::set_permissions(&tmp, perms)
+            .map_err(|e| LoadError::PermissionTighten(format!("secret file 0600: {e}")))?;
     }
     std::fs::rename(&tmp, path)?;
     Ok(())
@@ -354,11 +349,7 @@ mod tests {
         let _ = load_or_mint(dir.path()).unwrap();
         let path = secret_path(dir.path());
         let perms = std::fs::metadata(&path).unwrap().permissions();
-        assert_eq!(
-            perms.mode() & 0o777,
-            0o600,
-            "secret file MUST be 0600",
-        );
+        assert_eq!(perms.mode() & 0o777, 0o600, "secret file MUST be 0600",);
     }
 
     /// Witness for the auth dir permissions: 0700 on Unix.
@@ -370,11 +361,7 @@ mod tests {
         let _ = load_or_mint(dir.path()).unwrap();
         let auth_dir = dir.path().join(AUTH_SUBDIR);
         let perms = std::fs::metadata(&auth_dir).unwrap().permissions();
-        assert_eq!(
-            perms.mode() & 0o777,
-            0o700,
-            "auth dir MUST be 0700",
-        );
+        assert_eq!(perms.mode() & 0o777, 0o700, "auth dir MUST be 0700",);
     }
 
     #[test]
@@ -399,11 +386,7 @@ mod tests {
             updated_at_unix_secs: 0,
         };
         std::fs::create_dir_all(dir.path().join(AUTH_SUBDIR)).unwrap();
-        std::fs::write(
-            secret_path(dir.path()),
-            serde_json::to_vec(&bad).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(secret_path(dir.path()), serde_json::to_vec(&bad).unwrap()).unwrap();
         let err = load_or_mint(dir.path()).unwrap_err();
         match err {
             LoadError::Corrupt(_) => {}
@@ -422,11 +405,7 @@ mod tests {
             "updated_at_unix_secs": 100,
             "future_field": "ignored",
         });
-        std::fs::write(
-            secret_path(dir.path()),
-            serde_json::to_vec(&raw).unwrap(),
-        )
-        .unwrap();
+        std::fs::write(secret_path(dir.path()), serde_json::to_vec(&raw).unwrap()).unwrap();
         let (file, outcome) = load_or_mint(dir.path()).unwrap();
         assert_eq!(outcome, LoadOutcome::Reloaded);
         assert_eq!(file.generation, 7);

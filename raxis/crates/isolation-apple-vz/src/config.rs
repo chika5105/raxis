@@ -55,7 +55,7 @@ pub enum ConfigError {
         /// What the spec asked for.
         requested: u32,
         /// AVF's documented minimum.
-        floor:     u32,
+        floor: u32,
     },
 
     /// `VmSpec::linux_kernel_path` was empty. AVF's `VZLinuxBootLoader`
@@ -109,13 +109,13 @@ pub const AVF_PLANNER_PORT: u32 = 1024;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvfLinuxBootLoader {
     /// Host path of the Linux kernel image.
-    pub kernel_url:    PathBuf,
+    pub kernel_url: PathBuf,
     /// Optional initrd path.
-    pub initrd_url:    Option<PathBuf>,
+    pub initrd_url: Option<PathBuf>,
     /// Kernel command-line. RAXIS pins
     /// `console=hvc0 reboot=k panic=1` by default; operator can
     /// override via `VmSpec::boot_args`.
-    pub command_line:  String,
+    pub command_line: String,
 }
 
 /// Translated rootfs / data drive.
@@ -123,11 +123,11 @@ pub struct AvfLinuxBootLoader {
 pub struct AvfBlockDevice {
     /// Stable identifier. AVF doesn't natively use this but we record
     /// it so audit + diagnostic logs can correlate the device.
-    pub drive_id:    String,
+    pub drive_id: String,
     /// Host path of the disk image.
-    pub host_path:   PathBuf,
+    pub host_path: PathBuf,
     /// Read-only flag.
-    pub read_only:   bool,
+    pub read_only: bool,
 }
 
 /// Translated VirtioFS share. AVF maps this to
@@ -136,14 +136,14 @@ pub struct AvfBlockDevice {
 pub struct AvfVirtioFsShare {
     /// VirtioFS mount tag — the guest mounts this via
     /// `mount -t virtiofs <tag> <guest_path>`.
-    pub tag:         String,
+    pub tag: String,
     /// Host directory shared with the guest.
-    pub host_path:   PathBuf,
+    pub host_path: PathBuf,
     /// Read-only flag.
-    pub read_only:   bool,
+    pub read_only: bool,
     /// Mount path the guest is expected to use; recorded for audit
     /// and diagnostics.
-    pub guest_path:  String,
+    pub guest_path: String,
 }
 
 // `AvfNetworkDevice` and `AvfNetworkMode` were removed in the
@@ -165,7 +165,7 @@ pub struct AvfVirtioFsShare {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvfVsock {
     /// Guest CID used by the planner inside the VM.
-    pub guest_cid:    u32,
+    pub guest_cid: u32,
     /// Planner port the host connects to inside the guest.
     pub planner_port: u32,
 }
@@ -174,24 +174,24 @@ pub struct AvfVsock {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AvfConfig {
     /// vCPU count (validated >= 1).
-    pub vcpu_count:    u32,
+    pub vcpu_count: u32,
     /// Memory size in MiB (validated >= `AVF_MIN_MEMORY_MIB`).
-    pub mem_mib:       u32,
+    pub mem_mib: u32,
     /// Linux boot loader.
-    pub boot_loader:   AvfLinuxBootLoader,
+    pub boot_loader: AvfLinuxBootLoader,
     /// Block devices (rootfs + optional data drives).
     pub block_devices: Vec<AvfBlockDevice>,
     /// VirtioFS shares.
-    pub fs_shares:     Vec<AvfVirtioFsShare>,
+    pub fs_shares: Vec<AvfVirtioFsShare>,
     /// VSock configuration.
-    pub vsock:         AvfVsock,
+    pub vsock: AvfVsock,
     /// Optional host file path for guest serial console capture.
     /// When `Some`, the runtime attaches a
     /// `VZVirtioConsoleDeviceSerialPortConfiguration` whose
     /// `fileHandleForWriting` opens the path `O_WRONLY | O_CREAT |
     /// O_APPEND` (mode 0600). Forwarded verbatim from
     /// [`raxis_isolation::VmSpec::guest_console_log`].
-    pub console_log:   Option<PathBuf>,
+    pub console_log: Option<PathBuf>,
 }
 
 // ---------------------------------------------------------------------------
@@ -204,9 +204,9 @@ pub struct AvfConfig {
 /// Pure function — no I/O, no Objective-C calls, no platform gating.
 /// Any failure is a typed [`ConfigError`].
 pub fn translate(
-    image:    &VerifiedImage,
-    mounts:   &[WorkspaceMount],
-    spec:     &VmSpec,
+    image: &VerifiedImage,
+    mounts: &[WorkspaceMount],
+    spec: &VmSpec,
 ) -> Result<AvfConfig, ConfigError> {
     // ---- 1. Resource envelope sanity ------------------------------------
     if spec.vcpu_count == 0 {
@@ -215,7 +215,7 @@ pub fn translate(
     if spec.mem_mib < AVF_MIN_MEMORY_MIB {
         return Err(ConfigError::MemoryBelowFloor {
             requested: spec.mem_mib,
-            floor:     AVF_MIN_MEMORY_MIB,
+            floor: AVF_MIN_MEMORY_MIB,
         });
     }
 
@@ -298,10 +298,8 @@ pub fn translate(
     };
     let mut cmdline = if spec.boot_args.is_empty() {
         match image.kind {
-            ImageKind::RootfsInitramfsCpio =>
-                format!("{base_cmdline} rdinit=/init"),
-            _ =>
-                format!("{base_cmdline} root=/dev/vda ro"),
+            ImageKind::RootfsInitramfsCpio => format!("{base_cmdline} rdinit=/init"),
+            _ => format!("{base_cmdline} root=/dev/vda ro"),
         }
     } else {
         spec.boot_args.join(" ")
@@ -429,20 +427,15 @@ pub fn translate(
         // recipe used in the `AvfVirtioFsShare` translation block
         // below — otherwise the guest's `mount(2)` would refer to
         // a tag the AVF substrate never advertised.
-        let valid_mounts: Vec<&WorkspaceMount> = mounts
-            .iter()
-            .filter(|m| !m.guest_path.is_empty())
-            .collect();
+        let valid_mounts: Vec<&WorkspaceMount> =
+            mounts.iter().filter(|m| !m.guest_path.is_empty()).collect();
         if !valid_mounts.is_empty() {
             let mut mounts_env = String::new();
             for (i, mount) in valid_mounts.iter().enumerate() {
                 if i > 0 {
                     mounts_env.push(',');
                 }
-                let tag = mount
-                    .guest_path
-                    .trim_start_matches('/')
-                    .replace('/', "_");
+                let tag = mount.guest_path.trim_start_matches('/').replace('/', "_");
                 mounts_env.push_str(&tag);
                 mounts_env.push(':');
                 mounts_env.push_str(&mount.guest_path);
@@ -454,10 +447,7 @@ pub fn translate(
             // potential operator override on `spec.env` — the
             // operator never has authority to lie to the guest about
             // which shares the substrate actually wired up.
-            effective.insert(
-                "RAXIS_VIRTIOFS_MOUNTS".to_owned(),
-                mounts_env,
-            );
+            effective.insert("RAXIS_VIRTIOFS_MOUNTS".to_owned(), mounts_env);
         }
 
         let mut payload = String::new();
@@ -505,9 +495,7 @@ pub fn translate(
             // Caller bug — better to fail closed than to silently
             // mutate the planner argv.
             if arg.chars().any(|c| c.is_whitespace()) {
-                return Err(ConfigError::EntrypointArgvWhitespace {
-                    arg: arg.clone(),
-                });
+                return Err(ConfigError::EntrypointArgvWhitespace { arg: arg.clone() });
             }
             cmdline.push(' ');
             cmdline.push_str(arg);
@@ -533,7 +521,7 @@ pub fn translate(
     let block_devices = match image.kind {
         ImageKind::RootfsInitramfsCpio => Vec::new(),
         _ => vec![AvfBlockDevice {
-            drive_id:  "rootfs".to_owned(),
+            drive_id: "rootfs".to_owned(),
             host_path: rootfs_path,
             read_only: true,
         }],
@@ -552,14 +540,11 @@ pub fn translate(
         // `workspace`, `/raxis` ⇒ `raxis`. This matches the
         // `mount -t virtiofs <tag> <path>` convention the canonical
         // Reviewer / Orchestrator images expect.
-        let tag = mount
-            .guest_path
-            .trim_start_matches('/')
-            .replace('/', "_");
+        let tag = mount.guest_path.trim_start_matches('/').replace('/', "_");
         fs_shares.push(AvfVirtioFsShare {
             tag,
-            host_path:  mount.host_path.clone(),
-            read_only:  matches!(mount.mode, MountMode::ReadOnly),
+            host_path: mount.host_path.clone(),
+            read_only: matches!(mount.mode, MountMode::ReadOnly),
             guest_path: mount.guest_path.clone(),
         });
     }
@@ -590,13 +575,13 @@ pub fn translate(
     // dispatch the same `KernelPush` byte stream against both
     // substrates without per-platform knobs.
     let vsock = AvfVsock {
-        guest_cid:    spec.vsock_cid.unwrap_or(3),
+        guest_cid: spec.vsock_cid.unwrap_or(3),
         planner_port: AVF_PLANNER_PORT,
     };
 
     Ok(AvfConfig {
         vcpu_count: spec.vcpu_count,
-        mem_mib:    spec.mem_mib,
+        mem_mib: spec.mem_mib,
         boot_loader,
         block_devices,
         fs_shares,
@@ -622,34 +607,34 @@ mod tests {
         // ROOTFS path (EROFS .img or initramfs cpio.gz). The kernel
         // binary path lives on `VmSpec.linux_kernel_path`.
         VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Path(PathBuf::from("/var/raxis/test/rootfs.img")),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "raxis-test-avf-1".to_owned(),
+            image_id: "raxis-test-avf-1".to_owned(),
         }
     }
 
     fn fixture_spec() -> VmSpec {
         VmSpec {
-            vcpu_count:        1,
-            mem_mib:           128,
-            egress_tier:       EgressTier::None,
-            cgroup_quota:     None,
-            boot_args:         Vec::new(),
-            entrypoint_argv:   Vec::new(),
-            session_token:     SessionToken("avf-test-token".to_owned()),
-            vsock_cid:         Some(7),
-            virtio_fs_mounts:  Vec::new(),
+            vcpu_count: 1,
+            mem_mib: 128,
+            egress_tier: EgressTier::None,
+            cgroup_quota: None,
+            boot_args: Vec::new(),
+            entrypoint_argv: Vec::new(),
+            session_token: SessionToken("avf-test-token".to_owned()),
+            vsock_cid: Some(7),
+            virtio_fs_mounts: Vec::new(),
             linux_kernel_path: PathBuf::from("/var/raxis/test/vmlinux.bin"),
-            env:               Default::default(),
+            env: Default::default(),
             guest_console_log: None,
         }
     }
 
     fn fixture_mount(guest: &str, mode: MountMode) -> WorkspaceMount {
         WorkspaceMount {
-            host_path:    PathBuf::from(format!("/tmp/raxis-{}", guest.trim_start_matches('/'))),
-            guest_path:   guest.to_owned(),
+            host_path: PathBuf::from(format!("/tmp/raxis-{}", guest.trim_start_matches('/'))),
+            guest_path: guest.to_owned(),
             mode,
             content_hash: Some(ContentHash([0u8; 32])),
         }
@@ -678,9 +663,8 @@ mod tests {
         ] {
             let mut spec = fixture_spec();
             spec.egress_tier = tier;
-            translate(&fixture_image(), &[], &spec).unwrap_or_else(|e| {
-                panic!("translate must succeed for {tier:?}: {e:?}")
-            });
+            translate(&fixture_image(), &[], &spec)
+                .unwrap_or_else(|e| panic!("translate must succeed for {tier:?}: {e:?}"));
         }
     }
 
@@ -790,7 +774,8 @@ mod tests {
         use base64::Engine as _;
 
         let mut spec = fixture_spec();
-        spec.env.insert("RAXIS_SESSION_TOKEN".to_owned(), "tok-123".to_owned());
+        spec.env
+            .insert("RAXIS_SESSION_TOKEN".to_owned(), "tok-123".to_owned());
         spec.env.insert(
             "RAXIS_KERNEL_VSOCK_LISTEN_PORT".to_owned(),
             "1024".to_owned(),
@@ -1043,7 +1028,7 @@ mod tests {
             err,
             ConfigError::MemoryBelowFloor {
                 requested: AVF_MIN_MEMORY_MIB - 1,
-                floor:     AVF_MIN_MEMORY_MIB,
+                floor: AVF_MIN_MEMORY_MIB,
             }
         );
     }
@@ -1053,10 +1038,10 @@ mod tests {
     #[test]
     fn translate_rejects_inline_bytes_image() {
         let img = VerifiedImage {
-            kind:      ImageKind::RootfsErofs,
-            body:      ImageBody::Bytes(vec![0u8; 4]),
+            kind: ImageKind::RootfsErofs,
+            body: ImageBody::Bytes(vec![0u8; 4]),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "inline".to_owned(),
+            image_id: "inline".to_owned(),
         };
         let err = translate(&img, &[], &fixture_spec()).unwrap_err();
         assert_eq!(err, ConfigError::InlineBytesUnsupported);
@@ -1065,10 +1050,10 @@ mod tests {
     #[test]
     fn translate_rejects_non_linux_image_kinds() {
         let img = VerifiedImage {
-            kind:      ImageKind::WasmModule,
-            body:      ImageBody::Path(PathBuf::from("/tmp/wasm")),
+            kind: ImageKind::WasmModule,
+            body: ImageBody::Path(PathBuf::from("/tmp/wasm")),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "wasm".to_owned(),
+            image_id: "wasm".to_owned(),
         };
         let err = translate(&img, &[], &fixture_spec()).unwrap_err();
         assert_eq!(
@@ -1079,10 +1064,10 @@ mod tests {
         );
 
         let img2 = VerifiedImage {
-            kind:      ImageKind::EnclaveSigStruct,
-            body:      ImageBody::Path(PathBuf::from("/tmp/sgx")),
+            kind: ImageKind::EnclaveSigStruct,
+            body: ImageBody::Path(PathBuf::from("/tmp/sgx")),
             signature: ImageSignature(vec![0u8; 64]),
-            image_id:  "sgx".to_owned(),
+            image_id: "sgx".to_owned(),
         };
         let err2 = translate(&img2, &[], &fixture_spec()).unwrap_err();
         assert_eq!(

@@ -72,9 +72,7 @@ pub fn run(args: &[String]) -> anyhow::Result<()> {
     let tail: Vec<String> = iter.cloned().collect();
     match sub.as_str() {
         "notifications" => run_notifications(&tail),
-        other => bail!(
-            "unknown dev-reset subcommand: {other:?}; available: notifications"
-        ),
+        other => bail!("unknown dev-reset subcommand: {other:?}; available: notifications"),
     }
 }
 
@@ -108,12 +106,12 @@ fn run_notifications(args: &[String]) -> anyhow::Result<()> {
         }
     }
 
-    let data_dir = data_dir
-        .or_else(default_data_dir)
-        .ok_or_else(|| anyhow!(
+    let data_dir = data_dir.or_else(default_data_dir).ok_or_else(|| {
+        anyhow!(
             "could not resolve a default data dir (no $HOME / $XDG_DATA_HOME); \
              pass --data-dir <PATH> explicitly"
-        ))?;
+        )
+    })?;
 
     let db_path = data_dir.join("kernel.db");
     let inbox_path = data_dir.join("notifications").join("inbox.jsonl");
@@ -134,8 +132,7 @@ fn run_notifications(args: &[String]) -> anyhow::Result<()> {
 
     let row_count = if db_path.exists() {
         truncate_notifications_table(&db_path, dry_run)
-            .with_context(|| format!("truncating notifications table at {}",
-                db_path.display()))?
+            .with_context(|| format!("truncating notifications table at {}", db_path.display()))?
     } else {
         eprintln!(
             "{{\"event\":\"dev_reset_notifications_db_absent\",\
@@ -149,9 +146,8 @@ fn run_notifications(args: &[String]) -> anyhow::Result<()> {
         if dry_run {
             true
         } else {
-            std::fs::remove_file(&inbox_path).with_context(|| {
-                format!("removing inbox.jsonl at {}", inbox_path.display())
-            })?;
+            std::fs::remove_file(&inbox_path)
+                .with_context(|| format!("removing inbox.jsonl at {}", inbox_path.display()))?;
             true
         }
     } else {
@@ -194,11 +190,9 @@ fn run_notifications(args: &[String]) -> anyhow::Result<()> {
 fn truncate_notifications_table(db_path: &Path, dry_run: bool) -> anyhow::Result<u64> {
     // Open with the same flags the kernel uses for write access:
     // RW (no auto-create — the file MUST exist).
-    let conn = rusqlite::Connection::open_with_flags(
-        db_path,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE,
-    )
-    .with_context(|| format!("opening sqlite at {}", db_path.display()))?;
+    let conn =
+        rusqlite::Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)
+            .with_context(|| format!("opening sqlite at {}", db_path.display()))?;
 
     // The `notifications` table may be missing if the operator wiped
     // the DB but kept the data dir; treat that as "0 rows" rather
@@ -211,9 +205,7 @@ fn truncate_notifications_table(db_path: &Path, dry_run: bool) -> anyhow::Result
         )
         .unwrap_or(false);
     if !table_exists {
-        eprintln!(
-            "{{\"event\":\"dev_reset_notifications_table_absent\"}}",
-        );
+        eprintln!("{{\"event\":\"dev_reset_notifications_table_absent\"}}",);
         return Ok(0);
     }
 
@@ -353,10 +345,7 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM notifications", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 3, "dry-run must NOT delete any rows");
-        assert!(
-            inbox_path.exists(),
-            "dry-run must NOT remove inbox.jsonl"
-        );
+        assert!(inbox_path.exists(), "dry-run must NOT remove inbox.jsonl");
     }
 
     #[test]

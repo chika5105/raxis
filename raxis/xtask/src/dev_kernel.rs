@@ -99,7 +99,7 @@ impl Arch {
     fn parse(s: &str) -> Result<Self> {
         match s {
             "aarch64" | "arm64" => Ok(Arch::Aarch64),
-            "x86_64"  | "amd64" => Ok(Arch::X86_64),
+            "x86_64" | "amd64" => Ok(Arch::X86_64),
             other => bail!(
                 "unsupported --arch {other:?}; expected one of: aarch64, arm64, x86_64, amd64"
             ),
@@ -109,7 +109,7 @@ impl Arch {
     fn as_str(self) -> &'static str {
         match self {
             Arch::Aarch64 => "aarch64",
-            Arch::X86_64  => "x86_64",
+            Arch::X86_64 => "x86_64",
         }
     }
 }
@@ -128,24 +128,24 @@ enum Source {
 #[derive(Debug)]
 struct Args {
     install_dir: PathBuf,
-    arch:        Arch,
-    source:      Source,
+    arch: Arch,
+    source: Source,
     /// Optional SHA-256 to verify the local-file source (always
     /// verified when `Source::Url`). Lowercase hex.
-    sha256:      Option<String>,
+    sha256: Option<String>,
     /// If `false`, the command refuses to overwrite an existing
     /// `<install_dir>/kernel/vmlinux`.
-    force:       bool,
+    force: bool,
 }
 
 impl Args {
     fn parse(argv: &[String]) -> Result<Self> {
         let mut install_dir: Option<PathBuf> = None;
-        let mut arch: Option<Arch>           = None;
-        let mut from_file: Option<PathBuf>   = None;
-        let mut url: Option<String>          = None;
-        let mut sha256: Option<String>       = None;
-        let mut force                        = false;
+        let mut arch: Option<Arch> = None;
+        let mut from_file: Option<PathBuf> = None;
+        let mut url: Option<String> = None;
+        let mut sha256: Option<String> = None;
+        let mut force = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -170,9 +170,7 @@ impl Args {
                 }
                 "--url" => {
                     i += 1;
-                    url = Some(
-                        argv.get(i).context("--url requires a value")?.clone(),
-                    );
+                    url = Some(argv.get(i).context("--url requires a value")?.clone());
                 }
                 "--sha256" => {
                     i += 1;
@@ -196,29 +194,27 @@ impl Args {
             Some(p) => p,
             None => match std::env::var_os("RAXIS_INSTALL_DIR") {
                 Some(v) => PathBuf::from(v),
-                None    => PathBuf::from(DEFAULT_DEV_INSTALL_DIR),
+                None => PathBuf::from(DEFAULT_DEV_INSTALL_DIR),
             },
         };
         let arch = arch.unwrap_or_else(Arch::from_host);
 
         let source = match (from_file, url.clone(), sha256.clone()) {
-            (Some(p), None, _)            => Source::File(p),
-            (None, Some(u), Some(d))      => Source::Url { url: u, sha256: d },
-            (None, Some(_), None)         => bail!(
-                "--url requires --sha256 (refusing to install bytes you have not pinned)"
-            ),
-            (Some(_), Some(_), _)         => bail!(
-                "pass exactly one of --from-file or --url, not both"
-            ),
-            (None, None, _)               => bail!(
-                "must pass either --from-file <PATH> or --url <URL> --sha256 <HEX>"
-            ),
+            (Some(p), None, _) => Source::File(p),
+            (None, Some(u), Some(d)) => Source::Url { url: u, sha256: d },
+            (None, Some(_), None) => {
+                bail!("--url requires --sha256 (refusing to install bytes you have not pinned)")
+            }
+            (Some(_), Some(_), _) => bail!("pass exactly one of --from-file or --url, not both"),
+            (None, None, _) => {
+                bail!("must pass either --from-file <PATH> or --url <URL> --sha256 <HEX>")
+            }
         };
 
         // Re-bind sha256 so File-mode can keep the operator-supplied
         // digest (Url-mode already moved it into Source::Url).
         let local_sha256 = match &source {
-            Source::File(_)  => sha256,
+            Source::File(_) => sha256,
             Source::Url { .. } => None,
         };
 
@@ -259,12 +255,11 @@ pub fn run(argv: &[String]) -> Result<()> {
 /// Pure-function variant for tests: runs the install, returns `Ok(())`
 /// on success or the structured anyhow::Error on failure.
 fn install(args: &Args) -> Result<()> {
-    let dest_dir  = args.install_dir.join(KERNEL_SUBDIR);
+    let dest_dir = args.install_dir.join(KERNEL_SUBDIR);
     let dest_path = dest_dir.join(KERNEL_FILENAME);
 
-    fs::create_dir_all(&dest_dir).with_context(|| {
-        format!("create kernel dir {}", dest_dir.display())
-    })?;
+    fs::create_dir_all(&dest_dir)
+        .with_context(|| format!("create kernel dir {}", dest_dir.display()))?;
 
     if dest_path.exists() && !args.force {
         bail!(
@@ -279,15 +274,14 @@ fn install(args: &Args) -> Result<()> {
     // Keeps the canonical path either old-or-new, never half-written —
     // important because `kernel/main.rs` probes this path at boot.
     let tmp_path = dest_dir.join(format!(".{}.tmp", KERNEL_FILENAME));
-    let bytes    = match &args.source {
+    let bytes = match &args.source {
         Source::File(p) => read_local_file(p)?,
         Source::Url { url, sha256 } => fetch_url_with_curl(url, sha256)?,
     };
 
     if let Source::File(_) = &args.source {
         if let Some(expected) = &args.sha256 {
-            verify_sha256(&bytes, expected)
-                .context("--from-file SHA-256 verification failed")?;
+            verify_sha256(&bytes, expected).context("--from-file SHA-256 verification failed")?;
         }
     }
 
@@ -325,8 +319,7 @@ fn read_local_file(p: &Path) -> Result<Vec<u8>> {
     if !p.exists() {
         bail!("--from-file path does not exist: {}", p.display());
     }
-    let mut f = fs::File::open(p)
-        .with_context(|| format!("open {}", p.display()))?;
+    let mut f = fs::File::open(p).with_context(|| format!("open {}", p.display()))?;
     let mut buf = Vec::new();
     f.read_to_end(&mut buf)
         .with_context(|| format!("read {}", p.display()))?;
@@ -338,8 +331,8 @@ fn read_local_file(p: &Path) -> Result<Vec<u8>> {
 /// directly into the kernel path because we want to fail BEFORE
 /// touching the canonical layout if the bytes don't match.
 fn fetch_url_with_curl(url: &str, expected_sha256: &str) -> Result<Vec<u8>> {
-    let tmp = tempfile_in_curdir("dev-kernel-fetch-")
-        .context("allocate temp file for curl download")?;
+    let tmp =
+        tempfile_in_curdir("dev-kernel-fetch-").context("allocate temp file for curl download")?;
     let status = Command::new("curl")
         .args([
             "--fail",
@@ -359,13 +352,10 @@ fn fetch_url_with_curl(url: &str, expected_sha256: &str) -> Result<Vec<u8>> {
         let _ = fs::remove_file(&tmp);
         bail!("curl exited non-zero ({status}) fetching {url}");
     }
-    let bytes = fs::read(&tmp).with_context(|| {
-        format!("read curl output {}", tmp.display())
-    })?;
+    let bytes = fs::read(&tmp).with_context(|| format!("read curl output {}", tmp.display()))?;
     let _ = fs::remove_file(&tmp);
 
-    verify_sha256(&bytes, expected_sha256)
-        .context("--url SHA-256 verification failed")?;
+    verify_sha256(&bytes, expected_sha256).context("--url SHA-256 verification failed")?;
 
     Ok(bytes)
 }
@@ -383,9 +373,7 @@ fn verify_sha256(bytes: &[u8], expected_lowercase_hex: &str) -> Result<()> {
     }
     let actual = sha256_hex(bytes);
     if actual != expected_lowercase_hex {
-        bail!(
-            "SHA-256 mismatch: got {actual}, expected {expected_lowercase_hex}"
-        );
+        bail!("SHA-256 mismatch: got {actual}, expected {expected_lowercase_hex}");
     }
     Ok(())
 }
@@ -407,8 +395,8 @@ fn sha256_hex(bytes: &[u8]) -> String {
 fn tempfile_in_curdir(prefix: &str) -> Result<PathBuf> {
     use std::sync::atomic::{AtomicU64, Ordering};
     static SEQ: AtomicU64 = AtomicU64::new(0);
-    let pid  = std::process::id();
-    let seq  = SEQ.fetch_add(1, Ordering::SeqCst);
+    let pid = std::process::id();
+    let seq = SEQ.fetch_add(1, Ordering::SeqCst);
     let name = format!("{prefix}{}-{}-{}", pid, seq, now_nanos());
     Ok(std::env::temp_dir().join(name))
 }
@@ -425,8 +413,7 @@ mod tests {
     use super::*;
 
     fn temp_dir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir()
-            .join(format!("dev-kernel-test-{}-{}", name, now_nanos()));
+        let p = std::env::temp_dir().join(format!("dev-kernel-test-{}-{}", name, now_nanos()));
         fs::create_dir_all(&p).unwrap();
         p
     }
@@ -438,10 +425,7 @@ mod tests {
         let prev = std::env::var_os("RAXIS_INSTALL_DIR");
         // SAFETY: see comment above. Test is single-threaded.
         unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") };
-        let argv = vec![
-            "--from-file".to_owned(),
-            "/tmp/anything".to_owned(),
-        ];
+        let argv = vec!["--from-file".to_owned(), "/tmp/anything".to_owned()];
         let args = Args::parse(&argv).unwrap();
         assert_eq!(args.install_dir, PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
 
@@ -452,23 +436,26 @@ mod tests {
 
         match prev {
             Some(v) => unsafe { std::env::set_var("RAXIS_INSTALL_DIR", v) },
-            None    => unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") },
+            None => unsafe { std::env::remove_var("RAXIS_INSTALL_DIR") },
         };
     }
 
     #[test]
     fn args_parser_rejects_url_without_sha256() {
         let argv = vec!["--url".to_owned(), "https://example/x".to_owned()];
-        let err  = Args::parse(&argv).unwrap_err().to_string();
+        let err = Args::parse(&argv).unwrap_err().to_string();
         assert!(err.contains("--url requires --sha256"), "got: {err}");
     }
 
     #[test]
     fn args_parser_rejects_both_from_file_and_url() {
         let argv = vec![
-            "--from-file".to_owned(), "/tmp/k".to_owned(),
-            "--url".to_owned(),       "https://example/x".to_owned(),
-            "--sha256".to_owned(),    "00".repeat(32),
+            "--from-file".to_owned(),
+            "/tmp/k".to_owned(),
+            "--url".to_owned(),
+            "https://example/x".to_owned(),
+            "--sha256".to_owned(),
+            "00".repeat(32),
         ];
         let err = Args::parse(&argv).unwrap_err().to_string();
         assert!(err.contains("exactly one of"), "got: {err}");
@@ -484,8 +471,10 @@ mod tests {
     #[test]
     fn args_parser_normalises_sha256_to_lowercase() {
         let argv = vec![
-            "--url".to_owned(),    "https://x/y".to_owned(),
-            "--sha256".to_owned(), "ABCDEF".to_owned() + &"0".repeat(58),
+            "--url".to_owned(),
+            "https://x/y".to_owned(),
+            "--sha256".to_owned(),
+            "ABCDEF".to_owned() + &"0".repeat(58),
         ];
         let args = Args::parse(&argv).unwrap();
         match args.source {
@@ -500,27 +489,31 @@ mod tests {
     #[test]
     fn install_from_local_file_writes_canonical_layout_with_correct_bytes() {
         let install_dir = temp_dir("install");
-        let src         = temp_dir("src").join("vmlinux.bin");
+        let src = temp_dir("src").join("vmlinux.bin");
         fs::write(&src, b"DUMMY KERNEL BYTES").unwrap();
 
         let args = Args {
             install_dir: install_dir.clone(),
-            arch:        Arch::Aarch64,
-            source:      Source::File(src.clone()),
-            sha256:      None,
-            force:       false,
+            arch: Arch::Aarch64,
+            source: Source::File(src.clone()),
+            sha256: None,
+            force: false,
         };
         install(&args).unwrap();
 
         let staged = install_dir.join("kernel").join("vmlinux");
-        assert!(staged.exists(), "expected staged kernel at {}", staged.display());
+        assert!(
+            staged.exists(),
+            "expected staged kernel at {}",
+            staged.display()
+        );
         assert_eq!(fs::read(&staged).unwrap(), b"DUMMY KERNEL BYTES");
     }
 
     #[test]
     fn install_refuses_to_overwrite_without_force() {
         let install_dir = temp_dir("overwrite");
-        let kdir        = install_dir.join("kernel");
+        let kdir = install_dir.join("kernel");
         fs::create_dir_all(&kdir).unwrap();
         fs::write(kdir.join("vmlinux"), b"OLD").unwrap();
 
@@ -529,33 +522,42 @@ mod tests {
 
         let args = Args {
             install_dir: install_dir.clone(),
-            arch:        Arch::Aarch64,
-            source:      Source::File(src.clone()),
-            sha256:      None,
-            force:       false,
+            arch: Arch::Aarch64,
+            source: Source::File(src.clone()),
+            sha256: None,
+            force: false,
         };
         let err = install(&args).unwrap_err().to_string();
         assert!(err.contains("refusing to overwrite"), "got: {err}");
-        assert_eq!(fs::read(install_dir.join("kernel").join("vmlinux")).unwrap(), b"OLD");
+        assert_eq!(
+            fs::read(install_dir.join("kernel").join("vmlinux")).unwrap(),
+            b"OLD"
+        );
 
-        let args_force = Args { force: true, ..args };
+        let args_force = Args {
+            force: true,
+            ..args
+        };
         install(&args_force).unwrap();
-        assert_eq!(fs::read(install_dir.join("kernel").join("vmlinux")).unwrap(), b"NEW");
+        assert_eq!(
+            fs::read(install_dir.join("kernel").join("vmlinux")).unwrap(),
+            b"NEW"
+        );
     }
 
     #[test]
     fn install_verifies_sha256_when_supplied_and_rejects_mismatch() {
         let install_dir = temp_dir("sha256");
-        let src         = temp_dir("sha256-src").join("k");
+        let src = temp_dir("sha256-src").join("k");
         fs::write(&src, b"hello").unwrap();
-        let actual_sha  = sha256_hex(b"hello");
+        let actual_sha = sha256_hex(b"hello");
 
         let bad_args = Args {
             install_dir: install_dir.clone(),
-            arch:        Arch::X86_64,
-            source:      Source::File(src.clone()),
-            sha256:      Some("0".repeat(64)),
-            force:       false,
+            arch: Arch::X86_64,
+            source: Source::File(src.clone()),
+            sha256: Some("0".repeat(64)),
+            force: false,
         };
         let err = install(&bad_args).unwrap_err();
         // anyhow::to_string() returns only the top context; we want
@@ -565,10 +567,10 @@ mod tests {
 
         let good_args = Args {
             install_dir: install_dir.clone(),
-            arch:        Arch::X86_64,
-            source:      Source::File(src),
-            sha256:      Some(actual_sha.clone()),
-            force:       false,
+            arch: Arch::X86_64,
+            source: Source::File(src),
+            sha256: Some(actual_sha.clone()),
+            force: false,
         };
         install(&good_args).unwrap();
         let staged = install_dir.join("kernel").join("vmlinux");
@@ -586,9 +588,9 @@ mod tests {
     #[test]
     fn arch_parse_accepts_documented_aliases() {
         assert_eq!(Arch::parse("aarch64").unwrap(), Arch::Aarch64);
-        assert_eq!(Arch::parse("arm64").unwrap(),   Arch::Aarch64);
-        assert_eq!(Arch::parse("x86_64").unwrap(),  Arch::X86_64);
-        assert_eq!(Arch::parse("amd64").unwrap(),   Arch::X86_64);
+        assert_eq!(Arch::parse("arm64").unwrap(), Arch::Aarch64);
+        assert_eq!(Arch::parse("x86_64").unwrap(), Arch::X86_64);
+        assert_eq!(Arch::parse("amd64").unwrap(), Arch::X86_64);
         assert!(Arch::parse("riscv64").is_err());
     }
 }

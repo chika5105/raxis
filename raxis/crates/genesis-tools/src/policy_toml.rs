@@ -95,10 +95,10 @@ pub const PERMITTED_OPS: &[&str] = &[
 /// addition that forgets to update genesis defaults — see the
 /// `intent_kind_keys_match_canonical_set` test in `lib.rs::tests`.
 const BASE_COST_PER_INTENT_KIND: &[(&str, u64)] = &[
-    ("SingleCommit",     10),
+    ("SingleCommit", 10),
     ("IntegrationMerge", 50),
-    ("CompleteTask",     5),
-    ("ReportFailure",    1),
+    ("CompleteTask", 5),
+    ("ReportFailure", 1),
 ];
 
 /// Default lane configuration shipped at genesis. Operators replace this in
@@ -129,7 +129,7 @@ const DEFAULT_LANE_PRIORITY: u8 = 100;
 /// requires real provider credentials under
 /// `<data_dir>/providers/` before it can do anything useful.
 const DEFAULT_DASHBOARD_BIND_ADDRESS: &str = "127.0.0.1";
-const DEFAULT_DASHBOARD_BIND_PORT:    u16  = 9820;
+const DEFAULT_DASHBOARD_BIND_PORT: u16 = 9820;
 /// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`: the autologin URL
 /// printed at kernel boot MUST remain valid for the kernel's
 /// process lifetime. The realistic-scenario live-e2e harness
@@ -141,7 +141,7 @@ const DEFAULT_DASHBOARD_BIND_PORT:    u16  = 9820;
 /// every realistic kernel uptime while the per-boot HMAC secret
 /// regeneration still invalidates every token the instant the
 /// kernel exits. Mirrors `raxis_dashboard::config::DEFAULT_JWT_TTL_SECS`.
-const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64  = 86_400;
+const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64 = 86_400;
 
 // ---------------------------------------------------------------------------
 // Emitter
@@ -154,8 +154,7 @@ const DEFAULT_DASHBOARD_JWT_TTL_SECS: u64  = 86_400;
 /// rejects empty / overlong names; this layer just guards against
 /// quote injection on names that DO pass that check.
 fn escape_toml_basic_string(s: &str) -> String {
-    s.replace('\\', "\\\\")
-        .replace('"', "\\\"")
+    s.replace('\\', "\\\\").replace('"', "\\\"")
 }
 
 /// Build the epoch-1 policy.toml as a `String`. Pure function — caller is
@@ -197,23 +196,29 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
 
     // [meta] — epoch + signer fingerprint + timestamp. `signed_by` is the
     // operator's pubkey fingerprint; `signed_at` is caller-injected.
-    write!(out, "[meta]\n\
+    write!(
+        out,
+        "[meta]\n\
         epoch         = 1\n\
         signed_by     = \"{op_fp}\"\n\
         signed_at     = {ts}\n\
         \n",
         op_fp = inputs.operator_fingerprint,
-        ts    = inputs.signed_at_unix_secs,
-    ).expect("String write_fmt is infallible");
+        ts = inputs.signed_at_unix_secs,
+    )
+    .expect("String write_fmt is infallible");
 
     // [authority] — pubkeys for the kernel-issued signing identities.
-    write!(out, "[authority]\n\
+    write!(
+        out,
+        "[authority]\n\
         authority_pubkey = \"{auth}\"\n\
         quality_pubkey   = \"{qual}\"\n\
         \n",
         auth = inputs.authority_pubkey_hex,
         qual = inputs.quality_pubkey_hex,
-    ).expect("String write_fmt is infallible");
+    )
+    .expect("String write_fmt is infallible");
 
     // [escalation_policy] — fixed v1 defaults; the operator can re-tune via
     // epoch advance once they've observed real escalation traffic.
@@ -237,7 +242,9 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
          allowed_worktree_roots = [",
     );
     for (i, root) in inputs.allowed_worktree_roots.iter().enumerate() {
-        if i > 0 { out.push_str(", "); }
+        if i > 0 {
+            out.push_str(", ");
+        }
         // We do NOT escape backslashes inside the path — every supported
         // platform (Unix, macOS) uses `/`, and TOML basic-string escaping
         // is unnecessary for the placeholder. If a future Windows port
@@ -269,8 +276,7 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         // Right-pad keys to 17 chars so the equals signs align — purely
         // cosmetic, but operators read this file by hand and the alignment
         // makes a missed entry stand out at review time.
-        write!(out, "{kind:<17} = {cost}\n")
-            .expect("String write_fmt is infallible");
+        write!(out, "{kind:<17} = {cost}\n").expect("String write_fmt is infallible");
     }
     out.push('\n');
 
@@ -283,7 +289,9 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     // with operators who `cat policy.toml` looking for the op set, but
     // `validate_operator_certs` overwrites it from the cert at load
     // time.
-    write!(out, "[[operators.entries]]\n\
+    write!(
+        out,
+        "[[operators.entries]]\n\
         pubkey_fingerprint = \"{op_fp}\"\n\
         display_name       = \"{display_name}\"\n\
         pubkey_hex         = \"{op_pk}\"\n\
@@ -291,12 +299,15 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         op_fp = inputs.operator_fingerprint,
         op_pk = inputs.operator_pubkey_hex,
         display_name = escape_toml_basic_string(&inputs.operator_cert.display_name),
-    ).expect("String write_fmt is infallible");
+    )
+    .expect("String write_fmt is infallible");
     for (i, op) in PERMITTED_OPS.iter().enumerate() {
         // Trailing comma after every op including the last is legal TOML
         // and means inserting a new op is a one-line diff that doesn't
         // touch the previous line — much friendlier in code review.
-        if i > 0 { out.push_str(",\n"); }
+        if i > 0 {
+            out.push_str(",\n");
+        }
         write!(out, "  \"{op}\"").expect("String write_fmt is infallible");
     }
     out.push_str(",\n]\n\n");
@@ -310,26 +321,31 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     // pipeline that `[[operators.entries]]` itself goes through on
     // load. The serialiser is infallible for `OperatorCert` (every
     // field is `String`/`i64`/`u32`/`Vec<String>`).
-    let cert_block = toml::to_string(inputs.operator_cert)
-        .expect("OperatorCert serialise is infallible");
+    let cert_block =
+        toml::to_string(inputs.operator_cert).expect("OperatorCert serialise is infallible");
     out.push_str("[operators.entries.cert]\n");
     out.push_str(&cert_block);
-    if !cert_block.ends_with('\n') { out.push('\n'); }
+    if !cert_block.ends_with('\n') {
+        out.push('\n');
+    }
     out.push('\n');
 
     // [[lanes]] — the default execution lane. Without at least one lane
     // entry, `scheduler::admit::admit_task` cannot resolve `lane_id = "default"`
     // and admission fails with `SchedulerError::UnknownLane`.
-    write!(out, "[[lanes]]\n\
+    write!(
+        out,
+        "[[lanes]]\n\
         lane_id              = \"{lane_id}\"\n\
         max_concurrent_tasks = {max_conc}\n\
         max_cost_per_epoch   = {max_cost}\n\
         priority             = {priority}\n\n",
-        lane_id   = DEFAULT_LANE_NAME,
-        max_conc  = DEFAULT_LANE_MAX_CONCURRENT_TASKS,
-        max_cost  = DEFAULT_LANE_MAX_COST_PER_EPOCH,
-        priority  = DEFAULT_LANE_PRIORITY,
-    ).expect("String write_fmt is infallible");
+        lane_id = DEFAULT_LANE_NAME,
+        max_conc = DEFAULT_LANE_MAX_CONCURRENT_TASKS,
+        max_cost = DEFAULT_LANE_MAX_COST_PER_EPOCH,
+        priority = DEFAULT_LANE_PRIORITY,
+    )
+    .expect("String write_fmt is infallible");
 
     // [dashboard] — operator dashboard HTTP server (per
     // `v2_extended_gaps.md §4.3`). Emitted with `enabled = true` so
@@ -340,15 +356,18 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
     // outside `RawPolicy` (no strict-deserialise interaction with
     // the policy loader). Operators turn it off by setting
     // `enabled = false` and rotating the policy epoch.
-    write!(out, "[dashboard]\n\
+    write!(
+        out,
+        "[dashboard]\n\
         enabled      = true\n\
         bind_address = \"{addr}\"\n\
         bind_port    = {port}\n\
         jwt_ttl_secs = {ttl}\n\n",
         addr = DEFAULT_DASHBOARD_BIND_ADDRESS,
         port = DEFAULT_DASHBOARD_BIND_PORT,
-        ttl  = DEFAULT_DASHBOARD_JWT_TTL_SECS,
-    ).expect("String write_fmt is infallible");
+        ttl = DEFAULT_DASHBOARD_JWT_TTL_SECS,
+    )
+    .expect("String write_fmt is infallible");
 
     // [gateway] + [[providers]] — OPTIONAL. We emit them as commented
     // template blocks so operators get a working starting point without
@@ -405,7 +424,9 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
 mod tests {
     use super::*;
     use crate::pubkey_fingerprint;
-    use raxis_test_support::{ephemeral_cert_with_key, ephemeral_signing_key, pubkey_hex, CertOpts};
+    use raxis_test_support::{
+        ephemeral_cert_with_key, ephemeral_signing_key, pubkey_hex, CertOpts,
+    };
 
     /// Fixed all-zero / all-1s test pubkeys for the AUTHORITY and
     /// QUALITY keys (these are validated at the loader as 64-hex-char
@@ -435,10 +456,7 @@ mod tests {
             &key,
             CertOpts {
                 display_name: "operator-1".to_owned(),
-                permitted_ops: PERMITTED_OPS
-                    .iter()
-                    .map(|s| (*s).to_owned())
-                    .collect(),
+                permitted_ops: PERMITTED_OPS.iter().map(|s| (*s).to_owned()).collect(),
                 ..CertOpts::default()
             },
         );
@@ -446,19 +464,19 @@ mod tests {
     }
 
     fn fixed_inputs<'a>(
-        roots:  &'a [&'a str],
-        op_pk:  &'a str,
-        op_fp:  &'a str,
-        cert:   &'a OperatorCert,
+        roots: &'a [&'a str],
+        op_pk: &'a str,
+        op_fp: &'a str,
+        cert: &'a OperatorCert,
     ) -> GenesisPolicyInputs<'a> {
         GenesisPolicyInputs {
-            authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
-            quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-            operator_pubkey_hex:    op_pk,
-            operator_fingerprint:   op_fp,
-            signed_at_unix_secs:    1_700_000_000, // 2023-11-14T22:13:20Z
+            authority_pubkey_hex: FIXED_AUTHORITY_PUBKEY_HEX,
+            quality_pubkey_hex: FIXED_QUALITY_PUBKEY_HEX,
+            operator_pubkey_hex: op_pk,
+            operator_fingerprint: op_fp,
+            signed_at_unix_secs: 1_700_000_000, // 2023-11-14T22:13:20Z
             allowed_worktree_roots: roots,
-            operator_cert:          cert,
+            operator_cert: cert,
         }
     }
 
@@ -479,18 +497,29 @@ mod tests {
             .expect("loader must accept render_genesis_policy_toml output");
 
         assert_eq!(bundle.epoch(), 1, "genesis epoch is always 1");
-        assert_eq!(bundle.operators().len(), 1, "genesis registers exactly one operator");
+        assert_eq!(
+            bundle.operators().len(),
+            1,
+            "genesis registers exactly one operator"
+        );
         assert_eq!(bundle.operators()[0].pubkey_hex, op_pk_hex);
         assert_eq!(bundle.operators()[0].pubkey_fingerprint, op_fp);
         assert_eq!(bundle.signed_by(), op_fp);
         assert_eq!(bundle.signed_at(), 1_700_000_000);
-        assert_eq!(bundle.lanes().len(), 1, "exactly one default lane at genesis");
+        assert_eq!(
+            bundle.lanes().len(),
+            1,
+            "exactly one default lane at genesis"
+        );
         assert_eq!(bundle.lanes()[0].lane_id, "default");
         assert_eq!(sha.len(), 64, "policy_sha256 is hex-SHA-256 = 64 chars");
         // Cert mandatory: every operator entry MUST carry a cert that
         // round-trips losslessly through TOML.
-        assert_eq!(bundle.operators()[0].cert.pubkey_hex, op_pk_hex,
-            "embedded cert must agree with entry-level pubkey_hex");
+        assert_eq!(
+            bundle.operators()[0].cert.pubkey_hex,
+            op_pk_hex,
+            "embedded cert must agree with entry-level pubkey_hex"
+        );
     }
 
     #[test]
@@ -508,16 +537,25 @@ mod tests {
         let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
-        for kind in &["SingleCommit", "IntegrationMerge", "CompleteTask", "ReportFailure"] {
-            assert!(toml_str.contains(&format!("{kind:<17} = ")),
-                "expected canonical intent kind {kind:?} in output, got:\n{toml_str}");
+        for kind in &[
+            "SingleCommit",
+            "IntegrationMerge",
+            "CompleteTask",
+            "ReportFailure",
+        ] {
+            assert!(
+                toml_str.contains(&format!("{kind:<17} = ")),
+                "expected canonical intent kind {kind:?} in output, got:\n{toml_str}"
+            );
         }
         // Negative pin: the dead names that used to ship in the kernel
         // emitter must NOT reappear. If a future contributor copy-pastes
         // the wrong constant set this test will catch it.
         for dead in &["MultiBranchCommit", "PrGateEvaluation"] {
-            assert!(!toml_str.contains(dead),
-                "dead intent kind {dead:?} reappeared in genesis output:\n{toml_str}");
+            assert!(
+                !toml_str.contains(dead),
+                "dead intent kind {dead:?} reappeared in genesis output:\n{toml_str}"
+            );
         }
     }
 
@@ -531,18 +569,28 @@ mod tests {
         let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
-        assert!(toml_str.contains("[dashboard]"),
-            "missing [dashboard] section in output:\n{toml_str}");
-        assert!(toml_str.contains("enabled      = true"),
-            "expected dashboard enabled by default in genesis output:\n{toml_str}");
-        assert!(toml_str.contains("bind_address = \"127.0.0.1\""),
-            "expected loopback bind_address by default:\n{toml_str}");
-        assert!(toml_str.contains("bind_port    = 9820"),
-            "expected port 9820 (spec default) by default:\n{toml_str}");
-        assert!(toml_str.contains("jwt_ttl_secs = 86400"),
+        assert!(
+            toml_str.contains("[dashboard]"),
+            "missing [dashboard] section in output:\n{toml_str}"
+        );
+        assert!(
+            toml_str.contains("enabled      = true"),
+            "expected dashboard enabled by default in genesis output:\n{toml_str}"
+        );
+        assert!(
+            toml_str.contains("bind_address = \"127.0.0.1\""),
+            "expected loopback bind_address by default:\n{toml_str}"
+        );
+        assert!(
+            toml_str.contains("bind_port    = 9820"),
+            "expected port 9820 (spec default) by default:\n{toml_str}"
+        );
+        assert!(
+            toml_str.contains("jwt_ttl_secs = 86400"),
             "expected 24 h JWT TTL by default (INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01 — \
              autologin URL minted at boot must remain valid for the kernel's process \
-             lifetime; the realistic-scenario live-e2e harness runs >1h):\n{toml_str}");
+             lifetime; the realistic-scenario live-e2e harness runs >1h):\n{toml_str}"
+        );
 
         // Round-trip through the dashboard-config loader so the
         // bytes we emit are exactly what the kernel boot path reads.
@@ -553,7 +601,7 @@ mod tests {
             .expect("[dashboard] is enabled, so cfg must be Some");
         assert!(cfg.enabled, "loaded config must agree with TOML");
         assert_eq!(cfg.bind_address, "127.0.0.1");
-        assert_eq!(cfg.bind_port,    9820);
+        assert_eq!(cfg.bind_port, 9820);
         assert_eq!(cfg.jwt_ttl_secs, 86_400);
     }
 
@@ -566,8 +614,10 @@ mod tests {
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         assert!(toml_str.contains("[[lanes]]"), "missing [[lanes]] section");
-        assert!(toml_str.contains("lane_id              = \"default\""),
-            "missing default lane_id");
+        assert!(
+            toml_str.contains("lane_id              = \"default\""),
+            "missing default lane_id"
+        );
     }
 
     #[test]
@@ -576,13 +626,18 @@ mod tests {
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
         for op in PERMITTED_OPS {
-            assert!(toml_str.contains(&format!("\"{op}\"")),
-                "permitted op {op:?} missing from output");
+            assert!(
+                toml_str.contains(&format!("\"{op}\"")),
+                "permitted op {op:?} missing from output"
+            );
         }
         // Confirm exactly 15 (the original 13 v1 ops plus the two
         // quarantine ops added in step 10 — kernel-store.md §2.5.8).
-        assert_eq!(PERMITTED_OPS.len(), 15,
-            "v1+quarantine permitted_ops set is fixed at 15 (cli-ceremony.md §4.2 + §2.5.8)");
+        assert_eq!(
+            PERMITTED_OPS.len(),
+            15,
+            "v1+quarantine permitted_ops set is fixed at 15 (cli-ceremony.md §4.2 + §2.5.8)"
+        );
     }
 
     #[test]
@@ -593,9 +648,12 @@ mod tests {
         // Expect `["/tmp/raxis-a", "/tmp/raxis-b", "/tmp/raxis-c"]` — one
         // pair of brackets, two separators of exactly `, ` between three
         // string literals.
-        assert!(toml_str.contains(
-            "allowed_worktree_roots = [\"/tmp/raxis-a\", \"/tmp/raxis-b\", \"/tmp/raxis-c\"]"),
-            "multi-root list produced wrong shape:\n{toml_str}");
+        assert!(
+            toml_str.contains(
+                "allowed_worktree_roots = [\"/tmp/raxis-a\", \"/tmp/raxis-b\", \"/tmp/raxis-c\"]"
+            ),
+            "multi-root list produced wrong shape:\n{toml_str}"
+        );
     }
 
     #[test]
@@ -622,8 +680,10 @@ mod tests {
             ..fixed_inputs(&roots, &op_pk, &op_fp, &cert)
         };
         let toml_str = render_genesis_policy_toml(inputs);
-        assert!(toml_str.contains("signed_at     = 42"),
-            "expected `signed_at = 42` literal, got:\n{toml_str}");
+        assert!(
+            toml_str.contains("signed_at     = 42"),
+            "expected `signed_at = 42` literal, got:\n{toml_str}"
+        );
     }
 
     /// New contract (INV-CERT-01): the emitter MUST always produce a
@@ -635,8 +695,10 @@ mod tests {
         let (op_pk, op_fp, cert) = fixture_operator_identity();
         let roots = ["/tmp/raxis-test-worktrees"];
         let toml_str = render_genesis_policy_toml(fixed_inputs(&roots, &op_pk, &op_fp, &cert));
-        assert!(toml_str.contains("[operators.entries.cert]"),
-            "emitter MUST always produce a `[operators.entries.cert]` sub-table; got:\n{toml_str}");
+        assert!(
+            toml_str.contains("[operators.entries.cert]"),
+            "emitter MUST always produce a `[operators.entries.cert]` sub-table; got:\n{toml_str}"
+        );
     }
 
     // ── Negative cases ─────────────────────────────────────────────────────

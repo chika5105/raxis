@@ -145,16 +145,16 @@ fn default_schema_version() -> u32 {
 impl Sentinel {
     pub fn fresh_healthy(supervisor_pid: u32, kernel_pid: u32, now_unix_secs: i64) -> Self {
         Self {
-            schema_version:      1,
-            status:              "Healthy".to_owned(),
-            sub_state:           None,
-            attempt_n:           0,
-            max_attempts:        0,
+            schema_version: 1,
+            status: "Healthy".to_owned(),
+            sub_state: None,
+            attempt_n: 0,
+            max_attempts: 0,
             last_restart_unix_ts: 0,
-            last_restart_reason:  None,
-            prev_run_exit_code:   None,
-            attempts_in_window:  0,
-            window_secs:         0,
+            last_restart_reason: None,
+            prev_run_exit_code: None,
+            attempts_in_window: 0,
+            window_secs: 0,
             supervisor_pid,
             kernel_pid,
             updated_at_unix_secs: now_unix_secs,
@@ -245,7 +245,10 @@ mod tests {
         let back = read_sentinel(dir.path()).unwrap().unwrap();
         assert_eq!(back.status, "Restarting");
         assert_eq!(back.attempt_n, 2);
-        assert_eq!(back.last_restart_reason.as_deref(), Some("DeadlockDetected"));
+        assert_eq!(
+            back.last_restart_reason.as_deref(),
+            Some("DeadlockDetected")
+        );
     }
 
     #[test]

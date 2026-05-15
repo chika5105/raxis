@@ -45,20 +45,29 @@ async fn admission_loop_admits_a_real_anthropic_api_request_over_real_unix_socke
     });
 
     let req = ProxyAdmissionRequest {
-        connection_id:     7,
-        original_dst_ip:   "1.2.3.4".into(),
+        connection_id: 7,
+        original_dst_ip: "1.2.3.4".into(),
         original_dst_port: 443,
-        host_or_sni:       Some("api.anthropic.com".into()),
-        protocol:          AdmissionProtocol::Https,
+        host_or_sni: Some("api.anthropic.com".into()),
+        protocol: AdmissionProtocol::Https,
     };
     let req_bytes = encode_request(&req).expect("encode request");
-    proxy_side.write_all(&req_bytes).await.expect("write request");
+    proxy_side
+        .write_all(&req_bytes)
+        .await
+        .expect("write request");
 
     let mut len_buf = [0u8; 4];
-    proxy_side.read_exact(&mut len_buf).await.expect("read response prefix");
+    proxy_side
+        .read_exact(&mut len_buf)
+        .await
+        .expect("read response prefix");
     let body_len = u32::from_be_bytes(len_buf) as usize;
     let mut body = vec![0u8; body_len];
-    proxy_side.read_exact(&mut body).await.expect("read response body");
+    proxy_side
+        .read_exact(&mut body)
+        .await
+        .expect("read response body");
     let mut full = Vec::with_capacity(4 + body.len());
     full.extend_from_slice(&len_buf);
     full.extend_from_slice(&body);
@@ -110,13 +119,16 @@ async fn admission_loop_denies_disallowed_host_and_emits_transparent_proxy_denie
     });
 
     let req = ProxyAdmissionRequest {
-        connection_id:     1,
-        original_dst_ip:   "9.9.9.9".into(),
+        connection_id: 1,
+        original_dst_ip: "9.9.9.9".into(),
         original_dst_port: 443,
-        host_or_sni:       Some("evil.example.com".into()),
-        protocol:          AdmissionProtocol::Https,
+        host_or_sni: Some("evil.example.com".into()),
+        protocol: AdmissionProtocol::Https,
     };
-    proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+    proxy_side
+        .write_all(&encode_request(&req).unwrap())
+        .await
+        .unwrap();
 
     let mut len_buf = [0u8; 4];
     proxy_side.read_exact(&mut len_buf).await.unwrap();
@@ -128,7 +140,10 @@ async fn admission_loop_denies_disallowed_host_and_emits_transparent_proxy_denie
     full.extend_from_slice(&body);
     let (resp, _consumed) = decode_response(&full).unwrap();
     match resp {
-        ProxyAdmissionResponse::Deny { connection_id, reason } => {
+        ProxyAdmissionResponse::Deny {
+            connection_id,
+            reason,
+        } => {
             assert_eq!(connection_id, 1);
             assert_eq!(reason, DenyReason::HostNotInAllowlist);
         }
@@ -143,8 +158,17 @@ async fn admission_loop_denies_disallowed_host_and_emits_transparent_proxy_denie
         .iter()
         .find_map(|e| match &e.kind {
             AuditEventKind::TransparentProxyDenied {
-                session_id, host_or_sni, reason, protocol, ..
-            } => Some((session_id.clone(), host_or_sni.clone(), reason.clone(), protocol.clone())),
+                session_id,
+                host_or_sni,
+                reason,
+                protocol,
+                ..
+            } => Some((
+                session_id.clone(),
+                host_or_sni.clone(),
+                reason.clone(),
+                protocol.clone(),
+            )),
             _ => None,
         })
         .expect("TransparentProxyDenied must be emitted");
@@ -162,11 +186,7 @@ struct ScriptedAdmissionService {
 }
 
 impl AdmissionService for ScriptedAdmissionService {
-    fn admit(
-        &self,
-        _session_id: &str,
-        _request: &ProxyAdmissionRequest,
-    ) -> AdmissionDecision {
+    fn admit(&self, _session_id: &str, _request: &ProxyAdmissionRequest) -> AdmissionDecision {
         self.decisions
             .lock()
             .unwrap()
@@ -181,12 +201,18 @@ async fn admission_loop_pipelines_three_decisions_in_order() {
     let (kr, kw) = kernel_side.into_split();
 
     let mut decisions = std::collections::VecDeque::new();
-    decisions.push_back(AdmissionDecision { connection_id: 1, verdict: AdmissionVerdict::Admit });
+    decisions.push_back(AdmissionDecision {
+        connection_id: 1,
+        verdict: AdmissionVerdict::Admit,
+    });
     decisions.push_back(AdmissionDecision {
         connection_id: 2,
         verdict: AdmissionVerdict::Deny(DenyReason::ProxyTargetBypass),
     });
-    decisions.push_back(AdmissionDecision { connection_id: 3, verdict: AdmissionVerdict::Admit });
+    decisions.push_back(AdmissionDecision {
+        connection_id: 3,
+        verdict: AdmissionVerdict::Admit,
+    });
     let service = Arc::new(ScriptedAdmissionService {
         decisions: std::sync::Mutex::new(decisions),
     });
@@ -201,13 +227,16 @@ async fn admission_loop_pipelines_three_decisions_in_order() {
 
     for cid in 1u64..=3 {
         let req = ProxyAdmissionRequest {
-            connection_id:     cid,
-            original_dst_ip:   "10.0.0.1".into(),
+            connection_id: cid,
+            original_dst_ip: "10.0.0.1".into(),
             original_dst_port: 443,
-            host_or_sni:       Some(format!("h{cid}.example.com")),
-            protocol:          AdmissionProtocol::Https,
+            host_or_sni: Some(format!("h{cid}.example.com")),
+            protocol: AdmissionProtocol::Https,
         };
-        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        proxy_side
+            .write_all(&encode_request(&req).unwrap())
+            .await
+            .unwrap();
     }
     proxy_side.flush().await.unwrap();
 
@@ -232,7 +261,10 @@ async fn admission_loop_pipelines_three_decisions_in_order() {
         other => panic!("first response should be Admit(1), got {other:?}"),
     }
     match &got[1] {
-        ProxyAdmissionResponse::Deny { connection_id, reason } => {
+        ProxyAdmissionResponse::Deny {
+            connection_id,
+            reason,
+        } => {
             assert_eq!(*connection_id, 2);
             assert_eq!(*reason, DenyReason::ProxyTargetBypass);
         }
@@ -275,20 +307,29 @@ async fn three_denials_to_same_host_emit_one_session_egress_stall_detected() {
 
     let loop_handle = tokio::spawn(async move {
         run_admission_loop_with_stall_tracker(
-            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
-        ).await
+            kr,
+            kw,
+            service,
+            audit_dyn,
+            session_for_loop,
+            Some(tracker),
+        )
+        .await
     });
 
     // Fire 3 identical denials for the same (host, port).
     for cid in 1u64..=3 {
         let req = ProxyAdmissionRequest {
-            connection_id:     cid,
-            original_dst_ip:   "9.9.9.9".into(),
+            connection_id: cid,
+            original_dst_ip: "9.9.9.9".into(),
             original_dst_port: 443,
-            host_or_sni:       Some("api.anthropic.com".into()),
-            protocol:          AdmissionProtocol::Https,
+            host_or_sni: Some("api.anthropic.com".into()),
+            protocol: AdmissionProtocol::Https,
         };
-        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        proxy_side
+            .write_all(&encode_request(&req).unwrap())
+            .await
+            .unwrap();
         // Drain the response so the writer's flush ordering is
         // deterministic and we don't race the audit emit.
         let mut len_buf = [0u8; 4];
@@ -301,30 +342,52 @@ async fn three_denials_to_same_host_emit_one_session_egress_stall_detected() {
     let _ = loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
-    let denials: Vec<_> = events.iter().filter(|e|
-        matches!(e.kind, AuditEventKind::TransparentProxyDenied { .. })
-    ).collect();
-    assert_eq!(denials.len(), 3, "every denial MUST emit one TransparentProxyDenied");
+    let denials: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, AuditEventKind::TransparentProxyDenied { .. }))
+        .collect();
+    assert_eq!(
+        denials.len(),
+        3,
+        "every denial MUST emit one TransparentProxyDenied"
+    );
 
-    let stalls: Vec<_> = events.iter().filter_map(|e| match &e.kind {
-        AuditEventKind::SessionEgressStallDetected {
-            session_id: sid, host_or_sni, original_dst_port, reason,
-            block_count_in_window, window_seconds, source,
-        } => Some((sid.clone(), host_or_sni.clone(), *original_dst_port,
-                   reason.clone(), *block_count_in_window, *window_seconds,
-                   source.clone())),
-        _ => None,
-    }).collect();
-    assert_eq!(stalls.len(), 1,
-        "exactly one SessionEgressStallDetected MUST be emitted at threshold");
+    let stalls: Vec<_> = events
+        .iter()
+        .filter_map(|e| match &e.kind {
+            AuditEventKind::SessionEgressStallDetected {
+                session_id: sid,
+                host_or_sni,
+                original_dst_port,
+                reason,
+                block_count_in_window,
+                window_seconds,
+                source,
+            } => Some((
+                sid.clone(),
+                host_or_sni.clone(),
+                *original_dst_port,
+                reason.clone(),
+                *block_count_in_window,
+                *window_seconds,
+                source.clone(),
+            )),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        stalls.len(),
+        1,
+        "exactly one SessionEgressStallDetected MUST be emitted at threshold"
+    );
     let (sid, host, port, reason, count, window, source) = &stalls[0];
-    assert_eq!(sid,                &session_id);
-    assert_eq!(host.as_deref(),    Some("api.anthropic.com"));
-    assert_eq!(*port,              443);
-    assert_eq!(reason,             "host_not_in_allowlist");
-    assert_eq!(*count,             3);
-    assert_eq!(*window,            30);
-    assert_eq!(source,             "tproxy");
+    assert_eq!(sid, &session_id);
+    assert_eq!(host.as_deref(), Some("api.anthropic.com"));
+    assert_eq!(*port, 443);
+    assert_eq!(reason, "host_not_in_allowlist");
+    assert_eq!(*count, 3);
+    assert_eq!(*window, 30);
+    assert_eq!(source, "tproxy");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -344,19 +407,28 @@ async fn two_denials_below_threshold_do_not_emit_stall_event() {
 
     let loop_handle = tokio::spawn(async move {
         run_admission_loop_with_stall_tracker(
-            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
-        ).await
+            kr,
+            kw,
+            service,
+            audit_dyn,
+            session_for_loop,
+            Some(tracker),
+        )
+        .await
     });
 
     for cid in 1u64..=2 {
         let req = ProxyAdmissionRequest {
-            connection_id:     cid,
-            original_dst_ip:   "9.9.9.9".into(),
+            connection_id: cid,
+            original_dst_ip: "9.9.9.9".into(),
             original_dst_port: 443,
-            host_or_sni:       Some("evil.example".into()),
-            protocol:          AdmissionProtocol::Https,
+            host_or_sni: Some("evil.example".into()),
+            protocol: AdmissionProtocol::Https,
         };
-        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        proxy_side
+            .write_all(&encode_request(&req).unwrap())
+            .await
+            .unwrap();
         let mut len_buf = [0u8; 4];
         proxy_side.read_exact(&mut len_buf).await.unwrap();
         let body_len = u32::from_be_bytes(len_buf) as usize;
@@ -367,11 +439,14 @@ async fn two_denials_below_threshold_do_not_emit_stall_event() {
     let _ = loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
-    let stalls: Vec<_> = events.iter().filter(|e|
-        matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. })
-    ).collect();
-    assert!(stalls.is_empty(),
-        "below-threshold denials MUST NOT emit a stall event; got {stalls:?}");
+    let stalls: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. }))
+        .collect();
+    assert!(
+        stalls.is_empty(),
+        "below-threshold denials MUST NOT emit a stall event; got {stalls:?}"
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -390,21 +465,30 @@ async fn admit_verdicts_do_not_feed_the_stall_tracker() {
 
     let loop_handle = tokio::spawn(async move {
         run_admission_loop_with_stall_tracker(
-            kr, kw, service, audit_dyn, session_for_loop, Some(tracker),
-        ).await
+            kr,
+            kw,
+            service,
+            audit_dyn,
+            session_for_loop,
+            Some(tracker),
+        )
+        .await
     });
 
     // Five identical admits — would trip a threshold-3 tracker if
     // admits were fed in. They are not.
     for cid in 1u64..=5 {
         let req = ProxyAdmissionRequest {
-            connection_id:     cid,
-            original_dst_ip:   "1.2.3.4".into(),
+            connection_id: cid,
+            original_dst_ip: "1.2.3.4".into(),
             original_dst_port: 443,
-            host_or_sni:       Some("api.anthropic.com".into()),
-            protocol:          AdmissionProtocol::Https,
+            host_or_sni: Some("api.anthropic.com".into()),
+            protocol: AdmissionProtocol::Https,
         };
-        proxy_side.write_all(&encode_request(&req).unwrap()).await.unwrap();
+        proxy_side
+            .write_all(&encode_request(&req).unwrap())
+            .await
+            .unwrap();
         let mut len_buf = [0u8; 4];
         proxy_side.read_exact(&mut len_buf).await.unwrap();
         let body_len = u32::from_be_bytes(len_buf) as usize;
@@ -415,9 +499,12 @@ async fn admit_verdicts_do_not_feed_the_stall_tracker() {
     let _ = loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
-    let stalls: Vec<_> = events.iter().filter(|e|
-        matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. })
-    ).collect();
-    assert!(stalls.is_empty(),
-        "admits MUST NOT trip the stall tracker; got {stalls:?}");
+    let stalls: Vec<_> = events
+        .iter()
+        .filter(|e| matches!(e.kind, AuditEventKind::SessionEgressStallDetected { .. }))
+        .collect();
+    assert!(
+        stalls.is_empty(),
+        "admits MUST NOT trip the stall tracker; got {stalls:?}"
+    );
 }

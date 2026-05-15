@@ -69,10 +69,7 @@ pub trait CredentialProxyHandle: Send + Sync {
     /// short-lived copy the adapter is responsible for zeroing once
     /// it has injected the credential into the outbound wire frame
     /// (e.g., FIX login message, HTTP `Authorization` header).
-    fn resolve_leased(
-        &self,
-        credential_name: &str,
-    ) -> Result<Vec<u8>, DomainError>;
+    fn resolve_leased(&self, credential_name: &str) -> Result<Vec<u8>, DomainError>;
 
     /// Stable short-string identifying the underlying backend
     /// implementation. Used in audit emissions and `raxis doctor`
@@ -96,19 +93,19 @@ pub trait CredentialProxyHandle: Send + Sync {
 pub struct SessionContext<'a> {
     /// Stable session id (UUID-shaped string). Used by the adapter to
     /// scope per-session paths under its `sessions_root`.
-    pub session_id:        &'a str,
+    pub session_id: &'a str,
     /// The initiative the session belongs to. The adapter typically
     /// keys per-initiative shared state (e.g., main-repo worktree lock)
     /// off this id.
-    pub initiative_id:     &'a str,
+    pub initiative_id: &'a str,
     /// The canonical-state reference the session provisions from.
     /// SE: the main-branch commit SHA at session-admission time. Adapters
     /// for non-VCS domains supply their domain-specific anchor.
-    pub parent_state_ref:  &'a str,
+    pub parent_state_ref: &'a str,
     /// Policy epoch in effect when the session was admitted. Pinned
     /// for the session's lifetime so a mid-session policy advance
     /// cannot tear the adapter's view of the world (`INV-POLICY-01`).
-    pub policy_epoch_id:   u64,
+    pub policy_epoch_id: u64,
 }
 
 /// Per-intent read-only context for `touched_resources`. Carries the
@@ -118,12 +115,12 @@ pub struct SessionContext<'a> {
 #[derive(Debug, Clone)]
 pub struct AdmissionContext<'a> {
     /// The session the intent was submitted under.
-    pub session:           SessionContext<'a>,
+    pub session: SessionContext<'a>,
     /// The kernel-allocated intent request id (sequence-scoped).
     pub intent_request_id: &'a str,
     /// Optional task id the intent attaches to. Some intent kinds
     /// (e.g., `EgressRequest`) are not bound to a task.
-    pub task_id:           Option<&'a str>,
+    pub task_id: Option<&'a str>,
     /// The host-path of the workspace the intent applies to. The
     /// adapter computes the touched-set against this path's content.
     pub workspace_host_path: &'a std::path::Path,
@@ -135,13 +132,13 @@ pub struct AdmissionContext<'a> {
 #[derive(Debug, Clone)]
 pub struct CommitContext<'a> {
     /// The session the commit applies to.
-    pub session:           SessionContext<'a>,
+    pub session: SessionContext<'a>,
     /// The intent that triggered the commit (e.g., `IntegrationMerge`).
     pub intent_request_id: &'a str,
     /// Initiative-level worktree directory roots the adapter may
     /// stage from. SE: `<data_dir>/worktrees/`. Domains with no
     /// host-path discipline ignore this field.
-    pub worktree_root:     &'a std::path::Path,
+    pub worktree_root: &'a std::path::Path,
 }
 
 // ---------------------------------------------------------------------------
@@ -174,7 +171,7 @@ impl ContentHash {
 pub struct WorkspaceHandle {
     /// Host-side absolute path to the workspace root the agent VM
     /// mounts read-write into the guest.
-    pub host_path:    PathBuf,
+    pub host_path: PathBuf,
     /// SHA-256 of the canonical-state snapshot at provision time.
     pub content_hash: ContentHash,
     /// Adapter-private state the kernel never inspects.
@@ -197,10 +194,10 @@ impl std::fmt::Debug for WorkspaceHandle {
 /// `adapter_state`; `content_hash` is the head_tree_sha256.
 pub struct Snapshot {
     /// Identifying hash of the snapshot bytes.
-    pub content_hash:  ContentHash,
+    pub content_hash: ContentHash,
     /// Immediate parent's content hash, if any. SE: parent commit's
     /// tree hash; domains with no parent linkage leave this `None`.
-    pub parent_hash:   Option<ContentHash>,
+    pub parent_hash: Option<ContentHash>,
     /// Adapter-private state.
     pub adapter_state: Box<dyn std::any::Any + Send + Sync>,
 }
@@ -209,7 +206,10 @@ impl std::fmt::Debug for Snapshot {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Snapshot")
             .field("content_hash", &self.content_hash.as_hex())
-            .field("parent_hash", &self.parent_hash.as_ref().map(|h| h.as_hex()))
+            .field(
+                "parent_hash",
+                &self.parent_hash.as_ref().map(|h| h.as_hex()),
+            )
             .field("adapter_state", &"<opaque>")
             .finish()
     }
@@ -224,13 +224,13 @@ impl std::fmt::Debug for Snapshot {
 #[derive(Debug)]
 pub struct Bundle {
     /// Host-side absolute path to the transferable bytes.
-    pub host_path:    PathBuf,
+    pub host_path: PathBuf,
     /// SHA-256 over the bundle bytes; the kernel writes this into
     /// the audit chain for the multi-agent transfer step.
     pub content_hash: ContentHash,
     /// Bundle byte length; the kernel uses this for budget gates and
     /// for the `[plan_bundle_limits]` enforcement.
-    pub byte_len:     u64,
+    pub byte_len: u64,
 }
 
 /// Receipt of a successful `commit`. Every field is hashed into the
@@ -239,7 +239,7 @@ pub struct Bundle {
 pub struct DomainCommitReceipt {
     /// Adapter-defined unique id for this receipt. SE: the main-branch
     /// commit SHA. Trading: the broker order id.
-    pub receipt_id:   String,
+    pub receipt_id: String,
     /// Optional external reference (e.g., upstream remote URL the
     /// SE adapter pushed to, broker venue id, FHIR resource id). May
     /// be `None` when the commit is purely host-local.
@@ -277,9 +277,9 @@ pub struct TouchedResource {
     /// (empty authority, leading `/` denotes repo root). Trading:
     /// `account://acct-42/AAPL`. Healthcare:
     /// `fhir://patient-12/Observation`.
-    pub uri:  String,
+    pub uri: String,
     /// Whether this is an addition, modification, or deletion.
-    pub op:   ResourceOp,
+    pub op: ResourceOp,
     /// Optional bytes-affected metric for budget gates. SE: file size.
     /// Domains with no natural byte metric leave this `None`.
     pub size: Option<u64>,
@@ -366,12 +366,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// admits. SE: `IntentKind` from `raxis-types`. Trading:
     /// `ProposeOrder | CancelOrder | …`. The kernel deserialises
     /// these out of the `IntentRequest` envelope.
-    type IntentKind: Serialize
-        + serde::de::DeserializeOwned
-        + Clone
-        + Send
-        + Sync
-        + std::fmt::Debug;
+    type IntentKind: Serialize + serde::de::DeserializeOwned + Clone + Send + Sync + std::fmt::Debug;
 
     /// Artefact a successful terminal-task `CompleteTask`-equivalent
     /// witness binds to. SE: `(CommitSha, head_tree_sha256)`.
@@ -466,7 +461,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<bool, DomainError>;
 
     /// Granular admission hook #2 — verify there are no
@@ -485,7 +480,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<(), DomainError>;
 
     /// Granular admission hook #3 — compute the touched-set between
@@ -496,7 +491,7 @@ pub trait DomainAdapter: Send + Sync + 'static {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<TouchedResources, DomainError>;
 
     /// Convenience method that runs the three granular hooks in
@@ -509,19 +504,23 @@ pub trait DomainAdapter: Send + Sync + 'static {
         &self,
         parent_state_ref: &str,
         target_state_ref: &str,
-        workspace_root:   &std::path::Path,
+        workspace_root: &std::path::Path,
     ) -> Result<TouchedResources, DomainError> {
         match self
             .is_ancestor(parent_state_ref, target_state_ref, workspace_root)
             .await?
         {
             true => {}
-            false => return Err(DomainError::PreconditionFailed(format!(
-                "{parent_state_ref} is not an ancestor of {target_state_ref}"
-            ))),
+            false => {
+                return Err(DomainError::PreconditionFailed(format!(
+                    "{parent_state_ref} is not an ancestor of {target_state_ref}"
+                )))
+            }
         }
-        self.topology_check(parent_state_ref, target_state_ref, workspace_root).await?;
-        self.compute_touched_paths(parent_state_ref, target_state_ref, workspace_root).await
+        self.topology_check(parent_state_ref, target_state_ref, workspace_root)
+            .await?;
+        self.compute_touched_paths(parent_state_ref, target_state_ref, workspace_root)
+            .await
     }
 
     /// Stable, sorted, deduplicated list of escalation class names
@@ -536,19 +535,13 @@ pub trait DomainAdapter: Send + Sync + 'static {
     /// VM-mounted resources but does NOT delete the underlying state
     /// — the audit-retention window of `agent-disagreement.md §7`
     /// may require it for forensic replay.
-    async fn teardown_workspace(
-        &self,
-        workspace: &WorkspaceHandle,
-    ) -> Result<(), DomainError>;
+    async fn teardown_workspace(&self, workspace: &WorkspaceHandle) -> Result<(), DomainError>;
 
     /// Called when the audit retention window closes. Permanently
     /// purges the underlying state. SE: `rm -rf` the ephemeral clone.
     /// The kernel still retains the audit-chain entry; only the
     /// bulk state goes.
-    async fn purge_workspace(
-        &self,
-        workspace: &WorkspaceHandle,
-    ) -> Result<(), DomainError>;
+    async fn purge_workspace(&self, workspace: &WorkspaceHandle) -> Result<(), DomainError>;
 }
 
 // ---------------------------------------------------------------------------
@@ -565,12 +558,10 @@ pub mod conformance {
 
     /// Property #1 — `provision_workspace` is deterministic.
     /// Provision twice and assert byte-equal `content_hash`.
-    pub fn assert_workspace_determinism(
-        h1: &WorkspaceHandle,
-        h2: &WorkspaceHandle,
-    ) {
+    pub fn assert_workspace_determinism(h1: &WorkspaceHandle, h2: &WorkspaceHandle) {
         assert_eq!(
-            h1.content_hash, h2.content_hash,
+            h1.content_hash,
+            h2.content_hash,
             "DomainAdapter::provision_workspace conformance #1: \
              two provisions of the same (session_id, parent_state_ref) \
              must produce byte-identical content_hash; got {:?} vs {:?}",
@@ -583,7 +574,8 @@ pub mod conformance {
     /// workspace.
     pub fn assert_snapshot_idempotency(s1: &Snapshot, s2: &Snapshot) {
         assert_eq!(
-            s1.content_hash, s2.content_hash,
+            s1.content_hash,
+            s2.content_hash,
             "DomainAdapter::snapshot conformance #2: two snapshots of \
              an unchanged workspace must produce byte-identical \
              content_hash; got {:?} vs {:?}",
@@ -630,7 +622,9 @@ mod tests {
         let h = ContentHash([0xab; 32]);
         let s = h.as_hex();
         assert_eq!(s.len(), 64);
-        assert!(s.chars().all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
+        assert!(s
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
         assert_eq!(s, "ab".repeat(32));
     }
 
@@ -639,13 +633,13 @@ mod tests {
         let t = TouchedResources {
             resources: vec![
                 TouchedResource {
-                    uri:  "path:///src/foo.rs".to_owned(),
-                    op:   ResourceOp::Modify,
+                    uri: "path:///src/foo.rs".to_owned(),
+                    op: ResourceOp::Modify,
                     size: Some(1234),
                 },
                 TouchedResource {
-                    uri:  "path:///src/bar.rs".to_owned(),
-                    op:   ResourceOp::Create,
+                    uri: "path:///src/bar.rs".to_owned(),
+                    op: ResourceOp::Create,
                     size: None,
                 },
             ],
@@ -666,7 +660,7 @@ mod tests {
     #[test]
     fn domain_error_already_applied_short_circuits_via_pattern_match() {
         let receipt = DomainCommitReceipt {
-            receipt_id:   "rcpt-1".to_owned(),
+            receipt_id: "rcpt-1".to_owned(),
             external_ref: None,
             committed_at: chrono::Utc::now(),
             adapter_state: Box::new(()),

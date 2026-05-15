@@ -226,10 +226,7 @@ fn collect(data_dir: &Path) -> StatusReport {
 /// Inspect `runtime/heartbeat.json` + `kill(pid, 0)` to classify
 /// liveness. Returns the verdict plus the heartbeat snapshot when
 /// the snapshot is meaningful for downstream rendering.
-fn collect_liveness(
-    data_dir: &Path,
-    now_secs: u64,
-) -> (Liveness, Option<raxis_runtime::Snapshot>) {
+fn collect_liveness(data_dir: &Path, now_secs: u64) -> (Liveness, Option<raxis_runtime::Snapshot>) {
     match raxis_runtime::read(data_dir) {
         Ok(snap) => {
             // Final-write semantics: state=Stopping is always exit 1
@@ -481,7 +478,11 @@ impl StatusReport {
             ),
             Liveness::Missing { detail } => ("RAXIS Kernel: STOPPED", format!("({detail})")),
         };
-        let _ = writeln!(out, "{headline}{}{summary}", if summary.is_empty() { "" } else { " " });
+        let _ = writeln!(
+            out,
+            "{headline}{}{summary}",
+            if summary.is_empty() { "" } else { " " }
+        );
 
         // First block: kernel-self facts (only when we have a heartbeat).
         if let Some(hb) = &self.heartbeat {
@@ -610,14 +611,11 @@ impl StatusReport {
             }),
         };
 
-        let heartbeat_age_ms = self
-            .heartbeat
-            .as_ref()
-            .map(|hb| {
-                self.now_secs
-                    .saturating_sub(hb.last_heartbeat_at)
-                    .saturating_mul(1_000)
-            });
+        let heartbeat_age_ms = self.heartbeat.as_ref().map(|hb| {
+            self.now_secs
+                .saturating_sub(hb.last_heartbeat_at)
+                .saturating_mul(1_000)
+        });
 
         serde_json::json!({
             "data_dir":         self.data_dir.display().to_string(),
@@ -710,7 +708,7 @@ fn unix_now_secs() -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_runtime::{KernelLifecycleState, write_atomic, RUNTIME_DIR, HEARTBEAT_FILE};
+    use raxis_runtime::{write_atomic, KernelLifecycleState, HEARTBEAT_FILE, RUNTIME_DIR};
     use std::sync::Arc;
     use tempfile::TempDir;
 
@@ -741,7 +739,12 @@ mod tests {
             now.saturating_sub(1),
             KernelLifecycleState::Running,
             7,
-            0, 8, 0, 0, 0, 0,
+            0,
+            8,
+            0,
+            0,
+            0,
+            0,
         )
     }
 
@@ -751,7 +754,8 @@ mod tests {
             "seq": last_seq,
             "event_kind": "TestEvent",
             "prev_sha256": "00".repeat(32),
-        }).to_string();
+        })
+        .to_string();
         std::fs::write(&segment, format!("{line}\n")).unwrap();
     }
 
@@ -764,8 +768,11 @@ mod tests {
         write_heartbeat(tmp.path(), snap);
 
         let report = collect(tmp.path());
-        assert!(matches!(report.liveness, Liveness::Running),
-            "expected Running; got {:?}", report.liveness);
+        assert!(
+            matches!(report.liveness, Liveness::Running),
+            "expected Running; got {:?}",
+            report.liveness
+        );
     }
 
     #[test]
@@ -774,8 +781,10 @@ mod tests {
         let report = collect(tmp.path());
         match &report.liveness {
             Liveness::Missing { detail } => {
-                assert!(detail.contains("no heartbeat") || detail.contains("never started"),
-                    "unexpected detail: {detail}");
+                assert!(
+                    detail.contains("no heartbeat") || detail.contains("never started"),
+                    "unexpected detail: {detail}"
+                );
             }
             other => panic!("expected Missing; got {other:?}"),
         }
@@ -806,9 +815,8 @@ mod tests {
         let now = unix_now_secs();
         let mut snap = fresh_running_snapshot(std::process::id(), now);
         // Push last_heartbeat_at to one second past the stale window.
-        snap.last_heartbeat_at = now.saturating_sub(
-            raxis_runtime::HEARTBEAT_STALE_AFTER.as_secs() + 1,
-        );
+        snap.last_heartbeat_at =
+            now.saturating_sub(raxis_runtime::HEARTBEAT_STALE_AFTER.as_secs() + 1);
         write_heartbeat(tmp.path(), snap);
 
         let report = collect(tmp.path());
@@ -886,20 +894,32 @@ mod tests {
         std::fs::write(&segment, "garbage\n").unwrap();
 
         let report = collect(tmp.path());
-        assert_eq!(report.exit_code(), 3,
-            "chain break must trump live liveness");
+        assert_eq!(
+            report.exit_code(),
+            3,
+            "chain break must trump live liveness"
+        );
     }
 
     #[test]
     fn chain_quick_check_picks_highest_numbered_segment() {
         let tmp = make_data_dir(false);
         // Three segments, latest is 002 with seq=42.
-        std::fs::write(tmp.path().join("audit").join("segment-000.jsonl"),
-            r#"{"seq":1,"prev_sha256":""}"#).unwrap();
-        std::fs::write(tmp.path().join("audit").join("segment-001.jsonl"),
-            r#"{"seq":10,"prev_sha256":""}"#).unwrap();
-        std::fs::write(tmp.path().join("audit").join("segment-002.jsonl"),
-            r#"{"seq":42,"prev_sha256":""}"#).unwrap();
+        std::fs::write(
+            tmp.path().join("audit").join("segment-000.jsonl"),
+            r#"{"seq":1,"prev_sha256":""}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("audit").join("segment-001.jsonl"),
+            r#"{"seq":10,"prev_sha256":""}"#,
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("audit").join("segment-002.jsonl"),
+            r#"{"seq":42,"prev_sha256":""}"#,
+        )
+        .unwrap();
 
         let chain = collect_chain_quick_check(tmp.path());
         match chain {
@@ -914,8 +934,8 @@ mod tests {
     #[test]
     fn workload_counts_combine_initiative_task_session_escalation() {
         const INITIATIVES: &str = raxis_store::Table::Initiatives.as_str();
-        const TASKS:       &str = raxis_store::Table::Tasks.as_str();
-        const SESSIONS:    &str = raxis_store::Table::Sessions.as_str();
+        const TASKS: &str = raxis_store::Table::Tasks.as_str();
+        const SESSIONS: &str = raxis_store::Table::Sessions.as_str();
 
         let tmp = make_data_dir(true);
         // Seed one initiative + two tasks + one session.
@@ -930,25 +950,29 @@ mod tests {
                 ),
                 [],
             ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {TASKS} \
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {TASKS} \
                      (task_id, initiative_id, lane_id, state, actor, policy_epoch, \
                       admitted_at, transitioned_at) \
                      VALUES ('t-1', 'i-1', 'd', 'Running', 'op', 1, 1, 1), \
                             ('t-2', 'i-1', 'd', 'Admitted', 'op', 1, 1, 1)"
-                ),
-                [],
-            ).unwrap();
-            guard.execute(
-                &format!(
-                    "INSERT INTO {SESSIONS} \
+                    ),
+                    [],
+                )
+                .unwrap();
+            guard
+                .execute(
+                    &format!(
+                        "INSERT INTO {SESSIONS} \
                      (session_id, role_id, session_token, lineage_id, fetch_quota, \
                       created_at, expires_at, revoked) \
                      VALUES ('s-1', 'planner', 'tok', 'lin', 0, 1, 9999999999, 0)"
-                ),
-                [],
-            ).unwrap();
+                    ),
+                    [],
+                )
+                .unwrap();
         }
         drop(store);
 
@@ -973,13 +997,22 @@ mod tests {
         let report = collect(tmp.path());
         let v = report.to_json_value();
         for k in [
-            "data_dir", "liveness", "liveness_detail", "heartbeat",
-            "heartbeat_age_ms", "workload", "db_error", "audit_chain",
-            "now_secs", "exit_code",
+            "data_dir",
+            "liveness",
+            "liveness_detail",
+            "heartbeat",
+            "heartbeat_age_ms",
+            "workload",
+            "db_error",
+            "audit_chain",
+            "now_secs",
+            "exit_code",
         ] {
-            assert!(v.get(k).is_some(),
+            assert!(
+                v.get(k).is_some(),
                 "missing JSON field {k}; got keys: {:?}",
-                v.as_object().unwrap().keys().collect::<Vec<_>>());
+                v.as_object().unwrap().keys().collect::<Vec<_>>()
+            );
         }
         assert_eq!(v["liveness"], serde_json::json!("Running"));
         assert_eq!(v["audit_chain"]["status"], serde_json::json!("Ok"));
@@ -993,8 +1026,14 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         report.render_human(&mut buf);
         let text = String::from_utf8(buf).unwrap();
-        assert!(text.contains("STOPPED"), "expected STOPPED headline; got: {text}");
-        assert!(text.contains("data_dir:"), "must render data_dir line: {text}");
+        assert!(
+            text.contains("STOPPED"),
+            "expected STOPPED headline; got: {text}"
+        );
+        assert!(
+            text.contains("data_dir:"),
+            "must render data_dir line: {text}"
+        );
     }
 
     #[test]

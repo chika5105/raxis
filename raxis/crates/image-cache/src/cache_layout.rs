@@ -24,16 +24,16 @@ use std::path::{Path, PathBuf};
 
 use crate::OciDigest;
 
-const BLOBS_DIR:        &str = "blobs/sha256";
-const IMAGES_DIR:       &str = "images/sha256";
-const LOCKS_DIR:        &str = "locks/pulls";
+const BLOBS_DIR: &str = "blobs/sha256";
+const IMAGES_DIR: &str = "images/sha256";
+const LOCKS_DIR: &str = "locks/pulls";
 
-const BLOB_SUFFIX:      &str = ".tar.zst";
-const BLOB_MANIFEST:    &str = ".json";
-const BLOB_STAGING:     &str = ".staging";
-const ROOTFS_FILE:      &str = "rootfs.img";
-const MANIFEST_FILE:    &str = "manifest.json";
-const CONFIG_FILE:      &str = "config.json";
+const BLOB_SUFFIX: &str = ".tar.zst";
+const BLOB_MANIFEST: &str = ".json";
+const BLOB_STAGING: &str = ".staging";
+const ROOTFS_FILE: &str = "rootfs.img";
+const MANIFEST_FILE: &str = "manifest.json";
+const CONFIG_FILE: &str = "config.json";
 const LOCK_FILE_SUFFIX: &str = ".lockfile";
 
 /// Pure path derivation for the cache layout. Construct with
@@ -52,7 +52,9 @@ impl CacheLayout {
     }
 
     /// Borrow the cache root.
-    pub fn root(&self) -> &Path { &self.root }
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
 
     /// Path to the pulled image blob (`<root>/blobs/sha256/<aa>/<full>.tar.zst`).
     pub fn blob_path(&self, digest: &OciDigest) -> PathBuf {
@@ -71,7 +73,7 @@ impl CacheLayout {
 
     fn blob_path_with_suffix(&self, digest: &OciDigest, suffix: &str) -> PathBuf {
         let shard = digest.shard_prefix();
-        let hex   = hex::encode(digest.as_bytes());
+        let hex = hex::encode(digest.as_bytes());
         let mut p = self.root.join(BLOBS_DIR).join(shard);
         p.push(format!("{hex}{suffix}"));
         p
@@ -81,7 +83,7 @@ impl CacheLayout {
     /// (`<root>/images/sha256/<aa>/<full>/`).
     pub fn extracted_dir(&self, digest: &OciDigest) -> PathBuf {
         let shard = digest.shard_prefix();
-        let hex   = hex::encode(digest.as_bytes());
+        let hex = hex::encode(digest.as_bytes());
         self.root.join(IMAGES_DIR).join(shard).join(hex)
     }
 
@@ -105,7 +107,7 @@ impl CacheLayout {
     /// Path to the per-digest pull lockfile.
     pub fn lock_file_path(&self, digest: &OciDigest) -> PathBuf {
         let shard = digest.shard_prefix();
-        let hex   = hex::encode(digest.as_bytes());
+        let hex = hex::encode(digest.as_bytes());
         let mut p = self.root.join(LOCKS_DIR).join(shard);
         p.push(format!("{hex}{LOCK_FILE_SUFFIX}"));
         p
@@ -145,16 +147,31 @@ mod tests {
     #[test]
     fn manifest_and_staging_share_hex_prefix() {
         let layout = CacheLayout::new("/cache");
-        let blob     = layout.blob_path(&d());
+        let blob = layout.blob_path(&d());
         let manifest = layout.blob_manifest_path(&d());
-        let staging  = layout.blob_staging_path(&d());
+        let staging = layout.blob_staging_path(&d());
 
-        let blob_stem = blob.file_name().unwrap().to_string_lossy()
-            .strip_suffix(".tar.zst").unwrap().to_string();
-        let m_stem    = manifest.file_name().unwrap().to_string_lossy()
-            .strip_suffix(".json").unwrap().to_string();
-        let s_stem    = staging.file_name().unwrap().to_string_lossy()
-            .strip_suffix(".staging").unwrap().to_string();
+        let blob_stem = blob
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .strip_suffix(".tar.zst")
+            .unwrap()
+            .to_string();
+        let m_stem = manifest
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .strip_suffix(".json")
+            .unwrap()
+            .to_string();
+        let s_stem = staging
+            .file_name()
+            .unwrap()
+            .to_string_lossy()
+            .strip_suffix(".staging")
+            .unwrap()
+            .to_string();
 
         assert_eq!(blob_stem, m_stem);
         assert_eq!(blob_stem, s_stem);
@@ -163,10 +180,10 @@ mod tests {
     #[test]
     fn rootfs_and_config_live_in_extracted_dir() {
         let layout = CacheLayout::new("/cache");
-        let dir    = layout.extracted_dir(&d());
+        let dir = layout.extracted_dir(&d());
         assert_eq!(layout.rootfs_image_path(&d()), dir.join("rootfs.img"));
-        assert_eq!(layout.oci_config_path(&d()),   dir.join("config.json"));
-        assert_eq!(layout.manifest_path(&d()),     dir.join("manifest.json"));
+        assert_eq!(layout.oci_config_path(&d()), dir.join("config.json"));
+        assert_eq!(layout.manifest_path(&d()), dir.join("manifest.json"));
     }
 
     #[test]
@@ -179,25 +196,39 @@ mod tests {
 
     #[test]
     fn distinct_digests_get_distinct_paths() {
-        let a: OciDigest = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-            .parse().unwrap();
-        let b: OciDigest = "sha256:11112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-            .parse().unwrap();
+        let a: OciDigest =
+            "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                .parse()
+                .unwrap();
+        let b: OciDigest =
+            "sha256:11112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                .parse()
+                .unwrap();
         let layout = CacheLayout::new("/cache");
-        assert_ne!(layout.blob_path(&a),         layout.blob_path(&b));
-        assert_ne!(layout.extracted_dir(&a),     layout.extracted_dir(&b));
-        assert_ne!(layout.lock_file_path(&a),    layout.lock_file_path(&b));
+        assert_ne!(layout.blob_path(&a), layout.blob_path(&b));
+        assert_ne!(layout.extracted_dir(&a), layout.extracted_dir(&b));
+        assert_ne!(layout.lock_file_path(&a), layout.lock_file_path(&b));
     }
 
     #[test]
     fn shard_prefix_separates_digests_by_first_byte() {
-        let a: OciDigest = "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-            .parse().unwrap();
-        let b: OciDigest = "sha256:ff112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
-            .parse().unwrap();
+        let a: OciDigest =
+            "sha256:00112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                .parse()
+                .unwrap();
+        let b: OciDigest =
+            "sha256:ff112233445566778899aabbccddeeff00112233445566778899aabbccddeeff"
+                .parse()
+                .unwrap();
         let layout = CacheLayout::new("/cache");
         // a goes under .../sha256/00/...; b goes under .../sha256/ff/...
-        assert!(layout.blob_path(&a).to_string_lossy().contains("/sha256/00/"));
-        assert!(layout.blob_path(&b).to_string_lossy().contains("/sha256/ff/"));
+        assert!(layout
+            .blob_path(&a)
+            .to_string_lossy()
+            .contains("/sha256/00/"));
+        assert!(layout
+            .blob_path(&b)
+            .to_string_lossy()
+            .contains("/sha256/ff/"));
     }
 }

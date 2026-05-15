@@ -24,7 +24,7 @@
 // action.
 
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -43,7 +43,7 @@ pub enum DiskState {
     Healthy = 0,
     /// Free space < floor. New write-class admissions return
     /// `FAIL_DISK_FULL` per `halt_admit` behavior.
-    Halted  = 1,
+    Halted = 1,
     /// The watchdog has not yet performed its first poll. Treated
     /// as `Healthy` by callers — boot must not deadlock waiting
     /// for the first observation.
@@ -71,17 +71,17 @@ pub struct DiskWatchdog {
 struct Inner {
     /// Watchdog state encoded as `DiskState as u8`. Touched by
     /// the watchdog task on each poll; readers use `Acquire`.
-    state:        AtomicU8,
+    state: AtomicU8,
     /// Last observed free space in MiB. `u64::MAX` is the sentinel
     /// for "no observation yet".
-    free_mb:      AtomicU64,
+    free_mb: AtomicU64,
     /// Operator-declared floor in MiB.
-    min_free_mb:  u64,
+    min_free_mb: u64,
     /// Path the watchdog statvfs's. Stored for diagnostic logs.
-    disk_root:    PathBuf,
+    disk_root: PathBuf,
     /// `disk_full_behavior` ("halt_admit" in V2; the `Halt`
     /// transition will eventually pick which sub-behavior to run).
-    behavior:     String,
+    behavior: String,
 }
 
 impl DiskWatchdog {
@@ -90,8 +90,8 @@ impl DiskWatchdog {
     pub fn new(disk_root: PathBuf, min_free_mb: u64, behavior: String) -> Self {
         Self {
             inner: Arc::new(Inner {
-                state:       AtomicU8::new(DiskState::Pending as u8),
-                free_mb:     AtomicU64::new(u64::MAX),
+                state: AtomicU8::new(DiskState::Pending as u8),
+                free_mb: AtomicU64::new(u64::MAX),
                 min_free_mb,
                 disk_root,
                 behavior,
@@ -129,7 +129,11 @@ impl DiskWatchdog {
     /// has happened yet.
     pub fn current_free_mb(&self) -> Option<u64> {
         let v = self.inner.free_mb.load(Ordering::Acquire);
-        if v == u64::MAX { None } else { Some(v) }
+        if v == u64::MAX {
+            None
+        } else {
+            Some(v)
+        }
     }
 
     /// Operator-declared floor.
@@ -182,19 +186,21 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
     // First poll always lands here; emit no transition event for
     // `Pending → Healthy` (steady-state convergence — operators
     // do not need a kernel boot announcement that disk is fine).
-    let entered_halt   = prev != DiskState::Halted  && next == DiskState::Halted;
-    let exited_halt    = prev == DiskState::Halted  && next == DiskState::Healthy;
+    let entered_halt = prev != DiskState::Halted && next == DiskState::Halted;
+    let exited_halt = prev == DiskState::Halted && next == DiskState::Healthy;
 
     inner.state.store(next as u8, Ordering::Release);
 
     if entered_halt {
         let _ = audit.emit(
             AuditEventKind::DiskFullHaltEntered {
-                free_mb:  observed,
-                cap_mb:   inner.min_free_mb,
+                free_mb: observed,
+                cap_mb: inner.min_free_mb,
                 behavior: inner.behavior.clone(),
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
         let _ = audit.emit(
             AuditEventKind::OperatorAttentionRequired {
@@ -204,16 +210,20 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
                     inner.min_free_mb, inner.behavior,
                 ),
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
     } else if exited_halt {
         let _ = audit.emit(
             AuditEventKind::DiskHealthyAfterFull {
-                previous_free_mb:      0, // V2: we do not track previous-free duration; V3 will.
-                current_free_mb:       observed,
+                previous_free_mb: 0, // V2: we do not track previous-free duration; V3 will.
+                current_free_mb: observed,
                 halt_duration_seconds: 0,
             },
-            None, None, None,
+            None,
+            None,
+            None,
         );
     }
 }
@@ -224,9 +234,9 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
 fn free_mib(p: &Path) -> std::io::Result<u64> {
     #[cfg(unix)]
     {
-        use std::os::unix::ffi::OsStrExt;
         use std::ffi::CString;
         use std::mem::MaybeUninit;
+        use std::os::unix::ffi::OsStrExt;
 
         let c = CString::new(p.as_os_str().as_bytes())
             .map_err(|_| std::io::Error::other("path contains NUL"))?;
@@ -242,7 +252,7 @@ fn free_mib(p: &Path) -> std::io::Result<u64> {
         // protect against the multiplication overflowing on
         // pathologically large filesystems (32-bit ABIs only).
         let bytes = (sv.f_bavail as u128).saturating_mul(sv.f_frsize as u128);
-        let mib   = bytes / (1024 * 1024);
+        let mib = bytes / (1024 * 1024);
         Ok(mib.min(u64::MAX as u128) as u64)
     }
     #[cfg(not(unix))]
@@ -255,13 +265,13 @@ fn free_mib(p: &Path) -> std::io::Result<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_audit_tools::FileAuditSink;
     use raxis_audit_tools::AuditWriter;
+    use raxis_audit_tools::FileAuditSink;
 
     fn open_test_audit() -> Arc<dyn AuditSink> {
-        let dir  = tempfile::tempdir().unwrap();
+        let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("seg.jsonl");
-        let w    = AuditWriter::open(&path, 0, None).unwrap();
+        let w = AuditWriter::open(&path, 0, None).unwrap();
         let sink = Arc::new(FileAuditSink::new(w));
         // Leak the tempdir intentionally — the audit sink uses
         // the path through the static segment file; tests stay
@@ -296,11 +306,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         // 100 EiB floor — guaranteed above any realistic
         // filesystem free-space. Forces a Halted transition.
-        let w = DiskWatchdog::new(
-            dir.path().into(),
-            u64::MAX / 2,
-            "halt_admit".into(),
-        );
+        let w = DiskWatchdog::new(dir.path().into(), u64::MAX / 2, "halt_admit".into());
         let audit = open_test_audit();
         w.poll_for_tests(audit.as_ref());
         assert!(w.is_full());

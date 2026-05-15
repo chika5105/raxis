@@ -68,11 +68,11 @@
 #![deny(unsafe_code)]
 #![warn(missing_docs)]
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use raxis_credentials::{CredentialBackend, CredentialName, ConsumerIdentity};
+use raxis_credentials::{ConsumerIdentity, CredentialBackend, CredentialName};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -81,12 +81,12 @@ pub mod upstream;
 pub mod wire;
 
 pub use restriction::{
-    OperationKind, Restrictions, RestrictionDecision, RestrictionReason,
-    classify_first_operation, extract_relations,
+    classify_first_operation, extract_relations, OperationKind, RestrictionDecision,
+    RestrictionReason, Restrictions,
 };
 pub use upstream::{
-    ForwardOutcome, ParsedUpstreamUrl, UpstreamError, UpstreamSession,
-    redact_for_audit, resolve_upstream_url, DEFAULT_CONNECT_TIMEOUT,
+    redact_for_audit, resolve_upstream_url, ForwardOutcome, ParsedUpstreamUrl, UpstreamError,
+    UpstreamSession, DEFAULT_CONNECT_TIMEOUT,
 };
 
 // ---------------------------------------------------------------------------
@@ -99,13 +99,16 @@ pub struct OwnedConsumer {
     /// Subsystem identifier.
     pub kind: String,
     /// Free-form disambiguator within `kind`.
-    pub id:   String,
+    pub id: String,
 }
 
 impl OwnedConsumer {
     /// Convenience constructor.
     pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Self {
-        Self { kind: kind.into(), id: id.into() }
+        Self {
+            kind: kind.into(),
+            id: id.into(),
+        }
     }
     /// Borrow as the trait-facing form.
     pub fn as_ref(&self) -> ConsumerIdentity<'_> {
@@ -121,25 +124,25 @@ impl OwnedConsumer {
 #[derive(Debug, Clone)]
 pub struct ProxyConfig {
     /// Address the inbound listener binds to.
-    pub listen_addr:     String,
+    pub listen_addr: String,
     /// Credential to resolve once at proxy bind. Bytes are NEVER
     /// surfaced beyond the proxy boundary.
     pub credential_name: CredentialName,
     /// Identity of the agent session this proxy serves.
-    pub consumer:        OwnedConsumer,
+    pub consumer: OwnedConsumer,
     /// Server-version string the proxy advertises in its
     /// `Protocol::HandshakeV10` greeting. Defaults to a
     /// RAXIS-tagged 8.x string so server fingerprinters log
     /// "ours, not yours".
-    pub server_version:  String,
+    pub server_version: String,
     /// Effective restriction set parsed out of
     /// `[tasks.credentials.restrictions]`.
-    pub restrictions:    Restrictions,
+    pub restrictions: Restrictions,
     /// When `true`, `AuditEvent::DatabaseQueryExecuted` carries
     /// the SQL plaintext alongside its `sql_sha256`. The kernel
     /// ties this to its `inference_audit.log_content` policy
     /// flag; `false` is the safe default.
-    pub log_content:     bool,
+    pub log_content: bool,
 }
 
 // ---------------------------------------------------------------------------
@@ -152,31 +155,31 @@ pub struct ProxyStats {
     /// Number of accepted inbound TCP connections.
     pub connections_served: AtomicU32,
     /// Number of `COM_QUERY` statements observed (allowed + blocked).
-    pub queries_audited:    AtomicU32,
+    pub queries_audited: AtomicU32,
     /// Number of `COM_QUERY` statements rejected by `Restrictions`.
-    pub queries_blocked:    AtomicU32,
+    pub queries_blocked: AtomicU32,
     /// Bytes seen in inbound `COM_QUERY` payloads.
-    pub bytes_observed:     AtomicU64,
+    pub bytes_observed: AtomicU64,
     /// V2.1: number of upstream TCP+auth handshakes started.
     pub upstream_connects_attempted: AtomicU32,
     /// V2.1: subset that reached a usable upstream session.
     pub upstream_connects_succeeded: AtomicU32,
     /// V2.1: subset that failed (DNS / TCP / auth / timeout).
-    pub upstream_connects_failed:    AtomicU32,
+    pub upstream_connects_failed: AtomicU32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
-    pub upstream_bytes_forwarded:    AtomicU64,
+    pub upstream_bytes_forwarded: AtomicU64,
     /// V2 — queries blocked by `allowed_tables` / `forbidden_tables`
     /// (subset of `queries_blocked`). Per
     /// `proxy-table-allowlists.md §10`.
-    pub queries_blocked_by_table_allowlist:  AtomicU32,
+    pub queries_blocked_by_table_allowlist: AtomicU32,
     /// V2 — queries blocked because the walker reported the SQL as
     /// ambiguous and an allowlist was configured (subset of
     /// `queries_blocked`).
-    pub queries_blocked_by_ambiguous_sql:    AtomicU32,
+    pub queries_blocked_by_ambiguous_sql: AtomicU32,
     /// V2 — queries whose result set was truncated by
     /// `max_result_rows`. Not a subset of `queries_blocked`
     /// (the agent saw rows then a cap-error, not a pure rejection).
-    pub queries_capped_by_max_result_rows:   AtomicU32,
+    pub queries_capped_by_max_result_rows: AtomicU32,
 }
 
 impl ProxyStats {
@@ -184,19 +187,22 @@ impl ProxyStats {
     pub fn snapshot(&self) -> ProxyStatsSnapshot {
         ProxyStatsSnapshot {
             connections_served: self.connections_served.load(Ordering::Relaxed),
-            queries_audited:    self.queries_audited   .load(Ordering::Relaxed),
-            queries_blocked:    self.queries_blocked   .load(Ordering::Relaxed),
-            bytes_observed:     self.bytes_observed    .load(Ordering::Relaxed),
+            queries_audited: self.queries_audited.load(Ordering::Relaxed),
+            queries_blocked: self.queries_blocked.load(Ordering::Relaxed),
+            bytes_observed: self.bytes_observed.load(Ordering::Relaxed),
             upstream_connects_attempted: self.upstream_connects_attempted.load(Ordering::Relaxed),
             upstream_connects_succeeded: self.upstream_connects_succeeded.load(Ordering::Relaxed),
-            upstream_connects_failed:    self.upstream_connects_failed   .load(Ordering::Relaxed),
-            upstream_bytes_forwarded:    self.upstream_bytes_forwarded   .load(Ordering::Relaxed),
-            queries_blocked_by_table_allowlist:
-                self.queries_blocked_by_table_allowlist .load(Ordering::Relaxed),
-            queries_blocked_by_ambiguous_sql:
-                self.queries_blocked_by_ambiguous_sql   .load(Ordering::Relaxed),
-            queries_capped_by_max_result_rows:
-                self.queries_capped_by_max_result_rows  .load(Ordering::Relaxed),
+            upstream_connects_failed: self.upstream_connects_failed.load(Ordering::Relaxed),
+            upstream_bytes_forwarded: self.upstream_bytes_forwarded.load(Ordering::Relaxed),
+            queries_blocked_by_table_allowlist: self
+                .queries_blocked_by_table_allowlist
+                .load(Ordering::Relaxed),
+            queries_blocked_by_ambiguous_sql: self
+                .queries_blocked_by_ambiguous_sql
+                .load(Ordering::Relaxed),
+            queries_capped_by_max_result_rows: self
+                .queries_capped_by_max_result_rows
+                .load(Ordering::Relaxed),
         }
     }
 }
@@ -207,26 +213,26 @@ pub struct ProxyStatsSnapshot {
     /// Number of accepted inbound TCP connections.
     pub connections_served: u32,
     /// Number of `COM_QUERY` statements observed (allowed + blocked).
-    pub queries_audited:    u32,
+    pub queries_audited: u32,
     /// Number of `COM_QUERY` statements rejected by `Restrictions`.
-    pub queries_blocked:    u32,
+    pub queries_blocked: u32,
     /// Bytes seen in inbound `COM_QUERY` payloads.
-    pub bytes_observed:     u64,
+    pub bytes_observed: u64,
     /// V2.1: number of upstream TCP+auth handshakes started.
     pub upstream_connects_attempted: u32,
     /// V2.1: subset that reached a usable upstream session.
     pub upstream_connects_succeeded: u32,
     /// V2.1: subset that failed.
-    pub upstream_connects_failed:    u32,
+    pub upstream_connects_failed: u32,
     /// V2.1: sum of upstream→agent payload bytes relayed.
-    pub upstream_bytes_forwarded:    u64,
+    pub upstream_bytes_forwarded: u64,
     /// V2 — queries blocked by `allowed_tables` / `forbidden_tables`.
-    pub queries_blocked_by_table_allowlist:  u32,
+    pub queries_blocked_by_table_allowlist: u32,
     /// V2 — queries blocked because the walker reported the SQL as
     /// ambiguous.
-    pub queries_blocked_by_ambiguous_sql:    u32,
+    pub queries_blocked_by_ambiguous_sql: u32,
     /// V2 — queries truncated by `max_result_rows`.
-    pub queries_capped_by_max_result_rows:   u32,
+    pub queries_capped_by_max_result_rows: u32,
 }
 
 // ---------------------------------------------------------------------------
@@ -257,18 +263,18 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Hex SHA-256 of the SQL bytes (always present).
-        sql_sha256:  String,
+        sql_sha256: String,
         /// The SQL statement plaintext, if and only if the
         /// `ProxyConfig::log_content` flag is set.
-        sql_text:    Option<String>,
+        sql_text: Option<String>,
         /// `Select` / `Insert` / etc. — see [`OperationKind`].
-        operation:   OperationKind,
+        operation: OperationKind,
         /// True if the proxy refused the query under restrictions.
-        blocked:     bool,
+        blocked: bool,
         /// V2 — walker-resolved relation list. Empty when no
         /// allow/deny list is configured. Per
         /// `proxy-table-allowlists.md §8.1`.
@@ -287,20 +293,20 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// SHA-256 of the SQL text — matches the prior
         /// `DatabaseQueryExecuted.sql_sha256`.
-        sql_sha256:  String,
+        sql_sha256: String,
         /// Number of `ResultSetRow` packets forwarded.
-        rows_returned:  u64,
+        rows_returned: u64,
         /// Number of payload bytes the proxy relayed
         /// upstream→agent for this query.
         bytes_returned: u64,
         /// Wall-clock duration agent's-COM_QUERY-arrival → upstream's
         /// terminal frame in milliseconds.
-        duration_ms:    u32,
+        duration_ms: u32,
         /// `Some(<sqlstate>)` if the upstream returned an error;
         /// `None` on success.
         upstream_error: Option<String>,
@@ -313,9 +319,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream **hostname from the credential URL** (NOT a
         /// resolved IP).
         upstream_host: String,
@@ -338,9 +344,9 @@ pub enum AuditEvent {
         /// Wall-clock time of emission.
         timestamp_unix_seconds: u64,
         /// Identity of the session.
-        consumer:    OwnedConsumer,
+        consumer: OwnedConsumer,
         /// Credential name (never the value).
-        credential:  CredentialName,
+        credential: CredentialName,
         /// Upstream hostname from the credential URL.
         upstream_host: String,
         /// Upstream port from the credential URL.
@@ -363,7 +369,7 @@ pub enum ProxyError {
     #[error("listener bind failed at {addr}: {source}")]
     Bind {
         /// Address the bind was attempted on.
-        addr:   String,
+        addr: String,
         /// Underlying I/O error.
         source: std::io::Error,
     },
@@ -376,22 +382,23 @@ pub enum ProxyError {
 /// MySQL wire-protocol credential proxy.
 pub struct MysqlProxy {
     listener: TcpListener,
-    backend:  Arc<dyn CredentialBackend>,
-    config:   ProxyConfig,
-    stats:    Arc<ProxyStats>,
-    audit:    Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 }
 
 impl MysqlProxy {
     /// Bind a listener and return an owned proxy.
     pub async fn bind(
         backend: Arc<dyn CredentialBackend>,
-        config:  ProxyConfig,
-        audit:   Arc<dyn AuditChannel>,
+        config: ProxyConfig,
+        audit: Arc<dyn AuditChannel>,
     ) -> Result<Self, ProxyError> {
-        let listener = TcpListener::bind(&config.listen_addr).await
+        let listener = TcpListener::bind(&config.listen_addr)
+            .await
             .map_err(|source| ProxyError::Bind {
-                addr:   config.listen_addr.clone(),
+                addr: config.listen_addr.clone(),
                 source,
             })?;
         Ok(Self {
@@ -409,21 +416,27 @@ impl MysqlProxy {
     }
 
     /// Counters snapshot.
-    pub fn stats(&self) -> ProxyStatsSnapshot { self.stats.snapshot() }
+    pub fn stats(&self) -> ProxyStatsSnapshot {
+        self.stats.snapshot()
+    }
 
     /// Borrow the underlying counters Arc.
-    pub fn stats_handle(&self) -> Arc<ProxyStats> { Arc::clone(&self.stats) }
+    pub fn stats_handle(&self) -> Arc<ProxyStats> {
+        Arc::clone(&self.stats)
+    }
 
     /// Run the accept loop until dropped.
     pub async fn serve(self) {
         loop {
             match self.listener.accept().await {
                 Ok((stream, _peer)) => {
-                    self.stats.connections_served.fetch_add(1, Ordering::Relaxed);
+                    self.stats
+                        .connections_served
+                        .fetch_add(1, Ordering::Relaxed);
                     let backend = Arc::clone(&self.backend);
-                    let config  = self.config.clone();
-                    let stats   = Arc::clone(&self.stats);
-                    let audit   = Arc::clone(&self.audit);
+                    let config = self.config.clone();
+                    let stats = Arc::clone(&self.stats);
+                    let audit = Arc::clone(&self.audit);
                     tokio::spawn(async move {
                         if let Err(e) = serve_one(stream, backend, config, stats, audit).await {
                             tracing::warn!(error = %e, "mysql proxy connection ended with error");
@@ -445,31 +458,28 @@ impl MysqlProxy {
 
 async fn serve_one(
     mut stream: TcpStream,
-    backend:    Arc<dyn CredentialBackend>,
-    config:     ProxyConfig,
-    stats:      Arc<ProxyStats>,
-    audit:      Arc<dyn AuditChannel>,
+    backend: Arc<dyn CredentialBackend>,
+    config: ProxyConfig,
+    stats: Arc<ProxyStats>,
+    audit: Arc<dyn AuditChannel>,
 ) -> std::io::Result<()> {
     // Resolve+parse the upstream URL on accept. We tolerate failure
     // here and surface it lazily (on the first allowed COM_QUERY)
     // so a session that never issues queries still cleanly
     // disconnects and so blocked queries do not require an upstream
     // to be reachable at all.
-    let upstream_url: Option<ParsedUpstreamUrl> = match upstream::resolve_upstream_url(
-        &backend,
-        &config.credential_name,
-        &config.consumer,
-    ) {
-        Ok(u) => Some(u),
-        Err(e) => {
-            tracing::warn!(
-                error = %e,
-                credential = %config.credential_name.as_str(),
-                "mysql proxy upstream URL resolution failed; first allowed query will fail",
-            );
-            None
-        }
-    };
+    let upstream_url: Option<ParsedUpstreamUrl> =
+        match upstream::resolve_upstream_url(&backend, &config.credential_name, &config.consumer) {
+            Ok(u) => Some(u),
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    credential = %config.credential_name.as_str(),
+                    "mysql proxy upstream URL resolution failed; first allowed query will fail",
+                );
+                None
+            }
+        };
 
     // Send Protocol::HandshakeV10 (seq=0).
     let auth_plugin_data: [u8; 20] = derive_handshake_scramble(&config);
@@ -486,7 +496,10 @@ async fn serve_one(
     let _client_resp = match read_packet(&mut stream).await? {
         Some((header, payload)) if header.sequence_id == 1 => payload,
         Some((header, _)) => {
-            tracing::warn!(seq = header.sequence_id, "unexpected sequence ID on HandshakeResponse41");
+            tracing::warn!(
+                seq = header.sequence_id,
+                "unexpected sequence ID on HandshakeResponse41"
+            );
             return Ok(());
         }
         None => return Ok(()),
@@ -504,10 +517,12 @@ async fn serve_one(
     loop {
         let pkt = match read_packet(&mut stream).await? {
             Some(p) => p,
-            None    => break,
+            None => break,
         };
         let (_header, payload) = pkt;
-        if payload.is_empty() { break; }
+        if payload.is_empty() {
+            break;
+        }
         let cmd = payload[0];
         match cmd {
             wire::cmd::QUIT => {
@@ -520,9 +535,11 @@ async fn serve_one(
             }
             wire::cmd::QUERY => {
                 let sql_bytes = payload[1..].to_vec();
-                stats.bytes_observed.fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
+                stats
+                    .bytes_observed
+                    .fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
                 let sql = String::from_utf8_lossy(&sql_bytes).into_owned();
-                let op  = classify_first_operation(&sql);
+                let op = classify_first_operation(&sql);
 
                 let decision = config.restrictions.check(&sql, &op);
                 let (blocked, tables_referenced, restriction_reason) =
@@ -532,11 +549,15 @@ async fn serve_one(
 
                 audit.emit(AuditEvent::DatabaseQueryExecuted {
                     timestamp_unix_seconds: now_secs(),
-                    consumer:   config.consumer.clone(),
+                    consumer: config.consumer.clone(),
                     credential: config.credential_name.clone(),
                     sql_sha256: sql_sha.clone(),
-                    sql_text:   if config.log_content { Some(sql.clone()) } else { None },
-                    operation:  op,
+                    sql_text: if config.log_content {
+                        Some(sql.clone())
+                    } else {
+                        None
+                    },
+                    operation: op,
                     blocked,
                     tables_referenced,
                     restriction_reason,
@@ -547,8 +568,7 @@ async fn serve_one(
                     let (sqlstate, msg) = error_for_decision(&decision);
                     let err = wire::build_err_packet(
                         1142, // ER_TABLEACCESS_DENIED_ERROR
-                        &sqlstate,
-                        &msg,
+                        &sqlstate, &msg,
                     );
                     stream.write_all(&wire::frame_packet(&err, 1)).await?;
                     stream.flush().await?;
@@ -558,24 +578,29 @@ async fn serve_one(
                 // Allowed query: ensure we have a usable upstream
                 // session, then forward.
                 if !ensure_upstream(
-                    &mut stream, &mut upstream_session, upstream_url.as_ref(),
-                    &config, &stats, &audit,
-                ).await? {
+                    &mut stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &config,
+                    &stats,
+                    &audit,
+                )
+                .await?
+                {
                     continue;
                 }
                 let session = upstream_session.as_mut().expect("upstream connected above");
                 match session.forward_query(&sql_bytes).await {
                     Ok(outcome) => {
-                        let capped = apply_max_result_rows_cap(
-                            outcome,
-                            config.restrictions.max_result_rows,
-                        );
+                        let capped =
+                            apply_max_result_rows_cap(outcome, config.restrictions.max_result_rows);
                         for frame in &capped.frames {
                             stream.write_all(frame).await?;
                         }
                         if capped.cap_triggered {
                             let n = config.restrictions.max_result_rows;
-                            stats.queries_capped_by_max_result_rows
+                            stats
+                                .queries_capped_by_max_result_rows
                                 .fetch_add(1, Ordering::Relaxed);
                             let err = wire::build_err_packet(
                                 1226, // ER_USER_LIMIT_REACHED
@@ -585,13 +610,14 @@ async fn serve_one(
                                      (result-set row count exceeded max_result_rows = {n})",
                                 ),
                             );
-                            stream.write_all(&wire::frame_packet(&err, capped.next_seq))
+                            stream
+                                .write_all(&wire::frame_packet(&err, capped.next_seq))
                                 .await?;
                         }
                         stream.flush().await?;
-                        stats.upstream_bytes_forwarded.fetch_add(
-                            capped.bytes_returned, Ordering::Relaxed,
-                        );
+                        stats
+                            .upstream_bytes_forwarded
+                            .fetch_add(capped.bytes_returned, Ordering::Relaxed);
                         let upstream_error = if capped.cap_triggered {
                             Some("max_result_rows_exceeded".to_owned())
                         } else {
@@ -599,12 +625,12 @@ async fn serve_one(
                         };
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: now_secs(),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  capped.rows_returned,
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: capped.rows_returned,
                             bytes_returned: capped.bytes_returned,
-                            duration_ms:    capped.duration_ms,
+                            duration_ms: capped.duration_ms,
                             upstream_error,
                         });
                     }
@@ -617,16 +643,21 @@ async fn serve_one(
                         if let Some(sess) = upstream_session.take() {
                             sess.shutdown().await;
                         }
-                        send_err(&mut stream, 2013, "HY000",
-                            &format!("RAXIS proxy: upstream relay failed: {detail}")).await?;
+                        send_err(
+                            &mut stream,
+                            2013,
+                            "HY000",
+                            &format!("RAXIS proxy: upstream relay failed: {detail}"),
+                        )
+                        .await?;
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: now_secs(),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  0,
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: 0,
                             bytes_returned: 0,
-                            duration_ms:    0,
+                            duration_ms: 0,
                             upstream_error: Some("HY000".to_owned()),
                         });
                     }
@@ -652,9 +683,11 @@ async fn serve_one(
                 // for the binary-protocol execute leg is V3 work
                 // (`proxy-table-allowlists.md §14 deferrals`).
                 let sql_bytes = payload[1..].to_vec();
-                stats.bytes_observed.fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
+                stats
+                    .bytes_observed
+                    .fetch_add(sql_bytes.len() as u64, Ordering::Relaxed);
                 let sql = String::from_utf8_lossy(&sql_bytes).into_owned();
-                let op  = classify_first_operation(&sql);
+                let op = classify_first_operation(&sql);
                 let decision = config.restrictions.check(&sql, &op);
                 let (blocked, tables_referenced, restriction_reason) =
                     decision_to_audit_fields(&decision);
@@ -662,11 +695,15 @@ async fn serve_one(
                 let sql_sha = sha256_hex(&sql_bytes);
                 audit.emit(AuditEvent::DatabaseQueryExecuted {
                     timestamp_unix_seconds: now_secs(),
-                    consumer:   config.consumer.clone(),
+                    consumer: config.consumer.clone(),
                     credential: config.credential_name.clone(),
                     sql_sha256: sql_sha.clone(),
-                    sql_text:   if config.log_content { Some(sql.clone()) } else { None },
-                    operation:  op,
+                    sql_text: if config.log_content {
+                        Some(sql.clone())
+                    } else {
+                        None
+                    },
+                    operation: op,
                     blocked,
                     tables_referenced,
                     restriction_reason,
@@ -680,9 +717,15 @@ async fn serve_one(
                     continue;
                 }
                 if !ensure_upstream(
-                    &mut stream, &mut upstream_session, upstream_url.as_ref(),
-                    &config, &stats, &audit,
-                ).await? {
+                    &mut stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &config,
+                    &stats,
+                    &audit,
+                )
+                .await?
+                {
                     continue;
                 }
                 let session = upstream_session.as_mut().expect("ensured above");
@@ -692,20 +735,25 @@ async fn serve_one(
                             stream.write_all(frame).await?;
                         }
                         stream.flush().await?;
-                        stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned, Ordering::Relaxed,
-                        );
-                        let upstream_error = outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
-                            if sqlstate.is_empty() { "HY000".to_owned() } else { sqlstate.clone() }
-                        });
+                        stats
+                            .upstream_bytes_forwarded
+                            .fetch_add(outcome.bytes_returned, Ordering::Relaxed);
+                        let upstream_error =
+                            outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
+                                if sqlstate.is_empty() {
+                                    "HY000".to_owned()
+                                } else {
+                                    sqlstate.clone()
+                                }
+                            });
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: now_secs(),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  outcome.rows_returned,
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: outcome.rows_returned,
                             bytes_returned: outcome.bytes_returned,
-                            duration_ms:    outcome.duration_ms,
+                            duration_ms: outcome.duration_ms,
                             upstream_error,
                         });
                     }
@@ -714,16 +762,21 @@ async fn serve_one(
                         if let Some(sess) = upstream_session.take() {
                             sess.shutdown().await;
                         }
-                        send_err(&mut stream, 2013, "HY000",
-                            &format!("RAXIS proxy: STMT_PREPARE relay failed: {detail}")).await?;
+                        send_err(
+                            &mut stream,
+                            2013,
+                            "HY000",
+                            &format!("RAXIS proxy: STMT_PREPARE relay failed: {detail}"),
+                        )
+                        .await?;
                         audit.emit(AuditEvent::DatabaseQueryCompleted {
                             timestamp_unix_seconds: now_secs(),
-                            consumer:       config.consumer.clone(),
-                            credential:     config.credential_name.clone(),
-                            sql_sha256:     sql_sha,
-                            rows_returned:  0,
+                            consumer: config.consumer.clone(),
+                            credential: config.credential_name.clone(),
+                            sql_sha256: sql_sha,
+                            rows_returned: 0,
                             bytes_returned: 0,
-                            duration_ms:    0,
+                            duration_ms: 0,
                             upstream_error: Some("HY000".to_owned()),
                         });
                     }
@@ -734,9 +787,15 @@ async fn serve_one(
                 // statement. Restriction-check happened at PREPARE
                 // time; this is a pure byte-relay leg.
                 if !ensure_upstream(
-                    &mut stream, &mut upstream_session, upstream_url.as_ref(),
-                    &config, &stats, &audit,
-                ).await? {
+                    &mut stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &config,
+                    &stats,
+                    &audit,
+                )
+                .await?
+                {
                     continue;
                 }
                 let session = upstream_session.as_mut().expect("ensured above");
@@ -746,25 +805,36 @@ async fn serve_one(
                             stream.write_all(frame).await?;
                         }
                         stream.flush().await?;
-                        stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned, Ordering::Relaxed,
-                        );
+                        stats
+                            .upstream_bytes_forwarded
+                            .fetch_add(outcome.bytes_returned, Ordering::Relaxed);
                     }
                     Err(e) => {
                         let detail = redact_for_audit(&e.to_string());
                         if let Some(sess) = upstream_session.take() {
                             sess.shutdown().await;
                         }
-                        send_err(&mut stream, 2013, "HY000",
-                            &format!("RAXIS proxy: STMT_EXECUTE relay failed: {detail}")).await?;
+                        send_err(
+                            &mut stream,
+                            2013,
+                            "HY000",
+                            &format!("RAXIS proxy: STMT_EXECUTE relay failed: {detail}"),
+                        )
+                        .await?;
                     }
                 }
             }
             wire::cmd::STMT_FETCH => {
                 if !ensure_upstream(
-                    &mut stream, &mut upstream_session, upstream_url.as_ref(),
-                    &config, &stats, &audit,
-                ).await? {
+                    &mut stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &config,
+                    &stats,
+                    &audit,
+                )
+                .await?
+                {
                     continue;
                 }
                 let session = upstream_session.as_mut().expect("ensured above");
@@ -774,25 +844,36 @@ async fn serve_one(
                             stream.write_all(frame).await?;
                         }
                         stream.flush().await?;
-                        stats.upstream_bytes_forwarded.fetch_add(
-                            outcome.bytes_returned, Ordering::Relaxed,
-                        );
+                        stats
+                            .upstream_bytes_forwarded
+                            .fetch_add(outcome.bytes_returned, Ordering::Relaxed);
                     }
                     Err(e) => {
                         let detail = redact_for_audit(&e.to_string());
                         if let Some(sess) = upstream_session.take() {
                             sess.shutdown().await;
                         }
-                        send_err(&mut stream, 2013, "HY000",
-                            &format!("RAXIS proxy: STMT_FETCH relay failed: {detail}")).await?;
+                        send_err(
+                            &mut stream,
+                            2013,
+                            "HY000",
+                            &format!("RAXIS proxy: STMT_FETCH relay failed: {detail}"),
+                        )
+                        .await?;
                     }
                 }
             }
             wire::cmd::STMT_RESET => {
                 if !ensure_upstream(
-                    &mut stream, &mut upstream_session, upstream_url.as_ref(),
-                    &config, &stats, &audit,
-                ).await? {
+                    &mut stream,
+                    &mut upstream_session,
+                    upstream_url.as_ref(),
+                    &config,
+                    &stats,
+                    &audit,
+                )
+                .await?
+                {
                     continue;
                 }
                 let session = upstream_session.as_mut().expect("ensured above");
@@ -808,8 +889,13 @@ async fn serve_one(
                         if let Some(sess) = upstream_session.take() {
                             sess.shutdown().await;
                         }
-                        send_err(&mut stream, 2013, "HY000",
-                            &format!("RAXIS proxy: STMT_RESET relay failed: {detail}")).await?;
+                        send_err(
+                            &mut stream,
+                            2013,
+                            "HY000",
+                            &format!("RAXIS proxy: STMT_RESET relay failed: {detail}"),
+                        )
+                        .await?;
                     }
                 }
             }
@@ -837,8 +923,10 @@ async fn serve_one(
             }
             other => {
                 // Unsupported command — return ER_NOT_SUPPORTED_YET.
-                tracing::warn!(cmd = format!("0x{other:02x}"),
-                    "mysql proxy received unsupported command");
+                tracing::warn!(
+                    cmd = format!("0x{other:02x}"),
+                    "mysql proxy received unsupported command"
+                );
                 let err = wire::build_err_packet(
                     1235, // ER_NOT_SUPPORTED_YET
                     "0A000",
@@ -861,10 +949,10 @@ async fn serve_one(
 /// Send an ERR_Packet with the canonical V2.1 sequence ID (1) and
 /// flush it to the agent.
 async fn send_err(
-    stream:   &mut TcpStream,
-    code:     u16,
+    stream: &mut TcpStream,
+    code: u16,
     sqlstate: &str,
-    msg:      &str,
+    msg: &str,
 ) -> std::io::Result<()> {
     let err = wire::build_err_packet(code, sqlstate, msg);
     stream.write_all(&wire::frame_packet(&err, 1)).await?;
@@ -876,12 +964,12 @@ async fn send_err(
 /// when an `ERR_Packet` has already been sent and the caller should
 /// continue to the next command.
 async fn ensure_upstream(
-    stream:           &mut TcpStream,
+    stream: &mut TcpStream,
     upstream_session: &mut Option<UpstreamSession>,
-    upstream_url:     Option<&ParsedUpstreamUrl>,
-    config:           &ProxyConfig,
-    stats:            &Arc<ProxyStats>,
-    audit:            &Arc<dyn AuditChannel>,
+    upstream_url: Option<&ParsedUpstreamUrl>,
+    config: &ProxyConfig,
+    stats: &Arc<ProxyStats>,
+    audit: &Arc<dyn AuditChannel>,
 ) -> std::io::Result<bool> {
     if upstream_session.is_some() {
         return Ok(true);
@@ -896,32 +984,38 @@ async fn ensure_upstream(
     };
     let host = url.host.clone();
     let port = url.port;
-    stats.upstream_connects_attempted.fetch_add(1, Ordering::Relaxed);
+    stats
+        .upstream_connects_attempted
+        .fetch_add(1, Ordering::Relaxed);
     match UpstreamSession::connect(url, upstream::DEFAULT_CONNECT_TIMEOUT).await {
         Ok(sess) => {
-            stats.upstream_connects_succeeded.fetch_add(1, Ordering::Relaxed);
+            stats
+                .upstream_connects_succeeded
+                .fetch_add(1, Ordering::Relaxed);
             audit.emit(AuditEvent::CredentialProxyUpstreamConnected {
                 timestamp_unix_seconds: now_secs(),
-                consumer:      config.consumer.clone(),
-                credential:    config.credential_name.clone(),
+                consumer: config.consumer.clone(),
+                credential: config.credential_name.clone(),
                 upstream_host: sess.host.clone(),
                 upstream_port: sess.port,
-                tls:           sess.tls,
-                handshake_ms:  sess.handshake_ms,
+                tls: sess.tls,
+                handshake_ms: sess.handshake_ms,
             });
             *upstream_session = Some(sess);
             Ok(true)
         }
         Err(e) => {
-            stats.upstream_connects_failed.fetch_add(1, Ordering::Relaxed);
+            stats
+                .upstream_connects_failed
+                .fetch_add(1, Ordering::Relaxed);
             audit.emit(AuditEvent::CredentialProxyUpstreamFailed {
                 timestamp_unix_seconds: now_secs(),
-                consumer:      config.consumer.clone(),
-                credential:    config.credential_name.clone(),
+                consumer: config.consumer.clone(),
+                credential: config.credential_name.clone(),
                 upstream_host: host,
                 upstream_port: port,
-                reason:        e.audit_reason().to_owned(),
-                detail:        e.audit_detail(),
+                reason: e.audit_reason().to_owned(),
+                detail: e.audit_detail(),
             });
             let (code, sqlstate, msg) = match &e {
                 UpstreamError::AuthRejected(_) => (
@@ -954,7 +1048,9 @@ fn now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-async fn read_packet(stream: &mut TcpStream) -> std::io::Result<Option<(wire::PacketHeader, Vec<u8>)>> {
+async fn read_packet(
+    stream: &mut TcpStream,
+) -> std::io::Result<Option<(wire::PacketHeader, Vec<u8>)>> {
     let mut header = [0u8; 4];
     if let Err(e) = stream.read_exact(&mut header).await {
         if e.kind() == std::io::ErrorKind::UnexpectedEof {
@@ -1020,16 +1116,27 @@ fn sha256_hex(b: &[u8]) -> String {
 /// `proxy-table-allowlists.md §8.3`: `AuditOnly` decisions surface
 /// as `blocked = false` BUT carry the would-have-blocked reason in
 /// `restriction_reason`.
-fn decision_to_audit_fields(
-    decision: &RestrictionDecision,
-) -> (bool, Vec<String>, Option<String>) {
+fn decision_to_audit_fields(decision: &RestrictionDecision) -> (bool, Vec<String>, Option<String>) {
     match decision {
-        RestrictionDecision::Admit { tables_referenced } =>
-            (false, tables_referenced.clone(), None),
-        RestrictionDecision::Block { reason, tables_referenced } =>
-            (true, tables_referenced.clone(), Some(reason.as_str().to_owned())),
-        RestrictionDecision::AuditOnly { reason, tables_referenced } =>
-            (false, tables_referenced.clone(), Some(reason.as_str().to_owned())),
+        RestrictionDecision::Admit { tables_referenced } => {
+            (false, tables_referenced.clone(), None)
+        }
+        RestrictionDecision::Block {
+            reason,
+            tables_referenced,
+        } => (
+            true,
+            tables_referenced.clone(),
+            Some(reason.as_str().to_owned()),
+        ),
+        RestrictionDecision::AuditOnly {
+            reason,
+            tables_referenced,
+        } => (
+            false,
+            tables_referenced.clone(),
+            Some(reason.as_str().to_owned()),
+        ),
     }
 }
 
@@ -1039,15 +1146,16 @@ fn bump_blocked_counters(stats: &Arc<ProxyStats>, decision: &RestrictionDecision
     stats.queries_blocked.fetch_add(1, Ordering::Relaxed);
     if let RestrictionDecision::Block { reason, .. } = decision {
         match reason {
-            RestrictionReason::TableNotInAllowedList
-            | RestrictionReason::TableInForbiddenList => {
-                stats.queries_blocked_by_table_allowlist
+            RestrictionReason::TableNotInAllowedList | RestrictionReason::TableInForbiddenList => {
+                stats
+                    .queries_blocked_by_table_allowlist
                     .fetch_add(1, Ordering::Relaxed);
             }
             RestrictionReason::AmbiguousSqlMultiStatement
             | RestrictionReason::AmbiguousSqlDynamic
             | RestrictionReason::AmbiguousSqlMalformed => {
-                stats.queries_blocked_by_ambiguous_sql
+                stats
+                    .queries_blocked_by_ambiguous_sql
                     .fetch_add(1, Ordering::Relaxed);
             }
             RestrictionReason::AllowOnlySelect => {}
@@ -1096,14 +1204,14 @@ fn error_for_decision(decision: &RestrictionDecision) -> (String, String) {
 /// `next_seq` (which we compute by counting frames kept).
 #[derive(Debug)]
 struct CappedOutcome {
-    frames:                  Vec<Vec<u8>>,
-    rows_returned:           u64,
-    bytes_returned:          u64,
-    duration_ms:             u32,
-    cap_triggered:           bool,
+    frames: Vec<Vec<u8>>,
+    rows_returned: u64,
+    bytes_returned: u64,
+    duration_ms: u32,
+    cap_triggered: bool,
     /// Sequence ID the caller must use for the synthetic terminator
     /// ERR_Packet. Honoured ONLY when `cap_triggered = true`.
-    next_seq:                u8,
+    next_seq: u8,
     /// Forwarded upstream-error sqlstate when the upstream produced
     /// an ERR mid-stream and the cap did NOT fire.
     upstream_error_sqlstate: Option<String>,
@@ -1115,16 +1223,20 @@ fn apply_max_result_rows_cap(
 ) -> CappedOutcome {
     let duration_ms = outcome.duration_ms;
     let upstream_error_sqlstate = outcome.upstream_error.as_ref().map(|(_, sqlstate, _)| {
-        if sqlstate.is_empty() { "HY000".to_owned() } else { sqlstate.clone() }
+        if sqlstate.is_empty() {
+            "HY000".to_owned()
+        } else {
+            sqlstate.clone()
+        }
     });
     if max_result_rows == 0 || outcome.rows_returned <= max_result_rows {
         return CappedOutcome {
-            frames:                  outcome.frames,
-            rows_returned:           outcome.rows_returned,
-            bytes_returned:          outcome.bytes_returned,
+            frames: outcome.frames,
+            rows_returned: outcome.rows_returned,
+            bytes_returned: outcome.bytes_returned,
             duration_ms,
-            cap_triggered:           false,
-            next_seq:                0,
+            cap_triggered: false,
+            next_seq: 0,
             upstream_error_sqlstate,
         };
     }
@@ -1152,7 +1264,9 @@ fn apply_max_result_rows_cap(
     let mut last_seq: u8 = 0;
     for frame in outcome.frames.into_iter() {
         let kind = mysql_frame_kind(&frame);
-        if let Some(seq) = frame.get(3).copied() { last_seq = seq; }
+        if let Some(seq) = frame.get(3).copied() {
+            last_seq = seq;
+        }
         match kind {
             MysqlFrameKind::Err => {
                 // Upstream ERR — relay verbatim; do not cap.
@@ -1189,12 +1303,12 @@ fn apply_max_result_rows_cap(
         }
     }
     CappedOutcome {
-        frames:                  out,
-        rows_returned:           rows_kept,
-        bytes_returned:          bytes,
+        frames: out,
+        rows_returned: rows_kept,
+        bytes_returned: bytes,
         duration_ms,
-        cap_triggered:           true,
-        next_seq:                last_seq.wrapping_add(1),
+        cap_triggered: true,
+        next_seq: last_seq.wrapping_add(1),
         upstream_error_sqlstate: None,
     }
 }
@@ -1217,9 +1331,8 @@ fn mysql_frame_kind(frame: &[u8]) -> MysqlFrameKind {
         return MysqlFrameKind::OtherOrRow;
     }
     let first = frame[4];
-    let payload_len = (frame[0] as usize)
-        | ((frame[1] as usize) << 8)
-        | ((frame[2] as usize) << 16);
+    let payload_len =
+        (frame[0] as usize) | ((frame[1] as usize) << 8) | ((frame[2] as usize) << 16);
     if first == 0xff {
         return MysqlFrameKind::Err;
     }
@@ -1242,14 +1355,17 @@ mod tests {
         // Re-exports: just make sure the surface is reachable from
         // the public API (downstream callers go through the lib).
         assert_eq!(classify_first_operation("SELECT 1"), OperationKind::Select);
-        assert_eq!(classify_first_operation("DROP TABLE t"), OperationKind::Other("DROP".into()));
+        assert_eq!(
+            classify_first_operation("DROP TABLE t"),
+            OperationKind::Other("DROP".into())
+        );
     }
 
     #[test]
     fn restrictions_select_only_round_trip() {
         let r = Restrictions::select_only();
         assert!(r.allow_only_select);
-        assert!( r.is_blocked(&OperationKind::Insert));
+        assert!(r.is_blocked(&OperationKind::Insert));
         assert!(!r.is_blocked(&OperationKind::Select));
     }
 }

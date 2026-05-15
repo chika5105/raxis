@@ -82,16 +82,16 @@ use crate::retry::is_retryable;
 /// `provider-failure-handling.md §6.4`).
 #[derive(Debug, Clone)]
 pub struct CircuitRow {
-    pub provider:             String,
-    pub model:                String,
-    pub state:                CircuitState,
+    pub provider: String,
+    pub model: String,
+    pub state: CircuitState,
     pub consecutive_failures: u64,
-    pub last_failure_kind:    Option<String>,
+    pub last_failure_kind: Option<String>,
     pub last_failure_http_code: Option<u16>,
-    pub opened_at_ms:         Option<u64>,
-    pub open_expires_at_ms:   Option<u64>,
-    pub half_open_inflight:   bool,
-    pub last_success_at_ms:   Option<u64>,
+    pub opened_at_ms: Option<u64>,
+    pub open_expires_at_ms: Option<u64>,
+    pub half_open_inflight: bool,
+    pub last_success_at_ms: Option<u64>,
     pub last_state_change_at_ms: u64,
 }
 
@@ -101,16 +101,16 @@ impl CircuitRow {
     pub fn default_closed(provider: &str, model: &str) -> Self {
         let now = now_ms();
         Self {
-            provider:               provider.to_owned(),
-            model:                  model.to_owned(),
-            state:                  CircuitState::Closed,
-            consecutive_failures:   0,
-            last_failure_kind:      None,
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            state: CircuitState::Closed,
+            consecutive_failures: 0,
+            last_failure_kind: None,
             last_failure_http_code: None,
-            opened_at_ms:           None,
-            open_expires_at_ms:     None,
-            half_open_inflight:     false,
-            last_success_at_ms:     None,
+            opened_at_ms: None,
+            open_expires_at_ms: None,
+            half_open_inflight: false,
+            last_success_at_ms: None,
             last_state_change_at_ms: now,
         }
     }
@@ -163,11 +163,7 @@ pub trait CircuitStore: Send + Sync {
     /// `HalfOpen`, transitions to `Closed`.
     ///
     /// Returns the post-mutation row.
-    async fn record_success(
-        &self,
-        provider: &str,
-        model: &str,
-    ) -> CircuitRow;
+    async fn record_success(&self, provider: &str, model: &str) -> CircuitRow;
 
     /// Try to acquire the half-open probe slot (CAS 0 → 1).
     ///
@@ -195,12 +191,7 @@ pub trait CircuitStore: Send + Sync {
     /// audit event with `trigger = "ManualReset"`.
     ///
     /// Returns the post-reset row.
-    async fn manual_reset(
-        &self,
-        provider: &str,
-        model: &str,
-        operator: &str,
-    ) -> CircuitRow;
+    async fn manual_reset(&self, provider: &str, model: &str, operator: &str) -> CircuitRow;
 }
 
 // ---------------------------------------------------------------------------
@@ -243,7 +234,7 @@ impl CircuitConfig {
     pub fn production_default() -> Self {
         Self {
             failure_threshold: 5,
-            open_duration:     Duration::from_secs(60),
+            open_duration: Duration::from_secs(60),
         }
     }
 
@@ -252,7 +243,7 @@ impl CircuitConfig {
     pub fn for_tests() -> Self {
         Self {
             failure_threshold: 2,
-            open_duration:     Duration::from_millis(50),
+            open_duration: Duration::from_millis(50),
         }
     }
 }
@@ -280,8 +271,8 @@ fn circuit_state_from_u8(b: u8) -> CircuitState {
 /// Mapping from enum to atomic-stored `u8` discriminant.
 fn circuit_state_to_u8(s: CircuitState) -> u8 {
     match s {
-        CircuitState::Closed   => 0,
-        CircuitState::Open     => 1,
+        CircuitState::Closed => 0,
+        CircuitState::Open => 1,
         CircuitState::HalfOpen => 2,
     }
 }
@@ -292,8 +283,8 @@ fn circuit_state_to_u8(s: CircuitState) -> u8 {
 /// emits to JSON consumers.
 pub fn circuit_state_wire_str(s: CircuitState) -> &'static str {
     match s {
-        CircuitState::Closed   => "closed",
-        CircuitState::Open     => "circuit_open",
+        CircuitState::Closed => "closed",
+        CircuitState::Open => "circuit_open",
         CircuitState::HalfOpen => "half_open",
     }
 }
@@ -306,52 +297,64 @@ use std::collections::HashMap;
 
 /// Per-(provider, model) in-memory state entry.
 struct InMemoryEntry {
-    state:                AtomicU8,
+    state: AtomicU8,
     consecutive_failures: AtomicU64,
-    opened_at_ms:         AtomicU64,
-    open_expires_at_ms:   AtomicU64,
-    half_open_inflight:   AtomicU8,
-    last_success_at_ms:   AtomicU64,
+    opened_at_ms: AtomicU64,
+    open_expires_at_ms: AtomicU64,
+    half_open_inflight: AtomicU8,
+    last_success_at_ms: AtomicU64,
     last_state_change_ms: AtomicU64,
-    last_failure_kind:    Mutex<Option<String>>,
+    last_failure_kind: Mutex<Option<String>>,
     last_failure_http_code: Mutex<Option<u16>>,
 }
 
 impl InMemoryEntry {
     fn new() -> Self {
         Self {
-            state:                AtomicU8::new(circuit_state_to_u8(CircuitState::Closed)),
+            state: AtomicU8::new(circuit_state_to_u8(CircuitState::Closed)),
             consecutive_failures: AtomicU64::new(0),
-            opened_at_ms:         AtomicU64::new(0),
-            open_expires_at_ms:   AtomicU64::new(0),
-            half_open_inflight:   AtomicU8::new(0),
-            last_success_at_ms:   AtomicU64::new(0),
+            opened_at_ms: AtomicU64::new(0),
+            open_expires_at_ms: AtomicU64::new(0),
+            half_open_inflight: AtomicU8::new(0),
+            last_success_at_ms: AtomicU64::new(0),
             last_state_change_ms: AtomicU64::new(now_ms()),
-            last_failure_kind:    Mutex::new(None),
+            last_failure_kind: Mutex::new(None),
             last_failure_http_code: Mutex::new(None),
         }
     }
 
     fn snapshot(&self, provider: &str, model: &str) -> CircuitRow {
         CircuitRow {
-            provider:               provider.to_owned(),
-            model:                  model.to_owned(),
-            state:                  circuit_state_from_u8(self.state.load(Ordering::Acquire)),
-            consecutive_failures:   self.consecutive_failures.load(Ordering::Relaxed),
-            last_failure_kind:      self.last_failure_kind.lock().ok().and_then(|g| g.clone()),
+            provider: provider.to_owned(),
+            model: model.to_owned(),
+            state: circuit_state_from_u8(self.state.load(Ordering::Acquire)),
+            consecutive_failures: self.consecutive_failures.load(Ordering::Relaxed),
+            last_failure_kind: self.last_failure_kind.lock().ok().and_then(|g| g.clone()),
             last_failure_http_code: self.last_failure_http_code.lock().ok().and_then(|g| *g),
             opened_at_ms: {
                 let v = self.opened_at_ms.load(Ordering::Relaxed);
-                if v == 0 { None } else { Some(v) }
+                if v == 0 {
+                    None
+                } else {
+                    Some(v)
+                }
             },
             open_expires_at_ms: {
                 let v = self.open_expires_at_ms.load(Ordering::Relaxed);
-                if v == 0 { None } else { Some(v) }
+                if v == 0 {
+                    None
+                } else {
+                    Some(v)
+                }
             },
-            half_open_inflight:     self.half_open_inflight.load(Ordering::Relaxed) == 1,
+            half_open_inflight: self.half_open_inflight.load(Ordering::Relaxed) == 1,
             last_success_at_ms: {
                 let v = self.last_success_at_ms.load(Ordering::Relaxed);
-                if v == 0 { None } else { Some(v) }
+                if v == 0 {
+                    None
+                } else {
+                    Some(v)
+                }
             },
             last_state_change_at_ms: self.last_state_change_ms.load(Ordering::Relaxed),
         }
@@ -371,7 +374,9 @@ pub struct InMemoryCircuitStore {
 impl InMemoryCircuitStore {
     /// Create a new empty store.
     pub fn new() -> Self {
-        Self { entries: Mutex::new(HashMap::new()) }
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
     }
 
     fn get_or_create(&self, provider: &str, model: &str) -> Arc<InMemoryEntry> {
@@ -385,7 +390,8 @@ impl InMemoryCircuitStore {
 #[async_trait]
 impl CircuitStore for InMemoryCircuitStore {
     async fn load(&self, provider: &str, model: &str) -> CircuitRow {
-        self.get_or_create(provider, model).snapshot(provider, model)
+        self.get_or_create(provider, model)
+            .snapshot(provider, model)
     }
 
     async fn record_failure(
@@ -411,7 +417,9 @@ impl CircuitStore for InMemoryCircuitStore {
             let expires = now + config.open_duration.as_millis() as u64;
             e.opened_at_ms.store(now, Ordering::Relaxed);
             e.open_expires_at_ms.store(expires, Ordering::Relaxed);
-            let prev = e.state.swap(circuit_state_to_u8(CircuitState::Open), Ordering::AcqRel);
+            let prev = e
+                .state
+                .swap(circuit_state_to_u8(CircuitState::Open), Ordering::AcqRel);
             if prev != circuit_state_to_u8(CircuitState::Open) {
                 e.last_state_change_ms.store(now, Ordering::Relaxed);
             }
@@ -420,15 +428,12 @@ impl CircuitStore for InMemoryCircuitStore {
         e.snapshot(provider, model)
     }
 
-    async fn record_success(
-        &self,
-        provider: &str,
-        model: &str,
-    ) -> CircuitRow {
+    async fn record_success(&self, provider: &str, model: &str) -> CircuitRow {
         let e = self.get_or_create(provider, model);
         let prev = circuit_state_from_u8(e.state.load(Ordering::Acquire));
         e.consecutive_failures.store(0, Ordering::Relaxed);
-        e.state.store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
+        e.state
+            .store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
         e.opened_at_ms.store(0, Ordering::Relaxed);
         e.open_expires_at_ms.store(0, Ordering::Relaxed);
         e.last_success_at_ms.store(now_ms(), Ordering::Relaxed);
@@ -469,16 +474,12 @@ impl CircuitStore for InMemoryCircuitStore {
         e.snapshot(provider, model)
     }
 
-    async fn manual_reset(
-        &self,
-        provider: &str,
-        model: &str,
-        _operator: &str,
-    ) -> CircuitRow {
+    async fn manual_reset(&self, provider: &str, model: &str, _operator: &str) -> CircuitRow {
         let e = self.get_or_create(provider, model);
         let now = now_ms();
         e.consecutive_failures.store(0, Ordering::Relaxed);
-        e.state.store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
+        e.state
+            .store(circuit_state_to_u8(CircuitState::Closed), Ordering::Release);
         e.opened_at_ms.store(0, Ordering::Relaxed);
         e.open_expires_at_ms.store(0, Ordering::Relaxed);
         e.half_open_inflight.store(0, Ordering::Release);
@@ -498,15 +499,15 @@ impl CircuitStore for InMemoryCircuitStore {
 /// this is a `SqliteCircuitStore` (kernel-side, transactional with
 /// audit); in tests it is an `InMemoryCircuitStore`.
 pub struct CircuitBreakerModelClient {
-    inner:    Arc<dyn ModelClient>,
-    config:   CircuitConfig,
-    store:    Arc<dyn CircuitStore>,
+    inner: Arc<dyn ModelClient>,
+    config: CircuitConfig,
+    store: Arc<dyn CircuitStore>,
     /// Provider key for the store lookup (e.g. `"anthropic"`).
     provider: String,
     /// Model key for the store lookup (e.g. `"claude-opus-4.7"`).
     model_key: String,
     /// Human-readable label for log lines.
-    label:    String,
+    label: String,
     /// Last seen retryable error — replayed verbatim on short-circuit.
     last_err: Mutex<Option<ModelError>>,
 }
@@ -514,12 +515,12 @@ pub struct CircuitBreakerModelClient {
 impl CircuitBreakerModelClient {
     /// Wrap `inner` with a breaker backed by `store`.
     pub fn new(
-        inner:    Arc<dyn ModelClient>,
-        store:    Arc<dyn CircuitStore>,
+        inner: Arc<dyn ModelClient>,
+        store: Arc<dyn CircuitStore>,
         provider: impl Into<String>,
-        model:    impl Into<String>,
-        label:    impl Into<String>,
-        config:   CircuitConfig,
+        model: impl Into<String>,
+        label: impl Into<String>,
+        config: CircuitConfig,
     ) -> Self {
         Self {
             inner,
@@ -527,7 +528,7 @@ impl CircuitBreakerModelClient {
             store,
             provider: provider.into(),
             model_key: model.into(),
-            label:    label.into(),
+            label: label.into(),
             last_err: Mutex::new(None),
         }
     }
@@ -535,8 +536,8 @@ impl CircuitBreakerModelClient {
     /// Convenience constructor for tests: creates an `InMemoryCircuitStore`
     /// internally so callers don't have to wire one up.
     pub fn new_in_memory(
-        inner:  Arc<dyn ModelClient>,
-        label:  impl Into<String>,
+        inner: Arc<dyn ModelClient>,
+        label: impl Into<String>,
         config: CircuitConfig,
     ) -> Self {
         let label = label.into();
@@ -566,17 +567,27 @@ impl CircuitBreakerModelClient {
         match row.state {
             CircuitState::Closed => Admit::Pass,
             CircuitState::HalfOpen => {
-                if self.store.try_acquire_probe(&self.provider, &self.model_key).await {
+                if self
+                    .store
+                    .try_acquire_probe(&self.provider, &self.model_key)
+                    .await
+                {
                     Admit::Probe
                 } else {
                     Admit::ShortCircuit
                 }
             }
             CircuitState::Open => {
-                let promoted = self.store
-                    .maybe_promote(&self.provider, &self.model_key).await;
+                let promoted = self
+                    .store
+                    .maybe_promote(&self.provider, &self.model_key)
+                    .await;
                 if promoted.state == CircuitState::HalfOpen {
-                    if self.store.try_acquire_probe(&self.provider, &self.model_key).await {
+                    if self
+                        .store
+                        .try_acquire_probe(&self.provider, &self.model_key)
+                        .await
+                    {
                         Admit::Probe
                     } else {
                         Admit::ShortCircuit
@@ -593,17 +604,17 @@ impl CircuitBreakerModelClient {
             .lock()
             .ok()
             .and_then(|g| g.as_ref().map(clone_model_error))
-            .unwrap_or_else(|| ModelError::Transport(format!(
-                "circuit_open[{}]: provider rejected", self.label,
-            )))
+            .unwrap_or_else(|| {
+                ModelError::Transport(format!("circuit_open[{}]: provider rejected", self.label,))
+            })
     }
 
     fn failure_kind(err: &ModelError) -> &'static str {
         match err {
             ModelError::Transport(_) => "Transport",
-            ModelError::Timeout(_)   => "Timeout",
+            ModelError::Timeout(_) => "Timeout",
             ModelError::Upstream { .. } => "Unavailable",
-            ModelError::Json(_)      => "Malformed",
+            ModelError::Json(_) => "Malformed",
         }
     }
 
@@ -624,10 +635,7 @@ enum Admit {
 
 #[async_trait]
 impl ModelClient for CircuitBreakerModelClient {
-    async fn create_message(
-        &self,
-        req: &MessageRequest,
-    ) -> Result<MessageResponse, ModelError> {
+    async fn create_message(&self, req: &MessageRequest) -> Result<MessageResponse, ModelError> {
         match self.admit().await {
             Admit::ShortCircuit => return Err(self.cloned_last_err()),
             Admit::Pass | Admit::Probe => {}
@@ -638,14 +646,17 @@ impl ModelClient for CircuitBreakerModelClient {
         let result = self.inner.create_message(req).await;
 
         if was_probe {
-            self.store.release_probe(&self.provider, &self.model_key).await;
+            self.store
+                .release_probe(&self.provider, &self.model_key)
+                .await;
         }
 
         match result {
             Ok(resp) => {
-                let row = self.store.record_success(
-                    &self.provider, &self.model_key,
-                ).await;
+                let row = self
+                    .store
+                    .record_success(&self.provider, &self.model_key)
+                    .await;
                 if row_before.state != CircuitState::Closed {
                     eprintln!(
                         "{{\"level\":\"info\",\"event\":\"CircuitClosed\",\
@@ -663,16 +674,17 @@ impl ModelClient for CircuitBreakerModelClient {
                     if let Ok(mut g) = self.last_err.lock() {
                         *g = Some(clone_model_error(&err));
                     }
-                    let row = self.store.record_failure(
-                        &self.provider,
-                        &self.model_key,
-                        Self::failure_kind(&err),
-                        Self::http_code(&err),
-                        &self.config,
-                    ).await;
-                    if row.state == CircuitState::Open
-                        && row_before.state != CircuitState::Open
-                    {
+                    let row = self
+                        .store
+                        .record_failure(
+                            &self.provider,
+                            &self.model_key,
+                            Self::failure_kind(&err),
+                            Self::http_code(&err),
+                            &self.config,
+                        )
+                        .await;
+                    if row.state == CircuitState::Open && row_before.state != CircuitState::Open {
                         eprintln!(
                             "{{\"level\":\"warn\",\"event\":\"CircuitOpened\",\
                              \"provider\":\"{}\",\"consecutive_failures\":{}}}",
@@ -693,11 +705,12 @@ impl ModelClient for CircuitBreakerModelClient {
 fn clone_model_error(e: &ModelError) -> ModelError {
     match e {
         ModelError::Transport(s) => ModelError::Transport(s.clone()),
-        ModelError::Timeout(d)   => ModelError::Timeout(*d),
+        ModelError::Timeout(d) => ModelError::Timeout(*d),
         ModelError::Upstream { status, body } => ModelError::Upstream {
-            status: *status, body: body.clone(),
+            status: *status,
+            body: body.clone(),
         },
-        ModelError::Json(s)      => ModelError::Json(s.clone()),
+        ModelError::Json(s) => ModelError::Json(s.clone()),
     }
 }
 
@@ -724,9 +737,9 @@ mod tests {
 
     fn ok_response() -> MessageResponse {
         MessageResponse {
-            id:    "msg-ok".into(),
-            kind:  "message".into(),
-            role:  "assistant".into(),
+            id: "msg-ok".into(),
+            kind: "message".into(),
+            role: "assistant".into(),
             content: vec![ContentBlock::Text { text: "ok".into() }],
             stop_reason: Some("end_turn".into()),
             usage: Usage::default(),
@@ -736,7 +749,7 @@ mod tests {
 
     fn empty_request() -> MessageRequest {
         MessageRequest {
-            model:      "claude-test".into(),
+            model: "claude-test".into(),
             max_tokens: 8,
             ..MessageRequest::default()
         }
@@ -745,14 +758,19 @@ mod tests {
     /// Test fake whose call results are scripted.
     struct ScriptedClient {
         script: StdMutex<Vec<Result<MessageResponse, ModelError>>>,
-        calls:  AtomicU64,
+        calls: AtomicU64,
     }
 
     impl ScriptedClient {
         fn new(script: Vec<Result<MessageResponse, ModelError>>) -> Self {
-            Self { script: StdMutex::new(script), calls: AtomicU64::new(0) }
+            Self {
+                script: StdMutex::new(script),
+                calls: AtomicU64::new(0),
+            }
         }
-        fn call_count(&self) -> u64 { self.calls.load(Ordering::Relaxed) }
+        fn call_count(&self) -> u64 {
+            self.calls.load(Ordering::Relaxed)
+        }
     }
 
     #[async_trait]
@@ -771,11 +789,17 @@ mod tests {
     }
 
     fn err_503() -> ModelError {
-        ModelError::Upstream { status: 503, body: "outage".into() }
+        ModelError::Upstream {
+            status: 503,
+            body: "outage".into(),
+        }
     }
 
     fn err_400() -> ModelError {
-        ModelError::Upstream { status: 400, body: "bad".into() }
+        ModelError::Upstream {
+            status: 400,
+            body: "bad".into(),
+        }
     }
 
     #[tokio::test]
@@ -815,8 +839,11 @@ mod tests {
             ModelError::Upstream { status, .. } => assert_eq!(status, 503),
             other => panic!("expected last 503, got {other:?}"),
         }
-        assert_eq!(inner.call_count(), 2,
-            "open circuit must NOT call upstream a 3rd time");
+        assert_eq!(
+            inner.call_count(),
+            2,
+            "open circuit must NOT call upstream a 3rd time"
+        );
     }
 
     #[tokio::test]
@@ -896,21 +923,25 @@ mod tests {
 
     #[test]
     fn state_wire_strings_are_stable() {
-        assert_eq!(circuit_state_wire_str(CircuitState::Closed),   "closed");
-        assert_eq!(circuit_state_wire_str(CircuitState::Open),     "circuit_open");
+        assert_eq!(circuit_state_wire_str(CircuitState::Closed), "closed");
+        assert_eq!(circuit_state_wire_str(CircuitState::Open), "circuit_open");
         assert_eq!(circuit_state_wire_str(CircuitState::HalfOpen), "half_open");
     }
 
     #[test]
     fn state_sql_strings_match_check_constraint() {
-        assert_eq!(CircuitState::Closed.as_sql_str(),   "Closed");
-        assert_eq!(CircuitState::Open.as_sql_str(),     "Open");
+        assert_eq!(CircuitState::Closed.as_sql_str(), "Closed");
+        assert_eq!(CircuitState::Open.as_sql_str(), "Open");
         assert_eq!(CircuitState::HalfOpen.as_sql_str(), "HalfOpen");
     }
 
     #[test]
     fn state_sql_round_trip() {
-        for s in [CircuitState::Closed, CircuitState::Open, CircuitState::HalfOpen] {
+        for s in [
+            CircuitState::Closed,
+            CircuitState::Open,
+            CircuitState::HalfOpen,
+        ] {
             assert_eq!(CircuitState::from_sql_str(s.as_sql_str()), Some(s));
         }
         // Unknown values return None.

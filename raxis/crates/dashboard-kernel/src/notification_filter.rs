@@ -52,9 +52,7 @@ use serde::{Deserialize, Serialize};
 /// operator filter by bucket. The classification function
 /// [`notification_priority`] is the single source of truth — the
 /// FE never invents priorities.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum NotificationPriority {
     /// Operator must intervene — security incident, integrity
@@ -123,9 +121,7 @@ impl std::fmt::Display for NotificationPriority {
 /// silently drop OUT of the inbox rather than into it — the
 /// safer default if drift slips past review.
 #[allow(clippy::too_many_lines)]
-pub fn notification_priority_for_kind_str(
-    kind_str: &str,
-) -> Option<NotificationPriority> {
+pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<NotificationPriority> {
     use NotificationPriority::{Critical, High, Low, Medium};
     match kind_str {
         // Critical
@@ -605,8 +601,8 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
 #[cfg(test)]
 mod tests {
     use super::*;
-    use raxis_audit_tools::AuditEventKind;
     use raxis_audit_tools::event::SecurityViolationClass;
+    use raxis_audit_tools::AuditEventKind;
 
     /// A representative-but-not-exhaustive set of events used by
     /// the unit tests. We intentionally do NOT instantiate every
@@ -1125,7 +1121,8 @@ mod tests {
             let typed = notification_priority(&kind);
             let from_str = notification_priority_for_kind_str(kind.as_str());
             assert_eq!(
-                typed, from_str,
+                typed,
+                from_str,
                 "drift: typed and string priority APIs disagree for {} \
                  (typed={:?}, from_str={:?}). Update \
                  notification_priority_for_kind_str arms.",

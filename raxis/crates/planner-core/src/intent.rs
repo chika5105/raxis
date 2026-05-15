@@ -36,9 +36,8 @@ use uuid::Uuid;
 
 use raxis_ipc::IpcMessage;
 use raxis_types::{
-    CommitSha, EscalationClass, EscalationRequest, IntentKind,
-    IntentRequest, IntentResponse, PlannerExitOutcome, RequestedEscalationScope,
-    StructuredOutputKind, TaskId, TokensReport,
+    CommitSha, EscalationClass, EscalationRequest, IntentKind, IntentRequest, IntentResponse,
+    PlannerExitOutcome, RequestedEscalationScope, StructuredOutputKind, TaskId, TokensReport,
 };
 
 use crate::transport::{KernelTransport, TransportError};
@@ -51,11 +50,11 @@ use crate::transport::{KernelTransport, TransportError};
 /// task id, the per-session sequence + nonce counters, and the
 /// rolling [`TokensReport`] last reported by the dispatch loop.
 pub struct IntentSubmitter {
-    transport:    Arc<dyn KernelTransport>,
+    transport: Arc<dyn KernelTransport>,
     session_token: String,
-    task_id:      TaskId,
-    next_seq:     std::sync::atomic::AtomicU64,
-    nonce_seed:   std::sync::atomic::AtomicU64,
+    task_id: TaskId,
+    next_seq: std::sync::atomic::AtomicU64,
+    nonce_seed: std::sync::atomic::AtomicU64,
     /// V2 `v2_extended_gaps.md §2.5` — last known cumulative LLM
     /// token usage. Updated by callers via
     /// [`IntentSubmitter::report_tokens`] every time the dispatch
@@ -66,7 +65,7 @@ pub struct IntentSubmitter {
     /// Stored behind a `std::sync::Mutex` so the dispatch loop and
     /// the terminal-tool submission path (which run on the same
     /// task) can share without a `&mut`.
-    tokens:       std::sync::Mutex<TokensReport>,
+    tokens: std::sync::Mutex<TokensReport>,
 }
 
 impl IntentSubmitter {
@@ -80,22 +79,22 @@ impl IntentSubmitter {
     /// value the orchestrator/executor/reviewer received via
     /// `--task-id` argv).
     pub fn new(
-        transport:     Arc<dyn KernelTransport>,
+        transport: Arc<dyn KernelTransport>,
         session_token: String,
-        task_id:       TaskId,
+        task_id: TaskId,
     ) -> Self {
         Self {
             transport,
             session_token,
             task_id,
-            next_seq:   std::sync::atomic::AtomicU64::new(1),
+            next_seq: std::sync::atomic::AtomicU64::new(1),
             // High 64 bits of a fresh UUID v4 as the nonce seed —
             // the kernel only checks 32-hex-char format + uniqueness,
             // so 64 bits of entropy is plenty.
-            nonce_seed: std::sync::atomic::AtomicU64::new(
-                u64::from_le_bytes(Uuid::new_v4().as_bytes()[..8].try_into().unwrap()),
-            ),
-            tokens:     std::sync::Mutex::new(TokensReport::default()),
+            nonce_seed: std::sync::atomic::AtomicU64::new(u64::from_le_bytes(
+                Uuid::new_v4().as_bytes()[..8].try_into().unwrap(),
+            )),
+            tokens: std::sync::Mutex::new(TokensReport::default()),
         }
     }
 
@@ -118,11 +117,14 @@ impl IntentSubmitter {
     }
 
     fn next_seq(&self) -> u64 {
-        self.next_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst)
+        self.next_seq
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst)
     }
 
     fn next_nonce(&self) -> String {
-        let seed = self.nonce_seed.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let seed = self
+            .nonce_seed
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         // Render as 32-hex-char (fill the high 64 bits with the
         // task id hash so two submitters in the same process don't
         // collide, even if they happened to seed at the same
@@ -148,22 +150,22 @@ impl IntentSubmitter {
     /// truthful "zero token cost" report rather than a `None`.
     fn skeleton(&self, kind: IntentKind) -> IntentRequest {
         IntentRequest {
-            session_token:           self.session_token.clone(),
-            sequence_number:         self.next_seq(),
-            envelope_nonce:          self.next_nonce(),
-            intent_kind:             kind,
-            task_id:                 self.task_id.clone(),
-            base_sha:                None,
-            head_sha:                None,
-            submitted_claims:        vec![],
-            justification:           None,
-            idempotency_key:         None,
-            approval_token:          None,
-            approved:                None,
-            critique:                None,
+            session_token: self.session_token.clone(),
+            sequence_number: self.next_seq(),
+            envelope_nonce: self.next_nonce(),
+            intent_kind: kind,
+            task_id: self.task_id.clone(),
+            base_sha: None,
+            head_sha: None,
+            submitted_claims: vec![],
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
             resolved_via_escalation: None,
-            tokens_used:             Some(self.last_token_report()),
-            structured_output:       None,
+            tokens_used: Some(self.last_token_report()),
+            structured_output: None,
         }
     }
 
@@ -306,10 +308,7 @@ impl IntentSubmitter {
     /// is forensic context, NOT a structural unstall (the
     /// kernel's EOF-driven Mode-B synthesis fires regardless of
     /// whether the notice arrives, e.g. SIGKILL mid-loop).
-    pub async fn submit_exit_notice(
-        &self,
-        outcome: PlannerExitOutcome,
-    ) -> Result<(), SubmitError> {
+    pub async fn submit_exit_notice(&self, outcome: PlannerExitOutcome) -> Result<(), SubmitError> {
         let resp = self
             .transport
             .request(&IpcMessage::PlannerExitNotice { outcome })
@@ -325,13 +324,13 @@ impl IntentSubmitter {
     /// hold (e.g. infra-write).
     pub async fn submit_escalation(
         &self,
-        class:           EscalationClass,
+        class: EscalationClass,
         requested_scope: RequestedEscalationScope,
-        justification:   String,
+        justification: String,
     ) -> Result<IntentResponse, SubmitError> {
         let req = EscalationRequest {
-            session_token:   self.session_token.clone(),
-            task_id:         self.task_id.clone(),
+            session_token: self.session_token.clone(),
+            task_id: self.task_id.clone(),
             class,
             requested_scope,
             justification,
@@ -347,10 +346,7 @@ impl IntentSubmitter {
         self.send(IpcMessage::EscalationRequest(req)).await
     }
 
-    async fn send(
-        &self,
-        outbound: IpcMessage,
-    ) -> Result<IntentResponse, SubmitError> {
+    async fn send(&self, outbound: IpcMessage) -> Result<IntentResponse, SubmitError> {
         let resp = self.transport.request(&outbound).await?;
         match resp {
             IpcMessage::KernelIntentResponse(r) => Ok(r),
@@ -371,8 +367,8 @@ impl IntentSubmitter {
 /// without re-implementing the mapping in every binary.
 pub fn executor_terminal_tool_to_intent_kind(name: &str) -> Option<IntentKind> {
     match name {
-        "task_complete"  => Some(IntentKind::CompleteTask),
-        "single_commit"  => Some(IntentKind::SingleCommit),
+        "task_complete" => Some(IntentKind::CompleteTask),
+        "single_commit" => Some(IntentKind::SingleCommit),
         "report_failure" => Some(IntentKind::ReportFailure),
         _ => None,
     }
@@ -382,8 +378,8 @@ pub fn executor_terminal_tool_to_intent_kind(name: &str) -> Option<IntentKind> {
 pub fn orchestrator_terminal_tool_to_intent_kind(name: &str) -> Option<IntentKind> {
     match name {
         "integration_merge" => Some(IntentKind::IntegrationMerge),
-        "activate_subtask"  => Some(IntentKind::ActivateSubTask),
-        "retry_subtask"     => Some(IntentKind::RetrySubTask),
+        "activate_subtask" => Some(IntentKind::ActivateSubTask),
+        "retry_subtask" => Some(IntentKind::RetrySubTask),
         _ => None,
     }
 }
@@ -402,9 +398,7 @@ pub fn reviewer_terminal_tool_to_intent_kind(name: &str) -> Option<IntentKind> {
 /// recoverable error rather than a hard failure.
 fn parse_commit_sha(field: &'static str, raw: &str) -> Result<CommitSha, SubmitError> {
     CommitSha::parse(raw).map_err(|e| {
-        SubmitError::MalformedInput(format!(
-            "{field} {raw:?} not a valid commit SHA: {e}"
-        ))
+        SubmitError::MalformedInput(format!("{field} {raw:?} not a valid commit SHA: {e}"))
     })
 }
 
@@ -450,9 +444,7 @@ impl TaskCompleteInput {
     /// valid object with the expected `head_sha` string field.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
         serde_json::from_value(v.clone()).map_err(|e| {
-            SubmitError::MalformedInput(format!(
-                "task_complete input not parseable: {e}"
-            ))
+            SubmitError::MalformedInput(format!("task_complete input not parseable: {e}"))
         })
     }
 }
@@ -475,9 +467,7 @@ impl SubmitReviewInput {
     /// rejection MUST carry a critique.
     pub fn parse(v: &serde_json::Value) -> Result<Self, SubmitError> {
         let parsed: Self = serde_json::from_value(v.clone()).map_err(|e| {
-            SubmitError::MalformedInput(format!(
-                "submit_review input not parseable: {e}"
-            ))
+            SubmitError::MalformedInput(format!("submit_review input not parseable: {e}"))
         })?;
         if !parsed.approved && parsed.critique.is_none() {
             return Err(SubmitError::MalformedInput(
@@ -503,9 +493,9 @@ mod tests {
     fn fixture_response(seq: u64) -> IpcMessage {
         IpcMessage::KernelIntentResponse(IntentResponse {
             sequence_number: seq,
-            task_state:      TaskState::Completed,
+            task_state: TaskState::Completed,
             outcome: IntentOutcome::Rejected {
-                error_code:   PlannerErrorCode::InvalidRequest,
+                error_code: PlannerErrorCode::InvalidRequest,
                 error_detail: None,
             },
         })
@@ -533,7 +523,9 @@ mod tests {
                 }
                 other => panic!("expected IntentRequest, got {other:?}"),
             }
-            write_frame(&mut kernel_side, &fixture_response(1)).await.unwrap();
+            write_frame(&mut kernel_side, &fixture_response(1))
+                .await
+                .unwrap();
         });
 
         let submitter = IntentSubmitter::new(
@@ -541,9 +533,10 @@ mod tests {
             "session-tok".to_owned(),
             TaskId::parse("task-fixture").unwrap(),
         );
-        let _resp = submitter.submit_complete_task(
-            "0123456789abcdef0123456789abcdef01234567",
-        ).await.unwrap();
+        let _resp = submitter
+            .submit_complete_task("0123456789abcdef0123456789abcdef01234567")
+            .await
+            .unwrap();
         kernel_task.await.unwrap();
     }
 
@@ -559,11 +552,15 @@ mod tests {
             match inbound {
                 IpcMessage::IntentRequest(r) => {
                     assert_eq!(r.intent_kind, IntentKind::StructuredOutput);
-                    let payload = r.structured_output
-                        .as_ref().expect("structured_output payload must be present");
+                    let payload = r
+                        .structured_output
+                        .as_ref()
+                        .expect("structured_output payload must be present");
                     match payload {
                         StructuredOutputKind::DiagnosticFlag {
-                            severity, message, evidence,
+                            severity,
+                            message,
+                            evidence,
                         } => {
                             assert_eq!(*severity, DiagnosticSeverity::Critical);
                             assert_eq!(message, "auth bypass");
@@ -574,7 +571,9 @@ mod tests {
                 }
                 other => panic!("expected IntentRequest, got {other:?}"),
             }
-            write_frame(&mut kernel_side, &fixture_response(1)).await.unwrap();
+            write_frame(&mut kernel_side, &fixture_response(1))
+                .await
+                .unwrap();
         });
 
         let submitter = IntentSubmitter::new(
@@ -582,13 +581,14 @@ mod tests {
             "session-tok".to_owned(),
             TaskId::parse("exec-task").unwrap(),
         );
-        let _ = submitter.submit_structured_output(
-            StructuredOutputKind::DiagnosticFlag {
+        let _ = submitter
+            .submit_structured_output(StructuredOutputKind::DiagnosticFlag {
                 severity: DiagnosticSeverity::Critical,
-                message:  "auth bypass".to_owned(),
+                message: "auth bypass".to_owned(),
                 evidence: Some("src/auth.rs:42".to_owned()),
-            },
-        ).await.unwrap();
+            })
+            .await
+            .unwrap();
         kernel_task.await.unwrap();
     }
 
@@ -607,7 +607,9 @@ mod tests {
                 }
                 other => panic!("expected IntentRequest, got {other:?}"),
             }
-            write_frame(&mut kernel_side, &fixture_response(1)).await.unwrap();
+            write_frame(&mut kernel_side, &fixture_response(1))
+                .await
+                .unwrap();
         });
 
         let submitter = IntentSubmitter::new(
@@ -615,10 +617,10 @@ mod tests {
             "session-tok".to_owned(),
             TaskId::parse("review-task").unwrap(),
         );
-        let _resp = submitter.submit_review(
-            false,
-            Some("not enough tests".to_owned()),
-        ).await.unwrap();
+        let _resp = submitter
+            .submit_review(false, Some("not enough tests".to_owned()))
+            .await
+            .unwrap();
         kernel_task.await.unwrap();
     }
 
@@ -627,29 +629,41 @@ mod tests {
         let (planner_side, mut kernel_side) = duplex(64 * 1024);
         let transport = Arc::new(StreamTransport::new(planner_side));
 
-        let kernel_task = tokio::spawn(async move {
-            for n in 1u64..=3 {
-                let inbound: IpcMessage = read_frame(&mut kernel_side).await.unwrap();
-                match inbound {
-                    IpcMessage::IntentRequest(r) => {
-                        assert_eq!(r.sequence_number, n,
+        let kernel_task =
+            tokio::spawn(async move {
+                for n in 1u64..=3 {
+                    let inbound: IpcMessage = read_frame(&mut kernel_side).await.unwrap();
+                    match inbound {
+                        IpcMessage::IntentRequest(r) => {
+                            assert_eq!(r.sequence_number, n,
                             "expected per-session monotonic sequence_number, got {} on call {n}",
                             r.sequence_number);
+                        }
+                        other => panic!("expected IntentRequest, got {other:?}"),
                     }
-                    other => panic!("expected IntentRequest, got {other:?}"),
+                    write_frame(&mut kernel_side, &fixture_response(n))
+                        .await
+                        .unwrap();
                 }
-                write_frame(&mut kernel_side, &fixture_response(n)).await.unwrap();
-            }
-        });
+            });
 
         let submitter = IntentSubmitter::new(
             transport,
             "session-tok".to_owned(),
             TaskId::parse("task-x").unwrap(),
         );
-        let _ = submitter.submit_report_failure("a".to_owned()).await.unwrap();
-        let _ = submitter.submit_report_failure("b".to_owned()).await.unwrap();
-        let _ = submitter.submit_report_failure("c".to_owned()).await.unwrap();
+        let _ = submitter
+            .submit_report_failure("a".to_owned())
+            .await
+            .unwrap();
+        let _ = submitter
+            .submit_report_failure("b".to_owned())
+            .await
+            .unwrap();
+        let _ = submitter
+            .submit_report_failure("c".to_owned())
+            .await
+            .unwrap();
         kernel_task.await.unwrap();
     }
 

@@ -61,9 +61,9 @@ pub enum PolicyError {
          (audited at boot). Errors:\n{errors}"
     )]
     CertValidation {
-        fingerprint:  String,
+        fingerprint: String,
         display_name: String,
-        errors:       String,
+        errors: String,
     },
 
     /// The pubkey on the OperatorEntry does not match the pubkey
@@ -76,9 +76,9 @@ pub enum PolicyError {
          match so the cert binds the same identity the policy registers"
     )]
     CertPubkeyMismatch {
-        fingerprint:      String,
+        fingerprint: String,
         entry_pubkey_hex: String,
-        cert_pubkey_hex:  String,
+        cert_pubkey_hex: String,
     },
 
     /// The operator's pubkey hashes to a fingerprint that does not
@@ -89,8 +89,8 @@ pub enum PolicyError {
          the fingerprint MUST match (kernel-store.md §2.5.4)"
     )]
     FingerprintMismatch {
-        fingerprint:          String,
-        entry_pubkey_hex:     String,
+        fingerprint: String,
+        entry_pubkey_hex: String,
         computed_fingerprint: String,
     },
 }

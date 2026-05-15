@@ -174,16 +174,13 @@ impl MultiInitiativeIsolationWitness {
     /// that value in the chain. Returns a map of "fieldvalue ->
     /// initiative_id-set". A clean run produces a map in which
     /// every value's set has exactly one element.
-    fn fanout_by<F>(&self, chain: &[AuditEvent], extract: F)
-        -> BTreeMap<String, BTreeSet<String>>
+    fn fanout_by<F>(&self, chain: &[AuditEvent], extract: F) -> BTreeMap<String, BTreeSet<String>>
     where
         F: Fn(&AuditEvent) -> Option<&str>,
     {
         let mut map: BTreeMap<String, BTreeSet<String>> = BTreeMap::new();
         for ev in chain {
-            let (Some(init), Some(value)) =
-                (ev.initiative_id.as_deref(), extract(ev))
-            else {
+            let (Some(init), Some(value)) = (ev.initiative_id.as_deref(), extract(ev)) else {
                 continue;
             };
             map.entry(value.to_owned())
@@ -208,16 +205,16 @@ impl MultiInitiativeIsolationWitness {
 }
 
 impl EnforcementWitness for MultiInitiativeIsolationWitness {
-    fn name(&self) -> &'static str { "multi-initiative-isolation" }
+    fn name(&self) -> &'static str {
+        "multi-initiative-isolation"
+    }
 
     fn satisfied_by(&self, chain: &[AuditEvent]) -> bool {
         if !self.both_initiatives_present(chain) {
             return false;
         }
-        let task_fanout =
-            self.fanout_by(chain, |ev| ev.task_id.as_deref());
-        let session_fanout =
-            self.fanout_by(chain, |ev| ev.session_id.as_deref());
+        let task_fanout = self.fanout_by(chain, |ev| ev.task_id.as_deref());
+        let session_fanout = self.fanout_by(chain, |ev| ev.session_id.as_deref());
 
         // A "leak" is any task_id / session_id whose initiative
         // set has more than one element AND whose initiative set
@@ -225,8 +222,7 @@ impl EnforcementWitness for MultiInitiativeIsolationWitness {
         // dashboard-only task_id to false-positive against a
         // third unrelated initiative).
         let crosses_ab = |inits: &BTreeSet<String>| -> bool {
-            inits.contains(&self.initiative_a)
-                && inits.contains(&self.initiative_b)
+            inits.contains(&self.initiative_a) && inits.contains(&self.initiative_b)
         };
 
         let task_leak = task_fanout.values().any(crosses_ab);
@@ -236,16 +232,13 @@ impl EnforcementWitness for MultiInitiativeIsolationWitness {
     }
 
     fn diagnostic(&self, chain: &[AuditEvent]) -> String {
-        let task_fanout =
-            self.fanout_by(chain, |ev| ev.task_id.as_deref());
-        let session_fanout =
-            self.fanout_by(chain, |ev| ev.session_id.as_deref());
+        let task_fanout = self.fanout_by(chain, |ev| ev.task_id.as_deref());
+        let session_fanout = self.fanout_by(chain, |ev| ev.session_id.as_deref());
 
         let mut task_leaks: Vec<&String> = task_fanout
             .iter()
             .filter(|(_, inits)| {
-                inits.contains(&self.initiative_a)
-                    && inits.contains(&self.initiative_b)
+                inits.contains(&self.initiative_a) && inits.contains(&self.initiative_b)
             })
             .map(|(k, _)| k)
             .collect();
@@ -254,8 +247,7 @@ impl EnforcementWitness for MultiInitiativeIsolationWitness {
         let mut session_leaks: Vec<&String> = session_fanout
             .iter()
             .filter(|(_, inits)| {
-                inits.contains(&self.initiative_a)
-                    && inits.contains(&self.initiative_b)
+                inits.contains(&self.initiative_a) && inits.contains(&self.initiative_b)
             })
             .map(|(k, _)| k)
             .collect();
@@ -266,10 +258,14 @@ impl EnforcementWitness for MultiInitiativeIsolationWitness {
         let mut total_with_init = 0usize;
         for ev in chain {
             match ev.initiative_id.as_deref() {
-                Some(s) if s == self.initiative_a => { saw_a += 1; }
-                Some(s) if s == self.initiative_b => { saw_b += 1; }
+                Some(s) if s == self.initiative_a => {
+                    saw_a += 1;
+                }
+                Some(s) if s == self.initiative_b => {
+                    saw_b += 1;
+                }
                 Some(_) => {}
-                None    => continue,
+                None => continue,
             }
             total_with_init += 1;
         }
@@ -306,30 +302,30 @@ mod tests {
     ) -> AuditEvent {
         AuditEvent {
             seq,
-            event_id:      Uuid::nil(),
-            event_kind:    "IntentAccepted".to_owned(),
-            session_id:    session_id.map(str::to_owned),
-            task_id:       task_id.map(str::to_owned),
+            event_id: Uuid::nil(),
+            event_kind: "IntentAccepted".to_owned(),
+            session_id: session_id.map(str::to_owned),
+            task_id: task_id.map(str::to_owned),
             initiative_id: initiative_id.map(str::to_owned),
-            payload:       serde_json::to_value(&AuditEventKind::IntentAccepted {
-                task_id:         task_id.unwrap_or("").to_owned(),
-                session_id:      session_id.unwrap_or("").to_owned(),
-                intent_kind:     "Lifecycle".to_owned(),
-                base_sha:        None,
-                head_sha:        None,
+            payload: serde_json::to_value(&AuditEventKind::IntentAccepted {
+                task_id: task_id.unwrap_or("").to_owned(),
+                session_id: session_id.unwrap_or("").to_owned(),
+                intent_kind: "Lifecycle".to_owned(),
+                base_sha: None,
+                head_sha: None,
                 sequence_number: 1,
                 remaining_units: 99,
-            }).unwrap(),
-            emitted_at:    1700000000 + seq as i64,
-            prev_sha256:   "0".repeat(64),
+            })
+            .unwrap(),
+            emitted_at: 1700000000 + seq as i64,
+            prev_sha256: "0".repeat(64),
         }
     }
 
     #[test]
     fn sibling_plan_toml_decodes_and_carries_sibling_task() {
         let toml_text = sibling_plan_toml();
-        let v: toml::Value =
-            toml::from_str(&toml_text).expect("sibling plan must decode");
+        let v: toml::Value = toml::from_str(&toml_text).expect("sibling plan must decode");
         let tasks = v
             .get("tasks")
             .and_then(|t| t.as_array())
@@ -370,8 +366,7 @@ mod tests {
     #[test]
     fn sibling_plan_toml_carries_max_turns_150() {
         let toml_text = sibling_plan_toml();
-        let v: toml::Value =
-            toml::from_str(&toml_text).expect("sibling plan must decode");
+        let v: toml::Value = toml::from_str(&toml_text).expect("sibling plan must decode");
         let tasks = v
             .get("tasks")
             .and_then(|t| t.as_array())
@@ -379,16 +374,14 @@ mod tests {
         let max_turns_per_task: Vec<(&str, i64)> = tasks
             .iter()
             .map(|t| {
-                let id = t.get("task_id").and_then(|i| i.as_str())
-                    .expect("task_id");
-                let mt = t.get("max_turns").and_then(|m| m.as_integer())
-                    .expect(
-                        "INV-PLANNER-MAX-TURNS-PRECEDENCE-01 parity: \
+                let id = t.get("task_id").and_then(|i| i.as_str()).expect("task_id");
+                let mt = t.get("max_turns").and_then(|m| m.as_integer()).expect(
+                    "INV-PLANNER-MAX-TURNS-PRECEDENCE-01 parity: \
                          every sibling-plan task MUST declare an explicit \
                          max_turns; iter52 partial-run showed the kernel \
                          falling back to compiled-default=100 when this \
                          was omitted",
-                    );
+                );
                 (id, mt)
             })
             .collect();
@@ -407,7 +400,7 @@ mod tests {
             ev(1, Some("init-a"), Some("task-a-1"), Some("sess-a-1")),
             ev(2, Some("init-b"), Some("task-b-1"), Some("sess-b-1")),
             ev(3, Some("init-b"), Some("task-b-2"), Some("sess-b-1")),
-            ev(4, None,            None,            None),
+            ev(4, None, None, None),
         ];
         let w = MultiInitiativeIsolationWitness::new("init-a", "init-b");
         assert!(w.satisfied_by(&chain), "{}", w.diagnostic(&chain));

@@ -84,7 +84,10 @@ pub fn parse_gateway_env(
     // to an empty Vec without erroring, masking the misconfiguration.
     if token.len() != 64 {
         return Err(GatewayEnvError::InvalidToken {
-            reason: format!("expected 64 hex chars (32 raw bytes), got {} chars", token.len()),
+            reason: format!(
+                "expected 64 hex chars (32 raw bytes), got {} chars",
+                token.len()
+            ),
         });
     }
     hex::decode(token).map_err(|e| GatewayEnvError::InvalidToken {

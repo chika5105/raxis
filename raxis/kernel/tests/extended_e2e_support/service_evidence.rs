@@ -125,12 +125,11 @@ use raxis_audit_tools::{AuditEvent, AuditEventKind};
 use sha2::{Digest, Sha256};
 
 use super::harness_timeout::{
-    run_command_output_timeout, wait_with_output_timeout, BoundedWaitError,
-    SEED_TIMEOUT,
+    run_command_output_timeout, wait_with_output_timeout, BoundedWaitError, SEED_TIMEOUT,
 };
 use super::health_probe::{
-    probe_mongodb, probe_mssql, probe_mysql, probe_postgres, probe_redis,
-    probe_smtp, HealthProbeError,
+    probe_mongodb, probe_mssql, probe_mysql, probe_postgres, probe_redis, probe_smtp,
+    HealthProbeError,
 };
 
 // ---------------------------------------------------------------------------
@@ -688,14 +687,12 @@ pub fn seed_postgres() -> Result<PostgresSeed, ServiceEvidenceError> {
         .arg("SELECT COUNT(*) FROM service_evidence_pg;");
     let probe = run_command_output_timeout(&mut probe_cmd, SEED_TIMEOUT, "psql-count-probe")
         .map_err(|e| match e {
-            BoundedWaitError::Timeout { label, timeout } => {
-                ServiceEvidenceError::SeedTimedOut {
-                    service: "postgres",
-                    label,
-                    timeout,
-                    target: pg_target.clone(),
-                }
-            }
+            BoundedWaitError::Timeout { label, timeout } => ServiceEvidenceError::SeedTimedOut {
+                service: "postgres",
+                label,
+                timeout,
+                target: pg_target.clone(),
+            },
             other => ServiceEvidenceError::SeedMismatch {
                 service: "postgres",
                 hint: format!("probe psql: {other}"),
@@ -1888,26 +1885,20 @@ fn lift_bounded_wait_error(
     target: &str,
 ) -> ServiceEvidenceError {
     match err {
-        BoundedWaitError::Timeout { label, timeout } => {
-            ServiceEvidenceError::SeedTimedOut {
-                service,
-                label,
-                timeout,
-                target: target.to_owned(),
-            }
-        }
-        BoundedWaitError::SpawnFailed { label, reason } => {
-            ServiceEvidenceError::SeedFailed {
-                service,
-                reason: format!("spawn `{label}` against {target}: {reason}"),
-            }
-        }
-        BoundedWaitError::WaitFailed { label, reason } => {
-            ServiceEvidenceError::SeedFailed {
-                service,
-                reason: format!("wait `{label}` against {target}: {reason}"),
-            }
-        }
+        BoundedWaitError::Timeout { label, timeout } => ServiceEvidenceError::SeedTimedOut {
+            service,
+            label,
+            timeout,
+            target: target.to_owned(),
+        },
+        BoundedWaitError::SpawnFailed { label, reason } => ServiceEvidenceError::SeedFailed {
+            service,
+            reason: format!("spawn `{label}` against {target}: {reason}"),
+        },
+        BoundedWaitError::WaitFailed { label, reason } => ServiceEvidenceError::SeedFailed {
+            service,
+            reason: format!("wait `{label}` against {target}: {reason}"),
+        },
     }
 }
 
@@ -2221,17 +2212,13 @@ mod tests {
     #[test]
     #[ignore]
     fn seeds_hit_real_upstreams_when_unmocked() {
-        let pg = seed_postgres()
-            .expect("postgres container reachable on the un-mock stack");
+        let pg = seed_postgres().expect("postgres container reachable on the un-mock stack");
         assert_eq!(pg.rows.len(), SE_POSTGRES_ROW_COUNT);
-        let mongo = seed_mongodb()
-            .expect("mongodb container reachable on the un-mock stack");
+        let mongo = seed_mongodb().expect("mongodb container reachable on the un-mock stack");
         assert_eq!(mongo.docs.len(), SE_MONGODB_DOC_COUNT);
-        let redis = seed_redis()
-            .expect("redis container reachable on the un-mock stack");
+        let redis = seed_redis().expect("redis container reachable on the un-mock stack");
         assert_eq!(redis.entries.len(), SE_REDIS_KEY_COUNT);
-        let smtp = seed_smtp()
-            .expect("smtp container reachable on the un-mock stack");
+        let smtp = seed_smtp().expect("smtp container reachable on the un-mock stack");
         assert_eq!(smtp.subject, "smtp_seed_subject_1");
 
         // Opt-in seeds: short-circuit when the env var is unset.

@@ -7,8 +7,8 @@
 
 use std::path::PathBuf;
 
-use crate::OciDigest;
 use crate::digest::OciDigestParseError;
+use crate::OciDigest;
 
 /// Errors the resolver can surface. Mapping to kernel `FAIL_*`
 /// codes is documented inline.
@@ -22,11 +22,11 @@ pub enum ImageResolverError {
         /// What the caller (policy / plan) committed to.
         expected: OciDigest,
         /// What the cached / streamed bytes actually hashed to.
-        actual:   OciDigest,
+        actual: OciDigest,
         /// The on-disk path the digest was computed over (for the
         /// audit record; useful when reasoning about a
         /// half-extracted cache entry).
-        path:     PathBuf,
+        path: PathBuf,
     },
 
     /// Cache hit landed but the on-disk file is unreadable / wrong-
@@ -37,7 +37,7 @@ pub enum ImageResolverError {
     #[error("oci image cache entry is corrupted at {path}: {detail}")]
     CacheCorrupted {
         /// The path that failed verification.
-        path:   PathBuf,
+        path: PathBuf,
         /// Human-readable detail (NOT shown to the agent; logged
         /// to the audit chain only).
         detail: String,
@@ -64,7 +64,7 @@ pub enum ImageResolverError {
     #[error("oci registry {host} unreachable: {detail}")]
     RegistryUnreachable {
         /// Registry host that failed.
-        host:   String,
+        host: String,
         /// Human-readable detail.
         detail: String,
     },
@@ -73,7 +73,7 @@ pub enum ImageResolverError {
     #[error("oci registry rejected authentication for {host}/{repository}")]
     RegistryAuthRejected {
         /// Registry host.
-        host:       String,
+        host: String,
         /// Repository path.
         repository: String,
     },
@@ -82,11 +82,11 @@ pub enum ImageResolverError {
     #[error("oci registry has no image for {digest} at {host}/{repository}")]
     RegistryNotFound {
         /// Registry host.
-        host:       String,
+        host: String,
         /// Repository path.
         repository: String,
         /// The digest that wasn't found.
-        digest:     OciDigest,
+        digest: OciDigest,
     },
 
     /// Registry returned 5xx after retries are exhausted. Maps to
@@ -94,7 +94,7 @@ pub enum ImageResolverError {
     #[error("oci registry server error from {host}: status {status}")]
     RegistryServerError {
         /// Registry host.
-        host:   String,
+        host: String,
         /// HTTP status code observed on the final attempt.
         status: u16,
     },
@@ -113,7 +113,7 @@ pub enum ImageResolverError {
     #[error("oci image cache i/o error at {path}: {source}")]
     Io {
         /// The path the operation targeted.
-        path:   PathBuf,
+        path: PathBuf,
         /// Underlying I/O error.
         #[source]
         source: std::io::Error,

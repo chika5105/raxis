@@ -36,9 +36,7 @@ use raxis_supervisor::circuit_breaker::CircuitBreaker;
 use raxis_supervisor::log::SupervisorLog;
 use raxis_supervisor::sentinel::{read_sentinel, write_sentinel, Sentinel};
 use raxis_supervisor::signal::{install_handlers, IntentionalShutdownFlag};
-use raxis_supervisor::supervisor::{
-    run_supervisor_loop, FinalOutcome, SupervisorConfig,
-};
+use raxis_supervisor::supervisor::{run_supervisor_loop, FinalOutcome, SupervisorConfig};
 use raxis_supervisor::{
     DEFAULT_MAX_ATTEMPTS, DEFAULT_RESTART_WINDOW_SECS, DEFAULT_SHUTDOWN_GRACE_SECS,
     ENV_KERNEL_BINARY, ENV_OPT_IN, ENV_SHUTDOWN_GRACE_SECS,
@@ -95,11 +93,11 @@ fn kernel_binary_from_env_or_sibling() -> PathBuf {
 
 #[derive(Debug, Default)]
 struct ParsedArgs {
-    subcommand:    Option<String>,
-    data_dir:      Option<PathBuf>,
+    subcommand: Option<String>,
+    data_dir: Option<PathBuf>,
     kernel_binary: Option<PathBuf>,
-    force:         bool,
-    kernel_args:   Vec<String>,
+    force: bool,
+    kernel_args: Vec<String>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -154,7 +152,10 @@ fn parse_args() -> ParsedArgs {
 #[tokio::main]
 async fn main() {
     let args = parse_args();
-    let data_dir = args.data_dir.clone().unwrap_or_else(data_dir_from_env_or_default);
+    let data_dir = args
+        .data_dir
+        .clone()
+        .unwrap_or_else(data_dir_from_env_or_default);
     let kernel_binary = args
         .kernel_binary
         .clone()
@@ -175,8 +176,8 @@ async fn main() {
 }
 
 async fn cmd_start(
-    args:          &ParsedArgs,
-    data_dir:      &std::path::Path,
+    args: &ParsedArgs,
+    data_dir: &std::path::Path,
     kernel_binary: &std::path::Path,
 ) -> i32 {
     // `INV-SUPERVISOR-OPT-IN-01`: when the operator hasn't opted
@@ -205,15 +206,15 @@ async fn cmd_start(
         .and_then(|v| v.parse::<u64>().ok())
         .unwrap_or(DEFAULT_SHUTDOWN_GRACE_SECS);
     let cfg = SupervisorConfig {
-        data_dir:               data_dir.to_path_buf(),
-        kernel_binary:          kernel_binary.to_path_buf(),
-        kernel_args:            args.kernel_args.clone(),
-        kernel_env:             Vec::new(),
-        max_attempts:           DEFAULT_MAX_ATTEMPTS,
-        window_secs:            DEFAULT_RESTART_WINDOW_SECS,
+        data_dir: data_dir.to_path_buf(),
+        kernel_binary: kernel_binary.to_path_buf(),
+        kernel_args: args.kernel_args.clone(),
+        kernel_env: Vec::new(),
+        max_attempts: DEFAULT_MAX_ATTEMPTS,
+        window_secs: DEFAULT_RESTART_WINDOW_SECS,
         shutdown_grace_secs,
-        restart_backoff_ms:     250,
-        max_child_runs:         None,
+        restart_backoff_ms: 250,
+        max_child_runs: None,
     };
 
     let intent_flag = IntentionalShutdownFlag::new();
@@ -261,10 +262,7 @@ async fn cmd_start(
 /// One-shot passthrough used when the opt-in env var is unset.
 /// Spawns the kernel as a child and forwards its exit code.
 /// Same behaviour as running `raxis-kernel` directly.
-async fn one_shot_passthrough(
-    kernel_binary: &std::path::Path,
-    kernel_args:   &[String],
-) -> i32 {
+async fn one_shot_passthrough(kernel_binary: &std::path::Path, kernel_args: &[String]) -> i32 {
     let mut cmd = tokio::process::Command::new(kernel_binary);
     cmd.args(kernel_args);
     match cmd.spawn() {
@@ -304,7 +302,10 @@ fn cmd_stop(data_dir: &std::path::Path, force: bool) -> i32 {
     let sentinel = match read_sentinel(data_dir) {
         Ok(Some(s)) => s,
         Ok(None) => {
-            eprintln!("no sentinel file at {} — supervisor not running?", data_dir.display());
+            eprintln!(
+                "no sentinel file at {} — supervisor not running?",
+                data_dir.display()
+            );
             return 1;
         }
         Err(e) => {
@@ -316,7 +317,11 @@ fn cmd_stop(data_dir: &std::path::Path, force: bool) -> i32 {
         eprintln!("supervisor_pid is 0 in sentinel; nothing to signal");
         return 1;
     }
-    let signal = if force { Signal::SIGKILL } else { Signal::SIGTERM };
+    let signal = if force {
+        Signal::SIGKILL
+    } else {
+        Signal::SIGTERM
+    };
     match raxis_supervisor::signal::send_signal(sentinel.supervisor_pid, signal) {
         Ok(()) => {
             println!(
@@ -356,18 +361,18 @@ fn cmd_status(data_dir: &std::path::Path) -> i32 {
             // line so callers (xtask scripts, dashboard
             // bootstrap) can parse the JSON unconditionally.
             let s = Sentinel {
-                schema_version:      1,
-                status:              "Halted".to_owned(),
-                sub_state:           Some("OperatorStop".to_owned()),
-                attempt_n:           0,
-                max_attempts:        0,
+                schema_version: 1,
+                status: "Halted".to_owned(),
+                sub_state: Some("OperatorStop".to_owned()),
+                attempt_n: 0,
+                max_attempts: 0,
                 last_restart_unix_ts: 0,
                 last_restart_reason: None,
-                prev_run_exit_code:  None,
-                attempts_in_window:  0,
-                window_secs:         0,
-                supervisor_pid:      0,
-                kernel_pid:          0,
+                prev_run_exit_code: None,
+                attempts_in_window: 0,
+                window_secs: 0,
+                supervisor_pid: 0,
+                kernel_pid: 0,
                 updated_at_unix_secs: 0,
             };
             match serde_json::to_string_pretty(&s) {

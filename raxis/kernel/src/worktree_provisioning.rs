@@ -44,9 +44,7 @@ use std::path::{Path, PathBuf};
 
 use raxis_isolation::{ContentHash, MountMode, WorkspaceMount};
 use raxis_types::CloneStrategy;
-use raxis_worktree_provision::{
-    provision_orchestrator, provision_reviewer, ProvisionError,
-};
+use raxis_worktree_provision::{provision_orchestrator, provision_reviewer, ProvisionError};
 use raxis_worktree_staging::{GUEST_WORKSPACE_PATH, WORKTREES_DIR};
 
 /// The sub-directory under `<data_dir>` we mint per-Orchestrator
@@ -83,12 +81,12 @@ pub struct OrchestratorAnchor {
     /// for the Orchestrator session row, then again for each
     /// per-task session row's `worktree_root` column at
     /// activation time.
-    pub worktree_root:     PathBuf,
+    pub worktree_root: PathBuf,
     /// SHA the Orchestrator's HEAD points at after the clone. The
     /// kernel writes this into `sessions.base_sha` and propagates
     /// it through the per-task session rows so
     /// `IntegrationMerge`'s ancestry check has a stable boundary.
-    pub base_sha:          String,
+    pub base_sha: String,
     /// Fully-qualified ref the operator declared in `[git]
     /// default_target_ref` (or the V2 default `refs/heads/main`).
     /// Persisted into `sessions.base_tracking_ref` so a future
@@ -120,12 +118,12 @@ pub struct OrchestratorAnchor {
 ///   3. Returns the anchor with the resolved `base_sha` and
 ///      operator-configured `base_tracking_ref`.
 pub fn provision_orchestrator_worktree(
-    data_dir:       &Path,
-    initiative_id:  &str,
-    target_ref:     &str,
+    data_dir: &Path,
+    initiative_id: &str,
+    target_ref: &str,
 ) -> Result<OrchestratorAnchor, ProvisionError> {
     let main_repo = data_dir.join("repositories").join("main");
-    let dest      = orchestrator_worktree_path(data_dir, initiative_id);
+    let dest = orchestrator_worktree_path(data_dir, initiative_id);
 
     // Idempotent re-attach: a respawned orchestrator points at
     // the same per-initiative worktree the previous session left
@@ -136,7 +134,7 @@ pub fn provision_orchestrator_worktree(
     // holds across orchestrator session boundaries.
     if dest.join(".git").exists() {
         let repo = gix::open(&dest).map_err(|e| ProvisionError::SourceRepoUnopenable {
-            path:   dest.clone(),
+            path: dest.clone(),
             reason: format!("re-attach open: {e}"),
         })?;
         // Use the current ref tip (whatever the orchestrator
@@ -146,12 +144,12 @@ pub fn provision_orchestrator_worktree(
         let head_id = repo
             .head_id()
             .map_err(|e| ProvisionError::SourceRepoUnopenable {
-                path:   dest.clone(),
+                path: dest.clone(),
                 reason: format!("re-attach head: {e}"),
             })?;
         return Ok(OrchestratorAnchor {
-            worktree_root:     dest,
-            base_sha:          head_id.to_string(),
+            worktree_root: dest,
+            base_sha: head_id.to_string(),
             base_tracking_ref: target_ref.to_owned(),
         });
     }
@@ -160,20 +158,19 @@ pub fn provision_orchestrator_worktree(
     // by opening the source repo and peeling the ref. Any failure
     // here surfaces as `SourceRepoUnopenable` so the spawn handler
     // logs a structured diagnostic rather than panicking.
-    let main_repo_handle = gix::open(&main_repo).map_err(|e| {
-        ProvisionError::SourceRepoUnopenable {
-            path:   main_repo.clone(),
+    let main_repo_handle =
+        gix::open(&main_repo).map_err(|e| ProvisionError::SourceRepoUnopenable {
+            path: main_repo.clone(),
             reason: format!("open: {e}"),
-        }
-    })?;
+        })?;
     let mut reference = main_repo_handle
         .try_find_reference(target_ref)
         .map_err(|e| ProvisionError::SourceRepoUnopenable {
-            path:   main_repo.clone(),
+            path: main_repo.clone(),
             reason: format!("find_reference {target_ref:?}: {e}"),
         })?
         .ok_or_else(|| ProvisionError::SourceRepoUnopenable {
-            path:   main_repo.clone(),
+            path: main_repo.clone(),
             reason: format!(
                 "operator-configured target_ref {target_ref:?} does not exist \
                  in {} — operator must populate the source repository before \
@@ -184,7 +181,7 @@ pub fn provision_orchestrator_worktree(
     let base_sha = reference
         .peel_to_id()
         .map_err(|e| ProvisionError::SourceRepoUnopenable {
-            path:   main_repo.clone(),
+            path: main_repo.clone(),
             reason: format!("peel_to_id {target_ref:?}: {e}"),
         })?
         .to_string();
@@ -194,7 +191,7 @@ pub fn provision_orchestrator_worktree(
     // doesn't surface this as a misleading `gix::clone::Error`.
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
-            path:   parent.to_path_buf(),
+            path: parent.to_path_buf(),
             reason: e.to_string(),
         })?;
     }
@@ -213,8 +210,8 @@ pub fn provision_orchestrator_worktree(
     )?;
 
     Ok(OrchestratorAnchor {
-        worktree_root:     provision.worktree_root,
-        base_sha:          provision.base_sha,
+        worktree_root: provision.worktree_root,
+        base_sha: provision.base_sha,
         base_tracking_ref: target_ref.to_owned(),
     })
 }
@@ -232,14 +229,14 @@ pub fn provision_orchestrator_worktree(
 /// because the Executor `git commit`s its work) so the kernel
 /// can drop it straight into `SpawnRequest::workspace_mounts`.
 pub fn provision_executor_worktree(
-    data_dir:    &Path,
-    session_id:  &str,
+    data_dir: &Path,
+    session_id: &str,
     orch_anchor: &OrchestratorAnchor,
 ) -> Result<WorkspaceMount, ProvisionError> {
     let dest = data_dir.join(WORKTREES_DIR).join(session_id);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
-            path:   parent.to_path_buf(),
+            path: parent.to_path_buf(),
             reason: e.to_string(),
         })?;
     }
@@ -261,9 +258,9 @@ pub fn provision_executor_worktree(
     )?;
 
     Ok(WorkspaceMount {
-        host_path:    provision.worktree_root,
-        guest_path:   GUEST_WORKSPACE_PATH.to_owned(),
-        mode:         MountMode::ReadWrite,
+        host_path: provision.worktree_root,
+        guest_path: GUEST_WORKSPACE_PATH.to_owned(),
+        mode: MountMode::ReadWrite,
         // Content hashing the entire git working tree on every
         // spawn would dominate the spawn-path latency budget;
         // V2 leaves this `None` and the Reviewer's read-only
@@ -291,15 +288,15 @@ pub fn provision_executor_worktree(
 ///
 /// Returns the read-only [`WorkspaceMount`].
 pub fn provision_reviewer_worktree(
-    data_dir:        &Path,
-    session_id:      &str,
-    orch_anchor:     &OrchestratorAnchor,
-    evaluation_sha:  &str,
+    data_dir: &Path,
+    session_id: &str,
+    orch_anchor: &OrchestratorAnchor,
+    evaluation_sha: &str,
 ) -> Result<WorkspaceMount, ProvisionError> {
     let dest = data_dir.join(WORKTREES_DIR).join(session_id);
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
-            path:   parent.to_path_buf(),
+            path: parent.to_path_buf(),
             reason: e.to_string(),
         })?;
     }
@@ -318,9 +315,9 @@ pub fn provision_reviewer_worktree(
     )?;
 
     Ok(WorkspaceMount {
-        host_path:    provision.worktree_root,
-        guest_path:   GUEST_WORKSPACE_PATH.to_owned(),
-        mode:         MountMode::ReadOnly,
+        host_path: provision.worktree_root,
+        guest_path: GUEST_WORKSPACE_PATH.to_owned(),
+        mode: MountMode::ReadOnly,
         content_hash: None::<ContentHash>,
     })
 }
@@ -372,8 +369,8 @@ pub const TRANSFER_REF_PREFIX: &str = "refs/heads/raxis-transfer/";
 pub fn copy_executor_commit_to_orchestrator_odb(
     orch_worktree_root: &Path,
     exec_worktree_root: &Path,
-    task_id:            &str,
-    commit_sha:         &str,
+    task_id: &str,
+    commit_sha: &str,
 ) -> Result<(), String> {
     let oid = gix::ObjectId::from_hex(commit_sha.as_bytes())
         .map_err(|e| format!("invalid commit_sha {commit_sha:?}: {e}"))?;
@@ -381,12 +378,8 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     // 1. Copy the object closure. `fetch_into_main`'s param naming
     //    is historical — its body is "walk every object reachable
     //    from `commit_sha` in source, write into destination ODB".
-    raxis_domain_git::fetch_into_main(
-        orch_worktree_root,
-        exec_worktree_root,
-        &oid,
-    )
-    .map_err(|e| format!("fetch_into_main: {e}"))?;
+    raxis_domain_git::fetch_into_main(orch_worktree_root, exec_worktree_root, &oid)
+        .map_err(|e| format!("fetch_into_main: {e}"))?;
 
     // 2. Publish a transfer ref at `refs/raxis/transfer/<task_id>`
     //    so the next `gix::clone::PrepareFetch` walk includes the
@@ -395,9 +388,7 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     //    validator already enforces this, but a structurally bad
     //    id here would silently land outside the transfer
     //    namespace.
-    if task_id.is_empty()
-        || task_id.contains(['/', '\n', ' ', '\t', '\r'])
-    {
+    if task_id.is_empty() || task_id.contains(['/', '\n', ' ', '\t', '\r']) {
         return Err(format!(
             "task_id {task_id:?} contains invalid characters; \
              refusing to write transfer ref",
@@ -410,16 +401,15 @@ pub fn copy_executor_commit_to_orchestrator_odb(
     let edit = RefEdit {
         change: Change::Update {
             log: LogChange {
-                mode:        RefLog::AndReference,
+                mode: RefLog::AndReference,
                 force_create_reflog: false,
-                message:     format!(
-                    "raxis kernel transfer-ref for task {task_id} -> {commit_sha}"
-                ).into(),
+                message: format!("raxis kernel transfer-ref for task {task_id} -> {commit_sha}")
+                    .into(),
             },
             // Write the new OID unconditionally — the Executor may
             // have re-run and we want the latest commit to land.
             expected: PreviousValue::Any,
-            new:      gix::refs::Target::Object(oid),
+            new: gix::refs::Target::Object(oid),
         },
         name: ref_name
             .clone()
@@ -481,7 +471,7 @@ mod tests {
             &["symbolic-ref", "HEAD", &format!("refs/heads/{branch}")],
         );
         run_git(&main_repo, &["config", "user.email", "test@raxis.local"]);
-        run_git(&main_repo, &["config", "user.name",  "raxis-test"]);
+        run_git(&main_repo, &["config", "user.name", "raxis-test"]);
         std::fs::write(main_repo.join("README.md"), b"hello\n").unwrap();
         run_git(&main_repo, &["add", "README.md"]);
         run_git(&main_repo, &["commit", "-q", "-m", "initial"]);
@@ -532,7 +522,7 @@ mod tests {
         let dd = TempDir::new().unwrap();
         let _ = bootstrap_source(dd.path(), "main");
         let init = "01900000-0000-7000-8000-000000000002";
-        let first  = provision_orchestrator_worktree(dd.path(), init, "refs/heads/main")
+        let first = provision_orchestrator_worktree(dd.path(), init, "refs/heads/main")
             .expect("first-spawn ok");
         let second = provision_orchestrator_worktree(dd.path(), init, "refs/heads/main")
             .expect("re-attach ok");

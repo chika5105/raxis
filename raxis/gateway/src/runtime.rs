@@ -79,7 +79,7 @@ pub async fn run_gateway(env: GatewayEnv) -> Result<(), GatewayRunError> {
 /// `HttpBackend` internally so no operator-controlled env can swap
 /// it out.
 pub async fn run_gateway_with_backend(
-    env:     GatewayEnv,
+    env: GatewayEnv,
     backend: Arc<dyn Backend>,
 ) -> Result<(), GatewayRunError> {
     eprintln!(
@@ -92,24 +92,28 @@ pub async fn run_gateway_with_backend(
     // Step 1: initial policy view. Any failure aborts startup so the
     // kernel supervisor sees the spawn timeout and surfaces a clear
     // BOOT_ERR equivalent in the kernel log.
-    let policy_view = load_policy_view(&env.data_dir)
-        .map_err(GatewayRunError::InitialPolicyLoad)?;
-    let view_slot: Arc<RwLock<Option<PolicyView>>> =
-        Arc::new(RwLock::new(Some(policy_view)));
+    let policy_view =
+        load_policy_view(&env.data_dir).map_err(GatewayRunError::InitialPolicyLoad)?;
+    let view_slot: Arc<RwLock<Option<PolicyView>>> = Arc::new(RwLock::new(Some(policy_view)));
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"policy_view_loaded\",\
          \"providers\":{}}}",
-        view_slot.read().await.as_ref().map(|v| v.providers.len()).unwrap_or(0),
+        view_slot
+            .read()
+            .await
+            .as_ref()
+            .map(|v| v.providers.len())
+            .unwrap_or(0),
     );
 
     // Step 2: connect.
-    let mut stream = UnixStream::connect(&env.gateway_socket).await.map_err(|e| {
-        GatewayRunError::Connect {
+    let mut stream = UnixStream::connect(&env.gateway_socket)
+        .await
+        .map_err(|e| GatewayRunError::Connect {
             socket: env.gateway_socket.clone(),
             source: e,
-        }
-    })?;
+        })?;
 
     // Step 3: handshake.
     let ready = GatewayMessage::GatewayReady {
@@ -129,9 +133,7 @@ pub async fn run_gateway_with_backend(
         let msg: GatewayMessage = match read_frame(&mut stream).await {
             Ok(m) => m,
             Err(FrameError::Eof) => {
-                eprintln!(
-                    "{{\"level\":\"info\",\"event\":\"kernel_disconnected_clean\"}}"
-                );
+                eprintln!("{{\"level\":\"info\",\"event\":\"kernel_disconnected_clean\"}}");
                 return Ok(());
             }
             Err(e) => {
@@ -149,8 +151,7 @@ pub async fn run_gateway_with_backend(
                 let view_guard = view_slot.read().await;
                 let view_ref: Option<&PolicyView> = view_guard.as_ref();
                 let resp =
-                    handle_fetch_request(req, &env.gateway_token, view_ref, backend.as_ref())
-                        .await;
+                    handle_fetch_request(req, &env.gateway_token, view_ref, backend.as_ref()).await;
                 drop(view_guard);
                 if let Err(e) = write_frame(&mut stream, &resp).await {
                     return Err(GatewayRunError::FrameWrite(format!("{e}")));

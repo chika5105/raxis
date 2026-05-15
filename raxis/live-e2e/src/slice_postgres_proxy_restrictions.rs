@@ -37,17 +37,17 @@
 //! actionable error message if the container is not running. Set
 //! `RAXIS_LIVE_POSTGRES_URL` to override (non-CI debugging).
 
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{anyhow, Result};
 use raxis_credential_proxy_postgres::{
-    NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig, restriction::Restrictions,
+    restriction::Restrictions, NoopAuditChannel, OwnedConsumer, PostgresProxy, ProxyConfig,
 };
 use raxis_credentials::{
-    CredentialBackend, CredentialError, CredentialName, CredentialValue,
-    ConsumerIdentity, Lease, OperatorId,
+    ConsumerIdentity, CredentialBackend, CredentialError, CredentialName, CredentialValue, Lease,
+    OperatorId,
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
@@ -61,7 +61,7 @@ const DEFAULT_UPSTREAM_URL: &str =
     "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e";
 
 struct LiveBackend {
-    value:    Vec<u8>,
+    value: Vec<u8>,
     resolves: AtomicU32,
 }
 
@@ -78,16 +78,25 @@ impl CredentialBackend for LiveBackend {
         Ok(CredentialValue::from_bytes(self.value.clone()))
     }
     fn rotate(
-        &self, name: &CredentialName, _new_value: CredentialValue, _actor: OperatorId,
+        &self,
+        name: &CredentialName,
+        _new_value: CredentialValue,
+        _actor: OperatorId,
     ) -> Result<(), CredentialError> {
         Err(CredentialError::Malformed {
             name: name.clone(),
             reason: "live-e2e backend does not rotate".to_owned(),
         })
     }
-    fn exists(&self, name: &CredentialName) -> bool { name.as_str() == "live-e2e" }
-    fn lease(&self, _name: &CredentialName) -> Lease { Lease::Forever }
-    fn backend_kind(&self) -> &'static str { "live-e2e" }
+    fn exists(&self, name: &CredentialName) -> bool {
+        name.as_str() == "live-e2e"
+    }
+    fn lease(&self, _name: &CredentialName) -> Lease {
+        Lease::Forever
+    }
+    fn backend_kind(&self) -> &'static str {
+        "live-e2e"
+    }
 }
 
 pub(crate) async fn run() -> Result<()> {
@@ -103,19 +112,20 @@ pub(crate) async fn run() -> Result<()> {
     );
 
     let backend = Arc::new(LiveBackend {
-        value:    upstream_url,
+        value: upstream_url,
         resolves: AtomicU32::new(0),
     });
     let cfg = ProxyConfig {
-        listen_addr:     "127.0.0.1:0".to_owned(),
+        listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: CredentialName::new("live-e2e"),
-        consumer:        OwnedConsumer::new("credential_proxy", "live-e2e:postgres:r"),
-        restrictions:    Restrictions {
+        consumer: OwnedConsumer::new("credential_proxy", "live-e2e:postgres:r"),
+        restrictions: Restrictions {
             allow_only_select: true,
             ..Default::default()
         },
     };
-    let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel)).await
+    let proxy = PostgresProxy::bind(backend.clone(), cfg, Arc::new(NoopAuditChannel))
+        .await
         .map_err(|e| anyhow!("PostgresProxy::bind: {e}"))?;
     let addr = proxy.local_addr()?;
     let stats = proxy.stats_handle();
@@ -169,7 +179,9 @@ pub(crate) async fn run() -> Result<()> {
     let msgs = drain_until_ready(&mut s).await?;
     assert_error_with_sqlstate(&msgs, "42501", "UPDATE")?;
     if stats.snapshot().queries_blocked <= blocks_before_update {
-        return Err(anyhow!("queries_blocked did not increment after UPDATE rejection"));
+        return Err(anyhow!(
+            "queries_blocked did not increment after UPDATE rejection"
+        ));
     }
 
     // ── Deny class 3: DELETE ──
@@ -178,7 +190,9 @@ pub(crate) async fn run() -> Result<()> {
     let msgs = drain_until_ready(&mut s).await?;
     assert_error_with_sqlstate(&msgs, "42501", "DELETE")?;
     if stats.snapshot().queries_blocked <= blocks_before_delete {
-        return Err(anyhow!("queries_blocked did not increment after DELETE rejection"));
+        return Err(anyhow!(
+            "queries_blocked did not increment after DELETE rejection"
+        ));
     }
 
     // ── Persistence: another SELECT after rejections — proxy must
@@ -218,7 +232,9 @@ async fn require_postgres_container() -> Result<()> {
     match tokio::time::timeout(
         Duration::from_secs(2),
         TcpStream::connect(POSTGRES_HOST_PORT),
-    ).await {
+    )
+    .await
+    {
         Ok(Ok(_)) => Ok(()),
         Ok(Err(e)) => Err(anyhow!(
             "postgres container not reachable at {POSTGRES_HOST_PORT}: {e}\n\
@@ -240,7 +256,9 @@ fn first_error_sqlstate(msgs: &[(u8, Vec<u8>)]) -> Option<String> {
         let field_tag = body[i];
         i += 1;
         let mut end = i;
-        while end < body.len() && body[end] != 0 { end += 1; }
+        while end < body.len() && body[end] != 0 {
+            end += 1;
+        }
         if field_tag == b'C' {
             return Some(std::str::from_utf8(&body[i..end]).unwrap_or("").to_owned());
         }
@@ -253,21 +271,17 @@ fn first_error_sqlstate(msgs: &[(u8, Vec<u8>)]) -> Option<String> {
 /// body carries the expected sqlstate, that no `CommandComplete`
 /// ('C') sneaks past, and that the conversation ended at
 /// `ReadyForQuery` ('Z').
-fn assert_error_with_sqlstate(
-    msgs:     &[(u8, Vec<u8>)],
-    sqlstate: &str,
-    label:    &str,
-) -> Result<()> {
+fn assert_error_with_sqlstate(msgs: &[(u8, Vec<u8>)], sqlstate: &str, label: &str) -> Result<()> {
     let tags: Vec<u8> = msgs.iter().map(|(t, _)| *t).collect();
     if msgs.iter().any(|(t, _)| *t == b'C') {
         return Err(anyhow!(
             "deny path {label}: unexpected CommandComplete in response (proxy let it through?); tags={tags:?}",
         ));
     }
-    let err_frame = msgs.iter().find(|(t, _)| *t == b'E')
-        .ok_or_else(|| anyhow!(
-            "deny path {label}: no ErrorResponse frame; tags={tags:?}",
-        ))?;
+    let err_frame = msgs
+        .iter()
+        .find(|(t, _)| *t == b'E')
+        .ok_or_else(|| anyhow!("deny path {label}: no ErrorResponse frame; tags={tags:?}",))?;
     if tags.last() != Some(&b'Z') {
         return Err(anyhow!(
             "deny path {label}: response did not end at ReadyForQuery; tags={tags:?}",
@@ -287,13 +301,14 @@ fn assert_error_with_sqlstate(
             end += 1;
         }
         let value = std::str::from_utf8(&body[i..end]).unwrap_or("").to_owned();
-        if field_tag == b'C' { found_state = Some(value); }
+        if field_tag == b'C' {
+            found_state = Some(value);
+        }
         i = end + 1;
     }
-    let got = found_state
-        .ok_or_else(|| anyhow!(
-            "deny path {label}: ErrorResponse had no sqlstate (C) field; body bytes={body:?}",
-        ))?;
+    let got = found_state.ok_or_else(|| {
+        anyhow!("deny path {label}: ErrorResponse had no sqlstate (C) field; body bytes={body:?}",)
+    })?;
     if got != sqlstate {
         return Err(anyhow!(
             "deny path {label}: expected sqlstate {sqlstate}, got {got}",
@@ -336,7 +351,9 @@ async fn drain_until_ready(s: &mut TcpStream) -> Result<Vec<(u8, Vec<u8>)>> {
         let (t, b) = read_tagged_message(s).await?;
         let is_z = t == b'Z';
         acc.push((t, b));
-        if is_z { return Ok(acc); }
+        if is_z {
+            return Ok(acc);
+        }
     }
 }
 

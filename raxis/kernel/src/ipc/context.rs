@@ -280,12 +280,8 @@ pub struct HandlerContext {
     /// (`R-9` admission gate). A degraded boot without a domain
     /// adapter would refuse every spawn, which is identical to
     /// failing closed at boot — so we fail closed at boot instead.
-    pub domain: Arc<
-        dyn DomainAdapter<
-            IntentKind       = SeIntentKind,
-            TerminalArtefact = SeTerminalArtefact,
-        >,
-    >,
+    pub domain:
+        Arc<dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>>,
 
     /// V2 OCI image resolver — turns a policy- / plan-pinned
     /// `oci_digest` into the on-disk path the isolation backend
@@ -507,10 +503,7 @@ impl HandlerContext {
         orchestrator_spawn: Arc<dyn OrchestratorSpawn>,
         executor_spawn: Arc<ExecutorSpawnContext>,
         domain: Arc<
-            dyn DomainAdapter<
-                IntentKind       = SeIntentKind,
-                TerminalArtefact = SeTerminalArtefact,
-            >,
+            dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>,
         >,
     ) -> Self {
         let witness_dir = data_dir.join("witness");
@@ -524,9 +517,8 @@ impl HandlerContext {
         // shared (Arc-cloned) into `Self::initiative_bus` so the
         // streaming handler can subscribe by initiative_id.
         let initiative_bus = crate::push::InitiativeEventBus::new();
-        let audit: Arc<dyn AuditSink> = crate::push::BroadcastingAuditSink::new(
-            audit, Arc::clone(&initiative_bus),
-        );
+        let audit: Arc<dyn AuditSink> =
+            crate::push::BroadcastingAuditSink::new(audit, Arc::clone(&initiative_bus));
 
         let proxy_manager = Arc::new(CredentialProxyManager::new(
             Arc::clone(&credentials),
@@ -543,9 +535,8 @@ impl HandlerContext {
         // default; tests that need a deterministic clock
         // construct their own tracker and call
         // `with_egress_stall_tracker`.
-        let egress_stall_tracker = Arc::new(
-            raxis_egress_admission::EgressStallTracker::with_defaults(),
-        );
+        let egress_stall_tracker =
+            Arc::new(raxis_egress_admission::EgressStallTracker::with_defaults());
         let session_spawn = Arc::new(
             SessionSpawnService::new(
                 Arc::clone(&isolation),
@@ -585,9 +576,8 @@ impl HandlerContext {
         };
 
         let push_dispatcher = crate::push::KernelPushDispatcher::new(Arc::clone(&audit));
-        let sidecar_registry = Arc::new(
-            crate::notifications::handler::sidecar::SidecarRegistry::new(),
-        );
+        let sidecar_registry =
+            Arc::new(crate::notifications::handler::sidecar::SidecarRegistry::new());
         Self {
             policy,
             registry,
@@ -636,9 +626,7 @@ impl HandlerContext {
             // most one entry per active substrate-spawned VM
             // session, so production memory footprint is
             // negligible.
-            session_activity: Arc::new(
-                crate::session_activity::SessionActivityTracker::new(),
-            ),
+            session_activity: Arc::new(crate::session_activity::SessionActivityTracker::new()),
         }
     }
 
@@ -823,12 +811,7 @@ pub fn build_default_test_credentials(
 #[cfg(any(debug_assertions, test))]
 pub fn build_default_test_domain(
     data_dir: &std::path::Path,
-) -> Arc<
-    dyn DomainAdapter<
-        IntentKind       = SeIntentKind,
-        TerminalArtefact = SeTerminalArtefact,
-    >,
-> {
+) -> Arc<dyn DomainAdapter<IntentKind = SeIntentKind, TerminalArtefact = SeTerminalArtefact>> {
     Arc::new(raxis_domain_git::GitAdapter::new(
         data_dir.join("repositories").join("main"),
         data_dir.join("worktrees"),
@@ -864,21 +847,22 @@ struct FailClosedTestIsolation;
 impl raxis_isolation::Backend for FailClosedTestIsolation {
     fn spawn(
         &self,
-        _image:  &raxis_isolation::VerifiedImage,
+        _image: &raxis_isolation::VerifiedImage,
         _mounts: &[raxis_isolation::WorkspaceMount],
-        _spec:   &raxis_isolation::VmSpec,
+        _spec: &raxis_isolation::VmSpec,
     ) -> Result<Box<dyn raxis_isolation::Session>, raxis_isolation::IsolationError> {
         Err(raxis_isolation::IsolationError::BackendInternal(
             "FailClosedTestIsolation refuses every spawn — \
              this substrate exists only to satisfy the trait \
              surface in in-process unit tests; tests that need a \
              real spawn path use SubprocessIsolation behind \
-             RAXIS_TEST_HARNESS=1".to_owned(),
+             RAXIS_TEST_HARNESS=1"
+                .to_owned(),
         ))
     }
-    fn verify_isolation_guarantee(&self)
-        -> Result<raxis_isolation::IsolationLevel, raxis_isolation::IsolationError>
-    {
+    fn verify_isolation_guarantee(
+        &self,
+    ) -> Result<raxis_isolation::IsolationLevel, raxis_isolation::IsolationError> {
         Ok(raxis_isolation::IsolationLevel::TestOnly)
     }
     fn capability(
@@ -935,9 +919,7 @@ pub fn build_test_orchestrator_spawn() -> Arc<dyn OrchestratorSpawn> {
 /// `session_spawn_orchestrator::tests::write_canonical_image_fake`
 /// for the helper).
 #[cfg(any(debug_assertions, test))]
-pub fn build_test_executor_spawn()
-    -> Arc<crate::session_spawn_orchestrator::ExecutorSpawnContext>
-{
+pub fn build_test_executor_spawn() -> Arc<crate::session_spawn_orchestrator::ExecutorSpawnContext> {
     Arc::new(
         crate::session_spawn_orchestrator::ExecutorSpawnContext::new(
             std::path::PathBuf::from("/tmp/raxis-test-executor-spawn-non-existent"),

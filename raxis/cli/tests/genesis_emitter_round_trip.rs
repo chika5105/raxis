@@ -19,7 +19,7 @@
 // step 6, then write the bytes to a tempdir and parse them back.
 
 use raxis_genesis_tools::{render_genesis_policy_toml, GenesisPolicyInputs};
-use raxis_test_support::{ephemeral_signing_key, pubkey_hex, ephemeral_cert_with_key, CertOpts};
+use raxis_test_support::{ephemeral_cert_with_key, ephemeral_signing_key, pubkey_hex, CertOpts};
 
 const FIXED_AUTHORITY_PUBKEY_HEX: &str =
     "1111111111111111111111111111111111111111111111111111111111111111";
@@ -37,28 +37,30 @@ fn cli_emitted_policy_round_trips_through_loader() {
     // self-signed cert whose pubkey matches the operator entry's
     // `pubkey_hex`. We mint that cert here from a deterministic seed so
     // the test is reproducible.
-    let key   = ephemeral_signing_key([0x33u8; 32]);
-    let pk    = pubkey_hex(&key);
-    let fp    = raxis_genesis_tools::pubkey_fingerprint(
-        &hex::decode(&pk).expect("pubkey hex must decode"),
+    let key = ephemeral_signing_key([0x33u8; 32]);
+    let pk = pubkey_hex(&key);
+    let fp =
+        raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).expect("pubkey hex must decode"));
+    let cert = ephemeral_cert_with_key(
+        &key,
+        CertOpts {
+            display_name: "test-operator".to_owned(),
+            permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ..CertOpts::default()
+        },
     );
-    let cert  = ephemeral_cert_with_key(&key, CertOpts {
-        display_name: "test-operator".to_owned(),
-        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        ..CertOpts::default()
-    });
 
     let toml_str = render_genesis_policy_toml(GenesisPolicyInputs {
-        authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
-        quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-        operator_pubkey_hex:    &pk,
-        operator_fingerprint:   &fp,
-        signed_at_unix_secs:    1_700_000_000,
+        authority_pubkey_hex: FIXED_AUTHORITY_PUBKEY_HEX,
+        quality_pubkey_hex: FIXED_QUALITY_PUBKEY_HEX,
+        operator_pubkey_hex: &pk,
+        operator_fingerprint: &fp,
+        signed_at_unix_secs: 1_700_000_000,
         allowed_worktree_roots: &allowlist,
-        operator_cert:          &cert,
+        operator_cert: &cert,
     });
 
     let policy_path = tmp.path().join("policy.toml");
@@ -73,8 +75,11 @@ fn cli_emitted_policy_round_trips_through_loader() {
     assert_eq!(bundle.operators().len(), 1);
     assert_eq!(bundle.operators()[0].pubkey_hex, pk);
     assert_eq!(bundle.operators()[0].pubkey_fingerprint, fp);
-    assert_eq!(bundle.operators()[0].cert.pubkey_hex, pk,
-        "embedded cert must agree with entry-level pubkey_hex (INV-CERT-01)");
+    assert_eq!(
+        bundle.operators()[0].cert.pubkey_hex,
+        pk,
+        "embedded cert must agree with entry-level pubkey_hex (INV-CERT-01)"
+    );
     assert_eq!(bundle.lanes().len(), 1, "exactly one default lane");
     assert_eq!(bundle.lanes()[0].lane_id, "default");
     assert_eq!(sha.len(), 64);
@@ -95,35 +100,40 @@ fn cli_emitter_and_kernel_emitter_produce_identical_bytes_for_identical_inputs()
     //       (verified by reading the source), and
     //   (b) this test pinning the byte shape of that one emitter against
     //       the structural assertions below.
-    let key  = ephemeral_signing_key([0x33u8; 32]);
-    let pk   = pubkey_hex(&key);
-    let fp   = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
-    let cert = ephemeral_cert_with_key(&key, CertOpts {
-        display_name: "test-operator".to_owned(),
-        permitted_ops: raxis_genesis_tools::PERMITTED_OPS
-            .iter()
-            .map(|s| (*s).to_owned())
-            .collect(),
-        ..CertOpts::default()
-    });
+    let key = ephemeral_signing_key([0x33u8; 32]);
+    let pk = pubkey_hex(&key);
+    let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+    let cert = ephemeral_cert_with_key(
+        &key,
+        CertOpts {
+            display_name: "test-operator".to_owned(),
+            permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                .iter()
+                .map(|s| (*s).to_owned())
+                .collect(),
+            ..CertOpts::default()
+        },
+    );
 
     let placeholder = "/var/lib/raxis/worktrees";
     let allowlist: [&str; 1] = [placeholder];
     let inputs = GenesisPolicyInputs {
-        authority_pubkey_hex:   FIXED_AUTHORITY_PUBKEY_HEX,
-        quality_pubkey_hex:     FIXED_QUALITY_PUBKEY_HEX,
-        operator_pubkey_hex:    &pk,
-        operator_fingerprint:   &fp,
-        signed_at_unix_secs:    1_700_000_000,
+        authority_pubkey_hex: FIXED_AUTHORITY_PUBKEY_HEX,
+        quality_pubkey_hex: FIXED_QUALITY_PUBKEY_HEX,
+        operator_pubkey_hex: &pk,
+        operator_fingerprint: &fp,
+        signed_at_unix_secs: 1_700_000_000,
         allowed_worktree_roots: &allowlist,
-        operator_cert:          &cert,
+        operator_cert: &cert,
     };
 
     let bytes_a = render_genesis_policy_toml(inputs);
     let bytes_b = render_genesis_policy_toml(inputs);
-    assert_eq!(bytes_a, bytes_b,
+    assert_eq!(
+        bytes_a, bytes_b,
         "shared emitter must be deterministic — drift here means the CLI \
-         and kernel paths could diverge across hosts");
+         and kernel paths could diverge across hosts"
+    );
 
     for required_marker in [
         // Every section header the loader needs.
@@ -149,14 +159,18 @@ fn cli_emitter_and_kernel_emitter_produce_identical_bytes_for_identical_inputs()
         // that the shared emitter kept it).
         "RAXIS v1 policy artifact",
     ] {
-        assert!(bytes_a.contains(required_marker),
-            "shared emitter output missing marker {required_marker:?}");
+        assert!(
+            bytes_a.contains(required_marker),
+            "shared emitter output missing marker {required_marker:?}"
+        );
     }
 
     // Negative pin: the dead intent-kind names that used to ship in the
     // kernel emitter must not reappear.
     for dead in ["MultiBranchCommit", "PrGateEvaluation"] {
-        assert!(!bytes_a.contains(dead),
-            "dead intent kind {dead:?} appeared in shared emitter output");
+        assert!(
+            !bytes_a.contains(dead),
+            "dead intent kind {dead:?} appeared in shared emitter output"
+        );
     }
 }

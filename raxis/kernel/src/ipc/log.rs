@@ -35,8 +35,8 @@ use serde_json::{json, Value};
 /// the contract — log dashboards and grep recipes downstream depend
 /// on them.
 pub mod level {
-    pub const INFO:  &str = "info";
-    pub const WARN:  &str = "warn";
+    pub const INFO: &str = "info";
+    pub const WARN: &str = "warn";
     pub const ERROR: &str = "error";
 }
 
@@ -68,15 +68,16 @@ pub fn finalize_line(
     mut body: serde_json::Map<String, Value>,
     ts_unix: i64,
 ) -> String {
-    body.insert("level".into(),   json!(level));
-    body.insert("module".into(),  json!(module));
-    body.insert("event".into(),   json!(event));
+    body.insert("level".into(), json!(level));
+    body.insert("module".into(), json!(module));
+    body.insert("event".into(), json!(event));
     body.insert("ts_unix".into(), json!(ts_unix));
-    serde_json::to_string(&Value::Object(body))
-        .unwrap_or_else(|e| format!(
+    serde_json::to_string(&Value::Object(body)).unwrap_or_else(|e| {
+        format!(
             "{{\"level\":\"error\",\"module\":\"{module}\",\
               \"event\":\"log_serialize_failed\",\"detail\":\"{e}\"}}"
-        ))
+        )
+    })
 }
 
 /// Derive a stable 8-character (32-bit) lowercase hex prefix of the
@@ -120,11 +121,11 @@ mod tests {
         let body = body_from_fields(&[("foo", "bar".to_owned())]);
         let line = finalize_line(level::INFO, "ipc.test", "demo_event", body, 1_700_000_000);
         let v = parse(&line);
-        assert_eq!(v["level"],   "info");
-        assert_eq!(v["module"],  "ipc.test");
-        assert_eq!(v["event"],   "demo_event");
+        assert_eq!(v["level"], "info");
+        assert_eq!(v["module"], "ipc.test");
+        assert_eq!(v["event"], "demo_event");
         assert_eq!(v["ts_unix"], 1_700_000_000);
-        assert_eq!(v["foo"],     "bar");
+        assert_eq!(v["foo"], "bar");
     }
 
     /// **Regression**: any value put through `body_from_fields` /
@@ -152,15 +153,19 @@ mod tests {
         // '\n' inside the value must be escaped as `\\n`, not emitted
         // as a literal newline that breaks downstream line-oriented
         // log readers.
-        assert_eq!(line.lines().count(), 1, "log line must remain single-line: {line:?}");
+        assert_eq!(
+            line.lines().count(),
+            1,
+            "log line must remain single-line: {line:?}"
+        );
     }
 
     /// Pin the level constants — these end up in operator dashboards
     /// and grep recipes.
     #[test]
     fn level_constants_are_pinned() {
-        assert_eq!(level::INFO,  "info");
-        assert_eq!(level::WARN,  "warn");
+        assert_eq!(level::INFO, "info");
+        assert_eq!(level::WARN, "warn");
         assert_eq!(level::ERROR, "error");
     }
 

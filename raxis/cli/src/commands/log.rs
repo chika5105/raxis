@@ -56,8 +56,8 @@ pub fn run(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 // ────────────────────────────────────────────────────────────────────
 
 fn run_one_shot(
-    audit_dir:   &std::path::Path,
-    opts:        &LogOpts,
+    audit_dir: &std::path::Path,
+    opts: &LogOpts,
     name_lookup: &OperatorNameLookup,
 ) -> Result<(), CliError> {
     let reader = match ChainReader::open(audit_dir) {
@@ -118,8 +118,8 @@ fn run_one_shot(
 /// per-record `seq` rather than file offset, so a segment rotation
 /// doesn't mis-resume).
 fn run_follow(
-    audit_dir:   &std::path::Path,
-    opts:        &LogOpts,
+    audit_dir: &std::path::Path,
+    opts: &LogOpts,
     name_lookup: &OperatorNameLookup,
 ) -> Result<(), CliError> {
     let stdout = std::io::stdout();
@@ -136,7 +136,11 @@ fn run_follow(
                 }
             }
             tail.sort_by_key(|r| std::cmp::Reverse(r.seq));
-            let limit = if opts.limit == 0 { DEFAULT_LIMIT } else { opts.limit };
+            let limit = if opts.limit == 0 {
+                DEFAULT_LIMIT
+            } else {
+                opts.limit
+            };
             tail.truncate(limit);
             tail.reverse(); // print oldest-first inside the tail
             let now = unix_now_secs();
@@ -208,8 +212,7 @@ fn run_follow(
 fn install_sigint_handler<F: Fn() + Send + Sync + 'static>(f: F) {
     use std::sync::Mutex;
     use std::sync::OnceLock;
-    static SLOT: OnceLock<Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>>> =
-        OnceLock::new();
+    static SLOT: OnceLock<Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap() = Some(Box::new(f));
 
@@ -281,10 +284,10 @@ fn matches_filter(r: &ChainRecord, opts: &LogOpts) -> bool {
 // ────────────────────────────────────────────────────────────────────
 
 fn render_one<W: Write>(
-    out:         &mut W,
-    r:           &ChainRecord,
-    json:        bool,
-    now_secs:    u64,
+    out: &mut W,
+    r: &ChainRecord,
+    json: bool,
+    now_secs: u64,
     name_lookup: &OperatorNameLookup,
 ) {
     if json {
@@ -423,9 +426,7 @@ fn parse_args(args: &[String]) -> Result<LogOpts, CliError> {
                 opts.initiative_id = Some(other.to_owned());
             }
             other => {
-                return Err(CliError::Usage(format!(
-                    "unknown log flag: {other:?}"
-                )));
+                return Err(CliError::Usage(format!("unknown log flag: {other:?}")));
             }
         }
         i += 1;
@@ -453,12 +454,11 @@ fn parse_duration(s: &str) -> Result<u64, CliError> {
         Some('d') => (&s[..s.len() - 1], 86_400),
         _ => (s, 1),
     };
-    let n: u64 = num_str.parse().map_err(|_| {
-        CliError::Usage(format!("--since: cannot parse {num_str:?} as integer"))
-    })?;
-    n.checked_mul(mult).ok_or_else(|| {
-        CliError::Usage(format!("--since: duration {s:?} overflows u64 seconds"))
-    })
+    let n: u64 = num_str
+        .parse()
+        .map_err(|_| CliError::Usage(format!("--since: cannot parse {num_str:?} as integer")))?;
+    n.checked_mul(mult)
+        .ok_or_else(|| CliError::Usage(format!("--since: duration {s:?} overflows u64 seconds")))
 }
 
 fn print_help() {
@@ -570,14 +570,17 @@ mod tests {
         let r = make_record(1, "X", None, None, None, None);
         let mut opts = LogOpts::default();
         opts.since_unix_secs = Some(1_700_000_000);
-        assert!(!matches_filter(&r, &opts),
-            "missing emitted_at must drop under --since (we cannot prove it's recent)");
+        assert!(
+            !matches_filter(&r, &opts),
+            "missing emitted_at must drop under --since (we cannot prove it's recent)"
+        );
     }
 
     #[test]
     fn matches_filter_combines_all_predicates_as_and() {
         let r = make_record(
-            1, "WitnessAccepted",
+            1,
+            "WitnessAccepted",
             Some(1_700_000_500),
             Some("init-x"),
             Some("task-1"),
@@ -589,7 +592,10 @@ mod tests {
             session_id: Some("session-1".to_owned()),
             kind: Some("witness".to_owned()),
             since_unix_secs: Some(1_700_000_000),
-            limit: 50, json: false, follow: false, audit_dir: None,
+            limit: 50,
+            json: false,
+            follow: false,
+            audit_dir: None,
         };
         assert!(matches_filter(&r, &opts));
     }
@@ -628,7 +634,8 @@ mod tests {
     fn render_one_human_emits_event_kind_and_relative_time() {
         let now: u64 = 1_700_010_000;
         let r = make_record(
-            5, "WitnessAccepted",
+            5,
+            "WitnessAccepted",
             Some(now as i64 - 125),
             Some("init-x"),
             Some("task-1"),
@@ -661,7 +668,8 @@ mod tests {
     #[test]
     fn render_one_human_surfaces_embedded_operator_display_name() {
         let mut r = make_record(
-            7, "EscalationApproved",
+            7,
+            "EscalationApproved",
             Some(1_700_000_500),
             None,
             None,
@@ -678,12 +686,22 @@ mod tests {
             }
         }));
         let mut buf: Vec<u8> = Vec::new();
-        render_one(&mut buf, &r, false, 1_700_001_000, &OperatorNameLookup::empty());
+        render_one(
+            &mut buf,
+            &r,
+            false,
+            1_700_001_000,
+            &OperatorNameLookup::empty(),
+        );
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("approved_by=Chika (abcd1234)"),
-            "operator render must show embedded name + fp prefix; got: {s}");
-        assert!(!s.contains("[historical cert"),
-            "no historical annotation when embedded name is present; got: {s}");
+        assert!(
+            s.contains("approved_by=Chika (abcd1234)"),
+            "operator render must show embedded name + fp prefix; got: {s}"
+        );
+        assert!(
+            !s.contains("[historical cert"),
+            "no historical annotation when embedded name is present; got: {s}"
+        );
     }
 
     /// Legacy event without an embedded name: the renderer falls
@@ -692,12 +710,12 @@ mod tests {
     #[test]
     fn render_one_human_falls_back_to_historical_lookup_for_legacy_events() {
         // Hand-build a lookup so the test doesn't need a kernel.db.
-        let lookup = OperatorNameLookup::from_pairs([
-            ("deadbeefdeadbeefdeadbeefdeadbeef", "ChikaNow"),
-        ]);
+        let lookup =
+            OperatorNameLookup::from_pairs([("deadbeefdeadbeefdeadbeefdeadbeef", "ChikaNow")]);
 
         let mut r = make_record(
-            8, "EscalationApproved",
+            8,
+            "EscalationApproved",
             Some(1_700_000_500),
             None,
             None,
@@ -715,10 +733,14 @@ mod tests {
         let mut buf: Vec<u8> = Vec::new();
         render_one(&mut buf, &r, false, 1_700_001_000, &lookup);
         let s = String::from_utf8(buf).unwrap();
-        assert!(s.contains("approved_by=ChikaNow (deadbeef)"),
-            "legacy event must render via the live lookup: {s}");
-        assert!(s.contains("[historical cert"),
-            "legacy render MUST carry the historical annotation: {s}");
+        assert!(
+            s.contains("approved_by=ChikaNow (deadbeef)"),
+            "legacy event must render via the live lookup: {s}"
+        );
+        assert!(
+            s.contains("[historical cert"),
+            "legacy render MUST carry the historical annotation: {s}"
+        );
     }
 
     #[test]
@@ -730,15 +752,17 @@ mod tests {
 
     #[test]
     fn parse_args_handles_combined_filters() {
-        let opts = parse_args(
-            &[
-                "init-007".to_owned(),
-                "--task".to_owned(), "t-9".to_owned(),
-                "--kind".to_owned(), "witness".to_owned(),
-                "--limit".to_owned(), "10".to_owned(),
-                "--json".to_owned(),
-            ],
-        ).unwrap();
+        let opts = parse_args(&[
+            "init-007".to_owned(),
+            "--task".to_owned(),
+            "t-9".to_owned(),
+            "--kind".to_owned(),
+            "witness".to_owned(),
+            "--limit".to_owned(),
+            "10".to_owned(),
+            "--json".to_owned(),
+        ])
+        .unwrap();
         assert_eq!(opts.initiative_id.as_deref(), Some("init-007"));
         assert_eq!(opts.task_id.as_deref(), Some("t-9"));
         assert_eq!(opts.kind.as_deref(), Some("witness"));
@@ -768,7 +792,8 @@ mod tests {
             "event_kind": "GenesisRecord",
             "prev_sha256": GENESIS_PREV_SHA256_LITERAL,
             "emitted_at": 1_700_000_000_i64,
-        }).to_string();
+        })
+        .to_string();
         let line0_nl = format!("{line0}\n");
         let mut h = Sha256::new();
         h.update(line0_nl.as_bytes());
@@ -781,7 +806,8 @@ mod tests {
             "emitted_at": 1_700_000_500_i64,
             "task_id": "t-1",
             "initiative_id": "init-x",
-        }).to_string();
+        })
+        .to_string();
         let line1_nl = format!("{line1}\n");
         let mut h = Sha256::new();
         h.update(line1_nl.as_bytes());
@@ -793,11 +819,13 @@ mod tests {
             "prev_sha256": line1_sha,
             "emitted_at": 1_700_001_000_i64,
             "task_id": "t-2",
-        }).to_string();
+        })
+        .to_string();
         std::fs::write(
             audit_dir.join("segment-000.jsonl"),
             format!("{line0_nl}{line1_nl}{line2}\n"),
-        ).unwrap();
+        )
+        .unwrap();
     }
 
     #[test]

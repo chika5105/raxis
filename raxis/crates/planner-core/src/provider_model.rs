@@ -81,10 +81,10 @@ impl ProviderId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Anthropic => "anthropic",
-            Self::OpenAi    => "openai",
-            Self::Gemini    => "gemini",
-            Self::Bedrock   => "bedrock",
-            Self::Sidecar   => "sidecar",
+            Self::OpenAi => "openai",
+            Self::Gemini => "gemini",
+            Self::Bedrock => "bedrock",
+            Self::Sidecar => "sidecar",
         }
     }
 
@@ -111,10 +111,10 @@ impl ProviderId {
     pub const fn default_base_url(self) -> &'static str {
         match self {
             Self::Anthropic => "https://api.anthropic.com",
-            Self::OpenAi    => "https://api.openai.com",
-            Self::Gemini    => "https://generativelanguage.googleapis.com",
-            Self::Bedrock   => "https://bedrock-runtime.us-east-1.amazonaws.com",
-            Self::Sidecar   => "",
+            Self::OpenAi => "https://api.openai.com",
+            Self::Gemini => "https://generativelanguage.googleapis.com",
+            Self::Bedrock => "https://bedrock-runtime.us-east-1.amazonaws.com",
+            Self::Sidecar => "",
         }
     }
 }
@@ -126,15 +126,15 @@ impl ProviderId {
 pub struct KnownModel {
     /// The provider's model id. Forwarded verbatim into
     /// [`crate::model::MessageRequest::model`].
-    pub name:        &'static str,
+    pub name: &'static str,
     /// Provider this model belongs to.
-    pub provider:    ProviderId,
+    pub provider: ProviderId,
     /// `Some(replacement)` ⇒ deprecated; `None` ⇒ supported.
     /// Deprecated models still admit traffic but emit
     /// [`emit_model_deprecation_warning`] at planner-boot so the
     /// operator sees the upcoming-removal hint in
     /// `initiative watch`.
-    pub deprecated:  Option<&'static str>,
+    pub deprecated: Option<&'static str>,
     /// Approximate context window size in tokens. Used by
     /// upstream code to bound the per-request prompt size; `None`
     /// when the provider has not committed to a fixed value.
@@ -154,84 +154,84 @@ pub struct KnownModel {
 pub const KNOWN_MODELS: &[KnownModel] = &[
     // --- Anthropic ---
     KnownModel {
-        name:           "claude-sonnet-4-5-20250929",
-        provider:       ProviderId::Anthropic,
-        deprecated:     None,
+        name: "claude-sonnet-4-5-20250929",
+        provider: ProviderId::Anthropic,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-sonnet-4-20250514",
-        provider:       ProviderId::Anthropic,
-        deprecated:     None,
+        name: "claude-sonnet-4-20250514",
+        provider: ProviderId::Anthropic,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-4.6-sonnet-medium-thinking",
-        provider:       ProviderId::Anthropic,
-        deprecated:     None,
+        name: "claude-4.6-sonnet-medium-thinking",
+        provider: ProviderId::Anthropic,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-opus-4-7-thinking-xhigh",
-        provider:       ProviderId::Anthropic,
-        deprecated:     None,
+        name: "claude-opus-4-7-thinking-xhigh",
+        provider: ProviderId::Anthropic,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-opus-4.7-thinking-medium",
-        provider:       ProviderId::Anthropic,
-        deprecated:     None,
+        name: "claude-opus-4.7-thinking-medium",
+        provider: ProviderId::Anthropic,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-3-5-sonnet-20241022",
-        provider:       ProviderId::Anthropic,
-        deprecated:     Some("claude-sonnet-4-5-20250929"),
+        name: "claude-3-5-sonnet-20241022",
+        provider: ProviderId::Anthropic,
+        deprecated: Some("claude-sonnet-4-5-20250929"),
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "claude-3-haiku-20240307",
-        provider:       ProviderId::Anthropic,
-        deprecated:     Some("claude-sonnet-4-5-20250929"),
+        name: "claude-3-haiku-20240307",
+        provider: ProviderId::Anthropic,
+        deprecated: Some("claude-sonnet-4-5-20250929"),
         context_window: Some(200_000),
     },
     // --- OpenAI ---
     KnownModel {
-        name:           "gpt-5.5-medium",
-        provider:       ProviderId::OpenAi,
-        deprecated:     None,
+        name: "gpt-5.5-medium",
+        provider: ProviderId::OpenAi,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "gpt-5.3-codex",
-        provider:       ProviderId::OpenAi,
-        deprecated:     None,
+        name: "gpt-5.3-codex",
+        provider: ProviderId::OpenAi,
+        deprecated: None,
         context_window: Some(200_000),
     },
     // --- Google Gemini ---
     KnownModel {
-        name:           "gemini-2.5-pro",
-        provider:       ProviderId::Gemini,
-        deprecated:     None,
+        name: "gemini-2.5-pro",
+        provider: ProviderId::Gemini,
+        deprecated: None,
         context_window: Some(2_000_000),
     },
     KnownModel {
-        name:           "gemini-2.5-flash",
-        provider:       ProviderId::Gemini,
-        deprecated:     None,
+        name: "gemini-2.5-flash",
+        provider: ProviderId::Gemini,
+        deprecated: None,
         context_window: Some(1_000_000),
     },
     // --- AWS Bedrock (Anthropic-on-Bedrock; V2_GAPS §C2 BedrockClient) ---
     KnownModel {
-        name:           "anthropic.claude-3-5-sonnet-20241022-v2:0",
-        provider:       ProviderId::Bedrock,
-        deprecated:     None,
+        name: "anthropic.claude-3-5-sonnet-20241022-v2:0",
+        provider: ProviderId::Bedrock,
+        deprecated: None,
         context_window: Some(200_000),
     },
     KnownModel {
-        name:           "anthropic.claude-3-5-haiku-20241022-v1:0",
-        provider:       ProviderId::Bedrock,
-        deprecated:     None,
+        name: "anthropic.claude-3-5-haiku-20241022-v1:0",
+        provider: ProviderId::Bedrock,
+        deprecated: None,
         context_window: Some(200_000),
     },
 ];
@@ -299,10 +299,10 @@ where
     F: Fn(&str) -> Option<String>,
 {
     let raw = env("RAXIS_MODEL_ID");
-    let id  = match raw {
+    let id = match raw {
         Some(s) if s.is_empty() => return Err(ProviderModelError::EmptyModelEnv),
         Some(s) => s,
-        None    => DEFAULT_MODEL.to_owned(),
+        None => DEFAULT_MODEL.to_owned(),
     };
     let model = validate_model_id(&id)?;
     if let Some(replacement) = model.deprecated {
@@ -334,19 +334,19 @@ mod tests {
         assert!(!KNOWN_MODELS.is_empty());
         for (i, m) in KNOWN_MODELS.iter().enumerate() {
             for n in &KNOWN_MODELS[(i + 1)..] {
-                assert_ne!(m.name, n.name,
-                    "duplicate registry row for {:?}", m.name);
+                assert_ne!(m.name, n.name, "duplicate registry row for {:?}", m.name);
             }
         }
     }
 
     #[test]
     fn default_model_is_in_registry() {
-        let m = find_known_model(DEFAULT_MODEL)
-            .expect("DEFAULT_MODEL must be in KNOWN_MODELS");
+        let m = find_known_model(DEFAULT_MODEL).expect("DEFAULT_MODEL must be in KNOWN_MODELS");
         assert_eq!(m.provider, ProviderId::Anthropic);
-        assert!(m.deprecated.is_none(),
-            "DEFAULT_MODEL must NOT be deprecated");
+        assert!(
+            m.deprecated.is_none(),
+            "DEFAULT_MODEL must NOT be deprecated"
+        );
     }
 
     #[test]
@@ -370,8 +370,9 @@ mod tests {
     fn empty_env_value_is_typed_error() {
         let err = resolve_model_from_env_fn(|k| match k {
             "RAXIS_MODEL_ID" => Some(String::new()),
-            _                => None,
-        }).unwrap_err();
+            _ => None,
+        })
+        .unwrap_err();
         assert!(matches!(err, ProviderModelError::EmptyModelEnv));
     }
 
@@ -385,8 +386,9 @@ mod tests {
     fn resolves_explicit_model_from_env() {
         let m = resolve_model_from_env_fn(|k| match k {
             "RAXIS_MODEL_ID" => Some("claude-opus-4.7-thinking-medium".to_owned()),
-            _                => None,
-        }).unwrap();
+            _ => None,
+        })
+        .unwrap();
         assert_eq!(m.name, "claude-opus-4.7-thinking-medium");
         assert_eq!(m.provider, ProviderId::Anthropic);
     }
@@ -399,8 +401,9 @@ mod tests {
         // and we don't want a snapshot dependency here).
         let m = resolve_model_from_env_fn(|k| match k {
             "RAXIS_MODEL_ID" => Some("claude-3-haiku-20240307".to_owned()),
-            _                => None,
-        }).unwrap();
+            _ => None,
+        })
+        .unwrap();
         assert_eq!(m.name, "claude-3-haiku-20240307");
         assert!(m.deprecated.is_some());
     }
@@ -408,19 +411,19 @@ mod tests {
     #[test]
     fn provider_id_str_matches_policy_wire_shape() {
         assert_eq!(ProviderId::Anthropic.as_str(), "anthropic");
-        assert_eq!(ProviderId::OpenAi.as_str(),    "openai");
-        assert_eq!(ProviderId::Gemini.as_str(),    "gemini");
-        assert_eq!(ProviderId::Bedrock.as_str(),   "bedrock");
-        assert_eq!(ProviderId::Sidecar.as_str(),   "sidecar");
+        assert_eq!(ProviderId::OpenAi.as_str(), "openai");
+        assert_eq!(ProviderId::Gemini.as_str(), "gemini");
+        assert_eq!(ProviderId::Bedrock.as_str(), "bedrock");
+        assert_eq!(ProviderId::Sidecar.as_str(), "sidecar");
     }
 
     #[test]
     fn default_base_url_is_https_for_known_providers() {
         for (id, expected_prefix) in [
             (ProviderId::Anthropic, "https://"),
-            (ProviderId::OpenAi,    "https://"),
-            (ProviderId::Gemini,    "https://"),
-            (ProviderId::Bedrock,   "https://"),
+            (ProviderId::OpenAi, "https://"),
+            (ProviderId::Gemini, "https://"),
+            (ProviderId::Bedrock, "https://"),
         ] {
             let url = id.default_base_url();
             assert!(

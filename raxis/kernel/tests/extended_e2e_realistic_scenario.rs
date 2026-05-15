@@ -77,56 +77,44 @@ use common::kernel_harness::acquire_test_lock;
 use extended_e2e_support::{
     audit_chain::AuditChainWitness,
     crash_recovery::CrashRecoveryWitness,
+    credential_substitution_evidence::{self as cred_sub_evidence, REAL_PG_PASSWORD},
     docker_stack::ensure_extended_stack_up_or_panic,
     kernel_driver::{
-        bootstrap_with_custom_cert, build_operator_key,
-        enable_gateway_in_policy, locate_executor_worktree_via_chain,
-        locate_session_id_for_task, maybe_refresh_examples,
-        poll_for_dual_lifecycle_completion, realism_workspace_root,
-        realistic_lifecycle_deadline, require_anthropic_dev_key,
-        require_canonical_images, require_disk_hygiene,
+        bootstrap_with_custom_cert, build_operator_key, enable_gateway_in_policy,
+        locate_executor_worktree_via_chain, locate_session_id_for_task, maybe_refresh_examples,
+        poll_for_dual_lifecycle_completion, realism_workspace_root, realistic_lifecycle_deadline,
+        require_anthropic_dev_key, require_canonical_images, require_disk_hygiene,
         require_gateway_binary, require_gcp_adc, require_tcp_reachable,
-        seed_realistic_main_repository, spawn_kernel_normal,
-        walk_chain_or_panic, write_credentials,
-        write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
-        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED,
-        SHUTDOWN_DEADLINE,
+        seed_realistic_main_repository, spawn_kernel_normal, walk_chain_or_panic,
+        write_credentials, write_provider_credentials, ExampleRefreshInputs, OperatorIpc,
+        LIVE_E2E_GATE, READY_DEADLINE, REALISTIC_OPERATOR_SEED, SHUTDOWN_DEADLINE,
+    },
+    multi_initiative::{
+        sibling_plan_toml, MultiInitiativeIsolationWitness, SIBLING_LANE_ID,
+        TASK_SIBLING_MATERIALIZE,
     },
     otel_pusher::{ensure_otel_pusher_or_panic, PusherSpawnContext},
-    multi_initiative::{
-        sibling_plan_toml, MultiInitiativeIsolationWitness,
-        SIBLING_LANE_ID, TASK_SIBLING_MATERIALIZE,
-    },
     path_allowlist::PathAllowlistPositiveWitness,
     plan_realistic::{
-        realistic_plan_toml, TASK_ALLOWLIST_POSITIVE,
-        TASK_CREDENTIAL_SUBSTITUTION_CANARY, TASK_LINT_DEFECT,
-        TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
+        realistic_plan_toml, TASK_ALLOWLIST_POSITIVE, TASK_CREDENTIAL_SUBSTITUTION_CANARY,
+        TASK_LINT_DEFECT, TASK_MATERIALIZE, TASK_SERVICE_ROUND_TRIP,
         TASK_TRANSPARENT_PROXY_REALSCRIPTS, TASK_XFILE_REFACTOR,
     },
     reviewer_substantive_disagreement::ReviewerSubstantiveDisagreementWitness,
     seeds::{MONGO_HOST_PORT, PG_HOST_PORT},
     service_evidence::{
-        assert_mssql_round_trip, assert_mysql_round_trip,
-        collect_active_witness_failures, render_failures, seed_mongodb,
-        seed_mssql, seed_mysql, seed_postgres, seed_redis, seed_smtp,
-        WitnessScope,
+        assert_mssql_round_trip, assert_mysql_round_trip, collect_active_witness_failures,
+        render_failures, seed_mongodb, seed_mssql, seed_mysql, seed_postgres, seed_redis,
+        seed_smtp, WitnessScope,
     },
     transparent_proxy_evidence::{
-        self as tp_evidence,
-        TransparentProxyExpectations, WRAPPER_SUMMARY_PATH,
+        self as tp_evidence, TransparentProxyExpectations, WRAPPER_SUMMARY_PATH,
     },
-    credential_substitution_evidence::{
-        self as cred_sub_evidence, REAL_PG_PASSWORD,
-    },
-    witnesses::{
-        EnforcementWitness, NoSecurityViolationWitness,
-    },
+    witnesses::{EnforcementWitness, NoSecurityViolationWitness},
 };
 
 use common::dashboard::{
-    configured_dashboard_port, mutate_dashboard_block_in_policy,
-    open_dashboard_with_autologin,
+    configured_dashboard_port, mutate_dashboard_block_in_policy, open_dashboard_with_autologin,
 };
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -140,10 +128,8 @@ const REALISTIC_GATE: &str = "RAXIS_LIVE_E2E_REALISTIC";
 fn realistic_session_lifecycle() {
     // Decide which mode we're in. The smoke-test path is the
     // default; the live-driven path requires BOTH gates.
-    let live_gate_on =
-        std::env::var(LIVE_E2E_GATE).as_deref()  == Ok("1");
-    let realistic_gate_on =
-        std::env::var(REALISTIC_GATE).as_deref() == Ok("1");
+    let live_gate_on = std::env::var(LIVE_E2E_GATE).as_deref() == Ok("1");
+    let realistic_gate_on = std::env::var(REALISTIC_GATE).as_deref() == Ok("1");
 
     if !(live_gate_on && realistic_gate_on) {
         eprintln!(
@@ -187,7 +173,7 @@ fn realistic_session_lifecycle() {
     // every external-process spawn is bounded; the bring-up
     // itself runs through `harness_timeout::run_command_output_timeout`.
     ensure_extended_stack_up_or_panic();
-    require_tcp_reachable(PG_HOST_PORT,    "Postgres docker container");
+    require_tcp_reachable(PG_HOST_PORT, "Postgres docker container");
     require_tcp_reachable(MONGO_HOST_PORT, "MongoDB docker container");
     require_anthropic_dev_key();
     require_gcp_adc();
@@ -197,8 +183,11 @@ fn realistic_session_lifecycle() {
 
     // ── Bootstrap the kernel ─────────────────────────────────
     let (signing_key, fingerprint) = build_operator_key(&REALISTIC_OPERATOR_SEED);
-    let (kernel_bin, data_dir)     = bootstrap_with_custom_cert(&signing_key);
-    eprintln!("[realism-e2e] kernel bootstrapped, data_dir={}", data_dir.display());
+    let (kernel_bin, data_dir) = bootstrap_with_custom_cert(&signing_key);
+    eprintln!(
+        "[realism-e2e] kernel bootstrapped, data_dir={}",
+        data_dir.display()
+    );
 
     let gateway_binary = require_gateway_binary();
     enable_gateway_in_policy(&data_dir, &gateway_binary);
@@ -248,13 +237,13 @@ fn realistic_session_lifecycle() {
     // Default-off path: the env var is unset → `maybe_refresh_examples`
     // returns `None` and the worktree is untouched.
     let workspace_root = realism_workspace_root();
-    let plan_primary_pre   = realistic_plan_toml();
-    let plan_sibling_pre   = sibling_plan_toml();
+    let plan_primary_pre = realistic_plan_toml();
+    let plan_sibling_pre = sibling_plan_toml();
     if let Some(refreshed) = maybe_refresh_examples(ExampleRefreshInputs {
-        live_policy_toml:  &data_dir.join("policy").join("policy.toml"),
+        live_policy_toml: &data_dir.join("policy").join("policy.toml"),
         plan_primary_toml: &plan_primary_pre,
         plan_sibling_toml: &plan_sibling_pre,
-        workspace_root:    &workspace_root,
+        workspace_root: &workspace_root,
     }) {
         eprintln!(
             "[realism-e2e] RAXIS_E2E_REFRESH_EXAMPLES=1 → refreshed checked-in \
@@ -281,15 +270,13 @@ fn realistic_session_lifecycle() {
     // `cargo xtask observability urls` command renders, so an
     // operator scanning the post-run stderr capture finds both the
     // artifact paths AND the metric dashboards in one block.
-    let mut tier3 = Tier3Reporter::new(
-        "realism-e2e", &install_dir, &data_dir,
-    )
-    .with_observability_urls()
-    // Surface the checked-in example bundle (per
-    // `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`) so operators
-    // scanning the post-run artifact block always see where to
-    // find "this is exactly what configuration produced the run".
-    .with_examples_dir(workspace_root.join("live-e2e/examples"));
+    let mut tier3 = Tier3Reporter::new("realism-e2e", &install_dir, &data_dir)
+        .with_observability_urls()
+        // Surface the checked-in example bundle (per
+        // `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`) so operators
+        // scanning the post-run artifact block always see where to
+        // find "this is exactly what configuration produced the run".
+        .with_examples_dir(workspace_root.join("live-e2e/examples"));
 
     // Print the observability URL block at startup too so the
     // operator can paste a Grafana URL into their browser the
@@ -302,21 +289,15 @@ fn realistic_session_lifecycle() {
     // round-trip task runs late in the plan dependency graph, so we
     // have ample lead time, but we still seed eagerly so the harness
     // fails closed on missing containers before burning LLM tokens.
-    let pg_seed = seed_postgres()
-        .unwrap_or_else(|e| panic!("postgres seed failed: {e}"));
-    let mongo_seed = seed_mongodb()
-        .unwrap_or_else(|e| panic!("mongodb seed failed: {e}"));
-    let redis_seed = seed_redis()
-        .unwrap_or_else(|e| panic!("redis seed failed: {e}"));
-    let smtp_seed = seed_smtp()
-        .unwrap_or_else(|e| panic!("smtp seed failed: {e}"));
+    let pg_seed = seed_postgres().unwrap_or_else(|e| panic!("postgres seed failed: {e}"));
+    let mongo_seed = seed_mongodb().unwrap_or_else(|e| panic!("mongodb seed failed: {e}"));
+    let redis_seed = seed_redis().unwrap_or_else(|e| panic!("redis seed failed: {e}"));
+    let smtp_seed = seed_smtp().unwrap_or_else(|e| panic!("smtp seed failed: {e}"));
     // Opt-in seeds are bypassed by their own helpers when the env
     // var is unset; calling them unconditionally keeps the surface
     // wired so a future env flip becomes active with no code change.
-    let _mysql_seed = seed_mysql()
-        .unwrap_or_else(|e| panic!("mysql seed (opt-in) failed: {e}"));
-    let _mssql_seed = seed_mssql()
-        .unwrap_or_else(|e| panic!("mssql seed (opt-in) failed: {e}"));
+    let _mysql_seed = seed_mysql().unwrap_or_else(|e| panic!("mysql seed (opt-in) failed: {e}"));
+    let _mssql_seed = seed_mssql().unwrap_or_else(|e| panic!("mssql seed (opt-in) failed: {e}"));
     eprintln!(
         "[realism-e2e] service-evidence seeds installed:          postgres rows={}, mongo docs={}, redis keys={}, smtp subject={}",
         pg_seed.rows.len(),
@@ -361,9 +342,7 @@ fn realistic_session_lifecycle() {
     //    into the Tier-3 reporter so the post-run artifact block
     //    surfaces it for offline triage.
     let dashboard_port = configured_dashboard_port();
-    if let Some(url) = open_dashboard_with_autologin(
-        &signing_key, dashboard_port, "realism-e2e",
-    ) {
+    if let Some(url) = open_dashboard_with_autologin(&signing_key, dashboard_port, "realism-e2e") {
         tier3.set_dashboard_url(url);
     }
 
@@ -373,8 +352,10 @@ fn realistic_session_lifecycle() {
     let op_socket = kernel.operator_socket();
     {
         let mut conn = OperatorIpc::connect(
-            &op_socket, &signing_key,
-            REALISTIC_OPERATOR_SEED, &fingerprint,
+            &op_socket,
+            &signing_key,
+            REALISTIC_OPERATOR_SEED,
+            &fingerprint,
         );
         // Reuse the plan strings pre-computed for the example-bundle
         // refresh above so we're guaranteed to submit exactly the
@@ -387,8 +368,10 @@ fn realistic_session_lifecycle() {
 
         let plan_sibling = &plan_sibling_pre;
         conn.submit_plan(&initiative_sibling, plan_sibling);
-        eprintln!("[realism-e2e] sibling plan submitted, initiative_id={initiative_sibling} \
-                   (lane={SIBLING_LANE_ID}, task={TASK_SIBLING_MATERIALIZE})");
+        eprintln!(
+            "[realism-e2e] sibling plan submitted, initiative_id={initiative_sibling} \
+                   (lane={SIBLING_LANE_ID}, task={TASK_SIBLING_MATERIALIZE})"
+        );
         conn.approve_plan(&initiative_sibling, &fingerprint);
     }
 
@@ -415,22 +398,21 @@ fn realistic_session_lifecycle() {
     );
 
     // ── Apply every realism witness ──────────────────────────
-    let primary_workdir = locate_executor_worktree_via_chain(
-        kernel.data_dir(), &chain, TASK_XFILE_REFACTOR,
-    );
-    let positive_workdir = locate_executor_worktree_via_chain(
-        kernel.data_dir(), &chain, TASK_ALLOWLIST_POSITIVE,
-    );
-    let lint_session_id = locate_session_id_for_task(&chain, TASK_LINT_DEFECT)
-        .unwrap_or_else(|| {
-            panic!("no SessionVmSpawned for {TASK_LINT_DEFECT}; \
-                    reviewer-substantive witness cannot attribute critique")
+    let primary_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_XFILE_REFACTOR);
+    let positive_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_ALLOWLIST_POSITIVE);
+    let lint_session_id =
+        locate_session_id_for_task(&chain, TASK_LINT_DEFECT).unwrap_or_else(|| {
+            panic!(
+                "no SessionVmSpawned for {TASK_LINT_DEFECT}; \
+                    reviewer-substantive witness cannot attribute critique"
+            )
         });
     eprintln!("[realism-e2e] lint-defect session_id={lint_session_id}");
 
     let sqlite_path = kernel.data_dir().join("kernel.db");
-    let reviewer_witness =
-        ReviewerSubstantiveDisagreementWitness::for_realistic_plan(&sqlite_path);
+    let reviewer_witness = ReviewerSubstantiveDisagreementWitness::for_realistic_plan(&sqlite_path);
     let reviewer_report = reviewer_witness.evaluate(&chain);
     assert!(
         reviewer_report.is_pass(),
@@ -438,27 +420,24 @@ fn realistic_session_lifecycle() {
     );
     eprintln!("[realism-e2e] reviewer-substantive witness satisfied");
 
-    let isolation = MultiInitiativeIsolationWitness::new(
-        &initiative_primary, &initiative_sibling,
-    );
+    let isolation = MultiInitiativeIsolationWitness::new(&initiative_primary, &initiative_sibling);
 
     let crash_witness = CrashRecoveryWitness::new(TASK_MATERIALIZE);
 
     let global_witnesses: Vec<Box<dyn EnforcementWitness>> = vec![
         Box::new(NoSecurityViolationWitness),
-        Box::new(PathAllowlistPositiveWitness::for_realistic_plan(&positive_workdir)),
+        Box::new(PathAllowlistPositiveWitness::for_realistic_plan(
+            &positive_workdir,
+        )),
         Box::new(isolation),
         Box::new(crash_witness),
     ];
-    extended_e2e_support::witnesses::assert_all_satisfied(
-        &global_witnesses, &chain,
-    );
+    extended_e2e_support::witnesses::assert_all_satisfied(&global_witnesses, &chain);
     eprintln!("[realism-e2e] all chain-side + on-disk witnesses satisfied");
 
     // ── Service-evidence per-protocol round-trip ─────────────
-    let service_workdir = locate_executor_worktree_via_chain(
-        kernel.data_dir(), &chain, TASK_SERVICE_ROUND_TRIP,
-    );
+    let service_workdir =
+        locate_executor_worktree_via_chain(kernel.data_dir(), &chain, TASK_SERVICE_ROUND_TRIP);
     let service_scope = WitnessScope::new(
         initiative_primary.clone(),
         TASK_SERVICE_ROUND_TRIP.to_owned(),
@@ -482,12 +461,14 @@ fn realistic_session_lifecycle() {
     // is unset (emitting one informational `eprintln!`). When the
     // operator flips `RAXIS_LIVE_MYSQL_URL` / `RAXIS_LIVE_MSSQL_URL`
     // the round-trip assertion becomes active with no code change.
-    if let Err(e) = assert_mysql_round_trip(
-        &chain, &service_workdir, &_mysql_seed, &service_scope,
-    ) { panic!("[realism-e2e] mysql round-trip failed: {e}"); }
-    if let Err(e) = assert_mssql_round_trip(
-        &chain, &service_workdir, &_mssql_seed, &service_scope,
-    ) { panic!("[realism-e2e] mssql round-trip failed: {e}"); }
+    if let Err(e) = assert_mysql_round_trip(&chain, &service_workdir, &_mysql_seed, &service_scope)
+    {
+        panic!("[realism-e2e] mysql round-trip failed: {e}");
+    }
+    if let Err(e) = assert_mssql_round_trip(&chain, &service_workdir, &_mssql_seed, &service_scope)
+    {
+        panic!("[realism-e2e] mssql round-trip failed: {e}");
+    }
     eprintln!("[realism-e2e] service-evidence round-trip witnesses satisfied");
 
     // ── Transparent-proxy round-trip ─────────────────────────
@@ -508,11 +489,11 @@ fn realistic_session_lifecycle() {
     );
     let tp_expectations = TransparentProxyExpectations {
         postgres: pg_seed.clone(),
-        mongodb:  mongo_seed.clone(),
-        redis:    redis_seed.clone(),
-        smtp:     smtp_seed.clone(),
-        mysql:    _mysql_seed.clone(),
-        mssql:    _mssql_seed.clone(),
+        mongodb: mongo_seed.clone(),
+        redis: redis_seed.clone(),
+        smtp: smtp_seed.clone(),
+        mysql: _mysql_seed.clone(),
+        mssql: _mssql_seed.clone(),
     };
     let tp_failures = tp_evidence::collect_active_witness_failures(
         &chain,
@@ -590,8 +571,7 @@ fn realistic_session_lifecycle() {
     // realism scenario" contract. Asserted BEFORE the SIGTERM
     // graceful-shutdown so a kernel-side `flush()` on shutdown
     // can't mask a missing periodic-flush task.
-    let metrics_jsonl =
-        kernel.data_dir().join("observability/metrics/000001.jsonl");
+    let metrics_jsonl = kernel.data_dir().join("observability/metrics/000001.jsonl");
     let metrics_size = std::fs::metadata(&metrics_jsonl)
         .unwrap_or_else(|e| {
             panic!(
@@ -658,8 +638,7 @@ fn realistic_session_lifecycle() {
 
 fn wiring_smoke_test() {
     use extended_e2e_support::{
-        crash_recovery, multi_initiative, path_allowlist,
-        reviewer_substantive_disagreement,
+        crash_recovery, multi_initiative, path_allowlist, reviewer_substantive_disagreement,
     };
 
     eprintln!("[realism-e2e] wiring smoke test: constructing each realism witness");
@@ -669,16 +648,13 @@ fn wiring_smoke_test() {
     // (bait present, substituted event present, no bypass, output
     // file present, no real-canary leak) on the positive path.
     let cred_sub_tmp = tempfile::tempdir().unwrap();
-    cred_sub_evidence::write_worktree_fixture_for_smoke(cred_sub_tmp.path())
-        .unwrap();
+    cred_sub_evidence::write_worktree_fixture_for_smoke(cred_sub_tmp.path()).unwrap();
     let cs_initiative = uuid::Uuid::now_v7().to_string();
     let cs_task = TASK_CREDENTIAL_SUBSTITUTION_CANARY.to_owned();
     let cs_session = "smoke-cs-clean".to_owned();
-    let cs_chain = cred_sub_evidence::synthetic_substitution_chain(
-        &cs_initiative, &cs_task, &cs_session,
-    );
-    let cs_scope = WitnessScope::new(cs_initiative, cs_task)
-        .with_session(cs_session);
+    let cs_chain =
+        cred_sub_evidence::synthetic_substitution_chain(&cs_initiative, &cs_task, &cs_session);
+    let cs_scope = WitnessScope::new(cs_initiative, cs_task).with_session(cs_session);
     cred_sub_evidence::assert_credential_substitution_round_trip(
         &cs_chain,
         cred_sub_tmp.path(),
@@ -696,19 +672,22 @@ fn wiring_smoke_test() {
     std::fs::write(
         tmp.path().join("target/codegen/build_meta.txt"),
         b"rich-multilang-001\n",
-    ).unwrap();
+    )
+    .unwrap();
     let path_witness = PathAllowlistPositiveWitness {
-        task_id:       TASK_ALLOWLIST_POSITIVE.to_owned(),
-        workdir:       tmp.path().to_path_buf(),
+        task_id: TASK_ALLOWLIST_POSITIVE.to_owned(),
+        workdir: tmp.path().to_path_buf(),
         expected_path: PathBuf::from(path_allowlist::EXPECTED_GENERATED_PATH),
     };
-    assert!(path_witness.disk_positive(), "smoke: positive path witness disk seed");
+    assert!(
+        path_witness.disk_positive(),
+        "smoke: positive path witness disk seed"
+    );
     eprintln!("[realism-e2e] smoke: PathAllowlistPositiveWitness constructed");
 
     // MultiInitiativeIsolation: two-event chain with non-overlapping task_ids.
     let chain = synthetic_multi_initiative_chain();
-    let iso_witness =
-        MultiInitiativeIsolationWitness::new("init-primary", "init-sibling");
+    let iso_witness = MultiInitiativeIsolationWitness::new("init-primary", "init-sibling");
     assert!(
         iso_witness.satisfied_by(&chain),
         "smoke: isolation witness on synthetic chain: {}",
@@ -727,15 +706,16 @@ fn wiring_smoke_test() {
     eprintln!("[realism-e2e] smoke: CrashRecoveryWitness satisfied");
 
     // ReviewerSubstantiveDisagreement: synthetic chain + a fixture tasks.db.
-    let db_path = seed_minimal_tasks_db(tmp.path(), TASK_LINT_DEFECT,
-        "rejected: greeting.rs introduces clippy::useless_conversion");
+    let db_path = seed_minimal_tasks_db(
+        tmp.path(),
+        TASK_LINT_DEFECT,
+        "rejected: greeting.rs introduces clippy::useless_conversion",
+    );
     let reviewer_witness = ReviewerSubstantiveDisagreementWitness {
-        executor_task_id:   TASK_LINT_DEFECT.to_owned(),
-        reviewer_a_task_id: reviewer_substantive_disagreement::TASK_REVIEW_LINT_A
-                                .to_owned(),
-        reviewer_b_task_id: reviewer_substantive_disagreement::TASK_REVIEW_LINT_B
-                                .to_owned(),
-        sqlite_path:        db_path,
+        executor_task_id: TASK_LINT_DEFECT.to_owned(),
+        reviewer_a_task_id: reviewer_substantive_disagreement::TASK_REVIEW_LINT_A.to_owned(),
+        reviewer_b_task_id: reviewer_substantive_disagreement::TASK_REVIEW_LINT_B.to_owned(),
+        sqlite_path: db_path,
     };
     let reviewer_chain = synthetic_reviewer_chain(TASK_LINT_DEFECT);
     let reviewer_report = reviewer_witness.evaluate(&reviewer_chain);
@@ -757,9 +737,8 @@ fn wiring_smoke_test() {
     // helper lays down.
     let tp_tmp = tempfile::tempdir().unwrap();
     let tp_expectations = tp_evidence::default_expectations();
-    tp_evidence::write_canonical_outputs_for_smoke(
-        tp_tmp.path(), &tp_expectations,
-    ).expect("smoke: write_canonical_outputs_for_smoke");
+    tp_evidence::write_canonical_outputs_for_smoke(tp_tmp.path(), &tp_expectations)
+        .expect("smoke: write_canonical_outputs_for_smoke");
     let tp_scope = WitnessScope::new(
         "init-primary".to_owned(),
         TASK_TRANSPARENT_PROXY_REALSCRIPTS.to_owned(),
@@ -770,7 +749,10 @@ fn wiring_smoke_test() {
         "sess-tp-smoke",
     );
     let tp_failures = tp_evidence::collect_active_witness_failures(
-        &tp_chain, tp_tmp.path(), &tp_expectations, &tp_scope,
+        &tp_chain,
+        tp_tmp.path(),
+        &tp_expectations,
+        &tp_scope,
     );
     assert!(
         tp_failures.is_empty(),
@@ -812,13 +794,9 @@ fn synthetic_reviewer_chain(executor_task_id: &str) -> Vec<AuditEvent> {
         TASK_REVIEW_LINT_A, TASK_REVIEW_LINT_B,
     };
     vec![
-        synthetic_intent_accepted(
-            0, TASK_REVIEW_LINT_A, "SubmitReview",
-        ),
+        synthetic_intent_accepted(0, TASK_REVIEW_LINT_A, "SubmitReview"),
         synthetic_vm_spawn(1, executor_task_id),
-        synthetic_intent_accepted(
-            2, TASK_REVIEW_LINT_B, "SubmitReview",
-        ),
+        synthetic_intent_accepted(2, TASK_REVIEW_LINT_B, "SubmitReview"),
         synthetic_aggregation_pass(3, executor_task_id),
     ]
 }
@@ -831,97 +809,94 @@ fn synthetic_event(
 ) -> AuditEvent {
     AuditEvent {
         seq,
-        event_id:      uuid::Uuid::nil(),
-        event_kind:    "IntentAccepted".to_owned(),
-        session_id:    session_id.map(str::to_owned),
-        task_id:       task_id.map(str::to_owned),
+        event_id: uuid::Uuid::nil(),
+        event_kind: "IntentAccepted".to_owned(),
+        session_id: session_id.map(str::to_owned),
+        task_id: task_id.map(str::to_owned),
         initiative_id: initiative_id.map(str::to_owned),
-        payload:       serde_json::to_value(&AuditEventKind::IntentAccepted {
-            task_id:         task_id.unwrap_or("").to_owned(),
-            session_id:      session_id.unwrap_or("").to_owned(),
-            intent_kind:     "Lifecycle".to_owned(),
-            base_sha:        None,
-            head_sha:        None,
+        payload: serde_json::to_value(&AuditEventKind::IntentAccepted {
+            task_id: task_id.unwrap_or("").to_owned(),
+            session_id: session_id.unwrap_or("").to_owned(),
+            intent_kind: "Lifecycle".to_owned(),
+            base_sha: None,
+            head_sha: None,
             sequence_number: 1,
             remaining_units: 99,
-        }).unwrap(),
-        emitted_at:    1700000000 + seq as i64,
-        prev_sha256:   "0".repeat(64),
+        })
+        .unwrap(),
+        emitted_at: 1700000000 + seq as i64,
+        prev_sha256: "0".repeat(64),
     }
 }
 
 fn synthetic_vm_spawn(seq: u64, task_id: &str) -> AuditEvent {
     let payload = AuditEventKind::SessionVmSpawned {
-        session_id:         format!("sess-{task_id}-{seq}"),
-        task_id:            Some(task_id.to_owned()),
-        initiative_id:      "init-primary".to_owned(),
-        backend_id:         "test-backend".to_owned(),
-        egress_tier:        "Mediated".to_owned(),
+        session_id: format!("sess-{task_id}-{seq}"),
+        task_id: Some(task_id.to_owned()),
+        initiative_id: "init-primary".to_owned(),
+        backend_id: "test-backend".to_owned(),
+        egress_tier: "Mediated".to_owned(),
         admission_loopback: "127.0.0.1:0".to_owned(),
         credential_proxies: 0,
     };
     AuditEvent {
         seq,
-        event_id:      uuid::Uuid::nil(),
-        event_kind:    "SessionVmSpawned".to_owned(),
-        session_id:    Some(format!("sess-{task_id}-{seq}")),
-        task_id:       Some(task_id.to_owned()),
+        event_id: uuid::Uuid::nil(),
+        event_kind: "SessionVmSpawned".to_owned(),
+        session_id: Some(format!("sess-{task_id}-{seq}")),
+        task_id: Some(task_id.to_owned()),
         initiative_id: Some("init-primary".to_owned()),
-        payload:       serde_json::to_value(&payload).unwrap(),
-        emitted_at:    1700000000 + seq as i64,
-        prev_sha256:   "0".repeat(64),
+        payload: serde_json::to_value(&payload).unwrap(),
+        emitted_at: 1700000000 + seq as i64,
+        prev_sha256: "0".repeat(64),
     }
 }
 
-fn synthetic_intent_accepted(
-    seq: u64, task_id: &str, intent_kind: &str,
-) -> AuditEvent {
+fn synthetic_intent_accepted(seq: u64, task_id: &str, intent_kind: &str) -> AuditEvent {
     let payload = AuditEventKind::IntentAccepted {
-        task_id:         task_id.to_owned(),
-        session_id:      format!("sess-{task_id}"),
-        intent_kind:     intent_kind.to_owned(),
-        base_sha:        None,
-        head_sha:        None,
+        task_id: task_id.to_owned(),
+        session_id: format!("sess-{task_id}"),
+        intent_kind: intent_kind.to_owned(),
+        base_sha: None,
+        head_sha: None,
         sequence_number: 1,
         remaining_units: 99,
     };
     AuditEvent {
         seq,
-        event_id:      uuid::Uuid::nil(),
-        event_kind:    "IntentAccepted".to_owned(),
-        session_id:    Some(format!("sess-{task_id}")),
-        task_id:       Some(task_id.to_owned()),
+        event_id: uuid::Uuid::nil(),
+        event_kind: "IntentAccepted".to_owned(),
+        session_id: Some(format!("sess-{task_id}")),
+        task_id: Some(task_id.to_owned()),
         initiative_id: Some("init-primary".to_owned()),
-        payload:       serde_json::to_value(&payload).unwrap(),
-        emitted_at:    1700000000 + seq as i64,
-        prev_sha256:   "0".repeat(64),
+        payload: serde_json::to_value(&payload).unwrap(),
+        emitted_at: 1700000000 + seq as i64,
+        prev_sha256: "0".repeat(64),
     }
 }
 
 fn synthetic_aggregation_pass(seq: u64, executor_task_id: &str) -> AuditEvent {
     use extended_e2e_support::reviewer_substantive_disagreement::TASK_REVIEW_LINT_B;
     let payload = AuditEventKind::ReviewAggregationCompleted {
-        executor_task_id:              executor_task_id.to_owned(),
+        executor_task_id: executor_task_id.to_owned(),
         triggered_by_reviewer_task_id: TASK_REVIEW_LINT_B.to_owned(),
-        reviewer_count:                2,
-        verdict:                       "AllPassed".to_owned(),
+        reviewer_count: 2,
+        verdict: "AllPassed".to_owned(),
     };
     AuditEvent {
         seq,
-        event_id:      uuid::Uuid::nil(),
-        event_kind:    "ReviewAggregationCompleted".to_owned(),
-        session_id:    None,
-        task_id:       Some(executor_task_id.to_owned()),
+        event_id: uuid::Uuid::nil(),
+        event_kind: "ReviewAggregationCompleted".to_owned(),
+        session_id: None,
+        task_id: Some(executor_task_id.to_owned()),
         initiative_id: Some("init-primary".to_owned()),
-        payload:       serde_json::to_value(&payload).unwrap(),
-        emitted_at:    1700000000 + seq as i64,
-        prev_sha256:   "0".repeat(64),
+        payload: serde_json::to_value(&payload).unwrap(),
+        emitted_at: 1700000000 + seq as i64,
+        prev_sha256: "0".repeat(64),
     }
 }
 
-fn seed_minimal_tasks_db(
-    tmpdir: &Path, executor_task: &str, critique: &str,
-) -> PathBuf {
+fn seed_minimal_tasks_db(tmpdir: &Path, executor_task: &str, critique: &str) -> PathBuf {
     use raxis_store::Table;
     let db_path = tmpdir.join("smoke.db");
     let conn = rusqlite::Connection::open(&db_path).unwrap();
@@ -931,13 +906,13 @@ fn seed_minimal_tasks_db(
             task_id TEXT PRIMARY KEY,\
             last_critique TEXT\
         );",
-    )).unwrap();
+    ))
+    .unwrap();
     conn.execute(
-        &format!(
-            "INSERT INTO {tasks} (task_id, last_critique) VALUES (?1, ?2)",
-        ),
+        &format!("INSERT INTO {tasks} (task_id, last_critique) VALUES (?1, ?2)",),
         rusqlite::params![executor_task, critique],
-    ).unwrap();
+    )
+    .unwrap();
     db_path
 }
 

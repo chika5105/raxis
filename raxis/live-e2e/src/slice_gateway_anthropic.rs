@@ -37,8 +37,7 @@ use uuid::Uuid;
 use crate::env_file::EnvMap;
 use crate::require_env;
 
-const GATEWAY_TOKEN: &str =
-    "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+const GATEWAY_TOKEN: &str = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
 
 pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     let api_key = require_env(env, "ANTHROPIC-API-DEV-KEY")?;
@@ -51,13 +50,10 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     // 2. Bind kernel-side socket.
     // macOS UDS paths are capped at ~104 chars; keep the basename
     // short and use the system temp dir (NOT cargo target dir).
-    let kernel_sock = std::env::temp_dir().join(format!(
-        "rxe2e-{}.sock",
-        Uuid::new_v4().simple(),
-    ));
+    let kernel_sock = std::env::temp_dir().join(format!("rxe2e-{}.sock", Uuid::new_v4().simple(),));
     let _ = std::fs::remove_file(&kernel_sock);
-    let listener = UnixListener::bind(&kernel_sock)
-        .map_err(|e| anyhow!("bind kernel sock: {e}"))?;
+    let listener =
+        UnixListener::bind(&kernel_sock).map_err(|e| anyhow!("bind kernel sock: {e}"))?;
 
     // 3. Spawn gateway with real HttpBackend.
     let env_parsed = parse_gateway_env(
@@ -67,18 +63,14 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     )
     .map_err(|e| anyhow!("parse_gateway_env: {e:?}"))?;
     let backend: Arc<dyn Backend> = Arc::new(raxis_gateway::HttpBackend::new());
-    let gateway_task = tokio::spawn(async move {
-        run_gateway_with_backend(env_parsed, backend).await
-    });
+    let gateway_task =
+        tokio::spawn(async move { run_gateway_with_backend(env_parsed, backend).await });
 
     // 4. Accept the gateway's client connection.
-    let (mut stream, _addr) = tokio::time::timeout(
-        Duration::from_secs(5),
-        listener.accept(),
-    )
-    .await
-    .map_err(|_| anyhow!("gateway never connected within 5s"))?
-    .map_err(|e| anyhow!("accept: {e}"))?;
+    let (mut stream, _addr) = tokio::time::timeout(Duration::from_secs(5), listener.accept())
+        .await
+        .map_err(|_| anyhow!("gateway never connected within 5s"))?
+        .map_err(|e| anyhow!("accept: {e}"))?;
 
     // 5. Drain handshake.
     let ready = tokio::time::timeout(
@@ -112,24 +104,25 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
     let body_bytes = serde_json::to_vec(&body)?;
     let req = GatewayMessage::FetchRequest {
         gateway_token: GATEWAY_TOKEN.to_owned(),
-        fetch_id:      Uuid::new_v4(),
-        fetch_kind:    FetchKind::Inference,
-        url:           "https://api.anthropic.com/v1/messages".to_owned(),
-        method:        "POST".to_owned(),
+        fetch_id: Uuid::new_v4(),
+        fetch_kind: FetchKind::Inference,
+        url: "https://api.anthropic.com/v1/messages".to_owned(),
+        method: "POST".to_owned(),
         headers: vec![
             ("anthropic-version".to_owned(), "2023-06-01".to_owned()),
-            ("content-type".to_owned(),      "application/json".to_owned()),
+            ("content-type".to_owned(), "application/json".to_owned()),
         ],
         body_bytes,
         timeout_ms: 30_000,
         session_id: None,
-        task_id:    None,
+        task_id: None,
     };
     let req_id = match &req {
         GatewayMessage::FetchRequest { fetch_id, .. } => *fetch_id,
         _ => unreachable!(),
     };
-    write_frame(&mut stream, &req).await
+    write_frame(&mut stream, &req)
+        .await
         .map_err(|e| anyhow!("write FetchRequest: {e}"))?;
 
     // 7. Read the response.
@@ -143,7 +136,11 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
 
     match resp {
         GatewayMessage::FetchResponse {
-            fetch_id, status_code, body_bytes, error, ..
+            fetch_id,
+            status_code,
+            body_bytes,
+            error,
+            ..
         } => {
             if fetch_id != req_id {
                 return Err(anyhow!("fetch_id round-trip mismatch"));
@@ -162,17 +159,22 @@ pub(crate) async fn run(env: &EnvMap) -> Result<()> {
                 ));
             }
             let body = body_bytes.ok_or_else(|| anyhow!("no body"))?;
-            let json: serde_json::Value = serde_json::from_slice(&body)
-                .map_err(|e| anyhow!("body is not JSON: {e}; body={:?}",
-                    String::from_utf8_lossy(&body)))?;
+            let json: serde_json::Value = serde_json::from_slice(&body).map_err(|e| {
+                anyhow!(
+                    "body is not JSON: {e}; body={:?}",
+                    String::from_utf8_lossy(&body)
+                )
+            })?;
             // Validate the response shape.
-            let content = json.get("content")
+            let content = json
+                .get("content")
                 .and_then(|c| c.as_array())
                 .ok_or_else(|| anyhow!("no `content` array in {json}"))?;
             if content.is_empty() {
                 return Err(anyhow!("`content` is empty in {json}"));
             }
-            let text = content[0].get("text")
+            let text = content[0]
+                .get("text")
                 .and_then(|t| t.as_str())
                 .ok_or_else(|| anyhow!("first content has no `text`: {json}"))?;
             tracing::info!(
@@ -213,12 +215,12 @@ fn build_data_dir(api_key: &str) -> Result<tempfile::TempDir> {
     std::fs::create_dir_all(dd.join("policy"))?;
     std::fs::create_dir_all(dd.join("providers"))?;
 
-    let op_key   = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
+    let op_key = raxis_test_support::ephemeral_signing_key([0xCCu8; 32]);
     let op_pk_hex = raxis_test_support::pubkey_hex(&op_key);
-    let op_fp    = raxis_genesis_tools::pubkey_fingerprint(
+    let op_fp = raxis_genesis_tools::pubkey_fingerprint(
         &hex::decode(&op_pk_hex).map_err(|e| anyhow!("decode op pk: {e}"))?,
     );
-    let op_cert  = raxis_test_support::ephemeral_cert_with_key(
+    let op_cert = raxis_test_support::ephemeral_cert_with_key(
         &op_key,
         raxis_test_support::CertOpts {
             display_name: "raxis-live-e2e-operator".to_owned(),

@@ -115,13 +115,13 @@ pub struct LoopbackEntry {
     /// AF_VSOCK port the host substrate listens on. The in-guest
     /// forwarder dials `(VMADDR_CID_HOST, vsock_port)` for any
     /// connection accepted on `guest_loopback_port`.
-    pub vsock_port:           u32,
+    pub vsock_port: u32,
     /// TCP port the in-guest forwarder binds on `127.0.0.1`.
     /// The agent's env-stamped URL points at this port; the
     /// forwarder's `127.0.0.1:<guest_loopback_port>` listener is
     /// what the agent's libpq / pymongo / redis-py client
     /// actually connects to.
-    pub guest_loopback_port:  u16,
+    pub guest_loopback_port: u16,
 }
 
 /// Per-session forwarding plan. Carries every
@@ -149,7 +149,9 @@ impl LoopbackPlan {
     /// Empty plan — convenience constructor used by tests and by
     /// the kernel callsite when a session declares no credentials.
     pub fn new() -> Self {
-        Self { entries: Vec::new() }
+        Self {
+            entries: Vec::new(),
+        }
     }
 
     /// Number of forwarding entries.
@@ -201,16 +203,17 @@ impl LoopbackPlan {
             if token.is_empty() {
                 return Err(PlanParseError::EmptyEntry);
             }
-            let (vsock_str, guest_str) = token
-                .split_once(':')
-                .ok_or_else(|| PlanParseError::Malformed {
-                    token: token.to_owned(),
-                })?;
-            let vsock_port: u32 = vsock_str.parse().map_err(|_| {
-                PlanParseError::Malformed { token: token.to_owned() }
+            let (vsock_str, guest_str) =
+                token
+                    .split_once(':')
+                    .ok_or_else(|| PlanParseError::Malformed {
+                        token: token.to_owned(),
+                    })?;
+            let vsock_port: u32 = vsock_str.parse().map_err(|_| PlanParseError::Malformed {
+                token: token.to_owned(),
             })?;
-            let guest_port: u16 = guest_str.parse().map_err(|_| {
-                PlanParseError::Malformed { token: token.to_owned() }
+            let guest_port: u16 = guest_str.parse().map_err(|_| PlanParseError::Malformed {
+                token: token.to_owned(),
             })?;
             if vsock_port == 0 {
                 return Err(PlanParseError::ZeroPort {
@@ -223,9 +226,7 @@ impl LoopbackPlan {
                 });
             }
             if !seen_vsock.insert(vsock_port) {
-                return Err(PlanParseError::DuplicateVsockPort {
-                    vsock_port,
-                });
+                return Err(PlanParseError::DuplicateVsockPort { vsock_port });
             }
             if !seen_guest.insert(guest_port) {
                 return Err(PlanParseError::DuplicateGuestPort {
@@ -313,7 +314,7 @@ mod tests {
     fn single_entry_plan_encodes_to_canonical_token() {
         let plan = LoopbackPlan {
             entries: vec![LoopbackEntry {
-                vsock_port:          5432,
+                vsock_port: 5432,
                 guest_loopback_port: 5432,
             }],
         };
@@ -327,15 +328,15 @@ mod tests {
         let plan = LoopbackPlan {
             entries: vec![
                 LoopbackEntry {
-                    vsock_port:          54101,
+                    vsock_port: 54101,
                     guest_loopback_port: 54101,
                 },
                 LoopbackEntry {
-                    vsock_port:          54102,
+                    vsock_port: 54102,
                     guest_loopback_port: 54102,
                 },
                 LoopbackEntry {
-                    vsock_port:          8001,
+                    vsock_port: 8001,
                     guest_loopback_port: 9001,
                 },
             ],
@@ -363,7 +364,9 @@ mod tests {
         let err = LoopbackPlan::from_env_string("5432").unwrap_err();
         assert_eq!(
             err,
-            PlanParseError::Malformed { token: "5432".into() },
+            PlanParseError::Malformed {
+                token: "5432".into()
+            },
         );
     }
 
@@ -385,7 +388,9 @@ mod tests {
         let err = LoopbackPlan::from_env_string("0:5432").unwrap_err();
         assert_eq!(
             err,
-            PlanParseError::ZeroPort { token: "0:5432".into() },
+            PlanParseError::ZeroPort {
+                token: "0:5432".into()
+            },
         );
     }
 
@@ -394,17 +399,16 @@ mod tests {
         let err = LoopbackPlan::from_env_string("5432:0").unwrap_err();
         assert_eq!(
             err,
-            PlanParseError::ZeroPort { token: "5432:0".into() },
+            PlanParseError::ZeroPort {
+                token: "5432:0".into()
+            },
         );
     }
 
     #[test]
     fn decoder_rejects_duplicate_vsock_port() {
         let err = LoopbackPlan::from_env_string("5432:5432,5432:5433").unwrap_err();
-        assert_eq!(
-            err,
-            PlanParseError::DuplicateVsockPort { vsock_port: 5432 },
-        );
+        assert_eq!(err, PlanParseError::DuplicateVsockPort { vsock_port: 5432 },);
     }
 
     #[test]
@@ -430,7 +434,7 @@ mod tests {
     fn round_trip_through_serde_json_pins_field_names() {
         let plan = LoopbackPlan {
             entries: vec![LoopbackEntry {
-                vsock_port:          54321,
+                vsock_port: 54321,
                 guest_loopback_port: 54321,
             }],
         };
@@ -447,7 +451,7 @@ mod tests {
         assert!(plan.is_empty());
         assert_eq!(plan.len(), 0);
         plan.entries.push(LoopbackEntry {
-            vsock_port:          1234,
+            vsock_port: 1234,
             guest_loopback_port: 5678,
         });
         assert!(!plan.is_empty());
