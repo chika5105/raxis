@@ -167,9 +167,9 @@ No site was found where a tokio Mutex guard is held across an
 
 ## See also
 
-- `raxis/specs/v2/concurrency-and-locking.md` — the canonical
+- [`raxis/specs/v2/concurrency-and-locking.md`](concurrency-and-locking.md) — the canonical
   V2 lock-discipline contract this audit was checked against.
-- `raxis/specs/v2/provider-failure-handling.md §6.4` — the
+- [`raxis/specs/v2/provider-failure-handling.md §6.4`](provider-failure-handling.md) — the
   `SqliteCircuitStore` row schema and the original
   single-writer-via-`BEGIN IMMEDIATE` contract.
 - Commit `bb89145` — F1 fix.

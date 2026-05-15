@@ -18,7 +18,7 @@ Configures branch protection on `main` so that:
   - `build-images / cargo check + test (ubuntu-22.04)` — workspace
     compiles and tests pass on Linux.
   - `cla-check / cla` — the CLA-agreement checkbox in the PR
-    description (from `.github/PULL_REQUEST_TEMPLATE.md`) is ticked.
+    description (from [`.github/PULL_REQUEST_TEMPLATE.md`](../PULL_REQUEST_TEMPLATE.md)) is ticked.
     The CLA itself lives at [`raxis/CLA.md`](../../raxis/CLA.md).
 - Force-pushes to `main` are denied.
 - Branch deletions are denied.

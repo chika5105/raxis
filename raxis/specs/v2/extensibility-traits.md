@@ -44,7 +44,7 @@ Applying this rule yields seven trait boundaries and a fixed concrete kernel:
 | Sealed-event persistence (SQLite / PostgreSQL / S3 / Rekor) | ✅ `AuditSink` | `R-7` requires tamper-evidence verifiable with public keys; chain math stays kernel-side, persistence is a deployment choice. |
 | Operator CLI transport (UDS / mTLS gRPC / HTTPS) | ✅ `OperatorTransport` | `R-9` and `R-12` require the channel to be unforgeable by intelligence and authenticated to a human principal; the wire is replaceable. |
 | Inference provider routing (HTTPS / gRPC / local vLLM / TGI) | ✅ `InferenceRouter` | `R-2` mediation is satisfied by *any* router that strips planner authority over destination + meters tokens; specific providers are deployment choices. |
-| Operator notification transport (Shell / File / Email / Webhook / Slack / PagerDuty) | ✅ `OperatorNotificationChannel` | The dispatcher (idempotency, post-commit ordering, audit emission, drain-on-shutdown) enforces every `R-*`-bearing property; the wire to the operator is a transport choice. See `email-and-notification-channels.md` for the full spec. |
+| Operator notification transport (Shell / File / Email / Webhook / Slack / PagerDuty) | ✅ `OperatorNotificationChannel` | The dispatcher (idempotency, post-commit ordering, audit emission, drain-on-shutdown) enforces every `R-*`-bearing property; the wire to the operator is a transport choice. See [`email-and-notification-channels.md`](email-and-notification-channels.md) for the full spec. |
 | Intent admission pipeline (the 13-step gate check) | ❌ Concrete | This **is** the kernel. Abstracting it would hollow out the product and make `R-3`/`R-4`/`R-5`/`R-6` unverifiable. |
 | Policy parser (`policy.toml`/`plan.toml`) | ❌ Concrete | The signed-TOML schema is the RAXIS protocol; conformance test suites verify it. New domains add new fields, not new parsers. |
 | Escalation FSM | ❌ Concrete | The `Pending → Approved → Consumed` transitions are paradigm-level (`R-12`). Domain-specific escalation classes are enum variants, not trait swaps. |
@@ -60,7 +60,7 @@ V2 ships:
 3. Wiring at the kernel boot site (`kernel/src/main.rs` + `bootstrap.rs`) so each subsystem is held as `Arc<dyn Trait>` — not as a concrete type — anywhere admission code reads it.
 4. A **conformance test fixture** per trait that exercises the trait's contract against any alternative impl in any future workspace member.
 
-For `OperatorNotificationChannel`, V2 ships **four** default impls (`ShellChannel`, `FileChannel` — refactored from v1 — plus `EmailChannel` and `WebhookChannel` — new). The full surface is specified in `email-and-notification-channels.md`; the trait definition itself is in §6.5 of this document.
+For `OperatorNotificationChannel`, V2 ships **four** default impls (`ShellChannel`, `FileChannel` — refactored from v1 — plus `EmailChannel` and `WebhookChannel` — new). The full surface is specified in [`email-and-notification-channels.md`](email-and-notification-channels.md); the trait definition itself is in §6.5 of this document.
 
 V2 does **not** ship alternative impls in the other six trait families (Vault, HSM, gRPC, vLLM). Those are V3+ or out-of-tree. V2 only proves the seams exist and are testable.
 
@@ -81,7 +81,7 @@ The `DomainAdapter` trait is the single seam at which the implementation-layer c
 
 ### §2.1 What Git does, structurally
 
-Inspecting the V1+V2 reference implementation (`kernel/src/vcs/`, `crates/store/`, `kernel/src/handlers/intent.rs`, `raxis/specs/v2/integration-merge.md`), git plays exactly four structural roles. Each one is a domain-agnostic primitive:
+Inspecting the V1+V2 reference implementation (`kernel/src/vcs/`, `crates/store/`, `kernel/src/handlers/intent.rs`, [`raxis/specs/v2/integration-merge.md`](integration-merge.md)), git plays exactly four structural roles. Each one is a domain-agnostic primitive:
 
 | Git primitive (SE)                       | Structural role                                                   | Trading equivalent                                          | Healthcare equivalent                                                  |
 | ---------------------------------------- | ----------------------------------------------------------------- | ----------------------------------------------------------- | ---------------------------------------------------------------------- |
@@ -100,7 +100,7 @@ The trait is split into three coherent surface areas:
 
 1. **State-lifecycle methods** (the four primitives the user enumerated above): `provision_workspace`, `snapshot`, `transfer`, `commit`.
 2. **Admission-pipeline hooks** the kernel's gate-check uses on every intent: `touched_resources`, `escalation_classes`, plus the two associated types (`IntentKind`, `TerminalArtefact`) that bind a domain to its own intent vocabulary and terminal-task artefact shape.
-3. **Cleanup hooks** that drive the abandoned-state retention/purge loop the kernel runs at session-end (the canonical SE consumer is `agent-disagreement.md §7`, the `AbandonedSalvageable → AbandonedArchived → Purged` lifecycle): `teardown_workspace`, `purge_workspace`.
+3. **Cleanup hooks** that drive the abandoned-state retention/purge loop the kernel runs at session-end (the canonical SE consumer is [`agent-disagreement.md §7`](agent-disagreement.md), the `AbandonedSalvageable → AbandonedArchived → Purged` lifecycle): `teardown_workspace`, `purge_workspace`.
 
 ```rust
 //! crates/raxis-domain/src/lib.rs
@@ -356,7 +356,7 @@ pub enum DomainError {
 }
 ```
 
-`CredentialProxyHandle` is the existing trait from `crates/raxis-cred-proxy/` (see `extensibility-traits.md §4`); the kernel passes the per-session handle in unchanged.
+`CredentialProxyHandle` is the existing trait from `crates/raxis-cred-proxy/` (see [`extensibility-traits.md §4`](extensibility-traits.md)); the kernel passes the per-session handle in unchanged.
 
 `SessionContext`, `AdmissionContext`, `CommitContext` are read-only views the kernel constructs; they expose the session id, parent state ref, policy epoch, and a scoped audit-event emitter, but no kernel internals.
 
@@ -369,7 +369,7 @@ pub enum DomainError {
 | `provision_workspace`   | `git clone --no-hardlinks --no-checkout` main_repo → `/var/raxis/sessions/<sid>/work`; `git checkout -b session-<sid> <parent_state_ref>`; return host-path + tree sha256. |
 | `snapshot`              | `git add -A`; `git commit -m "session-<sid>:<intent_id>" --author="raxis-planner <planner@local>"`; capture `(commit_sha, head_tree_sha256)`.                              |
 | `transfer`              | `git bundle create /var/raxis/transfer/<bundle_id>.bundle <base>..<head>`; sha256 the bundle; return `Bundle { host_path, content_hash, byte_len }`.                            |
-| `commit`                | The full `IntegrationMerge` ceremony of `integration-merge.md §4`: lock main worktree → `git cherry-pick --no-commit <commit_sha>` → re-run touched-set diff → emit `IntegrationMergeApplied` event → push to upstream remote via credential proxy. |
+| `commit`                | The full `IntegrationMerge` ceremony of [`integration-merge.md §4`](integration-merge.md): lock main worktree → `git cherry-pick --no-commit <commit_sha>` → re-run touched-set diff → emit `IntegrationMergeApplied` event → push to upstream remote via credential proxy. |
 | `touched_resources`     | `gix::diff_tree_to_tree(parent_tree, head_tree)` → flatten to `path:///`-prefixed URIs. Identical algorithm to today's `kernel/src/vcs/diff.rs`, just relocated.                |
 | `escalation_classes`    | `&["protected_path_merge", "review_loop_exceeded", "merge_conflict_unresolvable", "policy_epoch_drift", "credential_proxy_denied"]`                                                             |
 | `teardown_workspace`    | Unmount VirtioFS; close `gix::Repository`; touch `.raxis-retain-until` with the audit-retention deadline.                                                                       |
@@ -440,8 +440,8 @@ Documented here so reviewers can sanity-check that the seam is wide enough to ad
   transfer_root = "/var/raxis/transfer"
   audit_retention = "30d"
   ```
-- `raxis/specs/v2/integration-merge.md` — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the main-worktree lock". The gate sequence and audit-chain emissions are unchanged.
-- `raxis/specs/v2/agent-disagreement.md §7` — the abandoned-worktree lifecycle's `AbandonedSalvageable` entry transition calls `ctx.domain.teardown_workspace(...)`; the daily kernel sweep at `abandoned_commits_retention` elapse calls `ctx.domain.purge_workspace(...)` instead of direct `rm -rf`. The same two hooks fire on a clean (non-abandoned) session-end path: `teardown_workspace` runs immediately on the terminal `CompleteTask` admission; `purge_workspace` runs once the configured audit-retention window has lapsed.
+- [`raxis/specs/v2/integration-merge.md`](integration-merge.md) — the IntegrationMerge ceremony stays the same end-to-end, but the **implementation step** that today reads "the kernel runs `git cherry-pick --no-commit ...`" is rewritten to "the kernel calls `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the SE adapter MUST internally execute the cherry-pick + push sequence under the main-worktree lock". The gate sequence and audit-chain emissions are unchanged.
+- [`raxis/specs/v2/agent-disagreement.md §7`](agent-disagreement.md) — the abandoned-worktree lifecycle's `AbandonedSalvageable` entry transition calls `ctx.domain.teardown_workspace(...)`; the daily kernel sweep at `abandoned_commits_retention` elapse calls `ctx.domain.purge_workspace(...)` instead of direct `rm -rf`. The same two hooks fire on a clean (non-abandoned) session-end path: `teardown_workspace` runs immediately on the terminal `CompleteTask` admission; `purge_workspace` runs once the configured audit-retention window has lapsed.
 
 ### §2.7 Conformance contract
 
@@ -485,7 +485,7 @@ The trait seam buys us four concrete things:
 
 1. **Domain-appropriate isolation.** Trading wants `SgxEnclaveIsolation` for IP-protection attestation; healthcare wants `SevSnpIsolation` for HIPAA in-use encryption; edge/IoT wants `WasmIsolation` to fit on a resource-constrained device; integration tests want `MockIsolation` to run without KVM. Hard-coding Firecracker breaks all four.
 2. **Test ergonomics.** Today, `kernel/tests/handlers/*.rs` either spin up real Firecracker microVMs (slow, flaky in CI without `/dev/kvm`) or mock at a higher level (less faithful). A `#[cfg(test)] MockIsolation` behind the same trait gives the kernel test suite a fast, faithful spawn surface that exercises real handler code without a hypervisor.
-3. **Mechanical R-1 conformance check.** A trait with an explicit `verify_isolation_guarantee` method that returns a typed `IsolationLevel` lets `raxis doctor` (`system-requirements.md §11`) refuse to start the kernel against a backend whose `IsolationLevel < R1Conformant`, except via a single, audited `--unsafe-fallback-isolation` flag. Today the equivalent check is scattered across `kernel/src/main.rs`, the Firecracker boot probe, and the operator's manual reading of `raxis doctor` output.
+3. **Mechanical R-1 conformance check.** A trait with an explicit `verify_isolation_guarantee` method that returns a typed `IsolationLevel` lets `raxis doctor` ([`system-requirements.md §11`](system-requirements.md)) refuse to start the kernel against a backend whose `IsolationLevel < R1Conformant`, except via a single, audited `--unsafe-fallback-isolation` flag. Today the equivalent check is scattered across `kernel/src/main.rs`, the Firecracker boot probe, and the operator's manual reading of `raxis doctor` output.
 4. **Future-proofing the IPC layer.** The current IPC is `AF_VSOCK` + `bincode` framing. SGX uses a shared-memory ring buffer; Wasm uses host-function imports (no socket); a mock backend wants an in-process channel. Splitting the trait into `IsolationBackend` (the spawner) + `IsolatedSession` (the running handle) hides the transport behind `push(&KernelPush)` / `recv_intent() -> IntentFrame` so the kernel intent admission pipeline never observes which transport carried the bytes.
 
 ### §3.1 What the isolation layer actually does (the five jobs)
@@ -516,7 +516,7 @@ The trait seam is what makes all five of these `cargo build --features <backend>
 
 ### §3.3 Trait definitions
 
-**Canonical home:** `crates/raxis-isolation/src/lib.rs` (NEW; consolidates the `SpawnBackend` design described in `system-requirements.md §5` and `vm-network-isolation.md §3` into a pair of cooperating traits).
+**Canonical home:** `crates/raxis-isolation/src/lib.rs` (NEW; consolidates the `SpawnBackend` design described in [`system-requirements.md §5`](system-requirements.md) and [`vm-network-isolation.md §3`](vm-network-isolation.md) into a pair of cooperating traits).
 
 The trait is split into two:
 
@@ -743,7 +743,7 @@ A natural-looking V2 design would mirror `VmSpec.linux_kernel_path` with a `VmSp
 
 **Rationale.**
 
-1. **Trust path.** `VerifiedImage` carries the Ed25519 signature over the rootfs bytes. Moving the rootfs path onto `VmSpec` would orphan the bytes from their signature, weakening the V2 manifest-trust model (`planner-harness.md §14.4` — the kernel's signed manifest binds `image_artefact_sha256` to `image_format`, both of which the substrate must trust). Keeping the rootfs on `VerifiedImage` keeps "what we hand the substrate" structurally the same as "what the manifest signed".
+1. **Trust path.** `VerifiedImage` carries the Ed25519 signature over the rootfs bytes. Moving the rootfs path onto `VmSpec` would orphan the bytes from their signature, weakening the V2 manifest-trust model ([`planner-harness.md §14.4`](planner-harness.md) — the kernel's signed manifest binds `image_artefact_sha256` to `image_format`, both of which the substrate must trust). Keeping the rootfs on `VerifiedImage` keeps "what we hand the substrate" structurally the same as "what the manifest signed".
 2. **Asymmetry of the kernel binary.** Unlike the per-role rootfs, the host Linux kernel binary is rotated independently of any role and is shared across every spawn. It is NOT manifest-signed in V2 (see field doc above for the V3 plan). A single host path on `VmSpec` matches its lifecycle; a path on every `VerifiedImage` would imply a per-image kernel binding the kernel-version-stable layout does not have.
 3. **Substrate dispatch is on the format, not the path.** AVF needs to either build a `VZDiskImageStorageDeviceAttachment` (EROFS) or set `VZLinuxBootLoader.initialRamdiskURL` (initramfs); Firecracker needs either `PUT /drives` or `PUT /boot-source { initrd_path }`. The format that drives this decision is signed; the host path is purely configuration. Hosting the path on `VerifiedImage` puts both the bytes and the discriminator (kind) in the same struct.
 
@@ -828,7 +828,7 @@ The kernel sends `KernelPush` and receives `IntentFrame`; it does not observe th
 | `NamespaceIsolation`     | Unix domain socket through bind-mount (no R-1)       | `bincode::serialize_into(uds, msg)`                     | `bincode::deserialize_from(uds)`                        |
 | `MockIsolation` (test)   | `tokio::sync::mpsc` channel pair                     | `tx.try_send(msg.clone()).map_err(...)`                 | `rx.recv().ok_or(PeerClosed)`                           |
 
-The framing is **identical** in every row above (bincode-encoded `IpcMessage` per `kernel-mechanics-prompt.md §4`). What changes is the byte conduit. The conformance kit (`§3.9`) records a recorded planner session against `MockIsolation` and replays it byte-identically against every other backend; any divergence is a contract violation.
+The framing is **identical** in every row above (bincode-encoded `IpcMessage` per [`kernel-mechanics-prompt.md §4`](kernel-mechanics-prompt.md)). What changes is the byte conduit. The conformance kit (`§3.9`) records a recorded planner session against `MockIsolation` and replays it byte-identically against every other backend; any divergence is a contract violation.
 
 ### §3.5 Reference implementations
 
@@ -845,7 +845,7 @@ The framing is **identical** in every row above (bincode-encoded `IpcMessage` pe
 `FirecrackerIsolation` (`crates/raxis-isolation-firecracker/`):
 - Talks directly to the Firecracker VMM API over its UDS; uses `KVM_RUN` ioctls.
 - ~125 ms boot, ~5 MiB RAM overhead per VM.
-- Network and Tier-1 tproxy wiring per `vm-network-isolation.md §3`.
+- Network and Tier-1 tproxy wiring per [`vm-network-isolation.md §3`](vm-network-isolation.md).
 - `IsolatedSession` impl owns the `vhost-vsock` connection + the cleanup `Drop` impl that issues `terminate()` on unexpected drop.
 
 `AppleVirtualizationIsolation` (`crates/raxis-isolation-apple-vz/`):
@@ -890,7 +890,7 @@ Any cell in this matrix is a valid V2-or-future deployment. The kernel binary do
 - `crates/raxis-isolation-firecracker/src/lib.rs` — `pub struct FirecrackerIsolation { vmm_uds: PathBuf, kernel_image_id: ImageId, ... }` + `impl IsolationBackend`.
 - `crates/raxis-isolation-firecracker/src/api.rs` — Firecracker UDS client.
 - `crates/raxis-isolation-firecracker/src/vsock.rs` — `vhost-vsock` wiring; the `FirecrackerSession` `IsolatedSession` impl lives here.
-- `crates/raxis-isolation-firecracker/src/network.rs` — Tier-1 tproxy + tap-device setup per `vm-network-isolation.md §3`.
+- `crates/raxis-isolation-firecracker/src/network.rs` — Tier-1 tproxy + tap-device setup per [`vm-network-isolation.md §3`](vm-network-isolation.md).
 - `crates/raxis-isolation-apple-vz/Cargo.toml` (NEW)
 - `crates/raxis-isolation-apple-vz/src/lib.rs` — `VZVirtualMachine` driver.
 - `crates/raxis-isolation-apple-vz/src/vsock.rs` — `VZVirtioSocketDevice`-based `AppleVzSession`.
@@ -966,7 +966,7 @@ Any cell in this matrix is a valid V2-or-future deployment. The kernel binary do
 - `kernel/src/runtime/recv_loop.rs` — replaces direct VSock reads with `session.recv_intent()?`.
 - `kernel/src/spawner/firecracker.rs` and `kernel/src/spawner/apple_vz.rs` — DELETED. All callers go through `ctx.isolation`.
 - `kernel/src/runtime/heartbeat.rs` — collects `isolation.capability(BootLatencyMs)` and `isolation.backend_id()` for the `raxis doctor` snapshot.
-- `cli/src/commands/doctor.rs` — adds `[CHECK] isolation.tier` reporting per-host whether the active backend is `R1Conformant`/`R1Conformant_Strong`/`WasmSandbox`/`FallbackOnly`. References `extensibility-traits.md §3.5` in the `--explain` output.
+- `cli/src/commands/doctor.rs` — adds `[CHECK] isolation.tier` reporting per-host whether the active backend is `R1Conformant`/`R1Conformant_Strong`/`WasmSandbox`/`FallbackOnly`. References [`extensibility-traits.md §3.5`](extensibility-traits.md) in the `--explain` output.
 - `policy.toml` — operator declares the active backend. New stanza:
   ```toml
   [isolation]
@@ -997,7 +997,7 @@ A backend is conformant iff it satisfies these properties (mechanically verified
 - Image verification (the kernel resolves and signature-checks the image *before* calling `spawn`; `R-3` Signed Capability Declaration).
 - Workspace-mount path computation (the `WorkspaceMount` argument is filled by `DomainAdapter::provision_workspace`, NOT by the isolation backend).
 - Resource budget enforcement (`vcpu_count`, `mem_mib` are kernel-controlled in `VmSpec`; the backend is not allowed to up-rev them).
-- The kernel-side network policy (Tier-0 / Tier-1 tproxy / Tier-2 cred-proxy routing decisions live in `kernel-mediated-egress.md`; the backend just instantiates the network namespace the kernel hands it).
+- The kernel-side network policy (Tier-0 / Tier-1 tproxy / Tier-2 cred-proxy routing decisions live in [`kernel-mediated-egress.md`](kernel-mediated-egress.md); the backend just instantiates the network namespace the kernel hands it).
 - Audit-chain emission of `SessionVmSpawned` / `SessionVmExited` events (kernel-side, after the backend returns).
 - The `R-1` admission check itself (the kernel refuses to start against a non-conformant backend; the backend just truthfully reports its level).
 
@@ -1008,7 +1008,7 @@ The reference implementation reads operator credentials from plaintext files at 
 
 The intent admission pipeline does not care **where** a credential lives — it cares that:
 
-1. The kernel can resolve a name to a value at the point of injection (per `credential-proxy.md` for in-VM injection, per `gateway/src/policy_view.rs` for provider keys).
+1. The kernel can resolve a name to a value at the point of injection (per [`credential-proxy.md`](credential-proxy.md) for in-VM injection, per `gateway/src/policy_view.rs` for provider keys).
 2. The planner never sees the value (per `paradigm.md §5.1` two-credential-system architecture).
 3. Every resolution is recorded in the audit chain.
 
@@ -1075,7 +1075,7 @@ pub trait CredentialBackend: Send + Sync + 'static {
 
 ### §4.2 Reference implementation: `FileCredentialBackend`
 
-**Home:** `crates/raxis-credentials-file/src/lib.rs` (NEW; consolidates the existing reader logic from `gateway/src/policy_view.rs::load_credentials` and the planned reader for `credential-proxy.md`).
+**Home:** `crates/raxis-credentials-file/src/lib.rs` (NEW; consolidates the existing reader logic from `gateway/src/policy_view.rs::load_credentials` and the planned reader for [`credential-proxy.md`](credential-proxy.md)).
 
 - `resolve` opens `<data_dir>/credentials/<name>.env` (or `providers/<name>.toml` for provider creds), validates `mode == 0600`, validates `uid == kernel_uid`, reads the body, returns `Secret<Vec<u8>>`.
 - `rotate` writes `<data_dir>/credentials/<name>.env.tmp`, fsyncs, `rename`s atomically over the existing file, fsyncs the directory, audits `CredentialRotated`.
@@ -1096,7 +1096,7 @@ pub trait CredentialBackend: Send + Sync + 'static {
 ### §4.4 Files to change
 
 - `gateway/src/policy_view.rs` — replace direct `std::fs::read_to_string("<data_dir>/providers/...")` with `Arc<dyn CredentialBackend>::resolve("providers.<id>")`
-- `kernel/src/handlers/session.rs` — at session boot, fetch in-VM credentials by name via `ctx.credentials.resolve(...)` (per `credential-proxy.md` §4.2)
+- `kernel/src/handlers/session.rs` — at session boot, fetch in-VM credentials by name via `ctx.credentials.resolve(...)` (per [`credential-proxy.md`](credential-proxy.md) §4.2)
 - `kernel/src/main.rs` — boot `Arc<dyn CredentialBackend>` from `policy.toml [credential_backend]` setting; default to `FileCredentialBackend`
 - `crates/policy/src/bundle.rs` — `PolicyBundle` gains `credential_backend: CredentialBackendKind` field with default `File`; future variants `Vault`, `AwsSecretsManager`, etc.
 - `cli/src/commands/credential.rs` (NEW) — `raxis credential rotate <name>` and `raxis credential list` operator ops
@@ -1283,21 +1283,21 @@ This split is what lets RAXIS Cloud have an immutable cloud ledger while still s
 ### §5.3 Files to create
 
 - `crates/audit/tests/conformance.rs` (NEW) — exercises any backend's `emit`/`read_range`/`sync`/`highest_durable_seq` contract plus the V2.1 paired-write contract (`emit_pending`/`emit_confirmed_for`/`emit_rolled_back_for`/`emit_recovered_*`); current `FileAuditSink` and `FakeAuditSink` MUST pass
-- `crates/audit-verify/` **(NEW leaf crate — per `audit-paired-writes.md §5.4`)** — independence-bearing verifier crate with strict dep boundary (`sha2`, `ed25519-dalek`, `serde`, `serde_json`, `hex`, `clap`, `glob` only; **NO** kernel crates). Hosts the `verify()` algorithm, the `Finding` enum, the `StateSnapshot` trait, and the `raxis-audit-verify` standalone binary. The kernel-side `crates/audit/` and `kernel/src/recovery.rs` import this crate one-way; the leaf crate never depends on kernel code. This dep boundary IS the operational substantiation of `INV-AUDIT-PAIRED-05` and is enforced by the `xtask audit-verify-deps` CI lint
-- `crates/audit-verify/src/digest.rs` (NEW — per `audit-paired-writes.md §13.1`) — canonical row-encoding helpers (`hash_row`, `RowDigest`) used by both the standalone binary and the kernel's `PairedAuditWriter`, so producer and verifier agree on byte representation
-- `xtask/src/audit_verify_deps.rs` (NEW — per `audit-paired-writes.md §13.3`) — the dep-boundary CI lint that enforces the leaf-crate's strict closure
+- `crates/audit-verify/` **(NEW leaf crate — per [`audit-paired-writes.md §5.4`](audit-paired-writes.md))** — independence-bearing verifier crate with strict dep boundary (`sha2`, `ed25519-dalek`, `serde`, `serde_json`, `hex`, `clap`, `glob` only; **NO** kernel crates). Hosts the `verify()` algorithm, the `Finding` enum, the `StateSnapshot` trait, and the `raxis-audit-verify` standalone binary. The kernel-side `crates/audit/` and `kernel/src/recovery.rs` import this crate one-way; the leaf crate never depends on kernel code. This dep boundary IS the operational substantiation of `INV-AUDIT-PAIRED-05` and is enforced by the `xtask audit-verify-deps` CI lint
+- `crates/audit-verify/src/digest.rs` (NEW — per [`audit-paired-writes.md §13.1`](audit-paired-writes.md)) — canonical row-encoding helpers (`hash_row`, `RowDigest`) used by both the standalone binary and the kernel's `PairedAuditWriter`, so producer and verifier agree on byte representation
+- `xtask/src/audit_verify_deps.rs` (NEW — per [`audit-paired-writes.md §13.3`](audit-paired-writes.md)) — the dep-boundary CI lint that enforces the leaf-crate's strict closure
 
 ### §5.4 Files to change
 
 - `crates/audit/src/sink.rs` — extend the `AuditSink` trait with `read_range`, `sync`, `highest_durable_seq` (existing trait keeps `emit` unchanged); add the five V2.1 paired-write methods (`emit_pending`, `emit_confirmed_for`, `emit_rolled_back_for`, `emit_recovered_confirmed`, `emit_recovered_rollback`)
 - `crates/audit/src/sink.rs` — extend `FileAuditSink` with the new methods (reads back from segment files; `sync` fsyncs the segment writer; `highest_durable_seq` reads the audit pointer; paired-write methods append a single JSONL line per call with their distinguishing payload)
-- `crates/audit/src/sink.rs` — extend `FakeAuditSink` symmetrically (returns from in-memory vec; the paired-write methods are first-class so test fixtures can drive every crash window in §15 of `audit-paired-writes.md`)
-- `crates/audit/src/event.rs` — add `StateChangePending`, `StateChangeRolledBack`, `RollbackReason`, `RowMutationDescriptor`, `KernelClaims`, `StateChangeOperation` (per `audit-paired-writes.md §2.1`); augment every paired-class variant with `confirms_pending_seq`, `sqlite_commit_id`, `actual_post_state_digest` (per `audit-paired-writes.md §2.2`). Imports `crates/audit-verify::digest` for canonical encoding helpers so kernel-emitted bytes and standalone-binary-verified bytes are identical
-- `crates/audit/src/reader.rs` — `verify_chain_*` functions accept `&dyn AuditSink` instead of `&Path`, so RAXIS Cloud / Postgres backends can be verified without exporting to disk first; `verify_chain_strict` is now a thin shim over `raxis_audit_verify::verify` per `audit-paired-writes.md §5.7` ("one algorithm, three call sites"). The independence-bearing call site is the standalone `raxis-audit-verify` binary; the kernel-linked `verify_chain_*` is the convenience wrapper
-- `kernel/src/main.rs` — boot site reads `policy.toml [audit_sink]` and constructs the corresponding sink; default is `FileAuditSink`. Boot also runs the V2.1 first-time migration ceremony (`audit-paired-writes.md §10`) the first time a V2.1 binary opens a pre-V2.1 chain. On critical findings from `reconcile_advisory`, the kernel refuses to start and instructs the operator to first run the standalone `raxis-audit-verify` (independence-bearing verdict), then clear with `raxis verify-chain --acknowledge-critical` (signed override embedding the standalone binary's verdict hash)
-- `kernel/src/recovery.rs` — `reconcile` → `reconcile_advisory`. Imports `raxis_audit_verify::verify` with a kernel-local `LiveSqliteSnapshot` impl of `audit-verify::StateSnapshot` (per `audit-paired-writes.md §6.2`). One algorithm, two snapshot sources (live SQLite for the kernel; JSON state-export for the standalone binary)
-- `kernel/src/audit/paired.rs` (NEW — per `audit-paired-writes.md §13.1`) — `PairedAuditWriter` helper used by every paired-class handler: wraps `sink.emit_pending` + `sink.emit_confirmed_for`/`sink.emit_rolled_back_for` with the digest-computation, fsync-retry, and panic-on-exhaustion semantics from `audit-paired-writes.md §7.8` and §7.9
-- `cli/src/commands/audit.rs` — adds `raxis verify-chain` as a **subprocess wrapper**: spawns the standalone `raxis-audit-verify` binary via `std::process::Command`, propagates its exit code unchanged, and formats its stdout/stderr for the operator. Does NOT import `raxis_audit_verify::verify` directly — the verification result MUST come from the dep-bounded subprocess so even operators who use the convenience CLI get an R-7-bearing verdict (per `audit-paired-writes.md §5.7`). Adds `raxis audit export-state-for-verifier` (writes JSON consumable by `raxis-audit-verify --state-export`). Adds `--acknowledge-critical` on `raxis verify-chain`: the CLI runs the binary, captures its `--json-output` verdict, builds an `AcknowledgeCriticalPayload` (verdict_hash + chain_head_digest + verifier_version + reason + operator_signature, per `audit-paired-writes.md §6.2`), signs it with the operator key, writes it to `<data_dir>/audit/critical_ack.signed`, and instructs the operator to restart the kernel. The kernel's `reconcile_advisory` re-verifies and clears the boot block iff the ack's `chain_head_digest` matches what the kernel observes right now (binds the ack to a specific chain byte-state)
+- `crates/audit/src/sink.rs` — extend `FakeAuditSink` symmetrically (returns from in-memory vec; the paired-write methods are first-class so test fixtures can drive every crash window in §15 of [`audit-paired-writes.md`](audit-paired-writes.md))
+- `crates/audit/src/event.rs` — add `StateChangePending`, `StateChangeRolledBack`, `RollbackReason`, `RowMutationDescriptor`, `KernelClaims`, `StateChangeOperation` (per [`audit-paired-writes.md §2.1`](audit-paired-writes.md)); augment every paired-class variant with `confirms_pending_seq`, `sqlite_commit_id`, `actual_post_state_digest` (per [`audit-paired-writes.md §2.2`](audit-paired-writes.md)). Imports `crates/audit-verify::digest` for canonical encoding helpers so kernel-emitted bytes and standalone-binary-verified bytes are identical
+- `crates/audit/src/reader.rs` — `verify_chain_*` functions accept `&dyn AuditSink` instead of `&Path`, so RAXIS Cloud / Postgres backends can be verified without exporting to disk first; `verify_chain_strict` is now a thin shim over `raxis_audit_verify::verify` per [`audit-paired-writes.md §5.7`](audit-paired-writes.md) ("one algorithm, three call sites"). The independence-bearing call site is the standalone `raxis-audit-verify` binary; the kernel-linked `verify_chain_*` is the convenience wrapper
+- `kernel/src/main.rs` — boot site reads `policy.toml [audit_sink]` and constructs the corresponding sink; default is `FileAuditSink`. Boot also runs the V2.1 first-time migration ceremony ([`audit-paired-writes.md §10`](audit-paired-writes.md)) the first time a V2.1 binary opens a pre-V2.1 chain. On critical findings from `reconcile_advisory`, the kernel refuses to start and instructs the operator to first run the standalone `raxis-audit-verify` (independence-bearing verdict), then clear with `raxis verify-chain --acknowledge-critical` (signed override embedding the standalone binary's verdict hash)
+- `kernel/src/recovery.rs` — `reconcile` → `reconcile_advisory`. Imports `raxis_audit_verify::verify` with a kernel-local `LiveSqliteSnapshot` impl of `audit-verify::StateSnapshot` (per [`audit-paired-writes.md §6.2`](audit-paired-writes.md)). One algorithm, two snapshot sources (live SQLite for the kernel; JSON state-export for the standalone binary)
+- `kernel/src/audit/paired.rs` (NEW — per [`audit-paired-writes.md §13.1`](audit-paired-writes.md)) — `PairedAuditWriter` helper used by every paired-class handler: wraps `sink.emit_pending` + `sink.emit_confirmed_for`/`sink.emit_rolled_back_for` with the digest-computation, fsync-retry, and panic-on-exhaustion semantics from [`audit-paired-writes.md §7.8`](audit-paired-writes.md) and §7.9
+- `cli/src/commands/audit.rs` — adds `raxis verify-chain` as a **subprocess wrapper**: spawns the standalone `raxis-audit-verify` binary via `std::process::Command`, propagates its exit code unchanged, and formats its stdout/stderr for the operator. Does NOT import `raxis_audit_verify::verify` directly — the verification result MUST come from the dep-bounded subprocess so even operators who use the convenience CLI get an R-7-bearing verdict (per [`audit-paired-writes.md §5.7`](audit-paired-writes.md)). Adds `raxis audit export-state-for-verifier` (writes JSON consumable by `raxis-audit-verify --state-export`). Adds `--acknowledge-critical` on `raxis verify-chain`: the CLI runs the binary, captures its `--json-output` verdict, builds an `AcknowledgeCriticalPayload` (verdict_hash + chain_head_digest + verifier_version + reason + operator_signature, per [`audit-paired-writes.md §6.2`](audit-paired-writes.md)), signs it with the operator key, writes it to `<data_dir>/audit/critical_ack.signed`, and instructs the operator to restart the kernel. The kernel's `reconcile_advisory` re-verifies and clears the boot block iff the ack's `chain_head_digest` matches what the kernel observes right now (binds the ack to a specific chain byte-state)
 - `cli/src/commands/doctor.rs` — `[CHECK] audit.sink_health` calls `sink.sync()` and `highest_durable_seq()` and reports; also exercises a single paired-write round-trip (`emit_pending` + `emit_confirmed_for`) to confirm the V2.1 fsync semantics against the configured sink. New `[CHECK] audit.standalone_verify_present` confirms `raxis-audit-verify` is on `$PATH` and reports its version (the standalone binary is the R-7 artefact; doctor warns if it is missing or version-mismatched)
 
 Future (V3+):
@@ -1327,9 +1327,9 @@ An `AuditSink` is **paired-write conformant** iff, in addition to §5.5:
 
 9. **Recovery emission.** `emit_recovered_confirmed` / `emit_recovered_rollback` MUST tag the resulting event with a `_recovery_synthesised: true` field in the canonical JSON encoding so forensic queries can filter recovery-derived from runtime-derived events. The conformance kit asserts this via JSON inspection.
 
-10. **Verifier compatibility (subprocess-asserted).** A chain produced by any combination of `emit_pending` / `emit_confirmed_for` / `emit_rolled_back_for` calls — including arbitrary interleaving with non-paired `emit(...)` calls — MUST be acceptable input to the **standalone** `raxis-audit-verify` binary (per `audit-paired-writes.md §5.4`) running in chain-only mode (no `--state-export`): no parse errors, no chain breaks, no critical findings on signature/pairing/digest. The conformance kit invokes the binary as a subprocess (NOT as a library import) and asserts exit code `0`. The same property holds for the CLI convenience wrapper: the kit also invokes `raxis verify-chain` and asserts the CLI's exit code matches the standalone binary's — the CLI is a subprocess wrapper, so a divergence indicates the CLI is masking a finding. Per `INV-AUDIT-PAIRED-05`. **This is the load-bearing conformance check**: if a sink's output cannot be verified by the dep-bounded standalone binary running in its own process, the sink does not satisfy R-7 even if every kernel-internal test passes.
+10. **Verifier compatibility (subprocess-asserted).** A chain produced by any combination of `emit_pending` / `emit_confirmed_for` / `emit_rolled_back_for` calls — including arbitrary interleaving with non-paired `emit(...)` calls — MUST be acceptable input to the **standalone** `raxis-audit-verify` binary (per [`audit-paired-writes.md §5.4`](audit-paired-writes.md)) running in chain-only mode (no `--state-export`): no parse errors, no chain breaks, no critical findings on signature/pairing/digest. The conformance kit invokes the binary as a subprocess (NOT as a library import) and asserts exit code `0`. The same property holds for the CLI convenience wrapper: the kit also invokes `raxis verify-chain` and asserts the CLI's exit code matches the standalone binary's — the CLI is a subprocess wrapper, so a divergence indicates the CLI is masking a finding. Per `INV-AUDIT-PAIRED-05`. **This is the load-bearing conformance check**: if a sink's output cannot be verified by the dep-bounded standalone binary running in its own process, the sink does not satisfy R-7 even if every kernel-internal test passes.
 
-11. **Atomicity is opt-in.** Backends that can land pending + confirmed atomically (single transaction, single multipart upload) MAY do so as a performance optimisation; backends that can't (V2.1 `FileAuditSink` writing JSONL line-by-line) MUST fsync each independently. Both shapes MUST satisfy the paired-write conformance kit. Per `audit-paired-writes.md §8.3`.
+11. **Atomicity is opt-in.** Backends that can land pending + confirmed atomically (single transaction, single multipart upload) MAY do so as a performance optimisation; backends that can't (V2.1 `FileAuditSink` writing JSONL line-by-line) MUST fsync each independently. Both shapes MUST satisfy the paired-write conformance kit. Per [`audit-paired-writes.md §8.3`](audit-paired-writes.md).
 
 12. **Standalone-binary export contract.** Any sink whose backing store is not a flat JSONL file (`PostgresAuditSink`, `S3AuditSink`, `RekorTransparencyLogSink`) MUST provide a paired-export tool that writes the chain in the canonical JSONL format `raxis-audit-verify` consumes. The export tool MAY itself link the kernel stack (it is operational, not R-7-bearing); its output MUST be verifiable by the standalone binary against the same operator pubkey that signed the events at emission time. Without this property, the sink ships a chain that only its own kernel can verify — defeating R-7 independence. Tested by `crates/audit/tests/conformance.rs::sink_export_round_trips_through_standalone_verifier`.
 
@@ -1475,7 +1475,7 @@ What changes: the bytes that leave the kernel for the operator's destination. Th
 
 **Canonical home:** `crates/raxis-notification/src/lib.rs` (NEW).
 
-The trait, error types, payload struct, and conformance kit are defined in detail in `email-and-notification-channels.md §2.2`. Reproduced here in summary:
+The trait, error types, payload struct, and conformance kit are defined in detail in [`email-and-notification-channels.md §2.2`](email-and-notification-channels.md). Reproduced here in summary:
 
 ```rust
 #[async_trait::async_trait]
@@ -1512,12 +1512,12 @@ V3+ candidates (out of V2 scope, listed for design clarity):
 
 ### §6A.3 Files to create
 
-Per `email-and-notification-channels.md §8`. Summary list:
+Per [`email-and-notification-channels.md §8`](email-and-notification-channels.md). Summary list:
 
 - `crates/raxis-notification/src/lib.rs` — trait + error types + `NotificationPayload`
 - `crates/raxis-notification/src/conformance.rs` — generic conformance kit
 - `crates/raxis-notification-{shell,file,email,webhook}/src/lib.rs` — four impls
-- `crates/raxis-smtp-client/` — shared SMTP client (used by `EmailChannel` AND the agent-side SMTP credential proxy in `credential-proxy.md §3.6`)
+- `crates/raxis-smtp-client/` — shared SMTP client (used by `EmailChannel` AND the agent-side SMTP credential proxy in [`credential-proxy.md §3.6`](credential-proxy.md))
 
 ### §6A.4 Files to change
 
@@ -1546,7 +1546,7 @@ The conformance kit `crates/raxis-notification/src/conformance.rs::run_conforman
 
 ## §7 — `InferenceRouter` — How LLM Inference Is Routed and Metered
 
-The reference implementation ships a `raxis-gateway` worker pool that forwards `InferenceRequest` IPC messages over HTTPS to public LLM providers (Anthropic, OpenAI, Google Gemini), with the kernel computing token cost and consuming budget before forwarding (`provider-failure-handling.md` §4, `provider-model-selection.md` §6).
+The reference implementation ships a `raxis-gateway` worker pool that forwards `InferenceRequest` IPC messages over HTTPS to public LLM providers (Anthropic, OpenAI, Google Gemini), with the kernel computing token cost and consuming budget before forwarding ([`provider-failure-handling.md`](provider-failure-handling.md) §4, [`provider-model-selection.md`](provider-model-selection.md) §6).
 
 This is correct for the SE reference deployment. It is wrong for:
 
@@ -1622,7 +1622,7 @@ pub trait InferenceRouter: Send + Sync + 'static {
 }
 ```
 
-`ResolvedInferenceRequest` carries: `provider_id`, `model_id`, `system_prompt_bytes`, `user_prompt_bytes`, `tool_manifest`, `max_tokens`, `request_id`, `session_id`. The kernel populates every field; the planner influences only the user prompt content (already sandboxed by the kernel-prepended NNSP per `kernel-mechanics-prompt.md` §3).
+`ResolvedInferenceRequest` carries: `provider_id`, `model_id`, `system_prompt_bytes`, `user_prompt_bytes`, `tool_manifest`, `max_tokens`, `request_id`, `session_id`. The kernel populates every field; the planner influences only the user prompt content (already sandboxed by the kernel-prepended NNSP per [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) §3).
 
 `InferenceResponse` carries: `provider_observed_token_in`, `provider_observed_token_out`, `model_id_actual` (provider may auto-route within a family), `response_bytes`, `provider_request_id` (for cross-referencing with provider's own logs), `wallclock_ms`.
 
@@ -1923,7 +1923,7 @@ If the response does not match this schema →
 INV-08, never the malformed bytes.
 
 ### §9A.5A RAXIS Sidecar Streaming Protocol (V2.5, optional)
-*(Closes `v2_extended_gaps.md §2.6` — sidecar streaming + heartbeat
+*(Closes [`v2_extended_gaps.md §2.6`](v2_extended_gaps.md) — sidecar streaming + heartbeat
 + mid-stream budget abort.)*
 
 A sidecar that wants to stream tokens incrementally exposes a
@@ -2007,7 +2007,7 @@ mid-stream transport error or per-chunk idle timeout surfaces as a
 terminal `Stop` and the receiver closes; the existing
 [`RetryingModelClient`](`crates/planner-core/src/retry.rs`) wrapping
 re-issues the entire request from scratch (per
-`provider-failure-handling.md §7.5` "no resumable streams").
+[`provider-failure-handling.md §7.5`](provider-failure-handling.md) "no resumable streams").
 
 **Mid-stream budget abort.** The dispatch loop's
 [`run_streaming`](`crates/planner-core/src/dispatch.rs`) watches
@@ -2039,7 +2039,7 @@ to kernel internals.
 
 The `HttpSidecarRouter` participates in the same provider health
 and circuit-breaker framework as built-in routers
-(`provider-failure-handling.md §4`):
+([`provider-failure-handling.md §4`](provider-failure-handling.md)):
 
 - **Boot probe:** kernel sends `GET /health` at boot; non-200 →
   `BootError::SidecarUnreachable` (fail-closed).
@@ -2057,7 +2057,7 @@ intercept all inference traffic — receiving prompts, injecting
 tool calls, and exfiltrating context.
 
 The kernel authenticates the sidecar using the **same trust chain
-as the gateway** (`planner-harness.md §14.4`): operator-signed
+as the gateway** ([`planner-harness.md §14.4`](planner-harness.md)): operator-signed
 policy carries the shared secret; the kernel validates it at boot
 and stamps every request.
 
@@ -2256,7 +2256,7 @@ The trait extraction touches the kernel boot site and every handler. Doing it as
 
 **Phase B — Default impls in their own crates.** Create `crates/raxis-domain-git` (the V2 reference `GitAdapter` impl of `DomainAdapter`), `crates/raxis-isolation-firecracker`, `crates/raxis-isolation-apple-vz`, `crates/raxis-isolation-namespace` (the documented `FallbackOnly` non-conformant tier), `crates/raxis-credentials-file`, `crates/raxis-operator-transport-unix`, `crates/raxis-inference-router-https`, and the four V2 notification impls `crates/raxis-notification-{shell,file,email,webhook}`. Each is a thin re-export of the existing concrete logic (Shell+File from v1) or a fresh impl (Email, Webhook), refactored to implement the trait. The kernel still uses the old concrete types directly. Mergeable in one PR per impl.
 
-> Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside `extensibility-traits.md §2.8` because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other six trait extractions (`IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`, `OperatorNotificationChannel`) are smaller and each ship as a single Phase B PR. `OperatorNotificationChannel` has its own implementation phasing in `email-and-notification-channels.md §7`.
+> Note. The `DomainAdapter` migration has its own internal sub-phases (A-E) inside [`extensibility-traits.md §2.8`](extensibility-traits.md) because it deletes `kernel/src/vcs/`, which is the largest single code-motion in V2. The other six trait extractions (`IsolationBackend`, `CredentialBackend`, `AuditSink`, `OperatorTransport`, `InferenceRouter`, `OperatorNotificationChannel`) are smaller and each ship as a single Phase B PR. `OperatorNotificationChannel` has its own implementation phasing in [`email-and-notification-channels.md §7`](email-and-notification-channels.md).
 
 **Phase C — `AuditSink` already in `crates/audit/src/sink.rs` is broadened.** Add `read_range`, `sync`, `highest_durable_seq` to the existing trait; extend `FileAuditSink` and `FakeAuditSink`. The conformance test now runs against both. Single PR.
 
@@ -2270,26 +2270,26 @@ After Phase E, V2 ships. V3+ adds alternative impls (`PostgresAuditSink`, `MtlsG
 
 ## §11 — Cross-Spec Impacts
 
-These specs are updated to reference `extensibility-traits.md` at the relevant integration points. The references are added in the same commit cycle as this spec (one commit per affected spec for reviewability):
+These specs are updated to reference [`extensibility-traits.md`](extensibility-traits.md) at the relevant integration points. The references are added in the same commit cycle as this spec (one commit per affected spec for reviewability):
 
 | Spec | Trait it consumes | Reference to add |
 |---|---|---|
 | `v2/integration-merge.md` | `DomainAdapter` | §1 reframes IntegrationMerge as the SE-domain instantiation of `DomainAdapter::commit`; §4 (mechanics) replaces the inline `git cherry-pick` step with `ctx.domain.commit(snapshot, &cred_proxy, &commit_ctx)?`; the gate sequence and audit emissions are unchanged |
 | `v2/agent-disagreement.md` | `DomainAdapter` | §7 (abandoned-worktree retention) drives `ctx.domain.teardown_workspace` immediately and `ctx.domain.purge_workspace` after the audit-retention deadline, rather than direct `rm -rf` |
-| `v2/credential-proxy.md` | `CredentialBackend` | §1 introduction notes "the resolution backend is pluggable per `extensibility-traits.md` §4"; checklist (§10) adds an item to refactor the credential reader to take `Arc<dyn CredentialBackend>` |
-| `v2/provider-failure-handling.md` | `InferenceRouter` | §1 introduction notes "the inference dispatch backend is pluggable per `extensibility-traits.md` §7"; the kernel↔gateway protocol becomes the implementation of `HttpsGatewayRouter`, not a kernel-baked concrete |
+| `v2/credential-proxy.md` | `CredentialBackend` | §1 introduction notes "the resolution backend is pluggable per [`extensibility-traits.md`](extensibility-traits.md) §4"; checklist (§10) adds an item to refactor the credential reader to take `Arc<dyn CredentialBackend>` |
+| `v2/provider-failure-handling.md` | `InferenceRouter` | §1 introduction notes "the inference dispatch backend is pluggable per [`extensibility-traits.md`](extensibility-traits.md) §7"; the kernel↔gateway protocol becomes the implementation of `HttpsGatewayRouter`, not a kernel-baked concrete |
 | `v2/provider-model-selection.md` | `InferenceRouter` | §6 (resolution) clarifies that resolution returns a `ResolvedInferenceRequest` consumed by an `InferenceRouter` impl |
-| `v2/system-requirements.md` | `IsolationBackend` | §5 (Hypervisor) reframes Firecracker / Apple-VZ / Namespace as the V2-shipped impls of `IsolationBackend`; raxis doctor §11 adds `[CHECK] isolation.tier` referencing `extensibility-traits.md` §3.5 |
+| `v2/system-requirements.md` | `IsolationBackend` | §5 (Hypervisor) reframes Firecracker / Apple-VZ / Namespace as the V2-shipped impls of `IsolationBackend`; raxis doctor §11 adds `[CHECK] isolation.tier` referencing [`extensibility-traits.md`](extensibility-traits.md) §3.5 |
 | `v2/vm-network-isolation.md` | `IsolationBackend` | §3 (boot path) clarifies the spec describes the V2 default `FirecrackerIsolation` Tier-1 networking; alternative isolation backends MUST satisfy the same Tier-1 contract per §3.9 conformance |
 | `v2/kernel-lifecycle.md` | `OperatorTransport` | §3 (kernel start) and §13 implementation checklist note the operator socket bind delegates to `Arc<dyn OperatorTransport>::bind` |
-| `v2/email-and-notification-channels.md` | `OperatorNotificationChannel` | §2.2 (canonical trait definition + four V2 ship impls), §3.6 cross-link to `credential-proxy.md` for SMTP `proxy_type` (Goal B is structurally orthogonal — agent SMTP egress is a credential proxy, not a notification channel — but they share `crates/raxis-smtp-client/`) |
+| `v2/email-and-notification-channels.md` | `OperatorNotificationChannel` | §2.2 (canonical trait definition + four V2 ship impls), §3.6 cross-link to [`credential-proxy.md`](credential-proxy.md) for SMTP `proxy_type` (Goal B is structurally orthogonal — agent SMTP egress is a credential proxy, not a notification channel — but they share `crates/raxis-smtp-client/`) |
 | `v1/cli-readonly.md` | `OperatorNotificationChannel` | §5.6.6 "Forward compatibility" updated to reflect that V2 ships Email + Webhook handlers behind the trait; the schema in §5.6.2 (channel kinds, routes, default_channels) is the contract the trait honours |
-| `v1/cli-ceremony.md` | `OperatorNotificationChannel` | New `raxis notify channel/route/credential` commands per `email-and-notification-channels.md §4.1`; commands wrap edits to `policy.toml` and call existing `policy sign` ceremony |
-| `v2/policy-plan-authority.md` | `OperatorNotificationChannel` | Schema additions for `[[notifications.credentials]]`, `[[notifications.channels.email]]`, `[[notifications.channels.webhook]]`, and (for Goal B agent SMTP egress) `[[permitted_credentials.smtp]]` per `email-and-notification-channels.md §3.2`; new failure codes `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` |
-| `v2/v2-deep-spec.md` | All seven | "Related Specifications" appendix gains a row for `extensibility-traits.md` and `email-and-notification-channels.md`; Part 2 (Authorization) gains a forward-pointer to the trait map; new invariants `INV-NOTIFY-01..06` and `INV-SMTP-PROXY-01..05` registered |
+| `v1/cli-ceremony.md` | `OperatorNotificationChannel` | New `raxis notify channel/route/credential` commands per [`email-and-notification-channels.md §4.1`](email-and-notification-channels.md); commands wrap edits to `policy.toml` and call existing `policy sign` ceremony |
+| `v2/policy-plan-authority.md` | `OperatorNotificationChannel` | Schema additions for `[[notifications.credentials]]`, `[[notifications.channels.email]]`, `[[notifications.channels.webhook]]`, and (for Goal B agent SMTP egress) `[[permitted_credentials.smtp]]` per [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md); new failure codes `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` |
+| `v2/v2-deep-spec.md` | All seven | "Related Specifications" appendix gains a row for [`extensibility-traits.md`](extensibility-traits.md) and [`email-and-notification-channels.md`](email-and-notification-channels.md); Part 2 (Authorization) gains a forward-pointer to the trait map; new invariants `INV-NOTIFY-01..06` and `INV-SMTP-PROXY-01..05` registered |
 | `v1/kernel-store.md` | `AuditSink` | §2.5.2 footnote adds "the AuditSink trait is V2-extensibility-pluggable per `v2/extensibility-traits.md` §5; the chain math stays in the writer" |
 | `paradigm.md` | All seven | §6 (Mapping) gains a sentence noting the reference implementation exposes seven trait boundaries; §5.1 (current reference impl) adds a one-line pointer |
-| `invariants.md` | n/a | New `INV-EXT-*` (extensibility) section optional for V2; for now, the conformance kit IS the enforcement. `INV-NOTIFY-*` and `INV-SMTP-PROXY-*` are canonical in `email-and-notification-channels.md §10` |
+| `invariants.md` | n/a | New `INV-EXT-*` (extensibility) section optional for V2; for now, the conformance kit IS the enforcement. `INV-NOTIFY-*` and `INV-SMTP-PROXY-*` are canonical in [`email-and-notification-channels.md §10`](email-and-notification-channels.md) |
 
 ---
 
@@ -2333,7 +2333,7 @@ The kit returns a `ConformanceReport { passed: u32, failed: Vec<Failure> }`. CI 
 
 **Considered alternative — eight traits (split `InferenceRouter` into `Provider` and `Router`).** Rejected: provider integration (auth, retry, parsing) is internal to the router impl. Operators don't swap providers; they swap routers (the entire dispatch path). Adding a provider trait creates a configuration surface (which router uses which providers) that benefits no real deployment.
 
-**Considered alternative — eight traits (collapse Goal A into a single `NotificationTransport` shared with agent SMTP egress).** Rejected: this would erase the `R-9` attribution boundary. An operator-attributed channel triggerable from agent intent would let the agent forge audit-bound operator messages. Agent SMTP egress is a `proxy_type` (`credential-proxy.md §3.6`), not an `OperatorNotificationChannel` impl — they share an SMTP client crate but distinct trait surfaces. See `email-and-notification-channels.md §1.2`.
+**Considered alternative — eight traits (collapse Goal A into a single `NotificationTransport` shared with agent SMTP egress).** Rejected: this would erase the `R-9` attribution boundary. An operator-attributed channel triggerable from agent intent would let the agent forge audit-bound operator messages. Agent SMTP egress is a `proxy_type` ([`credential-proxy.md §3.6`](credential-proxy.md)), not an `OperatorNotificationChannel` impl — they share an SMTP client crate but distinct trait surfaces. See [`email-and-notification-channels.md §1.2`](email-and-notification-channels.md).
 
 **Considered alternative — nine traits (add `PolicyParser`, `EscalationFsm`).** Rejected: those are paradigm-level (`R-3`, `R-12`). Substituting them would let an impl claim RAXIS conformance while not enforcing the paradigm.
 
@@ -2351,7 +2351,7 @@ The kit returns a `ConformanceReport { passed: u32, failed: Vec<Failure> }`. CI 
 
 **Rationale.** The trait already exists, ships, and is used throughout the kernel. Replacing it would force a lockstep migration of every `Arc<dyn AuditSink>` field. Adding methods (with default impls returning `Err(NotSupported)` initially, then upgraded to real impls in `FileAuditSink` and `FakeAuditSink`) lets the migration land incrementally.
 
-The V2.1 paired-write methods are a strict superset of `emit` — every backend that already supports `emit` can implement the paired methods by routing to `emit` with appropriate event-kind construction. Backends that can offer atomic pending+confirmed (Postgres, S3 multipart) override the defaults for performance; backends that can't (V2.1 file-system JSONL) inherit the per-call-fsync defaults. This keeps the trait surface coherent across deployment models while letting each model take advantage of its native durability primitives. Per `audit-paired-writes.md §8.3` and §11.
+The V2.1 paired-write methods are a strict superset of `emit` — every backend that already supports `emit` can implement the paired methods by routing to `emit` with appropriate event-kind construction. Backends that can offer atomic pending+confirmed (Postgres, S3 multipart) override the defaults for performance; backends that can't (V2.1 file-system JSONL) inherit the per-call-fsync defaults. This keeps the trait surface coherent across deployment models while letting each model take advantage of its native durability primitives. Per [`audit-paired-writes.md §8.3`](audit-paired-writes.md) and §11.
 
 **Rejected alternative** — introduce `AuditPersistence` as a fresh trait, deprecate the existing `AuditSink`. Rejected: doubles the API surface for no semantic gain.
 

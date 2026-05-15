@@ -1,18 +1,18 @@
 # RAXIS V2 — Credential Proxy Architecture
 
 > **Status:** V2 Specified
-> **Role in V2 unified egress:** This spec is the canonical home for **Tier 2 — Authenticated egress**. Together with `vm-network-isolation.md` (Tier 1 — Public unauthenticated egress), it replaces the previous `kernel-mediated-egress.md` (deprecated; preserved historically). V2 also extends the credential proxy with an **audit-only mode** (§3.5 below) for endpoints that need HTTP-granular audit but no credentials.
+> **Role in V2 unified egress:** This spec is the canonical home for **Tier 2 — Authenticated egress**. Together with [`vm-network-isolation.md`](vm-network-isolation.md) (Tier 1 — Public unauthenticated egress), it replaces the previous [`kernel-mediated-egress.md`](kernel-mediated-egress.md) (deprecated; preserved historically). V2 also extends the credential proxy with an **audit-only mode** (§3.5 below) for endpoints that need HTTP-granular audit but no credentials.
 >
 > **Cross-references:**
-> - `environment-access-control.md §2` — Credential scoping (replaced by this spec)
-> - `kernel-mechanics-prompt.md §3` — NNSP templates (updated with proxy protocol)
-> - `v2-deep-spec.md §INV-VM-CAP-04` — credentials/ never mounted into VMs
-> - `vm-network-isolation.md` — Tier 1 (SNI-allowlist tproxy) for public unauthenticated egress
-> - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
-> - `planner-harness.md §7` — V2 unified egress overview
-> - `extensibility-traits.md §4` — `CredentialBackend` trait, of which the V2 file-based reader (this spec's §11) is one impl; alternative impls (Vault, AWS Secrets Manager, Azure Key Vault, PKCS#11 HSM) plug in unchanged behind the proxy layer this spec describes.
+> - [`environment-access-control.md §2`](environment-access-control.md) — Credential scoping (replaced by this spec)
+> - [`kernel-mechanics-prompt.md §3`](kernel-mechanics-prompt.md) — NNSP templates (updated with proxy protocol)
+> - [`v2-deep-spec.md §INV-VM-CAP-04`](v2-deep-spec.md) — credentials/ never mounted into VMs
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — Tier 1 (SNI-allowlist tproxy) for public unauthenticated egress
+> - ~~[`kernel-mediated-egress.md`](kernel-mediated-egress.md)~~ — DEPRECATED in V2 in favor of unified two-tier egress
+> - [`planner-harness.md §7`](planner-harness.md) — V2 unified egress overview
+> - [`extensibility-traits.md §4`](extensibility-traits.md) — `CredentialBackend` trait, of which the V2 file-based reader (this spec's §11) is one impl; alternative impls (Vault, AWS Secrets Manager, Azure Key Vault, PKCS#11 HSM) plug in unchanged behind the proxy layer this spec describes.
 
-> **Trait boundary (V2):** The `CredentialBackend` trait — defined in `extensibility-traits.md §4` — is the seam at which the *resolution* of a credential name to a credential value happens. Everything in §3 (proxy types), §5 (audit), §6 (prompt engineering), §8 (rejected env-var design), §11 (operator config), and §12 (management CLI) is **independent of which `CredentialBackend` impl** the kernel was booted with: the proxy layer asks `Arc<dyn CredentialBackend>::resolve(...)` and never sees the underlying file/Vault/HSM detail. This means a deployment can swap from `FileCredentialBackend` (V2 default) to `VaultCredentialBackend` or `Pkcs11HsmBackend` without any change to the proxy types or the operator config in this spec — only the boot-site `policy.toml [credential_backend]` field changes.
+> **Trait boundary (V2):** The `CredentialBackend` trait — defined in [`extensibility-traits.md §4`](extensibility-traits.md) — is the seam at which the *resolution* of a credential name to a credential value happens. Everything in §3 (proxy types), §5 (audit), §6 (prompt engineering), §8 (rejected env-var design), §11 (operator config), and §12 (management CLI) is **independent of which `CredentialBackend` impl** the kernel was booted with: the proxy layer asks `Arc<dyn CredentialBackend>::resolve(...)` and never sees the underlying file/Vault/HSM detail. This means a deployment can swap from `FileCredentialBackend` (V2 default) to `VaultCredentialBackend` or `Pkcs11HsmBackend` without any change to the proxy types or the operator config in this spec — only the boot-site `policy.toml [credential_backend]` field changes.
 
 ---
 
@@ -242,7 +242,7 @@ The proxy listeners + the egress-admission listener + the VM itself are bound an
 
 1. `CredentialProxyManager::start_for_session(session_id, task_id, &decls)` binds one listener per `[[tasks.credentials]]` declaration on `127.0.0.1:0`.
 2. A per-session egress-admission `tokio::net::TcpListener::bind("127.0.0.1:0")` is bound for the in-guest `raxis-tproxy` to phone home to.
-3. The composer stamps four classes of values into `VmSpec.env` (per `extensibility-traits.md §3.5`):
+3. The composer stamps four classes of values into `VmSpec.env` (per [`extensibility-traits.md §3.5`](extensibility-traits.md)):
    * One entry per credential proxy keyed by the operator-declared `mount_as` field, value = the proxy's loopback URL. **The URL scheme MUST match the wire-protocol scheme the agent's standard client expects for that `proxy_type`** (rendered by `credential_proxy_manager::SessionProxyHandles::loopback_env`): `postgresql://raxis@127.0.0.1:NNN/` for `postgres`, `mysql://raxis@127.0.0.1:NNN/` for `mysql`, `mssql://raxis@127.0.0.1:NNN/` for `mssql`, `mongodb://127.0.0.1:NNN/` for `mongodb` (no userinfo — pymongo and the official Node / Java drivers reject `user@` URIs that omit a password), `redis://127.0.0.1:NNN` for `redis`, bare `127.0.0.1:NNN` for `smtp`, and `http://127.0.0.1:NNN` for `http` / `k8s` / `aws` / `gcp` / `azure`. Mismatched schemes are NOT a stylistic concern — agents (pymongo, libpq, etc.) reject foreign schemes with `InvalidURI`, and client-side rewrites still fail because the proxy's wire-protocol `serve_one()` reads the connection as malformed and closes it (Live-e2e iter28 reproduced this for mongodb: the catch-all `http://` arm was rendering `MONGO_URL=http://127.0.0.1:NNN`, executor's pymongo bailed out with "connection closed").
    * `RAXIS_SESSION_ID`.
    * `RAXIS_TPROXY_KERNEL_TCP` = the per-session admission listener address.
@@ -262,7 +262,7 @@ The proxy listeners + the egress-admission listener + the VM itself are bound an
 4. `SessionProxyHandles::shutdown()` → emits one `CredentialProxyStopped` per bound proxy with the final counter snapshot.
 
 The fixed ordering means audit-chain readers see a clean V exit-then-cleanup time series:
-`SessionVmExited` lands BEFORE `CredentialProxyStopped` events. The pair `SessionVmSpawned`/`SessionVmExited` is paired-class per `audit-paired-writes.md §4.1`; the `CredentialProxyStarted`/`CredentialProxyStopped` pair is single-class observability per §4.3.
+`SessionVmExited` lands BEFORE `CredentialProxyStopped` events. The pair `SessionVmSpawned`/`SessionVmExited` is paired-class per [`audit-paired-writes.md §4.1`](audit-paired-writes.md); the `CredentialProxyStarted`/`CredentialProxyStopped` pair is single-class observability per §4.3.
 
 **Production callsite seam.** Higher-level kernel callsites (operator IPC `ApprovePlan` → orchestrator auto-spawn; `ActivateSubTask` → executor spawn; recovery resume) all flow through one of two thin bridges in `raxis/kernel/src/session_spawn_orchestrator.rs`:
 
@@ -401,7 +401,7 @@ permits.
 
 **Architectural placement.** This is still a Tier-2 (per-request, HTTP-level)
 proxy — same code path as the credential proxies in §3.1–§3.4 — but with no
-auth injection. Tier 1 (`vm-network-isolation.md`) remains the right tool when
+auth injection. Tier 1 ([`vm-network-isolation.md`](vm-network-isolation.md)) remains the right tool when
 SNI-level audit is sufficient; audit-only mode exists for the cases where it
 isn't.
 
@@ -488,7 +488,7 @@ local URL).
 ### 3.6 — SMTP
 
 **Protocol:** SMTP (RFC 5321) with mandatory STARTTLS or implicit TLS to upstream
-**Canonical home:** `email-and-notification-channels.md §3` (this section is the credential-proxy summary)
+**Canonical home:** [`email-and-notification-channels.md §3`](email-and-notification-channels.md) (this section is the credential-proxy summary)
 
 **What the proxy does:**
 
@@ -506,7 +506,7 @@ local URL).
 - An operator whose only outbound email path is plain SMTP (corporate relay, internal mail server, on-prem deployment) MUST have a way to give agents email-send capability without granting SMTP credentials.
 - Operators who use Mailgun/SendGrid/SES via REST may instead use `proxy_type = "http_audit_only"` (§3.5) targeting the provider's API and skip this proxy entirely.
 
-**Configuration in `policy.toml`** (full schema in `email-and-notification-channels.md §3.3`):
+**Configuration in `policy.toml`** (full schema in [`email-and-notification-channels.md §3.3`](email-and-notification-channels.md)):
 
 ```toml
 [[permitted_credentials]]
@@ -558,7 +558,7 @@ with smtplib.SMTP("localhost", 2525) as s:
 
 The agent must NOT call `s.login()` — the proxy doesn't advertise AUTH and rejects it with `502 Command not implemented`. The agent must NOT include a `Bcc:` header — the proxy strips it. The agent's `MAIL FROM` is overridden; the kernel's `From: <from_address>` is what reaches recipients.
 
-**`PolicyBundle::validate` enforces** (per `email-and-notification-channels.md §3.2`):
+**`PolicyBundle::validate` enforces** (per [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md)):
 
 | Constraint | Failure code |
 | --- | --- |
@@ -568,7 +568,7 @@ The agent must NOT call `s.login()` — the proxy doesn't advertise AUTH and rej
 | `max_recipients_per_message ≤ 50` AND `≥ 1` | `FAIL_SMTP_PROXY_RECIPIENT_CAP_INVALID` |
 | `rate_limit_per_*.count ≥ 1` AND `window_seconds ∈ [1, 86_400]` | `FAIL_SMTP_PROXY_RATE_LIMIT_INVALID` |
 
-**Audit events** (full schema in `email-and-notification-channels.md §3.9`):
+**Audit events** (full schema in [`email-and-notification-channels.md §3.9`](email-and-notification-channels.md)):
 
 - `SmtpProxyConnected` — agent opened the local SMTP socket
 - `SmtpProxyMessageSent` — upstream returned `2xx` to end-of-DATA
@@ -577,7 +577,7 @@ The agent must NOT call `s.login()` — the proxy doesn't advertise AUTH and rej
 - `SmtpProxyUpstreamError` — upstream returned an unexpected error
 - `SmtpProxyDisconnected` — agent or proxy closed the session
 
-**See `email-and-notification-channels.md §3` for**: full wire flow, header rewrite rules, threat model, sliding-window rate limiter, NNSP additions, conformance tests, INV-SMTP-PROXY-01..05.
+**See [`email-and-notification-channels.md §3`](email-and-notification-channels.md) for**: full wire flow, header rewrite rules, threat model, sliding-window rate limiter, NNSP additions, conformance tests, INV-SMTP-PROXY-01..05.
 
 ---
 
@@ -908,7 +908,7 @@ proxies  = k8s-staging:localhost:8001,postgres-staging:localhost:5432,smtp-ops-r
 
 The agent can see which proxies are active on this call. If a proxy it expects to use is not listed, it knows before attempting a connection that it won't work.
 
-For `proxy_type = "smtp"` (V2), an additional NNSP block is templated into the prompt with the proxy's constraints (sender substitution, recipient allowlist, rate limits, no AUTH). See `email-and-notification-channels.md §3.10` for the full template — operators cannot lie to the agent about its own constraints because the prompt is generated from the same `SmtpProxyConfig` that the proxy enforces.
+For `proxy_type = "smtp"` (V2), an additional NNSP block is templated into the prompt with the proxy's constraints (sender substitution, recipient allowlist, rate limits, no AUTH). See [`email-and-notification-channels.md §3.10`](email-and-notification-channels.md) for the full template — operators cannot lie to the agent about its own constraints because the prompt is generated from the same `SmtpProxyConfig` that the proxy enforces.
 
 ---
 
@@ -1431,7 +1431,7 @@ rate_limit_per_session      = { count = 10, window_seconds = 3600 }
 rate_limit_per_task         = { count =  3, window_seconds =  600 }
 ```
 
-The full schema, validator rules, and audit events for `proxy_type = "smtp"` are documented in `email-and-notification-channels.md §3`.
+The full schema, validator rules, and audit events for `proxy_type = "smtp"` are documented in [`email-and-notification-channels.md §3`](email-and-notification-channels.md).
 
 ---
 
@@ -2019,7 +2019,7 @@ model:
 | Run `docker-compose up` for tests | Pre-provisioned services via proxies (Scenario 2) |
 | Deploy to Kubernetes | K8s credential proxy (`proxy_type = "k8s"`) with `kubectl` in the VM |
 | Push to a registry | HTTP credential proxy with registry auth |
-| Run a one-off service | Custom tool (`custom-tools.md`) or operator-managed sidecar (V3) |
+| Run a one-off service | Custom tool ([`custom-tools.md`](custom-tools.md)) or operator-managed sidecar (V3) |
 
 **V3 consideration:** A future operator-managed sidecar model could
 allow the operator to declare additional service containers that run
@@ -2539,7 +2539,7 @@ agent libpq → 127.0.0.1:5432  ─[TCP accept]─►          |
 
 * **Per-VM isolation argument.** Each isolation VM has its own `VZVirtioSocketDevice` (Apple-VZ) / `vhost-vsock` device (Firecracker). The substrate registers the host-side listener on **that VM's device**, not on a shared host CID. On Apple-VZ this is a `VZVirtioSocketListener` bound to the per-VM `VZVirtioSocketDevice`. On Firecracker this is a Unix-domain-socket listener bound at the per-session multiplexer path `<uds_path>_<vsock_port>` — every Firecracker VM the kernel boots has its own `<uds_path>` under the operator-owned runtime dir, so VM-A's `<uds_path>_5432` and VM-B's `<uds_path>_5432` are different inodes on different per-session directories. Vsock port `N` on VM-A's device is a different listener from vsock port `N` on VM-B's device — the substrate's per-VM device boundary IS the per-session isolation boundary. Cross-session access is structurally impossible: an executor in VM-B that dials `(VMADDR_CID_HOST, N)` reaches VM-B's listener (which forwards to VM-B's host loopback proxies), never VM-A's.
 * **Credential boundary preservation.** The credential proxy on the host side is the only component that ever sees plaintext credentials. The vsock channel carries opaque bytes — the in-VM forwarder is transport-agnostic and the host-side accepter just splices a SOCK_STREAM fd to a TCP connection. No code path puts a credential value on the vsock transport.
-* **Composes with `vm-network-isolation.md §3`.** The in-guest tproxy iptables rules already ACCEPT traffic to `lo` (the rule is `! -d 127.0.0.1`), so the agent's TCP connect to `127.0.0.1:<guest_loopback_port>` is not redirected through the egress-admission machinery — it reaches the in-VM forwarder directly. The forwarder's AF_VSOCK egress is an in-VM kernel-managed channel, not observed by the iptables OUTPUT chain.
+* **Composes with [`vm-network-isolation.md §3`](vm-network-isolation.md).** The in-guest tproxy iptables rules already ACCEPT traffic to `lo` (the rule is `! -d 127.0.0.1`), so the agent's TCP connect to `127.0.0.1:<guest_loopback_port>` is not redirected through the egress-admission machinery — it reaches the in-VM forwarder directly. The forwarder's AF_VSOCK egress is an in-VM kernel-managed channel, not observed by the iptables OUTPUT chain.
 
 ### 12a.3 — Lifecycle
 
@@ -2583,7 +2583,7 @@ The normative PID 1 sequence inside the executor VM is:
 
 The bring-up (step 3) and the forwarder activation (step 6) are both load-bearing for `INV-CRED-PROXY-VM-REACHABILITY-01`. The bring-up is logged as `step:"guest-init", event:"loopback_already_up" | "loopback_iface_up"`; the forwarder activation is logged as `step:"vsock-loopback-forwarder", role:"executor", outcome:"activated" | "skipped" | "plan-decode-failed" | "bind-failed"`. A forensic replay can pin the exact PID 1 progress from these two emissions.
 
-> **Companion specs.** The Linux-microVM-specific phase budget for steps 1–3 lives in `isolation-linux-microvm.md §3.1`. The forwarder's failure semantics (bind-failure exit-64 contract) live in `crates/raxis-tproxy/src/loopback_forwarder.rs` (rustdoc on `spawn_forwarder`).
+> **Companion specs.** The Linux-microVM-specific phase budget for steps 1–3 lives in [`isolation-linux-microvm.md §3.1`](isolation-linux-microvm.md). The forwarder's failure semantics (bind-failure exit-64 contract) live in `crates/raxis-tproxy/src/loopback_forwarder.rs` (rustdoc on `spawn_forwarder`).
 
 ---
 
@@ -2833,7 +2833,7 @@ not enabled by default.
 ### 13.8 — NNSP Update: Reserved Ports and Dev Server Protocol
 
 This section is added to the Executor and Orchestrator NNSPs (appended to §3.1 and §3.2
-in `kernel-mechanics-prompt.md`):
+in [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md)):
 
 ```text
 ## Local Development Servers
@@ -2890,13 +2890,13 @@ Docker-in-VM: only available if explicitly enabled in the VM image and policy.
 > `mongodb`, `redis`, `smtp`) from V3 follow-up to V2 in-scope.
 >
 > **Cross-references:**
-> - `kernel-mediated-egress.md` (deprecated; superseded by this section
+> - [`kernel-mediated-egress.md`](kernel-mediated-egress.md) (deprecated; superseded by this section
 >   for Tier-2 authenticated egress)
-> - `vm-network-isolation.md` — Tier-1 SNI-allowlist tproxy is
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — Tier-1 SNI-allowlist tproxy is
 >   unchanged; this section affects Tier-2 only.
-> - `audit-paired-writes.md §3.1` — paired-write status of the new
+> - [`audit-paired-writes.md §3.1`](audit-paired-writes.md) — paired-write status of the new
 >   audit events introduced here.
-> - `extensibility-traits.md §4` — `CredentialBackend` trait whose
+> - [`extensibility-traits.md §4`](extensibility-traits.md) — `CredentialBackend` trait whose
 >   `resolve()` returns the upstream URL bytes the proxy parses below.
 >
 > **Why this section exists.** The V2.0 cut shipped wire-protocol
@@ -3207,7 +3207,7 @@ misconfigured upstream:
 
 These three codes are wire-level only — they never reach the
 kernel's intent-admission failure-code surface (so they do not
-appear in `policy-plan-authority.md §3b`). They are visible on
+appear in [`policy-plan-authority.md §3b`](policy-plan-authority.md)). They are visible on
 `raxis audit dump --kind CredentialProxyUpstreamFailed`.
 
 ### 14.8 — Per-proxy implementation matrix
@@ -3352,9 +3352,9 @@ change is required. No migration on `kernel.db`.
 
 ### 10.0 Trait-boundary refactor (V2 prerequisite)
 
-This spec's proxy types resolve credential names to credential values via the `CredentialBackend` trait defined in `extensibility-traits.md §4`. The proxy layer NEVER opens `<data_dir>/credentials/<name>.env` directly — it always goes through `Arc<dyn CredentialBackend>`. Concretely:
+This spec's proxy types resolve credential names to credential values via the `CredentialBackend` trait defined in [`extensibility-traits.md §4`](extensibility-traits.md). The proxy layer NEVER opens `<data_dir>/credentials/<name>.env` directly — it always goes through `Arc<dyn CredentialBackend>`. Concretely:
 
-- [ ] **`crates/raxis-credentials/`** (NEW; per `extensibility-traits.md §4.3`) — defines `trait CredentialBackend`, `CredentialName`, `CredentialValue` (newtyped `Secret<Vec<u8>>`), `CredentialError`, `Lease`, `ConsumerIdentity`. Re-exported from `kernel`, `gateway`, and the proxy crates below.
+- [ ] **`crates/raxis-credentials/`** (NEW; per [`extensibility-traits.md §4.3`](extensibility-traits.md)) — defines `trait CredentialBackend`, `CredentialName`, `CredentialValue` (newtyped `Secret<Vec<u8>>`), `CredentialError`, `Lease`, `ConsumerIdentity`. Re-exported from `kernel`, `gateway`, and the proxy crates below.
 - [ ] **`crates/raxis-credentials-file/`** (NEW; the V2 default) — `FileCredentialBackend` reads `<data_dir>/credentials/<name>.<ext>` with mode 0600 + uid validation; current readers in `gateway/src/policy_view.rs::load_credentials` and the planned in-VM credential reader move here unchanged.
 - [ ] **`kernel/src/main.rs`** — boot site constructs `Arc<dyn CredentialBackend>` from `policy.toml [credential_backend]`; default `File`. Future variants `Vault`, `AwsSecretsManager`, `AzureKeyVault`, `Pkcs11Hsm` plug in here without touching anything below.
 - [ ] **All `CredentialProxy` impls below** — receive `Arc<dyn CredentialBackend>` (not a path) at construction; resolve credentials via `backend.resolve(name, ConsumerIdentity::CredentialProxy { proxy_type, session_id })`; the `CredentialAccessed` audit event is emitted by `CredentialBackend::resolve` itself, NOT by the proxy.
@@ -3399,7 +3399,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [x] Restriction enforcement: `allow_only_select` (DML/DDL → `ErrorResponse{42501}`).
       - [ ] **Deferred:** extended-query path (`Parse`/`Bind`/`Execute`/`Describe`/`Sync`/`Close`) — current MVP returns `0A000` (`feature_not_supported`). Unblocks prepared-statement tracking and ORM workloads.
       - [ ] **Deferred:** real upstream forwarding via `tokio-postgres` — current MVP synthesises `CommandComplete` for the simple-query path so handshake-tier integration is demonstrable end-to-end without a real Postgres process.
-      - [x] **V2 `proxy-table-allowlists.md`:** `allowed_tables`, `forbidden_tables`, `max_result_rows`, `enforce = false` audit-only mode (`raxis/crates/credential-proxy-postgres/src/restriction.rs` + `slice_postgres_proxy_table_allowlists` e2e).
+      - [x] **V2 [`proxy-table-allowlists.md`](proxy-table-allowlists.md):** `allowed_tables`, `forbidden_tables`, `max_result_rows`, `enforce = false` audit-only mode (`raxis/crates/credential-proxy-postgres/src/restriction.rs` + `slice_postgres_proxy_table_allowlists` e2e).
       - [ ] **Deferred:** `forbidden_schemas`, `statement_timeout_ms`.
       - [ ] **Deferred:** transaction-scoped restriction tracking with auto-`ROLLBACK` on blocked DML inside `BEGIN`.
       - [ ] Connection multiplexing (1:1 agent-to-real per session)
@@ -3412,7 +3412,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [x] `COM_PING` (synthetic `OK_Packet`), `COM_RESET_CONNECTION` (synthetic `OK_Packet` so connection-pool drivers can reuse the session), `COM_QUIT` (clean disconnect).
       - [x] Audit emission: every classified `COM_QUERY` emits `DatabaseQueryExecuted { sql_sha256, sql_text(optional), operation, blocked }` translated by the manager into `AuditEventKind::DatabaseQueryExecuted`.
       - [x] Stats surface (`ProxyStats { connections_served, queries_audited, queries_blocked, bytes_observed }`) feeds the manager's `CredentialProxyStopped` event.
-      - [x] **V2 `proxy-table-allowlists.md`:** `allowed_tables`, `forbidden_tables`, `max_result_rows` (streaming cap via `ERR_Packet` truncation), `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mysql/src/restriction.rs`).
+      - [x] **V2 [`proxy-table-allowlists.md`](proxy-table-allowlists.md):** `allowed_tables`, `forbidden_tables`, `max_result_rows` (streaming cap via `ERR_Packet` truncation), `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mysql/src/restriction.rs`).
       - [ ] **Deferred V3:** real upstream forwarding via `mysql_async`; `caching_sha2_password` plugin (the MySQL 8.0 default — V2 advertises `mysql_native_password` and lets clients negotiate down); `COM_STMT_PREPARE` / `COM_STMT_EXECUTE` (binary protocol); result-set framing for `SELECT` (V2 returns `OK_Packet` for every allowed statement); `forbidden_schemas`, `statement_timeout_ms`.
 - [x] **Implement `MssqlProxy`** (V2 handshake-tier MVP). **Implementation reference:** `raxis/crates/credential-proxy-mssql/` (lib + 8 unit tests + live-e2e slice `live-e2e/src/slice_mssql_proxy.rs`). Surface: `MssqlProxy::bind` + `serve()` accept loop, configured by `ProxyDecl::Mssql { restrictions }` (`raxis-plan-credentials`) and wired through `CredentialProxyManager::bind_mssql`. The `mount_as` env var receives a `mssql://raxis@127.0.0.1:NNNN/db` URL — `pytds`, `pyodbc`, `tiberius` (Rust), and the .NET `SqlClient` driver all speak the V2 plaintext TDS dialect after negotiating `ENCRYPTION = NotSupported` in `PRELOGIN`.
       - [x] `PRELOGIN` ingestion + synthetic VERSION (`15.0.4153.1`) + `ENCRYPTION = NotSupported` reply (the kernel terminates TLS at the VM boundary; the proxy speaks plaintext TDS).
@@ -3421,7 +3421,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [x] Restriction enforcement: `allow_only_select` (DML/DDL → `ERROR` token with `error_number = -1`, `class = 14`, followed by a `DONE_ERROR`).
       - [x] Audit emission: every classified `SQLBatch` emits `DatabaseQueryExecuted { sql_sha256, sql_text(optional), operation, blocked }` translated by the manager into `AuditEventKind::DatabaseQueryExecuted`.
       - [x] Stats surface mirrors the MySQL proxy (`connections_served`, `queries_audited`, `queries_blocked`, `bytes_observed`).
-      - [x] **V2 `proxy-table-allowlists.md`:** `allowed_tables`, `forbidden_tables`, `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mssql/src/restriction.rs`). `max_result_rows` is configured + surfaced in audit but its streaming cap is a V2 followup (TDS token parsing — see `proxy-table-allowlists.md §11.1`).
+      - [x] **V2 [`proxy-table-allowlists.md`](proxy-table-allowlists.md):** `allowed_tables`, `forbidden_tables`, `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mssql/src/restriction.rs`). `max_result_rows` is configured + surfaced in audit but its streaming cap is a V2 followup (TDS token parsing — see [`proxy-table-allowlists.md §11.1`](proxy-table-allowlists.md)).
       - [ ] **Deferred V3:** real upstream forwarding via `tiberius`; `LOGIN7` parsing for db / hostname / appname routing; `RPC` packet handling (binary parameter binding); Azure AD token auth via the Azure proxy; `forbidden_schemas`.
 - [x] **Implement `MongodbProxy`** (V2 handshake-tier MVP). **Implementation reference:** `raxis/crates/credential-proxy-mongodb/` (lib + 8 unit tests + live-e2e slice `live-e2e/src/slice_mongodb_proxy.rs`). Surface: `MongodbProxy::bind` + `serve()` accept loop, configured by `ProxyDecl::Mongodb { restrictions }` (`raxis-plan-credentials`) and wired through `CredentialProxyManager::bind_mongodb`. The `mount_as` env var receives a `mongodb://127.0.0.1:NNNN/db` URI — the V2 proxy advertises **no supported auth mechanisms** in its `hello` reply so `pymongo`, `mongosh`, and the official Node driver skip SCRAM/X.509 entirely (the kernel-resolved credential is what V3 will send to a real upstream after the SCRAM dance lands).
       - [x] 16-byte header parser + `OP_MSG` framing (op code 2013); inbound message length capped at 64 MiB to bound buffering.
@@ -3431,7 +3431,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [x] Restriction enforcement: `allow_read_only` (writes → `{ ok: 0.0, code: 13, codeName: "Unauthorized", errmsg: "..." }`); `is_read_command` covers `find`, `aggregate`, `count`, `distinct`, `getMore`, `listCollections`, `listIndexes`, `listDatabases`, `dbStats`, `collStats`, `connectionStatus`, `whatsmyuri`, etc. — see `restriction::is_read_command` for the full list.
       - [x] Audit emission: every classified command emits `MongoCommandExecuted { command, body_sha256, blocked }` translated by the manager into `AuditEventKind::MongoCommandExecuted`.
       - [x] Stats surface (`ProxyStats { connections_served, commands_audited, commands_blocked, bytes_observed }`) feeds the manager's `CredentialProxyStopped` event.
-      - [x] **V2 `proxy-table-allowlists.md`:** BSON command walker resolves primary collection + `$db`; `allowed_collections` / `forbidden_collections` admit/deny enforcement; `max_documents` cursor-rewrite cap (truncate `firstBatch` / `nextBatch` + zero cursor id per `§7.4`); fail-closed secondary-collection rejection for `$lookup` / `$unionWith` / `$merge` / `$out`; `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mongodb/src/restriction.rs` + `cursor.rs` + `slice_mongodb_proxy_collection_allowlists` e2e).
+      - [x] **V2 [`proxy-table-allowlists.md`](proxy-table-allowlists.md):** BSON command walker resolves primary collection + `$db`; `allowed_collections` / `forbidden_collections` admit/deny enforcement; `max_documents` cursor-rewrite cap (truncate `firstBatch` / `nextBatch` + zero cursor id per `§7.4`); fail-closed secondary-collection rejection for `$lookup` / `$unionWith` / `$merge` / `$out`; `enforce = false` audit-only mode (`raxis/crates/credential-proxy-mongodb/src/restriction.rs` + `cursor.rs` + `slice_mongodb_proxy_collection_allowlists` e2e).
       - [ ] **Deferred V3:** real upstream forwarding via the official `mongodb` Rust driver (V2.1 already supports the raw upstream relay); per-pipeline `$lookup` walker (V2 rejects $lookup-bearing pipelines when an allowlist is configured); `op_timeout_ms`; `OP_REPLY` legacy wire (V2 `OP_MSG`-only).
 - [x] **Implement `AwsProxy`** (V2 MVP). **Implementation reference:** `raxis/crates/credential-proxy-aws/` (lib + 11 unit tests). Surface: `AwsProxy::bind(Arc<dyn CredentialBackend>, ProxyConfig, Arc<dyn AuditChannel>) -> Result<Self, ProxyError>` binds a localhost HTTP listener that serves the AWS container-credential-provider shape (`AWS_CONTAINER_CREDENTIALS_FULL_URI`). The manager wires this through `raxis_credential_proxy_manager::CredentialProxyManager::bind_aws` from `ProxyDecl::Aws { role_arn, lease_seconds, restrictions }` (`raxis-plan-credentials`). The `mount_as` env var receives a full URL (`http://127.0.0.1:NNNN/creds`) — boto3, aws-sdk-rust, and Terraform's AWS provider all dial that URL automatically when `AWS_CONTAINER_CREDENTIALS_FULL_URI` is set.
       - [x] HTTP/1.1 inbound parser (`httparse`) handles `GET /creds` (allowlisted) and rejects anything else with `403 Forbidden`.
@@ -3448,7 +3448,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [x] Audit emission: every forwarded (and every blocked) command emits `RedisCommandExecuted { command, frame_sha256, blocked }` translated by the manager into `AuditEventKind::RedisCommandExecuted`.
       - [x] Stats surface (`ProxyStats { connections_served, commands_forwarded, commands_blocked, bytes_out_to_upstream }`) feeds the manager's `CredentialProxyStopped` event.
       - [ ] **Deferred V3:** RESP-over-TLS for managed Redis (Elasticache, Memorystore); ACL `AUTH user pass` form (V2 emits `AUTH password`); `MULTI/EXEC` transactional grouping in the audit chain; cluster proxy across multiple upstream nodes by hash slot.
-- [x] **Implement `SmtpProxy`** (V2 MVP; full spec in `email-and-notification-channels.md §3`). **Implementation reference:** `raxis/crates/credential-proxy-smtp/` (lib + 17 unit/integration tests). Surface: `SmtpProxy::bind(Arc<dyn CredentialBackend>, ProxyConfig, Arc<dyn EnvelopeAuditSink>) -> Result<Self, ProxyError>` binds a localhost SMTP server, then `serve()` runs the accept loop. The manager wires this through `raxis_credential_proxy_manager::CredentialProxyManager::bind_smtp` from `ProxyDecl::Smtp { auth_mode, upstream_host_port, require_upstream_tls, restrictions }` (`raxis-plan-credentials`), and the `mount_as` env var receives the bare loopback `host:port` (no scheme) — agent SMTP libraries dial that pair directly. Integration test `start_then_shutdown_emits_paired_audit_events_for_smtp` pins the kernel-side `CredentialProxyStarted`/`CredentialProxyStopped` pair through the manager.
+- [x] **Implement `SmtpProxy`** (V2 MVP; full spec in [`email-and-notification-channels.md §3`](email-and-notification-channels.md)). **Implementation reference:** `raxis/crates/credential-proxy-smtp/` (lib + 17 unit/integration tests). Surface: `SmtpProxy::bind(Arc<dyn CredentialBackend>, ProxyConfig, Arc<dyn EnvelopeAuditSink>) -> Result<Self, ProxyError>` binds a localhost SMTP server, then `serve()` runs the accept loop. The manager wires this through `raxis_credential_proxy_manager::CredentialProxyManager::bind_smtp` from `ProxyDecl::Smtp { auth_mode, upstream_host_port, require_upstream_tls, restrictions }` (`raxis-plan-credentials`), and the `mount_as` env var receives the bare loopback `host:port` (no scheme) — agent SMTP libraries dial that pair directly. Integration test `start_then_shutdown_emits_paired_audit_events_for_smtp` pins the kernel-side `CredentialProxyStarted`/`CredentialProxyStopped` pair through the manager.
       - [x] SMTP-server side: EHLO/HELO/AUTH (rejected with 503)/MAIL FROM/RCPT TO/DATA/QUIT only; AUTH from agent-side rejected (the proxy IS the auth boundary).
       - [x] Envelope gating from `Restrictions { allowed_sender_address, allowed_recipient_domains, max_recipients_per_message, max_message_bytes, max_messages_per_minute }` — rejections emit `EnvelopeAudit { outcome: Rejected, rejection_reason }` with stable `audit_summary` prefixes (`sender_not_allowed`, `recipient_not_allowed`, `too_many_recipients`, `message_too_large`, `rate_limit_exceeded`).
       - [x] Per-session rolling 60-second token-bucket rate limiter (`RateBucket`; in-process, per-listener — full SQLite cross-session rate limiting is a follow-up).
@@ -3459,7 +3459,7 @@ After this phase, every proxy type below operates against any conformant `Creden
       - [ ] **Deferred V2-followup:** header rewrite (substitute `From:`, strip `Bcc:`/`Sender:`/`Resent-From:`, rewrite `Message-Id:`); body SHA-256 archival; `xoauth2` auth mode; `SmtpProxyConnected`/`SmtpProxyDisconnected` connection-lifecycle events (the per-envelope `EnvelopeAudit` IS now translated by the manager into `AuditEventKind::SmtpMessageRelayed` / `SmtpMessageRejected`).
 - [x] **`[[tasks.credentials]]` plan parser** — typed parser for the per-task credential declaration block. **Implementation reference:** `raxis/crates/plan-credentials/`. Surface: `parse_for_task(&toml::Value) -> Result<Vec<TaskCredentialDecl>, ParseError>` + a `ProxyDecl` enum with typed variants for each proxy_type (`Postgres`, `Http`, `K8s`, `Smtp`, `Redis`, `Aws`, `Gcp`, `Azure`, `Mysql`, `Mssql`, `Mongodb`) + an `Unknown` catch-all that preserves unimplemented `proxy_type` strings without losing information. Tests: 14 unit tests pinning the schema (postgres with default + `allow_only_select` restrictions, http with bearer + basic auth modes, http with method/path-prefix allowlists, k8s convenience over http, smtp with default `Plain` auth + smtp with `Login` auth and full `SmtpRestrictions` (`allowed_sender_address`, `allowed_recipient_domains`, `max_recipients_per_message`, `max_message_bytes`, `max_messages_per_minute`), multiple credentials per task, unknown proxy_type preservation, structured errors for missing required fields). The parser does NOT touch the credential backend or spawn proxies; that is the kernel-side `CredentialProxyManager`'s job.
 - [x] **Kernel: per-session `CredentialProxyManager`** — **Implementation reference:** `raxis/crates/credential-proxy-manager/` (lib + integration test). Surface: `CredentialProxyManager::new(Arc<dyn CredentialBackend>, Arc<dyn AuditSink>)` is constructed once at boot from the same backend and audit sink as the rest of the kernel and threaded through `HandlerContext::proxy_manager`. The session-spawn path calls `manager.start_for_session(session_id, task_id, &task_decls).await -> Result<SessionProxyHandles, ManagerError>` which (1) binds a real listener per `ProxyDecl::{Postgres, Http, K8s, Smtp, Redis, Aws, Gcp, Azure, Mysql, Mssql, Mongodb}` against `127.0.0.1:0`, (2) emits one `CredentialProxyStarted` audit event per bound proxy carrying the loopback `addr`, and (3) returns `SessionProxyHandles` with `loopback_env() -> BTreeMap<String, String>` for the `mount_as → URL` injection into the VM environment. SMTP loopback URLs are bare `host:port` (no scheme) so smtplib-style clients dial the pair directly. K8s rides the HTTP credential proxy with a fixed `auth_mode = "bearer"` and a kubeconfig-derived `cluster.server` upstream (the manager parses the first `- cluster: ... server: ...` entry from the kubeconfig YAML body at bind time). The session-teardown path calls `handles.shutdown() -> Result<ShutdownReport, ManagerError>` which aborts the listener tasks, snapshots the per-proxy stats, and emits one `CredentialProxyStopped` audit event per proxy carrying `{ connections_served, forwards_completed, forwards_blocked }`. **Tests:** 12 unit tests + 1 integration test covering Postgres/HTTP/K8s paired-event emission (including k8s `loopback_env` URL shape and `proxy_type = "k8s"` audit-label preservation), unknown-proxy-type rejection without partial audit emission, empty-decl no-op, declaration-order-preserving multi-decl bind, kubeconfig parse-error surfacing, and a real TCP-client connecting to the bound listener and observing `connections_served` increment through to the `CredentialProxyStopped` event. **Deferred to followup**: the actual session-spawn callsite wiring (`approve_plan` / `handle_create_session` calling `proxy_manager.start_for_session(...)` and stamping the `loopback_env` into the VM env block) — that is gated on the production VM-spawn path being driven from kernel callsites, which is a separate V2 work item.
-- [x] **Kernel: `[[tasks.credentials]]` persistence at `approve_plan`.** **Implementation reference:** `raxis/kernel/src/initiatives/lifecycle.rs::insert_task_credential_proxies_in_tx` (write side, called from inside the `approve_plan` transaction immediately after each `scheduler::admit_in_tx`) and `raxis/kernel/src/initiatives/lifecycle.rs::read_task_credential_proxies_in_tx` (read side, used at session-spawn time by the `CredentialProxyManager`). Storage layer: `raxis_store::Table::TaskCredentialProxies` (DDL migration 10, see `raxis-store/src/migration.rs`). The table is **METADATA ONLY** — credential VALUES never enter `kernel.db`; bytes resolve through the `CredentialBackend`. **Round-trip test:** `task_credential_proxies_persistence_round_trips_via_session_spawn` in `lifecycle::tests` — exercises postgres + http + k8s + multi-credential-per-task + insertion-order ordering, *and* asserts at the SQL level that no `credential_value`, `password`, `token`, `kubeconfig`, or `secret` column ever exists on the table. See `credential-proxy.md §1.1` for the full metadata-only invariant.
+- [x] **Kernel: `[[tasks.credentials]]` persistence at `approve_plan`.** **Implementation reference:** `raxis/kernel/src/initiatives/lifecycle.rs::insert_task_credential_proxies_in_tx` (write side, called from inside the `approve_plan` transaction immediately after each `scheduler::admit_in_tx`) and `raxis/kernel/src/initiatives/lifecycle.rs::read_task_credential_proxies_in_tx` (read side, used at session-spawn time by the `CredentialProxyManager`). Storage layer: `raxis_store::Table::TaskCredentialProxies` (DDL migration 10, see `raxis-store/src/migration.rs`). The table is **METADATA ONLY** — credential VALUES never enter `kernel.db`; bytes resolve through the `CredentialBackend`. **Round-trip test:** `task_credential_proxies_persistence_round_trips_via_session_spawn` in `lifecycle::tests` — exercises postgres + http + k8s + multi-credential-per-task + insertion-order ordering, *and* asserts at the SQL level that no `credential_value`, `password`, `token`, `kubeconfig`, or `secret` column ever exists on the table. See [`credential-proxy.md §1.1`](credential-proxy.md) for the full metadata-only invariant.
 - [x] **Kernel: `[[tasks.credentials]]` shift-left validation at `approve_plan`.** **Implementation reference:** `raxis/kernel/src/initiatives/lifecycle.rs::validate_task_credentials` (called from `approve_plan` immediately after `validate_cross_cutting_artifacts` and before `BEGIN TRANSACTION`). The validator iterates every parsed `[[tasks.credentials]]` block (already typed via `raxis_plan_credentials::parse_for_task` inside `parse_plan_tasks`) and rejects:
   * `proxy_type` values not in the V2 implemented set (`postgres | http | k8s | smtp | redis | aws | gcp | azure | mysql | mssql | mongodb`) — surfaced as `LifecycleError::PlanTaskCredentialsInvalid { rule: "unknown_proxy_type", offending_task, offending_credential, suggestion }`. The diagnostic enumerates the V2 implemented set so the operator can either drop the credential block or upgrade the kernel build to one that ships the matching proxy.
   * Structural malformations (`raxis_plan_credentials::ParseError`) — surfaced as `LifecycleError::PlanInvalid { reason }` with the offending task id and parser diagnostic preserved verbatim.

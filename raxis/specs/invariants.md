@@ -42,10 +42,10 @@
 > `INV-MERGE-WORKTREE-RETAIN`, `INV-MERGE-CONSISTENCY`,
 > `INV-CAPACITY-01..06`, `INV-PROVIDER-01..10`,
 > `INV-LIFECYCLE-01..07`, `INV-CRED-KERNEL-01`, `INV-SECRET-01..05`
-> (canonical home: `v2/secrets-model.md`), `INV-DELEGATE-01`,
+> (canonical home: [`v2/secrets-model.md`](v2/secrets-model.md)), `INV-DELEGATE-01`,
 > `INV-DISPATCH`, `INV-RUNTIME-CLASSIFICATION` (§12 of this file per
 > the V1 numbering, slated to become INV-09),
-> `INV-ELASTIC-01..07` (canonical home: `v2/elastic-vm-scaling.md`).
+> `INV-ELASTIC-01..07` (canonical home: [`v2/elastic-vm-scaling.md`](v2/elastic-vm-scaling.md)).
 >
 > **DEPRECATED in V2 (do NOT mirror; will be removed entirely in V3):**
 > `INV-EGRESS-01` (kernel-mediated egress allowlist; superseded by
@@ -111,7 +111,7 @@
 ## §1 — Top-level invariants (must-pass list)
 
 These are the v1 release gates. If any one of these fails, v1 is not
-done — regardless of what else works. Canonical home: `v1/philosophy.md`
+done — regardless of what else works. Canonical home: [`v1/philosophy.md`](v1/philosophy.md)
 §1.2.
 
 ### INV-01 — Planner needs a kernel session token
@@ -134,7 +134,7 @@ revoked it is rejected at session-lookup; with a session token whose
 `expires_at` has passed it is rejected at the same gate. No
 authority leaks past these checks.
 
-**Canonical home.** `v1/philosophy.md` §1.2.
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2.
 
 ---
 
@@ -162,7 +162,7 @@ it routes through the kernel, the `estimated_cost` it provides is
 discarded by `compute_admission_cost`, which derives the real cost
 from `(touched_paths, intent_kind, policy.budget.base_cost_per_intent_kind)`.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-core.md` §3 (`budget`).
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-core.md`](v1/kernel-core.md) §3 (`budget`).
 
 ---
 
@@ -188,7 +188,7 @@ IPC socket to the kernel; the kernel logs every fetch with its
 URL, content hash, and byte length. After a postmortem the
 operator can `grep` the audit chain for unexpected hosts.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/peripherals.md` §3.
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/peripherals.md`](v1/peripherals.md) §3.
 
 ---
 
@@ -210,7 +210,7 @@ head_sha = B)`; the previous successful witness for `head_sha = A`
 does not appear. The kernel re-spawns the verifier under `head_sha
 = B`, the regression fails, and the gate check rejects.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-store.md`
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-store.md`](v1/kernel-store.md)
 §2.5.6 (`witness_records`).
 
 ---
@@ -233,7 +233,7 @@ segment N+1's first record from segment N's last record, and
 detects the discontinuity. The kernel itself refuses to advance
 the epoch when the chain is invalid.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-store.md`
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-store.md`](v1/kernel-store.md)
 §2.5.2 (audit log).
 
 ---
@@ -258,7 +258,7 @@ in-memory queue or counter is consulted. An investigator pulls
 the audit log six months later and replays every decision in
 order — same inputs, same outputs.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-core.md` §recovery.
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-core.md`](v1/kernel-core.md) §recovery.
 
 ---
 
@@ -281,7 +281,7 @@ scope, escalation-status, validity) and rejects the forgery at
 step 1 (`NotFound`). Even a real-but-replayed token is rejected at
 the nonce-replay step.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-core.md` §4
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-core.md`](v1/kernel-core.md) §4
 (escalation FSM); INV-ESC-01..06.
 
 ---
@@ -304,7 +304,7 @@ manifest and computes the path set from `vcs::diff(base_sha,
 head_sha)`; the resulting required claims include the test-pass
 gate; the planner cannot bypass the gate by lying about its scope.
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/kernel-core.md` §gates.
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/kernel-core.md`](v1/kernel-core.md) §gates.
 
 ---
 
@@ -327,13 +327,13 @@ gate witness — and cannot tell which rule fired. The richer
 diagnostic lives only in the audit chain (operator-visible) and
 the planner-feedback table (operator-mediated).
 
-**Canonical home.** `v1/philosophy.md` §1.2; `v1/peripherals.md` §3.1.
+**Canonical home.** [`v1/philosophy.md`](v1/philosophy.md) §1.2; [`v1/peripherals.md`](v1/peripherals.md) §3.1.
 
 ---
 
 ## §2 — Initiative & task FSM (INV-INIT-*)
 
-Canonical home: `v1/kernel-core.md` §4.8 (Trust Invariants — Gap 4).
+Canonical home: [`v1/kernel-core.md`](v1/kernel-core.md) §4.8 (Trust Invariants — Gap 4).
 
 ### INV-INIT-01 — Planner cannot create or amend tasks
 
@@ -506,7 +506,7 @@ matters for an initiative.
 
 **Technical enforcement mechanism (V2).** The strengthened post-
 admission read discipline is enforced by **Plan Bundle Sealing**
-(`v2/plan-bundle-sealing.md`). The CLI bundles `plan.toml` plus all
+([`v2/plan-bundle-sealing.md`](v2/plan-bundle-sealing.md)). The CLI bundles `plan.toml` plus all
 transitively-referenced host-side artifacts into a canonical byte
 array, signs the bundle hash atomically with submission, and the
 kernel seals the bundle bytes into SQLite at admission time. The
@@ -526,7 +526,7 @@ submission cannot influence the executing initiative — the kernel
 no longer reads from that directory and the bundle bytes in SQLite
 are signature-protected.
 
-**Canonical home.** `v2/plan-bundle-sealing.md`.
+**Canonical home.** [`v2/plan-bundle-sealing.md`](v2/plan-bundle-sealing.md).
 
 ---
 
@@ -577,7 +577,7 @@ with `FAIL_PLAN_BUNDLE_REPLAY`, attaching the prior `initiative_id`
 to the failure detail so the operator can immediately distinguish
 the replay from a benign re-submission after a lost CLI ack.
 
-**Canonical home.** `v2/plan-bundle-sealing.md` §3.5, §8.1
+**Canonical home.** [`v2/plan-bundle-sealing.md`](v2/plan-bundle-sealing.md) §3.5, §8.1
 step 10a/10b.
 
 ---
@@ -812,9 +812,9 @@ The test is wrapped in `tokio::time::timeout(Duration::from_secs(60))`
 as a hard wall — if the kernel hangs anywhere along the chain,
 the test fails fast (current wall-clock: ~1.5 s).
 
-**Canonical home.** `v2/concurrency-and-locking.md` §7a
+**Canonical home.** [`v2/concurrency-and-locking.md`](v2/concurrency-and-locking.md) §7a
 (INV-LOCK-07, the deadlock watcher that bounds detection
-latency); `v1/kernel-store.md` §2 (INV-STORE-02, multi-table
+latency); [`v1/kernel-store.md`](v1/kernel-store.md) §2 (INV-STORE-02, multi-table
 atomicity that ties the four mutations into one transaction).
 
 ---
@@ -886,9 +886,9 @@ SQLite store: < 5 ms.
   the return is `Ok(None)` and neither row changes — the
   recovery-sweep idempotency contract.
 
-**Canonical home.** `v2/v2-deep-spec.md §IntegrationMerge`,
-`v2/v2_extended_gaps.md §1.2` (host-side fast-forward),
-`v1/kernel-store.md §2` (INV-STORE-02 single-transaction
+**Canonical home.** [`v2/v2-deep-spec.md §IntegrationMerge`](v2/v2-deep-spec.md),
+[`v2/v2_extended_gaps.md §1.2`](v2/v2_extended_gaps.md) (host-side fast-forward),
+[`v1/kernel-store.md §2`](v1/kernel-store.md) (INV-STORE-02 single-transaction
 atomicity).
 
 ---
@@ -956,16 +956,16 @@ duration.
   exercises the `QueryReturnedNoRows` path so a forensics-
   deleted initiative cannot crash the cascade.
 
-**Canonical home.** `v2/v2-deep-spec.md §IntegrationMerge`,
-`v1/kernel-core.md §2.4` (initiative FSM —
+**Canonical home.** [`v2/v2-deep-spec.md §IntegrationMerge`](v2/v2-deep-spec.md),
+[`v1/kernel-core.md §2.4`](v1/kernel-core.md) (initiative FSM —
 `Executing → Completed` is the canonical success edge),
-`v1/kernel-store.md §2` (INV-STORE-02 multi-table atomicity).
+[`v1/kernel-store.md §2`](v1/kernel-store.md) (INV-STORE-02 multi-table atomicity).
 
 ---
 
 ## §3 — Escalation (INV-ESC-*)
 
-Canonical home: `v1/kernel-core.md` §4.
+Canonical home: [`v1/kernel-core.md`](v1/kernel-core.md) §4.
 
 ### INV-ESC-01 — No self-approval
 
@@ -1088,7 +1088,7 @@ testable assertion against this invariant.
 
 ## §4 — Kernel store (INV-STORE-*)
 
-Canonical home: `v1/kernel-store.md` §2.5.1 (DDL + mutex/transaction
+Canonical home: [`v1/kernel-store.md`](v1/kernel-store.md) §2.5.1 (DDL + mutex/transaction
 contracts).
 
 ### INV-STORE-01 — Single-acquire single-transaction discipline
@@ -1156,7 +1156,7 @@ scenarios — patterns A (split mutex acquisition / TOCTOU), B
 (multi-call composition outside tx), C (read in one tx then
 write in another), D (multi-table writes with no explicit
 transaction) — are documented step-by-step in
-`v1/kernel-store.md` §2.5.1.1 with concrete adversarial
+[`v1/kernel-store.md`](v1/kernel-store.md) §2.5.1.1 with concrete adversarial
 interleavings, the canonical fix for each, and the
 regression-test home that pins it. New PRs that touch a
 multi-write kernel path are required to read that section.
@@ -1189,8 +1189,8 @@ typo-sensitivity.
 
 ## §5 — Policy epochs (INV-POLICY-*)
 
-Canonical home: `v1/kernel-store.md` §2.5.1 (multi-phase advance
-contract); `v1/kernel-core.md` §`policy_manager.rs`.
+Canonical home: [`v1/kernel-store.md`](v1/kernel-store.md) §2.5.1 (multi-phase advance
+contract); [`v1/kernel-core.md`](v1/kernel-core.md) §`policy_manager.rs`.
 
 ### INV-POLICY-01 — Epoch advance atomicity
 
@@ -1221,7 +1221,7 @@ and continues serving under the old epoch.
 
 ## §6 — Scheduler (INV-SCHED-*)
 
-Canonical home: `v1/kernel-store.md` §2.5.7 (INV amendments).
+Canonical home: [`v1/kernel-store.md`](v1/kernel-store.md) §2.5.7 (INV amendments).
 
 ### INV-SCHED-01 — `scheduler::admit` runs only at plan approval
 
@@ -1266,7 +1266,7 @@ flip. The exhaustive v2 list:
 
 **Justification.** Lane bookkeeping (`lane_budget_reservations`)
 caps the total `estimated_cost` reserved across all live tasks on
-a lane (`v1/kernel-store.md` §2.5.1.1 Pattern A). The
+a lane ([`v1/kernel-store.md`](v1/kernel-store.md) §2.5.1.1 Pattern A). The
 `reserve_budget_in_tx` write at intent admission charges the cap;
 without a paired `release_budget_in_tx` at terminal transition the
 cap is charged monotonically. After enough sub-task completions on
@@ -1368,7 +1368,7 @@ same fix commit so the live-e2e runs to completion.
 
 ## §6.5 — Orchestrator respawn ceiling (INV-ORCH-RESPAWN-*)
 
-Canonical home: `v2/v2-deep-spec.md` §Step 12 (V2.5b extension —
+Canonical home: [`v2/v2-deep-spec.md`](v2/v2-deep-spec.md) §Step 12 (V2.5b extension —
 Orchestrator no-progress respawn counter). The pre-existing
 bounded-capability invariants (`INV-CONVERGENCE-01` review-round
 cap, `crash_count` Executor-Failed cap, `max_orch_turns`
@@ -1845,7 +1845,7 @@ expected to investigate the upstream cause manually (e.g. the
 plan asked for an impossible task; the orchestrator's NNSP has
 a regression specific to this plan's `policy.toml`; etc.).
 
-**Canonical home.** `v2/v2-deep-spec.md §Step 12 V2.5b extension`
+**Canonical home.** [`v2/v2-deep-spec.md §Step 12 V2.5b extension`](v2/v2-deep-spec.md)
 + `raxis-concepts/07-escalations.md §The six escalation classes`.
 
 **Implementation references.**
@@ -2022,7 +2022,7 @@ mitigation against three classes of LLM error:
     would invite reasoning like "the orchestrator is unstable;
     I should rush my commit").
   * **Reviewer trajectory bias** — the reviewer's verdict
-    contract (`v1/peripherals.md §reviewer`) is "verdict on the
+    contract ([`v1/peripherals.md §reviewer`](v1/peripherals.md)) is "verdict on the
     artifact, not on the executor". Surfacing
     `crash_retry_count` / `review_reject_count` to the reviewer
     would invite "approve, the executor has burned 2/2 budget;
@@ -2121,7 +2121,7 @@ relies on.
 
 **Canonical home.** `kernel/src/initiatives/ksb_assembly.rs`
 `assemble_capabilities` docstring +
-`v2/v2-deep-spec.md §V2.6 KSB capabilities envelope`.
+[`v2/v2-deep-spec.md §V2.6 KSB capabilities envelope`](v2/v2-deep-spec.md).
 
 **Implementation references.**
 
@@ -2141,11 +2141,11 @@ relies on.
 
 ## §6.8 — Kernel DAG authority (INV-KERNEL-DAG-AUTHORITY-*)
 
-Canonical home: `paradigm.md §3.4` (the orchestrator is an untrusted
-LLM agent confined to its own VM); `paradigm.md` rules `R-2`
+Canonical home: [`paradigm.md §3.4`](paradigm.md) (the orchestrator is an untrusted
+LLM agent confined to its own VM); [`paradigm.md`](paradigm.md) rules `R-2`
 (mediated I/O), `R-5` (bounded capabilities), `R-11` (mediated
-coordination); `v2/agent-disagreement.md §3.6` (Authority boundary
-block); `v2/v2-deep-spec.md §Step 8` (`IntegrationMerge`
+coordination); [`v2/agent-disagreement.md §3.6`](v2/agent-disagreement.md) (Authority boundary
+block); [`v2/v2-deep-spec.md §Step 8`](v2/v2-deep-spec.md) (`IntegrationMerge`
 adjudication), `§Step 20` (static dispatch matrix), `§Step 21`
 (`DEPENDENCY_NOT_MET`).
 
@@ -2175,7 +2175,7 @@ exclusively (`tasks`, `task_dag_edges`); the orchestrator's intent
 payload contributes only the `task_id` lookup key.
 
 **Justification.** The orchestrator is an untrusted LLM agent
-running inside a confined VM (`paradigm.md §3.4`). If it owned DAG
+running inside a confined VM ([`paradigm.md §3.4`](paradigm.md)). If it owned DAG
 release, it could (i) skip review gates by activating a downstream
 Executor before its predecessor Reviewer finishes voting, (ii)
 provision extra VMs out of plan order to race the kernel's
@@ -2259,7 +2259,7 @@ irreversible substrate spawn.
 
 ## §7 — VCS path enforcement (INV-TASK-PATH-*)
 
-Canonical home: `v1/kernel-store.md` §2.5.8 (VCS Path Scope
+Canonical home: [`v1/kernel-store.md`](v1/kernel-store.md) §2.5.8 (VCS Path Scope
 Enforcement).
 
 ### INV-TASK-PATH-01 — Intent admission requires path coverage
@@ -2318,9 +2318,9 @@ revert D and resubmit.
 
 ## §8 — Operator certificates (INV-CERT-*)
 
-Canonical home: `v1/kernel-core.md` §4.8 (cross-cutting cert
-invariants); `v1/kernel-store.md` §2.5.9 (operator certificates);
-`v1/philosophy.md` §1.2 (must-pass list).
+Canonical home: [`v1/kernel-core.md`](v1/kernel-core.md) §4.8 (cross-cutting cert
+invariants); [`v1/kernel-store.md`](v1/kernel-store.md) §2.5.9 (operator certificates);
+[`v1/philosophy.md`](v1/philosophy.md) §1.2 (must-pass list).
 
 ### INV-CERT-01 — Cert is mandatory for every operator entry
 
@@ -2489,7 +2489,7 @@ invisible to this walk.
 
 ## §9 — Convergence (INV-CONVERGENCE-*)
 
-Canonical home: `v2/agent-disagreement.md` §8. These invariants bound
+Canonical home: [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §8. These invariants bound
 multi-agent non-convergence — review-rejection loops, circular
 revision attempts, wall-clock runaway, and the abandoned-worktree
 lifecycle that follows a non-converging task. They were introduced
@@ -2526,7 +2526,7 @@ rejects with `FAIL_REVIEW_LOOP_EXCEEDED` and auto-creates a
 operator (or Orchestrator if `orchestrator_first` routing is in
 effect) decides whether to extend rounds, abandon, or force-admit.
 
-**Canonical home.** `v2/agent-disagreement.md` §3.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §3.
 
 ---
 
@@ -2561,7 +2561,7 @@ computes `diff_hash(Y) == diff_hash(X)`, finds the row marked
 intent admits. Worktree is preserved for forensics; the configured
 `on_circular` behavior fires.
 
-**Canonical home.** `v2/agent-disagreement.md` §4.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §4.
 
 ---
 
@@ -2595,7 +2595,7 @@ works for another 30m of active time; on the next intent attempt,
 `unblocked_elapsed_ms` = 2h15m, exceeds limit; kernel rejects with
 `FAIL_WALL_CLOCK_LIMIT_EXCEEDED` and fires `wall_clock_behavior`.
 
-**Canonical home.** `v2/agent-disagreement.md` §5.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §5.
 
 ---
 
@@ -2629,7 +2629,7 @@ remaining. Orchestrator must either grant ≤ 50K (which the
 kernel deducts from its own budget) or `EscalateUpward` for the
 operator to grant a larger amount.
 
-**Canonical home.** `v2/agent-disagreement.md` §6.3.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §6.3.
 
 ---
 
@@ -2664,7 +2664,7 @@ preserving, runs `raxis worktree purge --force <T>`. The forced
 purge audits as `WorktreeForciblyPurgedDuringSalvage` so the
 forensic gap is explicit and attributable.
 
-**Canonical home.** `v2/agent-disagreement.md` §7.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §7.
 
 ---
 
@@ -2698,13 +2698,13 @@ exceeds it, and rejects. O must `EscalateUpward` for the operator
 to grant a larger extension. The new policy epoch is honored, not
 the stale routing-time snapshot.
 
-**Canonical home.** `v2/agent-disagreement.md` §6.3, §8.
+**Canonical home.** [`v2/agent-disagreement.md`](v2/agent-disagreement.md) §6.3, §8.
 
 ---
 
 ## §10 — Planner Harness (INV-PLANNER-HARNESS-*)
 
-Canonical home: `v2/planner-harness.md` §4–§5, §13. These invariants
+Canonical home: [`v2/planner-harness.md`](v2/planner-harness.md) §4–§5, §13. These invariants
 constrain the planner's tool surface (per role), the source and
 integrity of the Reviewer's VM image, and the in-VM
 backgrounded-process containment substrate. They were introduced
@@ -2798,7 +2798,7 @@ a verifier VM (operator-published) where the same malicious
 `build.rs` runs under cgroup containment with no access to
 Reviewer or other planner state.
 
-**Canonical home.** `v2/planner-harness.md` §4.4.
+**Canonical home.** [`v2/planner-harness.md`](v2/planner-harness.md) §4.4.
 
 ---
 
@@ -2837,7 +2837,7 @@ digest, and aborts activation with `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`
 The compromised image never runs; the operator is paged to
 investigate.
 
-**Canonical home.** `v2/planner-harness.md` §4.5.
+**Canonical home.** [`v2/planner-harness.md`](v2/planner-harness.md) §4.5.
 
 ---
 
@@ -2875,7 +2875,7 @@ harness verifies by reading `cgroup.events` `populated=0`, then
 returns to the LLM. No worker survives, no race window, no
 process tree fragmentation.
 
-**Canonical home.** `v2/planner-harness.md` §5.3, §10.2.
+**Canonical home.** [`v2/planner-harness.md`](v2/planner-harness.md) §5.3, §10.2.
 
 ---
 
@@ -2918,7 +2918,7 @@ review activation per `INV-VERIFIER-04`; or (b) move the tool to an
 Executor-inheriting profile if the use case is execution-time, not
 review-time.
 
-**Canonical home.** `v2/custom-tools.md` §10.
+**Canonical home.** [`v2/custom-tools.md`](v2/custom-tools.md) §10.
 
 ---
 
@@ -2955,7 +2955,7 @@ the Reviewer.
 The image is large enough to perform 3-way semantic git merges with
 bash + git + edit_file, and nothing more (no language runtimes, no
 compilers, no package managers, no curl, no editors, no LSPs). See
-`v2/planner-harness.md §10.5` for the full image manifest.
+[`v2/planner-harness.md §10.5`](v2/planner-harness.md) for the full image manifest.
 
 **Scenario.** An attacker with operator-host filesystem write access
 replaces `raxis-orchestrator-core-2.0.0.img` with a tampered build
@@ -2967,7 +2967,7 @@ re-computes the on-disk SHA-256, finds it does not match
 `SecurityViolationDetected { kind: "OrchestratorImageDigestMismatch" }`.
 The compromised image never runs; the operator is paged.
 
-**Canonical home.** `v2/planner-harness.md` §4.7.
+**Canonical home.** [`v2/planner-harness.md`](v2/planner-harness.md) §4.7.
 
 ---
 
@@ -3035,7 +3035,7 @@ field, which the Orchestrator reads via its KSB. Deployment-wide
 controls are in `policy.toml [orchestrator]`. See
 `planner-harness.md §4.8`."
 
-**Canonical home.** `v2/planner-harness.md` §4.8.
+**Canonical home.** [`v2/planner-harness.md`](v2/planner-harness.md) §4.8.
 
 ---
 
@@ -3127,8 +3127,8 @@ The fix adds rule 3a (scan `reviewer_verdicts=`; on
 `approved=false`, call `retry_subtask`) and tightens rule 4
 (merge only when all verdicts are `approved=true`).
 
-**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
-responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+**Canonical home.** [`v2/agent-disagreement.md §3.6`](v2/agent-disagreement.md) (NNSP
+responsibility) + [`v2/planner-harness.md §4.8`](v2/planner-harness.md) (Orchestrator
 NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 **Kernel-side projection contract.** The NNSP rule is dead-letter
@@ -3290,8 +3290,8 @@ satisfaction.
   (end-to-end audit-chain witness wired into
   `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`).
 
-**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
-responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+**Canonical home.** [`v2/agent-disagreement.md §3.6`](v2/agent-disagreement.md) (NNSP
+responsibility) + [`v2/planner-harness.md §4.8`](v2/planner-harness.md) (Orchestrator
 NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 ---
@@ -3368,8 +3368,8 @@ on the round-2 review cycle.
   `kernel/tests/extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`
   — the iter49 → iter50 reproduction's full chain).
 
-**Canonical home.** `v2/agent-disagreement.md §3.6` (NNSP
-responsibility) + `v2/planner-harness.md §4.8` (Orchestrator
+**Canonical home.** [`v2/agent-disagreement.md §3.6`](v2/agent-disagreement.md) (NNSP
+responsibility) + [`v2/planner-harness.md §4.8`](v2/planner-harness.md) (Orchestrator
 NNSP is kernel-owned per `INV-PLANNER-HARNESS-06`).
 
 ---
@@ -3408,7 +3408,7 @@ by `created_at`, so per-round counter semantics are preserved.
 Two ground-truth constraints force Option A over Option B
 (`Completed → Failed` backward transition):
 
-1. `paradigm.md §3.6` — "the executor's task-FSM is
+1. [`paradigm.md §3.6`](paradigm.md) — "the executor's task-FSM is
    independent of downstream review verdicts". The Executor's
    responsibility is "I produced the output you asked for"; the
    Reviewer's verdict on that output belongs to a separate axis.
@@ -3684,7 +3684,7 @@ package versions, credential-proxy URLs, workdir state — are
 opaque to the model. The model cannot do trial-and-error
 `pip install` / `npm install` / `cargo install` / `go get` because
 egress is gated by the kernel's allowlist (per
-`v2/vm-network-isolation.md`) and the credential proxies only
+[`v2/vm-network-isolation.md`](v2/vm-network-isolation.md)) and the credential proxies only
 proxy DB / cloud traffic, not package mirrors. The capability-
 discovery surface is the model's only legitimate way to learn
 what's already baked in. It SHOULD short-circuit a wasted turn
@@ -3835,8 +3835,8 @@ proxy env vars" line lists the `DATABASE_URL` / `MONGO_URL`
 the value (presence is acknowledged so the model knows the
 var is set; the value never reaches the transcript).
 
-**Canonical home.** `v2/canonical-images.md` §"VM capability
-discovery" and `v2/planner-harness.md §10.6` (probe site +
+**Canonical home.** [`v2/canonical-images.md`](v2/canonical-images.md) §"VM capability
+discovery" and [`v2/planner-harness.md §10.6`](v2/planner-harness.md) (probe site +
 cache scope + redaction allowlist + system-prompt hint
 formatter). Implementation: `raxis/crates/planner-core/src/`
 modules `vm_capabilities.rs` (probes + cache + manifest
@@ -3851,8 +3851,8 @@ satisfies the "tool availability" leg of the invariant.
 
 ## §10.5 — Image resolution & operator-published images (INV-IMAGE-*, INV-OPERATOR-CUSTOM-IMAGE-*)
 
-Canonical home: `v2/canonical-images.md` (BYO end-to-end flow) and
-`v2/image-cache.md` (resolver trait + on-disk cache layout). These
+Canonical home: [`v2/canonical-images.md`](v2/canonical-images.md) (BYO end-to-end flow) and
+[`v2/image-cache.md`](v2/image-cache.md) (resolver trait + on-disk cache layout). These
 invariants pin the trust contract that binds the kernel's
 `policy.toml [[vm_images]]` admit-list to the bytes the substrate
 actually boots from. They sit alongside the `INV-PLANNER-HARNESS-*`
@@ -3951,7 +3951,7 @@ The plan never admits; the kernel-canonical Reviewer image is
 the only image any Reviewer activation can ever boot from
 (`INV-PLANNER-HARNESS-02`).
 
-**Canonical home.** `v2/canonical-images.md §2`.
+**Canonical home.** [`v2/canonical-images.md §2`](v2/canonical-images.md).
 
 ---
 
@@ -4025,7 +4025,7 @@ fails the activation with `FAIL_POLICY_VIOLATION`. The
 attacker-staged image never boots; the operator is paged via
 the Critical-priority notification.
 
-**Canonical home.** `v2/canonical-images.md §3`.
+**Canonical home.** [`v2/canonical-images.md §3`](v2/canonical-images.md).
 
 ---
 
@@ -4107,7 +4107,7 @@ trust contract surface — the existing
 respectively. `INV-OPERATOR-CUSTOM-IMAGE-02` makes that
 extensibility shape normative.
 
-**Canonical home.** `v2/canonical-images.md §3`.
+**Canonical home.** [`v2/canonical-images.md §3`](v2/canonical-images.md).
 
 ---
 
@@ -4282,7 +4282,7 @@ The CLI surface itself is pinned by
 that default would silently re-introduce the iter53 failure
 mode without any other test catching it.
 
-**Canonical home.** `v2/planner-harness.md §14.4` (image-build
+**Canonical home.** [`v2/planner-harness.md §14.4`](v2/planner-harness.md) (image-build
 pipeline) — the freshness check is one of three guards listed
 in the "Why the dev-stage guard, the cpio-walk preflight, and
 the freshness check are all load-bearing" subsection. The
@@ -4384,8 +4384,8 @@ and [`…::inv_image_bake_preflight_fail_closed_01_role_needs_rootfs_bake_taxono
 (pins which roles need the OCI bake; lockstep with the harness's
 `role_needs_rootfs_bake` table).
 
-**Canonical home.** `v2/canonical-images.md §7` and
-`v2/planner-harness.md §14.4` (image-build pipeline).
+**Canonical home.** [`v2/canonical-images.md §7`](v2/canonical-images.md) and
+[`v2/planner-harness.md §14.4`](v2/planner-harness.md) (image-build pipeline).
 
 ---
 
@@ -4470,7 +4470,7 @@ and [`…::inv_image_bake_no_circular_containerfile_01_skips_missing_files`](../
 (a partial worktree without all three Containerfiles MUST NOT
 trip the check — release tarballs that ship only a subset).
 
-**Canonical home.** `v2/canonical-images.md §7`.
+**Canonical home.** [`v2/canonical-images.md §7`](v2/canonical-images.md).
 
 ---
 
@@ -4520,7 +4520,7 @@ gunzips via `MultiGzDecoder` (kernel-equivalent multi-member
 shape), asserts the decoded bytes contain TWO trailers AND that
 the raw concatenated stream's bytes equal `A ++ B` byte-for-byte.
 
-**Canonical home.** `v2/canonical-images.md §7`.
+**Canonical home.** [`v2/canonical-images.md §7`](v2/canonical-images.md).
 
 ---
 
@@ -4602,8 +4602,8 @@ and [`…::inv_image_bake_vmlinux_staged_01_apply_copy_writes_atomically`](../xt
 (the actual copy step uses a `.vmlinux.tmp` + rename shape so a
 partial copy never replaces a working kernel).
 
-**Canonical home.** `v2/canonical-images.md §7` and
-`v2/system-requirements.md §11.2`.
+**Canonical home.** [`v2/canonical-images.md §7`](v2/canonical-images.md) and
+[`v2/system-requirements.md §11.2`](v2/system-requirements.md).
 
 ---
 
@@ -4721,7 +4721,7 @@ and [`…::inv_image_bake_manifest_integrity_01_unknown_schema_version_treated_a
 (forward-compat shape: a newer manifest schema must NOT be
 trusted by an older xtask).
 
-**Canonical home.** `v2/canonical-images.md §7`.
+**Canonical home.** [`v2/canonical-images.md §7`](v2/canonical-images.md).
 
 ---
 
@@ -4829,7 +4829,7 @@ against it. The witnesses pin:
   so a silent transitive bump surfaces at bake time rather than
   at the next `lint-runner-python` task run.
 
-**Canonical home.** `v2/planner-harness.md §10.6` (canonical
+**Canonical home.** [`v2/planner-harness.md §10.6`](v2/planner-harness.md) (canonical
 executor starter image manifest — "Pre-installed lint
 toolchain" subsection) and `§14.4` (image-build pipeline,
 normative-pins paragraph). The witness binds the Containerfile
@@ -4906,7 +4906,7 @@ install -g` succeeded but the symlink step failed — the verifier
 must still reject because `$PATH` resolution is the load-bearing
 mechanism, not the module presence alone).
 
-**Canonical home.** `v2/planner-harness.md §10.6` (canonical
+**Canonical home.** [`v2/planner-harness.md §10.6`](v2/planner-harness.md) (canonical
 executor starter image manifest — "Pre-installed lint
 toolchain" subsection) and `§14.4` (image-build pipeline). The
 witness binds the Containerfile pin, the manifest pin, and the
@@ -5013,7 +5013,7 @@ sits below the helper call site); a structured info line
 post-mortem audit chain can prove which branch fired for
 each session.
 
-**Canonical home.** `v2/planner-harness.md §10.6` (executor
+**Canonical home.** [`v2/planner-harness.md §10.6`](v2/planner-harness.md) (executor
 image manifest — "Per-language pre-bundling for the
 realistic-scenario plan" subsection).
 
@@ -5104,9 +5104,9 @@ contract?"). The audit chain's `egress_admission_decision`
 events for the realistic-scenario test scope provide the
 runtime proof: zero non-gateway entries.
 
-**Canonical home.** `v2/airgap-architecture.md §9` (Path A3
+**Canonical home.** [`v2/airgap-architecture.md §9`](v2/airgap-architecture.md) (Path A3
 egress posture — cross-reference to the executor-side
-pre-bundling contract); `v2/planner-harness.md §10.6`
+pre-bundling contract); [`v2/planner-harness.md §10.6`](v2/planner-harness.md)
 documents the per-language pre-bundling protocol that makes
 the contract viable.
 
@@ -5114,7 +5114,7 @@ the contract viable.
 
 ## §11 — Verifier Processes (INV-VERIFIER-*)
 
-Canonical home: `v2/verifier-processes.md` §13. These invariants
+Canonical home: [`v2/verifier-processes.md`](v2/verifier-processes.md) §13. These invariants
 constrain the unified verifier subsystem (no V1/V2 split per
 `verifier-processes.md §7` — single `WitnessSubmission` frame,
 single `witness_records` schema, single `raxis-verifier` PID-1
@@ -5143,7 +5143,7 @@ kernel-bound communication is the `WitnessSubmission` frame
 (per `verifier-processes.md §7`). Verifier output enters the audit
 chain via `witness_records` only.
 
-**Canonical home.** `v2/verifier-processes.md` §13.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13.
 
 ---
 
@@ -5161,7 +5161,7 @@ observed by the Executor whose commit they evaluate, by sibling
 Reviewers, or by the Orchestrator (who sees only the failure code,
 not the verifier process state).
 
-**Canonical home.** `v2/verifier-processes.md` §13.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13.
 
 ---
 
@@ -5179,7 +5179,7 @@ Pre-`IntegrationMerge` verifiers (per `INV-VERIFIER-13`) do NOT
 participate in this gate — they fire at a strictly later lifecycle
 hook and the Reviewer has no dependency on them.
 
-**Canonical home.** `v2/verifier-processes.md` §13, §5.2.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13, §5.2.
 
 ---
 
@@ -5196,7 +5196,7 @@ failure counts as a review round toward `INV-CONVERGENCE-01`.
 implicitly for policy claim-based gates); pre-`IntegrationMerge`
 verifiers cannot use `block_review` (per `INV-VERIFIER-13`).
 
-**Canonical home.** `v2/verifier-processes.md` §13, §5.2.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13, §5.2.
 
 ---
 
@@ -5209,7 +5209,7 @@ produce `final_status = "artifact_missing"` regardless of the
 command's exit code. The kernel does NOT partial-stage or
 truncate. This applies uniformly to all three authoring sources.
 
-**Canonical home.** `v2/verifier-processes.md` §13, §6.3.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13, §6.3.
 
 ---
 
@@ -5226,7 +5226,7 @@ canonical symbol-index image; per `verifier-processes.md §14.5`
 for the four tiered language starters) are pre-validated at
 release-build time.
 
-**Canonical home.** `v2/verifier-processes.md` §13. Cross-references
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13. Cross-references
 `INV-PLANNER-HARNESS-03`.
 
 ---
@@ -5251,7 +5251,7 @@ any verifier-source surface (`[[plan.tasks.X.verifiers]].image`,
 `[[integration_merge_verifiers]].image`,
 `[default_verifier_images].<lang>`).
 
-**Canonical home.** `v2/verifier-processes.md` §13, §14.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13, §14.
 
 ---
 
@@ -5271,7 +5271,7 @@ command could trigger novel intent paths, escalate authority,
 or otherwise increase the trust surface of code-running
 verification.
 
-**Canonical home.** `v2/verifier-processes.md` §13.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13.
 
 ---
 
@@ -5284,7 +5284,7 @@ are dropped at VM exit unless declared as `artifact` per §6 of
 `verifier-processes.md`. Verifier VMs cannot persist mutations
 to the `main_repo` or any session-shared storage.
 
-**Canonical home.** `v2/verifier-processes.md` §13.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13.
 
 ---
 
@@ -5298,7 +5298,7 @@ the verifier as failed per its `on_failure` rule. The kernel
 does NOT rely on the verifier's internal timeout handling for
 this guarantee.
 
-**Canonical home.** `v2/verifier-processes.md` §13. Cross-references
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13. Cross-references
 `INV-PLANNER-HARNESS-03`.
 
 ---
@@ -5318,7 +5318,7 @@ compromise of a verifier image: a compromised image cannot
 exfiltrate `evaluation_sha` contents (or, for pre-merge verifiers,
 candidate-merge-tree contents) without explicit egress declared.
 
-**Canonical home.** `v2/verifier-processes.md` §13.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13.
 
 ---
 
@@ -5360,7 +5360,7 @@ in their plan with their own image. Per-task suppression is also
 available via `[plan.tasks.<id>.review] symbol_index = "not_needed"`
 (per `planner-harness.md §4.1`).
 
-**Canonical home.** `v2/verifier-processes.md` §14.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §14.
 
 ---
 
@@ -5408,8 +5408,8 @@ silent regressions: if a pre-merge gate fails, main does not
 advance until either the gate passes or the operator explicitly
 escalates.
 
-**Canonical home.** `v2/verifier-processes.md` §15,
-`v2/integration-merge.md §4 Check 5d`, §11.10.
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §15,
+[`v2/integration-merge.md §4 Check 5d`](v2/integration-merge.md), §11.10.
 
 ---
 
@@ -5445,7 +5445,7 @@ VM is started. The forensic auditor verifies provenance by
 reading this event from the audit chain — no instrumentation of
 the verifier VM is required.
 
-**Canonical home.** `v2/verifier-processes.md` §13
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13
 (invariant statement), §16.5 (provisioning step), and the
 `kernel/src/verifier/spawn.rs` helper `verifier_provision_workspace`.
 
@@ -5490,7 +5490,7 @@ and the global kill-switch lets them revert that decision in a
 single line during incident response without rewriting per-image
 rows.
 
-**Canonical home.** `v2/verifier-processes.md §13` (invariant
+**Canonical home.** [`v2/verifier-processes.md §13`](v2/verifier-processes.md) (invariant
 statement), `§16.7` (full policy schema, resolution chain,
 audit events, V2.0→V2.1 migration story).
 
@@ -5498,7 +5498,7 @@ audit events, V2.0→V2.1 migration story).
 
 ## §11.5 — Environment Binding (INV-ENV-*)
 
-Canonical home: `v2/environment-access-control.md` §11. These
+Canonical home: [`v2/environment-access-control.md`](v2/environment-access-control.md) §11. These
 invariants constrain V2's optional environment-binding compliance
 layer. The whole subsystem is **opt-in**: a deployment whose
 `policy.toml` declares zero `[environments.<label>]` sections runs
@@ -5615,7 +5615,7 @@ without compromising existing deployments.
   refactors a security risk. Binding is exclusively the
   `environment` field on `[[permitted_credentials]]`.
 
-**Canonical home.** `v2/environment-access-control.md` §11
+**Canonical home.** [`v2/environment-access-control.md`](v2/environment-access-control.md) §11
 (behavioral spec, including the §11.3 algorithm, §11.4 same-cluster
 interaction, §11.5 DAG-split pattern, and §11.6 role-implicit
 neutrality table).
@@ -5631,13 +5631,13 @@ the next kernel start) into a structural guarantee: an offline
 forensic verifier resolves every chain orphan from a frozen SQLite
 snapshot alone, with no kernel runtime dependency.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14 (full statements,
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14 (full statements,
 verification tests, and rationale per invariant).
 
 ### INV-AUDIT-PAIRED-01 — Every state-mutating event is preceded by a pending
 
 **Statement.** For every `AuditEventKind` variant in the paired class
-(`v2/audit-paired-writes.md §4.1`), the kernel writes and durably
+([`v2/audit-paired-writes.md §4.1`](v2/audit-paired-writes.md)), the kernel writes and durably
 fsyncs a `StateChangePending` event before issuing `BEGIN IMMEDIATE`.
 No path through the kernel mutates SQLite without a preceding
 fsync'd pending.
@@ -5651,7 +5651,7 @@ invariant the chain is silent on the attempted mutation; with it, a
 `StateChangePending` survives the crash for the offline verifier to
 resolve.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.1.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.1.
 
 ---
 
@@ -5666,13 +5666,13 @@ event earlier in the chain, AND the confirmed's
 **Justification.** Closes the kernel-buggery / kernel-compromise
 vector where the kernel announces one mutation and commits a
 different one. The digest binding is the structural defence the
-threat model in `v2/audit-paired-writes.md §9` enumerates.
+threat model in [`v2/audit-paired-writes.md §9`](v2/audit-paired-writes.md) enumerates.
 
 **Scenario.** A buggy or compromised kernel announces `Admitted →
 Active` in the pending and commits `Admitted → Failed`. The verifier
 flags `Finding::DigestMismatch` as a critical finding.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.2.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.2.
 
 ---
 
@@ -5692,7 +5692,7 @@ it implies chain truncation or fabrication.
 seq 9001. Verifier flags `Finding::RolledBackWithoutPending` as
 critical.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.3.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.3.
 
 ---
 
@@ -5706,7 +5706,7 @@ as the row mutation; no path exists by which a row mutates without
 `last_committing_event_seq` being updated.
 
 **Justification.** SQLite half of offline-verifier resolution
-(`v2/audit-paired-writes.md §5.1` Phase 3). Without it, the verifier
+([`v2/audit-paired-writes.md §5.1`](v2/audit-paired-writes.md) Phase 3). Without it, the verifier
 cannot distinguish a committed orphan from a rolled-back orphan.
 
 **Scenario.** Crash window §7.4 (COMMIT succeeded, confirmed fsync
@@ -5714,7 +5714,7 @@ never ran). Verifier sees orphan pending(X) and confirms it
 committed by reading `last_committing_event_seq = X` on the affected
 row.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.4.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.4.
 
 ---
 
@@ -5722,7 +5722,7 @@ row.
 
 **Statement.** Given (a) the JSONL chain segments and (b) a SQLite
 snapshot at any point-in-time after the chain, the verifier algorithm
-in `v2/audit-paired-writes.md §5` MUST resolve every orphan to either
+in [`v2/audit-paired-writes.md §5`](v2/audit-paired-writes.md) MUST resolve every orphan to either
 `OrphanResolvedByStateSnapshot` or `OrphanRolledBackInferred`. The
 verifier MUST NOT require the kernel to be running, MUST NOT require
 any kernel-side recovery process to have run, and MUST produce the
@@ -5737,7 +5737,7 @@ ran. A compliance auditor receives the data directory and
 reconstructs the full chain integrity story without the kernel
 binary.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.5.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.5.
 
 ---
 
@@ -5761,7 +5761,7 @@ include `OrphanResolvedByStateSnapshot` (or `OrphanRolledBackInferred`)
 for each orphan, with no critical findings — full chain
 verifiability without `reconcile_advisory` having run.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.6.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.6.
 
 ---
 
@@ -5784,7 +5784,7 @@ prior segment rotation. The verifier flags it as `PreV21Row`, falls
 back to V1 reconciliation for that row's narrative, and continues
 without raising a critical finding.
 
-**Canonical home.** `v2/audit-paired-writes.md` §14.7.
+**Canonical home.** [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §14.7.
 
 ---
 
@@ -5812,7 +5812,7 @@ attacker-controlled host by a misconfigured plan is strictly
 worse than the V2 emulator. The allowlist is structural, not
 configuration-driven.
 
-**Canonical home.** `v3/cloud-proxy-forwarding.md §3.1`.
+**Canonical home.** [`v3/cloud-proxy-forwarding.md §3.1`](v3/cloud-proxy-forwarding.md).
 
 ### INV-CLOUD-FWD-02 — Audit redaction discipline
 
@@ -5832,7 +5832,7 @@ identifying bytes.
 visibility into credential operations. Without strict
 redaction the chain becomes a credential exfiltration vector.
 
-**Canonical home.** `v3/cloud-proxy-forwarding.md §5` and
+**Canonical home.** [`v3/cloud-proxy-forwarding.md §5`](v3/cloud-proxy-forwarding.md) and
 `raxis-credential-proxy-cloud-shared::audit`.
 
 ### INV-CLOUD-FWD-03 — Failed refresh does not poison cache
@@ -5851,7 +5851,7 @@ into agent-side credential starvation while the refresh
 window is open. Operators need explicit signal of refresh
 failures so they can act before the hard TTL expires.
 
-**Canonical home.** `v3/cloud-proxy-forwarding.md §6.5`.
+**Canonical home.** [`v3/cloud-proxy-forwarding.md §6.5`](v3/cloud-proxy-forwarding.md).
 
 ### INV-CLOUD-FWD-04 — Upstream 4xx envelope pass-through
 
@@ -5871,7 +5871,7 @@ expectations. A proxy that "helpfully" translates the error
 into a non-canonical shape becomes a compatibility
 liability.
 
-**Canonical home.** `v3/cloud-proxy-forwarding.md §6.4`.
+**Canonical home.** [`v3/cloud-proxy-forwarding.md §6.4`](v3/cloud-proxy-forwarding.md).
 
 ### INV-CLOUD-FWD-05 — Operator credentials never enter the VM
 
@@ -5926,7 +5926,7 @@ inference call with `DomainNotAllowed` or
 configuration coupling — `[[providers]]` is now the single
 source of truth for "agent X can reach provider Y".
 
-**Canonical home.** `v2/reviewer-egress-defaults-decision.md §5`.
+**Canonical home.** [`v2/reviewer-egress-defaults-decision.md §5`](v2/reviewer-egress-defaults-decision.md).
 
 ### INV-EGRESS-DEFAULT-02 — Implicit grants are auditable
 
@@ -5951,7 +5951,7 @@ the gap; the operator-visible diff between
 `bundle.effective_egress_domains()` (what the kernel
 enforces) is reconstructible from the audit chain alone.
 
-**Canonical home.** `v2/reviewer-egress-defaults-decision.md §5`.
+**Canonical home.** [`v2/reviewer-egress-defaults-decision.md §5`](v2/reviewer-egress-defaults-decision.md).
 
 ### INV-EGRESS-DEFAULT-03 — Opt-out is validated at policy-load
 
@@ -5967,7 +5967,7 @@ was disabled when it wasn't.
 operator BELIEVES they have opted out but the policy still
 auto-grants the FQDN.
 
-**Canonical home.** `v2/reviewer-egress-defaults-decision.md §6`.
+**Canonical home.** [`v2/reviewer-egress-defaults-decision.md §6`](v2/reviewer-egress-defaults-decision.md).
 
 ### INV-EGRESS-STALL-01 — Repeated egress denials emit one stall event
 
@@ -5994,14 +5994,14 @@ possible (post-admission policy reload, scoped
 `deny_provider` opt-out, cred-proxy down). The detector
 catches every stall regardless of root cause.
 
-**Canonical home.** `v2/reviewer-egress-defaults-decision.md §7`.
+**Canonical home.** [`v2/reviewer-egress-defaults-decision.md §7`](v2/reviewer-egress-defaults-decision.md).
 
 ---
 
 ## §11.8a — Universal airgap (Path A3) invariants
 
 These six invariants form the contract for the **universal airgap**
-egress model documented in `v2/airgap-architecture.md`. They are
+egress model documented in [`v2/airgap-architecture.md`](v2/airgap-architecture.md). They are
 **unconditional** in V2 after the Tier1Tproxy deletion (TODO
 `tier1-deletion-fold-into-cleanup-sweep`): the legacy
 `EgressTier::Tier1Tproxy` variant, the `runtime-airgap-a3` cargo
@@ -6036,7 +6036,7 @@ is no codepath that produces a NIC*.
 
 **Witness.** `kernel/tests/airgap_a3_executor_no_nic.rs`.
 
-**Canonical home.** `v2/airgap-architecture.md §5`.
+**Canonical home.** [`v2/airgap-architecture.md §5`](v2/airgap-architecture.md).
 
 ### INV-NETISO-A3-VSOCK-CHOKEPOINT-01 — Kernel admission gate is the sole arbiter of guest egress
 
@@ -6061,7 +6061,7 @@ bundle, and the audit chain captures every flow that ever opened
 **Witness.** `kernel/tests/airgap_a3_admission_admit_path.rs` and
 `kernel/tests/airgap_a3_admission_deny_path.rs`.
 
-**Canonical home.** `v2/airgap-architecture.md §3.1 / §3.2`.
+**Canonical home.** [`v2/airgap-architecture.md §3.1 / §3.2`](v2/airgap-architecture.md).
 
 ### INV-NETISO-A3-DNS-MEDIATED-01 — DNS queries flow through the kernel under A3
 
@@ -6083,7 +6083,7 @@ visibility into hostname lookup that it has into TCP admission.
 
 **Witness.** `kernel/tests/airgap_a3_dns_resolve.rs`.
 
-**Canonical home.** `v2/airgap-architecture.md §3.3 / §4`.
+**Canonical home.** [`v2/airgap-architecture.md §3.3 / §4`](v2/airgap-architecture.md).
 
 ### INV-NETISO-A3-IPV6-DISABLED-01 — IPv6 is disabled at PID 1 under A3
 
@@ -6105,7 +6105,7 @@ exhaustive.
 the `disable_ipv6` sysctls read `1` inside the booted guest's
 mount-namespace fixture.
 
-**Canonical home.** `v2/airgap-architecture.md §4`.
+**Canonical home.** [`v2/airgap-architecture.md §4`](v2/airgap-architecture.md).
 
 ### INV-AUDIT-TPROXY-ADMIT-01 — Every tproxy admission emits a paired audit event before the response
 
@@ -6130,8 +6130,8 @@ and `kernel/tests/airgap_a3_admission_deny_path.rs` both assert
 the audit event is present in the chain by the time the response
 arrives at the in-guest tproxy.
 
-**Canonical home.** `v2/audit-paired-writes.md §3` (the
-paired-write framework) and `v2/airgap-architecture.md §8`
+**Canonical home.** [`v2/audit-paired-writes.md §3`](v2/audit-paired-writes.md) (the
+paired-write framework) and [`v2/airgap-architecture.md §8`](v2/airgap-architecture.md)
 (specific A3 contract).
 
 ### INV-AUDIT-DNS-RESOLVE-01 — Every DNS resolution emits an audit event
@@ -6155,14 +6155,14 @@ admission was granted.
 
 **Witness.** `kernel/tests/airgap_a3_dns_resolve.rs`.
 
-**Canonical home.** `v2/airgap-architecture.md §3.3 / §8`.
+**Canonical home.** [`v2/airgap-architecture.md §3.3 / §8`](v2/airgap-architecture.md).
 
 ---
 
 ## §11.X — Secrets model invariants
 
 The five invariants below form the V2 secrets-model surface. The
-canonical doctrinal text is `v2/secrets-model.md`; the formal
+canonical doctrinal text is [`v2/secrets-model.md`](v2/secrets-model.md); the formal
 statements live here.
 
 ### INV-SECRET-01 — Operators never place raw secret material in worktrees
@@ -6181,7 +6181,7 @@ the kernel's protections vacuous: the secrets model presupposes
 the agent never has the bytes, not that the agent politely
 declines to read them.
 
-**Canonical home.** `v2/secrets-model.md §2.1`.
+**Canonical home.** [`v2/secrets-model.md §2.1`](v2/secrets-model.md).
 
 ### INV-SECRET-02 — Real credentials live in `CredentialBackend`, resolved host-side
 
@@ -6201,7 +6201,7 @@ boundary the threat model relies on. Anything inside the VM is
 inside the agent's reach and is therefore treated as
 exfiltratable.
 
-**Canonical home.** `v2/secrets-model.md §2.2`,
+**Canonical home.** [`v2/secrets-model.md §2.2`](v2/secrets-model.md),
 `extensibility-traits.md §4`.
 
 ### INV-SECRET-03 — Agents reach external services only via credential proxies
@@ -6219,7 +6219,7 @@ surfaced in the audit chain.
 bypassed and the substitution discipline is voluntary. With it,
 the substitution discipline is the only path that *works*.
 
-**Canonical home.** `v2/secrets-model.md §2.4`, `credential-
+**Canonical home.** [`v2/secrets-model.md §2.4`](v2/secrets-model.md), `credential-
 proxy.md`, `vm-network-isolation.md`.
 
 ### INV-SECRET-04 — Mechanical enforcement, not agent compliance
@@ -6238,7 +6238,7 @@ keeps the threat model honest. The realistic-scenario e2e's
 witness; future tests that violate this invariant should be
 rejected at review.
 
-**Canonical home.** `v2/secrets-model.md §1, §4`.
+**Canonical home.** [`v2/secrets-model.md §1, §4`](v2/secrets-model.md).
 
 ### INV-SECRET-05 — Credential-proxy substitutes placeholder credentials before forwarding upstream
 
@@ -6267,7 +6267,7 @@ testable, and pairs with the
 `credential_substitution_evidence::assert_credential_
 substitution_round_trip` witness in the realism extended e2e.
 
-**Canonical home.** `v2/secrets-model.md §2.5`,
+**Canonical home.** [`v2/secrets-model.md §2.5`](v2/secrets-model.md),
 `credential-proxy.md`,
 `kernel/tests/extended_e2e_support/credential_substitution_evidence.rs`.
 
@@ -6310,7 +6310,7 @@ substrate-level fan-out preserves both the credential boundary
 (`INV-SECRET-02`, `INV-VM-CAP-04`) and the stock-URL contract
 the executor scripts depend on.
 
-**Canonical home.** `v2/credential-proxy.md §12a`,
+**Canonical home.** [`v2/credential-proxy.md §12a`](v2/credential-proxy.md),
 `raxis/crates/vsock-loopback/src/lib.rs` (wire format),
 `raxis/crates/isolation-apple-vz/src/vsock_loopback_bridge.rs`
 (host half), `raxis/tproxy/src/loopback_forwarder.rs`
@@ -6387,7 +6387,7 @@ declared but no working loopback bridge — the kernel either has a
 working bridge for the chosen backend or it tears the session
 down before the agent's first tool invocation.
 
-**Canonical home.** `v2/credential-proxy.md §12a.4`,
+**Canonical home.** [`v2/credential-proxy.md §12a.4`](v2/credential-proxy.md),
 `raxis/crates/isolation/src/lib.rs` (default `Session::
 register_loopback_listener` returning `BackendInternal`),
 `raxis/crates/session-spawn/src/lib.rs` (composer fail-closed
@@ -6431,7 +6431,7 @@ contract makes the wire forward-compatible by construction —
 new kinds light up on the dashboard the moment the kernel
 emits them.
 
-**Canonical home.** `v2/dashboard-hardening.md §4.2`.
+**Canonical home.** [`v2/dashboard-hardening.md §4.2`](v2/dashboard-hardening.md).
 
 ### INV-DASHBOARD-STREAM-PRODUCER-01 — Audit emits feed the SSE pump
 
@@ -6450,7 +6450,7 @@ chain order between the canonical audit log and the live
 dashboard stream — the dashboard never reorders or invents
 events relative to the kernel-authoritative ordering.
 
-**Canonical home.** `v2/dashboard-hardening.md §4.1`.
+**Canonical home.** [`v2/dashboard-hardening.md §4.1`](v2/dashboard-hardening.md).
 
 ### INV-AUDIT-DASHBOARD-01 — Chain status comes from the kernel walker
 
@@ -6471,7 +6471,7 @@ it as the single source of truth for the dashboard banner is
 strictly safer than a frontend re-implementation and trivially
 correct.
 
-**Canonical home.** `v2/dashboard-hardening.md §2.1`.
+**Canonical home.** [`v2/dashboard-hardening.md §2.1`](v2/dashboard-hardening.md).
 
 ### INV-AUDIT-OPERATOR-ACTION-01 — Every operator action emits an audit row
 
@@ -6509,7 +6509,7 @@ distinguish "operator was rejected at the gate" from "operator
 clicked, action ran". A single-class enum keeps the
 discriminant small enough for dashboards to render directly.
 
-**Canonical home.** `v2/dashboard-hardening.md §2.2`.
+**Canonical home.** [`v2/dashboard-hardening.md §2.2`](v2/dashboard-hardening.md).
 
 ### INV-NOTIF-SCOPE-01 — Notifications are a strict subset of audit events
 
@@ -6580,7 +6580,7 @@ pre-filter rows from earlier dev runs. The command NEVER
 touches `<data_dir>/audit/`; an integration test asserts the
 audit-segment file is byte-identical before/after.
 
-**Canonical home.** `v2/dashboard-hardening.md §2.6`.
+**Canonical home.** [`v2/dashboard-hardening.md §2.6`](v2/dashboard-hardening.md).
 
 ### INV-DASHBOARD-VALIDATE-01 — Validation precedes every side effect and privileged read
 
@@ -6603,14 +6603,14 @@ audit-noise-from-rejected-requests; structured error codes
 make every rejection mechanically classifiable so dashboards
 never have to grep stack traces for failure modes.
 
-**Canonical home.** `v2/dashboard-hardening.md §2.3`.
+**Canonical home.** [`v2/dashboard-hardening.md §2.3`](v2/dashboard-hardening.md).
 
 ### INV-DASHBOARD-FAILURE-VISIBILITY-01 — Every failure surfaced by the dashboard MUST display its reason
 
 **Statement.** Every failure-bearing or rejection-bearing entity
 surfaced through the dashboard MUST display its REASON to the
 operator, not merely a status colour. The set of failure-bearing
-surfaces is enumerated in `v2/dashboard-hardening.md §5` and
+surfaces is enumerated in [`v2/dashboard-hardening.md §5`](v2/dashboard-hardening.md) and
 includes (non-exhaustive):
 
   * Lifecycle terminals — `SessionView.failure`, `TaskView.failure`,
@@ -6690,7 +6690,7 @@ and files it. Without the rule the gap is invisible — both the
 operator and the engineering team see the same red badge they'd
 see for any other failure.
 
-**Canonical home.** `v2/dashboard-hardening.md §5`.
+**Canonical home.** [`v2/dashboard-hardening.md §5`](v2/dashboard-hardening.md).
 
 ### INV-FAILURE-REASON-MANDATORY-01 — Every kernel-emitted terminal-failure transition MUST carry a non-empty reason
 
@@ -6937,8 +6937,8 @@ cannot determine a real reason:
 **Canonical home.** `specs/invariants.md` (this file) — the
 invariant's normative wording lives here; the FE-side
 empty-reason rule (operator-experience contract) is in
-`v2/dashboard-hardening.md §5.5`; the audit-event
-non-nullability declaration is in `v2/audit-paired-writes.md`.
+[`v2/dashboard-hardening.md §5.5`](v2/dashboard-hardening.md); the audit-event
+non-nullability declaration is in [`v2/audit-paired-writes.md`](v2/audit-paired-writes.md).
 
 ### INV-FAILURE-REASON-CONCRETE-01 — Every failure reason MUST name a SPECIFIC cause, never hedge between possibilities
 
@@ -7111,8 +7111,8 @@ following are specifically forbidden by this invariant:
 **Canonical home.** `specs/invariants.md` (this file).
 Audit-paired-writes parity in `v2/audit-paired-writes.md
 §14.8`; dashboard FE counterpart in
-`v2/dashboard-hardening.md §5.5.1`; planner-harness wire
-contract in `v2/planner-harness.md`.
+[`v2/dashboard-hardening.md §5.5.1`](v2/dashboard-hardening.md); planner-harness wire
+contract in [`v2/planner-harness.md`](v2/planner-harness.md).
 
 ### INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01 — Approved plans surface their original sealed TOML
 
@@ -7175,7 +7175,7 @@ opens the same panel for an archived (`Aborted`) initiative
 whose plan bundle was purged; the panel renders "Plan archived
 or purged" inline (410), not a generic 5xx toast.
 
-**Canonical home.** `v2/dashboard-hardening.md §plan-view`.
+**Canonical home.** [`v2/dashboard-hardening.md §plan-view`](v2/dashboard-hardening.md).
 
 ---
 
@@ -7223,7 +7223,7 @@ is allowed to show only active rows (that's its semantic — "which
 sessions are live"), but the detail surface must answer "what
 happened to this id" for any `id` in the catalog.
 
-**Canonical home.** `v2/dashboard-hardening.md §session-detail`
+**Canonical home.** [`v2/dashboard-hardening.md §session-detail`](v2/dashboard-hardening.md)
 (referenced; the full body lives in this invariants block).
 
 **Witness.**
@@ -7286,7 +7286,7 @@ shutdown, so every JWT — autologin or otherwise — is
 invalidated the instant the kernel exits. Widening the TTL
 inside one boot does NOT survive a restart.
 
-**Canonical home.** `v2/dashboard-hardening.md §2.8`.
+**Canonical home.** [`v2/dashboard-hardening.md §2.8`](v2/dashboard-hardening.md).
 
 **Witness.** `crates/dashboard/tests/autologin_witness.rs`
 (three test cases pin the constant, the loader path, and the
@@ -7345,7 +7345,7 @@ it's Admitted" middle path. This is the same shape as
 unsurfaced") but lifted one tier up: no FSM state goes
 unsurfaced either.
 
-**Canonical home.** `v2/dashboard-hardening.md §task-state-rendering`.
+**Canonical home.** [`v2/dashboard-hardening.md §task-state-rendering`](v2/dashboard-hardening.md).
 
 **Witness.**
   * Frontend: `dashboard-fe/src/test/state-color.test.ts`
@@ -7406,7 +7406,7 @@ visual treatment is unambiguous; and pinning the glyph in a
 witness test means a future refactor cannot regress the
 distinction.
 
-**Canonical home.** `v2/dashboard-hardening.md §fsm-state-visibility-contract`.
+**Canonical home.** [`v2/dashboard-hardening.md §fsm-state-visibility-contract`](v2/dashboard-hardening.md).
 
 **Witness.**
   * Frontend: `dashboard-fe/src/test/state-color.test.ts`
@@ -7483,7 +7483,7 @@ through `transition_task_with_audit` and asserts the
 `FakeAuditSink` captured exactly one `TaskStateChanged` event
 with the canonical wire shape.
 
-**Canonical home.** `v2/kernel-push-protocol.md §13` +
+**Canonical home.** [`v2/kernel-push-protocol.md §13`](v2/kernel-push-protocol.md) +
 `kernel/src/initiatives/task_transitions.rs`.
 
 **Witness.**
@@ -7652,7 +7652,7 @@ correctly `_ms`-suffixed `generated_at_ms` and `verified_at_ms`
 fields.
 
 **Canonical home.**
-`v2/dashboard-hardening.md §5.13 Wire-time units` (this file
+[`v2/dashboard-hardening.md §5.13 Wire-time units`](v2/dashboard-hardening.md) (this file
 mirrors); see also `v2_extended_gaps.md §4` for the broader
 dashboard backend contract.
 
@@ -7895,7 +7895,7 @@ stack (loopback-only bindings) and the matching server-side
 credentials already commit in
 `raxis/live-e2e/docker-compose.extended.e2e.yml`. They have no
 production value and their commit is documented in
-`raxis/live-e2e/examples/README.md`.
+[`raxis/live-e2e/examples/README.md`](../live-e2e/examples/README.md).
 
 **Justification.** The point of `raxis/live-e2e/examples/` is
 to let an operator answer "what configuration produced the
@@ -7956,9 +7956,9 @@ the layout-drift fail-fast is pinned by
 `find_real_anthropic_key` + the regression test block);
 `raxis/scripts/check-no-real-anthropic-key.sh` (commit-time
 guard with the same regex);
-`raxis/live-e2e/examples/README.md` (operator-facing refresh
+[`raxis/live-e2e/examples/README.md`](../live-e2e/examples/README.md) (operator-facing refresh
 contract + the rules for which credentials are OK to commit);
-`raxis/specs/v2/secrets-model.md §2.5` (operator-supplied-
+[`raxis/specs/v2/secrets-model.md §2.5`](v2/secrets-model.md) (operator-supplied-
 placeholder discipline that this invariant operationalises for
 the harness's own self-managed examples bundle).
 
@@ -8542,7 +8542,7 @@ wedged kernel. Lands behind the
 preserves the existing operator-managed restart behaviour and
 leaves live-e2e iter-by-iter behaviour bit-identical.
 
-Canonical home: `v2/self-healing-supervisor.md`.
+Canonical home: [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md).
 
 ### INV-SUPERVISOR-RESTART-AUDIT-01 — Every restart emits a paired audit chain entry
 
@@ -8596,9 +8596,9 @@ re-boots the kernel binary, and asserts:
    `Ok` end-to-end across the seeded prior segment + the
    freshly-appended events.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §3.3 +
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §3.3 +
 §3.4 (boot-time rehydration + new audit event variants);
-`v2/audit-paired-writes.md` §6 (restart audit emission
+[`v2/audit-paired-writes.md`](v2/audit-paired-writes.md) §6 (restart audit emission
 contract addendum).
 
 ---
@@ -8648,7 +8648,7 @@ supervisor's spawn-and-classify loop synthetically with a
 fake clock, and asserts the 4th attempt is refused + sentinel
 transitions to `Halted (CircuitOpen)`.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.3.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.3.
 
 ---
 
@@ -8690,7 +8690,7 @@ empty `RAXIS_SUPERVISOR_AUTO_RESTART` env var and asserts
 no kernel child is spawned + the gate-closed log line is
 emitted.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.9.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.9.
 
 ---
 
@@ -8749,7 +8749,7 @@ as `Halted (OperatorTerminated)`, (d) NO replacement child
 process is spawned (verified by polling `/proc` or
 equivalent under the supervisor's process group).
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.5.
 
 ---
 
@@ -8783,7 +8783,7 @@ returns to a prompt within the grace window.
 `raxis/crates/supervisor/tests/sigint_respect.rs::sigint_to_supervisor_propagates_and_halts`
 mirrors the SIGTERM-respect test against SIGINT.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.5.
 
 ---
 
@@ -8823,7 +8823,7 @@ runs one sub-test per row of the §4.4 table, asserting
 `classify(...)` returns the documented `SupervisorAction`
 for each combination.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.4.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.4.
 
 ---
 
@@ -8871,7 +8871,7 @@ exit-status discriminator), and that the elapsed wall-clock
 between SIGTERM-send and child-exit is ≥ 5 s and
 < 10 s (i.e. inside the grace window, not at the deadline).
 
-**Canonical home.** `v2/self-healing-supervisor.md` §4.5.
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §4.5.
 
 ---
 
@@ -8881,7 +8881,7 @@ between SIGTERM-send and child-exit is ≥ 5 s and
 shows a non-`Healthy` status, the operator dashboard MUST
 render the matching `KernelLifecycleBanner` within 5 seconds
 of the sentinel transition. The banner copy + tone for each
-sub-state is pinned by `v2/self-healing-supervisor.md §5.3`.
+sub-state is pinned by [`v2/self-healing-supervisor.md §5.3`](v2/self-healing-supervisor.md).
 
 **Justification.** The kernel may be down during a restart
 window (sentinel = `Restarting`) or permanently halted
@@ -8925,8 +8925,8 @@ writes sentinel `Healthy`; within 5 s the banner clears.
    `SupervisorGone`, `Restarting`), and (c) the stale-data
    note appears when `fresh === false`.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §5;
-`v2/dashboard-hardening.md §6` (kernel-lifecycle banner
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §5;
+[`v2/dashboard-hardening.md §6`](v2/dashboard-hardening.md) (kernel-lifecycle banner
 contract addendum).
 
 ---
@@ -8989,7 +8989,7 @@ re-login.
   data dir, and asserting the JWT verifies — including
   asserting `claims.gen == 1` (the persisted generation).
 
-**Canonical home.** `v2/self-healing-supervisor.md` §10
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §10
 (Operator session continuity across supervisor-triggered
 restarts).
 
@@ -9101,7 +9101,7 @@ operator intent for the explicit-block cases.
   `[notifications.routes]` referring to it parse cleanly per
   `cli-readonly.md §5.6.2`).
 
-**Canonical home.** `v2/self-healing-supervisor.md` §3.5
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §3.5
 (Operator session continuity — task auto-resume).
 
 ---
@@ -9163,7 +9163,7 @@ JWT minted by the lost-laptop attacker (assuming they got
 that far) likewise bounces.
 
 **Witness.** Test matrix in §10.6 of
-`v2/self-healing-supervisor.md`:
+[`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md):
 * `secret_file_is_0600_after_mint` (Unix) — perm contract.
 * `auth_dir_is_0700_after_mint` (Unix) — perm contract.
 * `rotate_bumps_generation_and_changes_secret_bytes` —
@@ -9177,8 +9177,8 @@ that far) likewise bounces.
 * `unknown_future_field_is_silently_ignored` — forward-compat
   on the on-disk schema.
 
-**Canonical home.** `v2/self-healing-supervisor.md` §10;
-`v2/dashboard-hardening.md` §7 (persistent JWT secret
+**Canonical home.** [`v2/self-healing-supervisor.md`](v2/self-healing-supervisor.md) §10;
+[`v2/dashboard-hardening.md`](v2/dashboard-hardening.md) §7 (persistent JWT secret
 addendum).
 
 ---
@@ -9190,8 +9190,8 @@ or coverage statement with a deterministic unit-test witness so the
 "what does a working live-e2e iter44 run look like in Grafana?"
 reference can be programmatically asserted instead of eyeballed.
 
-Canonical home: `v3/otel-observability.md §8` (metric catalog) +
-`v3/observability-prometheus.md §3` (Prometheus naming).
+Canonical home: [`v3/otel-observability.md §8`](v3/otel-observability.md) (metric catalog) +
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (Prometheus naming).
 
 ### INV-OBS-RESPAWN-KIND-LABEL-01 — `IsolationRespawnAttemptedTotal` carries a closed `respawn_kind` label
 
@@ -9201,7 +9201,7 @@ of `MetricName::IsolationRespawnAttemptedTotal`) MUST carry a
 non-empty `respawn_kind` label whose value is drawn from the closed
 set `{ "vm_crash", "orchestrator_no_progress", "reviewer_rejection",
 "unknown" }`. Adding a new value is a spec change to
-`v3/otel-observability.md §8` AND a code change to
+[`v3/otel-observability.md §8`](v3/otel-observability.md) AND a code change to
 `kernel/src/observability.rs::RESPAWN_KIND_CLOSED_SET`.
 
 **Justification.** The pre-iter44 metric counted every respawn under
@@ -9235,14 +9235,14 @@ recognises it as the agent-disagreement code path, and moves on.
 * `closed_set_matches_spec_table` — pins the four constants
   enumerated in this invariant.
 
-**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) (Metric Catalog
 row for `IsolationRespawnAttemptedTotal`).
 
 ### INV-OBS-KERNEL-RESPAWN-COVERAGE-01 — Every supervisor-driven kernel respawn has a paired metric emission
 
 **Statement.** Every `KernelRespawnedBySupervisor` audit event the
 supervisor writes (via the sentinel-file → kernel-boot rehydration
-path documented in `v2/self-healing-supervisor.md §3.3`) MUST be
+path documented in [`v2/self-healing-supervisor.md §3.3`](v2/self-healing-supervisor.md)) MUST be
 paired with one `KernelRespawnTotal` counter increment AND one
 `KernelRespawnDuration` histogram observation, both emitted from
 the kernel-boot codepath the next time the kernel boots and reads
@@ -9266,7 +9266,7 @@ The label vocabularies are CLOSED:
   "other" }`.
 
 Adding a new value to any of these lexicons is a spec change to
-`v3/otel-observability.md §8` AND a code change to
+[`v3/otel-observability.md §8`](v3/otel-observability.md) AND a code change to
 `kernel/src/observability.rs::RESPAWN_*_CLOSED_SET` /
 `REFUSED_REASON_CLOSED_SET`.
 
@@ -9340,10 +9340,10 @@ without opening the audit log or the supervisor's stderr file.
   `record_supervisor_refused_restart`, asserts the counter and
   the closed-set membership of the `reason` label.
 
-**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) (Metric Catalog
 rows for `KernelRespawnTotal` / `KernelRespawnDuration` /
 `SupervisorRefusedRestartTotal`) + cross-ref from
-`v2/self-healing-supervisor.md §9`.
+[`v2/self-healing-supervisor.md §9`](v2/self-healing-supervisor.md).
 
 ### INV-OBS-OPERATOR-IPC-COVERAGE-01 — Every operator IPC dispatch is paired with one counter increment + one duration sample
 
@@ -9430,9 +9430,9 @@ witness — adding a new `OperatorRequest` variant produces a
 compile error here until the variant is mapped, which forces the
 closed-lexicon update to be a single PR.
 
-**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) (Metric Catalog
 rows for `OperatorIpcTotal` and `OperatorIpcDuration`). Referenced
-from `v3/observability-prometheus.md §3.12` (Prometheus inventory).
+from [`v3/observability-prometheus.md §3.12`](v3/observability-prometheus.md) (Prometheus inventory).
 
 ### INV-OBS-IPC-ROUNDTRIP-COVERAGE-01 — Every kernel↔substrate IPC frame has a paired counter + histogram + inflight emission
 
@@ -9582,10 +9582,10 @@ witness — adding a new `IpcMessage` variant produces a compile
 error here until the variant is mapped, which forces the
 closed-lexicon update to be a single PR.
 
-**Canonical home.** `v3/otel-observability.md §8` (Metric Catalog
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) (Metric Catalog
 rows for `KernelSubstrateIpcRoundtripDuration`,
 `KernelSubstrateIpcMessagesTotal`, `KernelSubstrateIpcInflight`).
-Referenced from `v3/observability-prometheus.md §3.13`
+Referenced from [`v3/observability-prometheus.md §3.13`](v3/observability-prometheus.md)
 (Prometheus inventory).
 
 ---
@@ -9647,9 +9647,9 @@ plus
 `wired_helpers_pass_redactor_allowlist` (the closed-set witness that
 asserts the redactor accepts the four labels the helper stamps).
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `PlannerInferenceDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3`.
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md).
 
 ---
 
@@ -9680,7 +9680,7 @@ endpoint from a slow gateway subprocess.
 **Witness.**
 `kernel/src/observability.rs::latency_metrics_wired_witness_tests::gateway_upstream_helper_lands_observed_sample`.
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `GatewayUpstreamDuration`.
 
 ---
@@ -9720,7 +9720,7 @@ fsync-failure path is visible against the success rate.
 and
 `audit_event_append_helper_records_error_arm`.
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `AuditEventAppendDuration` + `AuditEventAppendTotal`.
 
 ---
@@ -9746,7 +9746,7 @@ zero or zero-thousand events per second.
 **Witness.**
 `kernel/src/observability.rs::latency_metrics_wired_witness_tests::audit_chain_length_helper_lands_observed_sample`.
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `AuditChainLength`.
 
 ---
@@ -9816,9 +9816,9 @@ co-emit invariant.
 `fsm_bridge_records_initiative_created_completed`, and
 `fsm_bridge_inert_when_hub_disabled`.
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `FsmTransitionDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3` (iter61 expansion).
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61 expansion).
 
 ---
 
@@ -9870,9 +9870,9 @@ sample).
 (combined witness exercising the disabled / happy / error arms
 under one `OnceLock`-aware serial guard).
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `GitWorktreeStageDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3` (iter61 expansion).
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61 expansion).
 
 ---
 
@@ -9925,9 +9925,9 @@ operator sees both "which kernel↔substrate frame is slow" and
 (combined witness exercising the disabled / happy / error
 arms under one `OnceLock`-aware serial guard).
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `IpcFrameStageDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3` (iter61 expansion).
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61 expansion).
 
 ---
 
@@ -9979,9 +9979,9 @@ histogram now carries the first of those four signals.
 under one `OnceLock`-aware serial guard, mirroring the IPC-frame
 witness pattern).
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `GatewayStageDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3` (iter61 expansion).
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61 expansion).
 
 ---
 
@@ -10051,9 +10051,9 @@ The pre-existing `every_class_lexeme_is_unique` and
 lexemes uniformly (no duplicates, none exceed the redactor's
 32-byte cap).
 
-**Canonical home.** `v3/otel-observability.md §8` row
+**Canonical home.** [`v3/otel-observability.md §8`](v3/otel-observability.md) row
 `StoreQueryDuration` + Prometheus inventory in
-`v3/observability-prometheus.md §3` (iter61 expansion).
+[`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61 expansion).
 
 ---
 
@@ -10096,7 +10096,7 @@ spec-vs-dashboard parity audit (the `ripgrep` query
 `INV-OBSERVABILITY-DATAPLANE-LATENCY-0[3-7]` MUST hit at least
 one description in the JSON file).
 
-**Canonical home.** `v3/observability-prometheus.md §3` (iter61
+**Canonical home.** [`v3/observability-prometheus.md §3`](v3/observability-prometheus.md) (iter61
 panel inventory) + the dashboard JSON itself.
 
 ---
@@ -10447,7 +10447,7 @@ share one view of the budget.
 * `kernel/src/initiatives/lifecycle.rs::parse_plan_tasks` — `max_turns = 0` rejection
 * `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::effective_max_turns` — pure resolution helper called by the resolver
 
-**Canonical home.** `v2/v2-deep-spec.md §Step 12` (planner-harness
+**Canonical home.** [`v2/v2-deep-spec.md §Step 12`](v2/v2-deep-spec.md) (planner-harness
 ceiling resolution); `guides/recipes/env/11-planner-env-vars.md`
 (operator-facing recipe); `guides/recipes/policy/06-budget-section.md`
 (policy-side default).
@@ -10505,8 +10505,8 @@ spent >75% of its budget on a single coherent edit should prefer
 * `kernel/src/session_spawn_orchestrator.rs` (orchestrator + executor spawn paths) — the spawn-site bridge that calls `resolve_planner_max_turns_for(...)` once and threads the result into BOTH the env stamp and `KsbInputs`
 * `crates/ksb/src/lib.rs::push_session_capability_line` — the renderer that emits the `planner_max_turns=N` token
 
-**Canonical home.** `v2/v2_extended_gaps.md §2.4` (KSB schema);
-`v2/v2-deep-spec.md §Step 12` (planner-harness ceiling resolution).
+**Canonical home.** [`v2/v2_extended_gaps.md §2.4`](v2/v2_extended_gaps.md) (KSB schema);
+[`v2/v2-deep-spec.md §Step 12`](v2/v2-deep-spec.md) (planner-harness ceiling resolution).
 
 ---
 
@@ -10605,8 +10605,8 @@ per-attempt cost bounded even when the operator's TOML is wrong.
 * `crates/ksb/src/lib.rs::push_max_turns_scaling_line` — KSB renderer
 * `kernel/src/initiatives/ksb_assembly.rs::assemble_capabilities` — role-scoped projection
 
-**Canonical home.** `v2/v2-deep-spec.md §Step 12` (planner-harness
-progressive ceiling resolution); `v2/planner-harness.md`
+**Canonical home.** [`v2/v2-deep-spec.md §Step 12`](v2/v2-deep-spec.md) (planner-harness
+progressive ceiling resolution); [`v2/planner-harness.md`](v2/planner-harness.md)
 (progressive scaling section); `guides/recipes/policy/06-budget-section.md`
 (policy-side `planner_max_turns_step_default`);
 `guides/recipes/env/11-planner-env-vars.md`
@@ -11045,7 +11045,7 @@ because the resulting fetch fails.
   value, and the observed value); exit 2 ⇔ prerequisites
   missing (`curl`/`jq`/`docker`) or stack not up.
 
-**Canonical home.** `v3/observability-prometheus.md §4`
+**Canonical home.** [`v3/observability-prometheus.md §4`](v3/observability-prometheus.md)
 (Grafana dashboards) — the dashboards-and-datasource contract
 description. Operator-facing recipe:
 `guides/recipes/ops/19-grafana-datasource-provisioning.md`

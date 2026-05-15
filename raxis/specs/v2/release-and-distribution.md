@@ -8,16 +8,16 @@
 >
 > **Cross-references:**
 >
-> - `planner-harness.md §14.4` — image-build pipeline (the producer
+> - [`planner-harness.md §14.4`](planner-harness.md) — image-build pipeline (the producer
 >   side of the artefacts this spec consumes).
-> - `system-requirements.md §1`, §11 — install-dir layout and
+> - [`system-requirements.md §1`](system-requirements.md), §11 — install-dir layout and
 >   `raxis doctor` checks.
 > - `canonical-images/build.rs` — the build-script implementation
 >   that bakes the trust anchor + V1-fallback image digests into the
 >   kernel binary.
 > - `architectural-tensions.md §...` — the original distribution
 >   tension this spec resolves.
-> - `v2-deep-spec.md §Distribution` — the two-line normative seed
+> - [`v2-deep-spec.md §Distribution`](v2-deep-spec.md) — the two-line normative seed
 >   that authorised this work (`brew install raxis-kernel` /
 >   notarized AVF execution).
 
@@ -26,7 +26,7 @@
 ## §1 — Why a standalone spec
 
 The original V2 distribution direction was a two-line statement in
-`v2-deep-spec.md`:
+[`v2-deep-spec.md`](v2-deep-spec.md):
 
 > The `raxis-planner` binary and the kernel must support notarized
 > AVF execution, distributed via `brew` (`chika5105/tap/raxis`). The
@@ -356,7 +356,7 @@ proxy is Linux-only because it depends on `nfqueue` and Netfilter.
 The macOS tarball ships a `bin/raxis-tproxy` stub binary that
 prints "tproxy is Linux-only; the macOS kernel uses host-routed
 egress" and exits with status 70 (the convention §6.5 of
-`vm-network-isolation.md` defines for "wrong host kernel").
+[`vm-network-isolation.md`](vm-network-isolation.md) defines for "wrong host kernel").
 
 ### §6.4 Failure modes
 
@@ -655,7 +655,7 @@ brew upgrade raxis-kernel
 
 Old `share/raxis/images/<role>-<version>.img` files are deleted on
 upgrade because they are kernel-version-locked (per
-`canonical-images.md`); the tap formula always deposits the
+[`canonical-images.md`](canonical-images.md)); the tap formula always deposits the
 images named with the new kernel version. Custom operator policy
 under `$HOMEBREW_PREFIX/etc/raxis/` is **never** touched by upgrades.
 
@@ -708,7 +708,7 @@ machine after RAXIS is removed.
 | `xtask/src/release.rs`                                  | NEW        | Local helper: `cargo xtask release dry-run`              |
 | `xtask/src/dev_keys.rs`                                 | NEW        | Local helper: `cargo xtask dev-keys init` (§8.1–§8.2)    |
 | `cli/src/commands/doctor.rs`                            | MODIFY     | Add `signing-key-fp` subcommand (§9.2)                   |
-| `raxis/specs/v2/release-and-distribution.md`            | THIS SPEC  | (you are here)                                            |
+| [`raxis/specs/v2/release-and-distribution.md`](release-and-distribution.md)            | THIS SPEC  | (you are here)                                            |
 | Tap repo `chika5105/homebrew-tap` initial commit        | NEW        | Tap bootstrap with first-version formulas                |
 
 The implementation roadmap mirrors this list — each row is one

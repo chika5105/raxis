@@ -7,14 +7,14 @@
 > opt-in env var.
 >
 > **Cross-references:**
-> - `concurrency-and-locking.md §7a` — the in-kernel
+> - [`concurrency-and-locking.md §7a`](concurrency-and-locking.md) — the in-kernel
 >   `runtime-deadlock-detection` watcher this surface composes with
 >   (`INV-LOCK-07`).
-> - `audit-paired-writes.md` — the audit-emission contract this
+> - [`audit-paired-writes.md`](audit-paired-writes.md) — the audit-emission contract this
 >   surface extends with the four new restart-lifecycle event kinds.
-> - `dashboard-hardening.md` — the operator-dashboard surface
+> - [`dashboard-hardening.md`](dashboard-hardening.md) — the operator-dashboard surface
 >   contract; this spec adds the kernel-lifecycle banner.
-> - `kernel-lifecycle.md` — the boot/shutdown flow this surface
+> - [`kernel-lifecycle.md`](kernel-lifecycle.md) — the boot/shutdown flow this surface
 >   composes with on the kernel side (Step 6 recovery sweep).
 > - `invariants.md` — adds `INV-SUPERVISOR-RESTART-AUDIT-01`,
 >   `INV-SUPERVISOR-CIRCUIT-BREAKER-01`, `INV-SUPERVISOR-OPT-IN-01`,
@@ -49,7 +49,7 @@
 | # | Risk | Mitigation |
 |---|---|---|
 | 2.1 | **Masks real bugs.** | Auto-restart can hide the underlying deadlock. *"Transient" is dangerous framing — there are no transient deadlocks, only repeating ones we haven't reproduced reliably.* **Mitigation:** every restart writes a forensic dump (`<data_dir>/deadlock_dump_<unix_ts>.json`) carrying the full `parking_lot::deadlock::check_deadlock()` lock-graph (thread IDs, lock IDs, backtraces). Dump is read on the next boot to synthesise `KernelDeadlockDetected` into the audit chain. **No deadlock is silently absorbed.** Kernel notification surface routes this event at `Critical` severity. |
-| 2.2 | **Loses in-flight work.** | Session VMs in flight when kernel restarts may be orphaned. **Mitigation:** the audit chain + SQLite persistence let `recovery::reconcile` rehydrate FSM state on restart (the existing crash-recovery sweep that runs at every boot today, kernel-core.md §2.2 Step 6). Orphan VMs are reaped by the substrate's existing TTL (`extensibility-traits.md §3.5`). |
+| 2.2 | **Loses in-flight work.** | Session VMs in flight when kernel restarts may be orphaned. **Mitigation:** the audit chain + SQLite persistence let `recovery::reconcile` rehydrate FSM state on restart (the existing crash-recovery sweep that runs at every boot today, kernel-core.md §2.2 Step 6). Orphan VMs are reaped by the substrate's existing TTL ([`extensibility-traits.md §3.5`](extensibility-traits.md)). |
 | 2.3 | **Audit-chain hash continuity.** | Restart needs to preserve `prev_sha256` continuity across the boundary. **Mitigation:** the kernel writes a terminal record on its way out (`KernelDeadlockDetected` from the watcher's *best-effort* attempt — see §3.2; or a clean `KernelStopped` on operator exit). The next boot's first chained record is `KernelRestartCompleted` with `prev_sha256` = the last record on disk (which the existing chain-resume path in `kernel/src/main.rs` already computes via `last_chain_state`). The offline `verify-chain` walker stays clean. |
 | 2.4 | **State-recovery complexity.** | Half-committed SQLite transactions, dangling FDs, in-flight planner sessions. **Mitigation:** kernel's existing crash-recovery sweep (`recovery::reconcile`) handles this — it is invoked at boot today; the restart path just re-enters the same sweep. No new recovery code is introduced by this spec. |
 | 2.5 | **Restart loops.** | A persistent deadlock would cause a crash-loop. **Mitigation:** circuit breaker — `≤ 3 restarts in a 60-second sliding window`, then escalate to `Halted (circuit-open)` and refuse to restart further until operator runs `raxis-supervisor reset-circuit-breaker`. (`INV-SUPERVISOR-CIRCUIT-BREAKER-01`.) |
@@ -93,7 +93,7 @@ New module `raxis/kernel/src/deadlock_dump.rs`:
 ### §3.2 Wire `spawn_deadlock_watcher` to dump + exit 70
 
 `kernel/src/main.rs::spawn_deadlock_watcher` is extended (the existing
-JSON-line stderr emit per `concurrency-and-locking.md §7a` stays — it
+JSON-line stderr emit per [`concurrency-and-locking.md §7a`](concurrency-and-locking.md) stays — it
 is forensic evidence and is independent of dump writing):
 
 1. Build the `DeadlockDump` from the `parking_lot::deadlock::check_deadlock()` result.
@@ -464,7 +464,7 @@ The supervisor installs handlers for `SIGTERM`, `SIGINT`, and `SIGHUP` BEFORE sp
 1. **`SIGTERM` / `SIGINT` received.** Atomically set:
     * `intentional_shutdown = true`
     * `signal_origin = "operator-terminated"` (for SIGTERM) or `"operator-interrupt"` (for SIGINT)
-2. **Forward** the signal to the kernel child via `nix::sys::signal::kill(child_pid, signal)`. The kernel's own signal handlers (`signal::ctrl_c` in `kernel/src/main.rs`) flow the shutdown through `dashboard::DashboardServer::serve_with_shutdown` and the IPC graceful-drain seam (`dashboard-hardening.md §1.5`).
+2. **Forward** the signal to the kernel child via `nix::sys::signal::kill(child_pid, signal)`. The kernel's own signal handlers (`signal::ctrl_c` in `kernel/src/main.rs`) flow the shutdown through `dashboard::DashboardServer::serve_with_shutdown` and the IPC graceful-drain seam ([`dashboard-hardening.md §1.5`](dashboard-hardening.md)).
 3. **Wait** up to `RAXIS_SUPERVISOR_SHUTDOWN_GRACE_SECS` (default `30`) for the kernel to exit naturally.
 4. **Escalation.** If the grace deadline expires AND the kernel is still alive:
     * Log a structured `KernelGracefulShutdownTimedOut { grace_secs, child_pid }` line on supervisor stderr.
@@ -617,7 +617,7 @@ TanStack Query `useKernelLifecycle()` hook polls `/api/health/kernel-lifecycle` 
 
 ## §7 — Relationship to the deferred `system-daemon` work
 
-The `system-daemon` todo (launchd plist + systemd unit + `raxis daemon start/stop/status` CLI mentioned in `operator-ergonomics.md §...`) overlaps with this surface. Two integration paths are forward-compatible with both:
+The `system-daemon` todo (launchd plist + systemd unit + `raxis daemon start/stop/status` CLI mentioned in [`operator-ergonomics.md §...`](operator-ergonomics.md)) overlaps with this surface. Two integration paths are forward-compatible with both:
 
 ### Path A — Supervisor as the OS-supervised process
 
@@ -630,7 +630,7 @@ Launchd / systemd spawns `raxis-supervisor start`, which in turn spawns and supe
 
 Launchd / systemd spawns `raxis-kernel` directly; the in-kernel deadlock detector exits with `70` and the OS-level supervisor restarts the kernel. The `raxis-supervisor` binary is not in the loop.
 
-* **Pros:** simpler single-layer supervision; matches the original `concurrency-and-locking.md §7a` "panic = abort + supervisor restarts" model.
+* **Pros:** simpler single-layer supervision; matches the original [`concurrency-and-locking.md §7a`](concurrency-and-locking.md) "panic = abort + supervisor restarts" model.
 * **Cons:** no circuit breaker at the OS level (launchd's `KeepAlive` will infinite-restart; systemd needs explicit `Restart=on-failure StartLimitBurst=3 StartLimitIntervalSec=60`); no dashboard sentinel without adding an OS-level write hook; operator-signal contract has to be re-implemented per-OS (launchd vs systemd vs init).
 
 **Recommendation:** **Path A** for production deployments. Path B is documented for operators who want the simpler topology and accept the per-OS configuration of the rate limit. The decision is deferred to the system-daemon PR; this PR ships only the supervisor binary (Path A's prerequisite) and explicitly leaves both the launchd plist and systemd unit out of scope.

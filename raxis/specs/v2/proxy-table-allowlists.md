@@ -12,7 +12,7 @@
 > verifying the SQL / BSON walker reads.
 >
 > **Cross-references:**
-> - `credential-proxy.md` §4 (per-proxy wire shapes), §5 (audit
+> - [`credential-proxy.md`](credential-proxy.md) §4 (per-proxy wire shapes), §5 (audit
 >   envelopes), §14 (real-upstream-forwarding contract), §14.8
 >   (per-proxy implementation matrix) — this spec amends the matrix
 >   rows for `postgres`, `mysql`, `mssql`, `mongodb`.
@@ -23,7 +23,7 @@
 > - `invariants.md` — adds `INV-PROXY-TABLE-01..06`; companions to
 >   the existing `INV-CRED-KERNEL-01` "no credential bytes in VM"
 >   discipline.
-> - `audit-paired-writes.md` — the proxy events this spec extends
+> - [`audit-paired-writes.md`](audit-paired-writes.md) — the proxy events this spec extends
 >   (`DatabaseQueryExecuted`, `DatabaseQueryCompleted`,
 >   `MongoCommandExecuted`) are pre-tx single-class observability
 >   events; the pairing model is unchanged.
@@ -37,7 +37,7 @@
 
 ### 1.1 The gap V2.1 closed and the gap this spec closes
 
-`credential-proxy.md` §14 (V2.1 real-upstream forwarding) shipped
+[`credential-proxy.md`](credential-proxy.md) §14 (V2.1 real-upstream forwarding) shipped
 proxies that:
 
 1. Authenticate to the real upstream with the operator-declared
@@ -170,8 +170,8 @@ These deferrals are listed in §11.3.
   blocked (§9).
 - The `ProxyStats` counter additions (§10).
 - The per-proxy implementation matrix update (§11).
-- The cross-spec amendments (`credential-proxy.md`,
-  `03-credential-proxies.md`, `V2_STATUS.md`) (§16).
+- The cross-spec amendments ([`credential-proxy.md`](credential-proxy.md),
+  `03-credential-proxies.md`, [`V2_STATUS.md`](V2_STATUS.md)) (§16).
 
 ### Out of scope
 
@@ -296,7 +296,7 @@ enforce = true
 
 - All four new fields default to their permissive value (`[]` /
   `0` / `true`) so V2.1 plans keep working without a `plan prepare`
-  pass. `plan prepare` (per `operator-ergonomics.md §4`) does NOT
+  pass. `plan prepare` (per [`operator-ergonomics.md §4`](operator-ergonomics.md)) does NOT
   populate any of these fields; operators declare them
   explicitly.
 - The `enforce` field is **per-credential**, not per-restriction.
@@ -900,7 +900,7 @@ serialises the full stats struct, so this is a passive extension).
   database-native `GRANT` /  view-based controls.
 - **Per-restriction-axis `enforce`.** Operators that need
   different `enforce` per restriction axis split the credential
-  per D2 of `operator-ergonomics.md` (one credential block per
+  per D2 of [`operator-ergonomics.md`](operator-ergonomics.md) (one credential block per
   enforcement axis with the corresponding fields).
 
 ---
@@ -977,7 +977,7 @@ to make this the cheap path.
 
 | ID | Statement | Justification | Canonical home |
 |---|---|---|---|
-| `INV-PROXY-TABLE-01` | When `allowed_tables` is non-empty on a SQL credential, every admitted query has `tables_referenced ⊆ allowed_tables` (per the walker output recorded in the audit chain). | The allowlist is structurally enforced; an audit reader can verify the property by re-reading the audit chain. | `proxy-table-allowlists.md` §5.3, §8.1 |
+| `INV-PROXY-TABLE-01` | When `allowed_tables` is non-empty on a SQL credential, every admitted query has `tables_referenced ⊆ allowed_tables` (per the walker output recorded in the audit chain). | The allowlist is structurally enforced; an audit reader can verify the property by re-reading the audit chain. | [`proxy-table-allowlists.md`](proxy-table-allowlists.md) §5.3, §8.1 |
 | `INV-PROXY-TABLE-02` | When the walker returns `Ambiguous` and any allowlist or denylist is configured, the query is blocked and audited with the corresponding `ambiguous_sql_*` reason. | Fail-closed default `R-6`. | §5.2 |
 | `INV-PROXY-TABLE-03` | When `forbidden_tables` is non-empty on a SQL credential, no admitted query touches a table in `forbidden_tables`. | Denylist short-circuit. | §5.3 |
 | `INV-PROXY-TABLE-04` | When `max_result_rows = N` is finite, no agent connection observes more than `N` rows for any single simple-query result set, regardless of upstream return size. | Streaming hard-cap (§7.1–7.3). | §7 |
@@ -1019,7 +1019,7 @@ operators land them through the audit-only rollout of §13.2.
 
 This PR updates:
 
-- `credential-proxy.md` §14.8 implementation matrix rows for
+- [`credential-proxy.md`](credential-proxy.md) §14.8 implementation matrix rows for
   `postgres`, `mysql`, `mssql`, `mongodb` to flip the "Deferred
   V3: `forbidden_tables`, `max_result_rows`" / "Deferred V3:
   full BSON tree-walker for `forbidden_collections`,
@@ -1028,13 +1028,13 @@ This PR updates:
 - `raxis-concepts/03-credential-proxies.md` to expand the
   `allowed_tables` / `allowed_collections` / `max_rows_per_query`
   conceptual surface with a link to this spec.
-- `V2_STATUS.md` to add a line for the proxy table-allowlist
+- [`V2_STATUS.md`](V2_STATUS.md) to add a line for the proxy table-allowlist
   feature with status "shipped".
 - `invariants.md` §3-equivalent table — adds the six
   `INV-PROXY-TABLE-*` rows above.
 
 Implementation tracker (the closing checklist of
-`credential-proxy.md`) gains:
+[`credential-proxy.md`](credential-proxy.md)) gains:
 
 - [x] **Proxy: SQL relation-reference walker** — per §5, lands
   in each of `credential-proxy-postgres`, `-mysql`, `-mssql`

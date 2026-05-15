@@ -5,7 +5,7 @@
 > **Cross-references:**
 > - [`isolation-linux-microvm.md`](isolation-linux-microvm.md) — Linux Firecracker substrate spec.
 > - [`extensibility-traits.md §3`](extensibility-traits.md) — `IsolationBackend` trait surface both substrates implement.
-> - [`vm-network-isolation.md`](vm-network-isolation.md) — historical Tier-1 networking contract (now superseded by Path A3; see `airgap-architecture.md`).
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — historical Tier-1 networking contract (now superseded by Path A3; see [`airgap-architecture.md`](airgap-architecture.md)).
 > - [`airgap-architecture.md`](airgap-architecture.md) — Path A3 universal-airgap egress (the only non-`None` tier shipped in V2).
 > - [`system-requirements.md §1.1, §2`](system-requirements.md) — host requirements.
 > - `crates/raxis-isolation-apple-vz/src/lib.rs` — macOS substrate impl.
@@ -29,7 +29,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | `Backend::spawn(image, mounts, spec)`            | `AppleVzBackend::spawn` → `runtime::boot_vm`                    | `FirecrackerBackend::spawn` → `boot_and_open_session`          | ✅ parity |
 | `Backend::verify_isolation_guarantee()`          | Returns `R1Conformant` on macOS 13+, else `FallbackOnly`        | Returns `R1Conformant` iff `/dev/kvm` RW-openable, else `FallbackOnly` | ✅ parity |
 | `Backend::backend_id()`                          | `"apple-vz-1.x"`                                                | `"firecracker-1.x"`                                            | ✅ parity (string differs by design — both are stable per-substrate identifiers) |
-| `Backend::capability(BootLatencyMs)`             | `Int(200)` median                                               | `Int(50)` median (post-fast-boot tune; `isolation-linux-microvm.md §3.1`) | ✅ parity (both are hints surfaced through `raxis doctor`; kernel does NOT gate admission) |
+| `Backend::capability(BootLatencyMs)`             | `Int(200)` median                                               | `Int(50)` median (post-fast-boot tune; [`isolation-linux-microvm.md §3.1`](isolation-linux-microvm.md)) | ✅ parity (both are hints surfaced through `raxis doctor`; kernel does NOT gate admission) |
 | `Backend::capability(MaxConcurrentVms)`          | `Int(64)`                                                       | `Int(256)`                                                     | ✅ parity (substrate-honest; KVM has more headroom than AVF) |
 | `Backend::capability(AttestationSupported)`      | `Bool(false)`                                                   | `Bool(false)`                                                  | ✅ parity |
 | `Backend::capability(MemoryEncryption)`          | `Bool(false)`                                                   | `Bool(false)`                                                  | ✅ parity (TDX/SEV-SNP substrate is V3+) |
@@ -38,7 +38,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | `Session::terminate()`                           | Close channel; `vm.stop()`; `Drop` reaps                        | Close channel; SIGKILL Firecracker child; unlink UDS           | ✅ parity (per-OS mechanism, identical observable: idempotent teardown) |
 | `Session::shutdown(grace) -> ExitStatus`         | `vm.requestStop()`; poll vm state with 20 ms tick; SIGKILL on grace expiry | `SendCtrlAltDel`; poll `try_wait` with 20 ms tick; SIGKILL on grace expiry | ✅ parity (graceful → forced; both report `ExitStatus::SignalKilled { signum: 9 }` on timeout) |
 | `Session::session_identity()`                    | `SessionTransportId::Vsock { cid }`                             | `SessionTransportId::Vsock { cid }` (Firecracker-assigned)     | ✅ parity (both substrates surface the canonical `Vsock { cid }` shape) |
-| `Session::take_kernel_ipc_fd()`                  | `Some(<surfaced fd>)` when `surface_kernel_ipc_fd` was opted-in | `None` (V2); will return `Some(<UnixStream::as_raw_fd>)` in V3 once the kernel's async dispatch loop is the only consumer | ⚠️ partial (V3 closes; documented in `isolation-linux-microvm.md §8`) |
+| `Session::take_kernel_ipc_fd()`                  | `Some(<surfaced fd>)` when `surface_kernel_ipc_fd` was opted-in | `None` (V2); will return `Some(<UnixStream::as_raw_fd>)` in V3 once the kernel's async dispatch loop is the only consumer | ⚠️ partial (V3 closes; documented in [`isolation-linux-microvm.md §8`](isolation-linux-microvm.md)) |
 | `Backend::capability(KvmAvailable)`              | n/a (always returns `Bool(false)` on macOS)                     | Re-runs `probe_host`; `Bool(true)` iff `/dev/kvm` RW-openable | ✅ parity (per-OS-meaningful capability; kernel ignores on the wrong OS) |
 | `Backend::capability(VirtualizationFrameworkAvailable)` | Re-runs the AVF gate; `Bool(true)` on macOS 13+         | n/a (always `Bool(false)` on Linux)                            | ✅ parity (mirror of the previous row) |
 
@@ -52,7 +52,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 | Kernel cmdline                                   | `console=hvc0 loglevel=8 ignore_loglevel reboot=k panic=10` (verbose for diagnostics; Apple's PL011 is async-flushed) | `console=ttyS0 reboot=k panic=1 pci=off i8042.noaux i8042.nokbd quiet loglevel=0 tsc=reliable clocksource=tsc 8250.nr_uarts=0 random.trust_cpu=on` (fast-boot recipe) | ⚠️ partial — divergence is intentional per-VMM tuning, not a contract gap. The substrate owns the cmdline; operator-supplied `boot_args` REPLACE on both substrates. |
 | Initramfs vs EROFS rootfs                        | Both supported; `ImageKind::RootfsInitramfsCpio` → `vz_initial_ram_disk_url`; `RootfsErofs` → `vz_block_device_initialization` | Both supported; initramfs → `BootSource.initrd_path`; EROFS → `PUT /drives/rootfs` | ✅ parity |
 | Workspace mount path                             | VirtioFS via `VZVirtioFileSystemDeviceConfiguration`            | V2: vsock-mediated artifact RPC (no virtiofs in upstream Firecracker); V3: virtiofsd sidecar | ⚠️ partial — observable to the planner agent but invisible to the kernel; `WorkspaceMount` typed contract is identical |
-| Network device                                   | No `VZ*NetworkDevice*` attachment for any tier (`EgressTier::None` and `EgressTier::Mediated` both produce a NIC-less VM) | No `PUT /network-interfaces` call for any tier (both `None` and `Mediated` omit it) | ✅ parity (Path A3 — `airgap-architecture.md` — is the only egress path; the legacy `Tier1Tproxy` virtio-net + NAT codepath was deleted alongside the variant) |
+| Network device                                   | No `VZ*NetworkDevice*` attachment for any tier (`EgressTier::None` and `EgressTier::Mediated` both produce a NIC-less VM) | No `PUT /network-interfaces` call for any tier (both `None` and `Mediated` omit it) | ✅ parity (Path A3 — [`airgap-architecture.md`](airgap-architecture.md) — is the only egress path; the legacy `Tier1Tproxy` virtio-net + NAT codepath was deleted alongside the variant) |
 | Vsock contract                                   | Host CID 2; per-session guest CID; planner port 1024            | Host CID 2; per-session guest CID (Firecracker-assigned); planner port 1024 | ✅ parity |
 | Host-side vsock channel                          | `VZVirtioSocketDevice` connect; raw bytes                       | UDS multiplexer + `CONNECT 1024\n`/`OK <peer_port>\n` handshake; raw bytes | ✅ parity (handshake invisible to the kernel; both surface a `dyn Read + Write`) |
 | Frame envelope                                   | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)       | 4-byte BE length + payload, 16 MiB cap (`MAX_FRAME_BYTES`)     | ✅ parity (byte-identical) |
@@ -84,7 +84,7 @@ This matrix tracks every observable that a reviewer might think to compare. Rows
 After the Tier1Tproxy deletion every supported egress tier
 produces a NIC-less VM. The kernel arbitrates outbound TCP and
 DNS over AF_VSOCK rather than over a virtio-net device — see
-`airgap-architecture.md` for the wire protocol. The substrate's
+[`airgap-architecture.md`](airgap-architecture.md) for the wire protocol. The substrate's
 job is to honour `EgressTier::Mediated` by emitting *no* network
 device, and to honour `EgressTier::None` the same way.
 

@@ -92,7 +92,7 @@ admission_queue_limit  = 32
 purpose                = "Nightly batch job; admits up to 32 long-running initiatives"
 ```
 
-Defaults are conservative (small) so a fresh install on modest hardware does not crash. Production deployments tune per host capability. All caps are policy-pushable per `policy-epoch-diffing.md`; changing capacity caps advances the policy epoch.
+Defaults are conservative (small) so a fresh install on modest hardware does not crash. Production deployments tune per host capability. All caps are policy-pushable per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); changing capacity caps advances the policy epoch.
 
 ---
 
@@ -235,7 +235,7 @@ Bundle staging is uncapped per-initiative but contributes to the aggregate disk 
 
 ### 6.7 Abandoned-worktree retention
 
-When a task transitions to `Failed` (per `agent-disagreement.md §7`), its worktree enters the abandoned-commits lifecycle and is retained on disk for forensic inspection and operator salvage. Sizing characteristics:
+When a task transitions to `Failed` (per [`agent-disagreement.md §7`](agent-disagreement.md)), its worktree enters the abandoned-commits lifecycle and is retained on disk for forensic inspection and operator salvage. Sizing characteristics:
 
 - An abandoned worktree's size on disk equals the active worktree's size at the moment of failure (file copy; checkpoint of the failed state, not a live mount).
 - The `[worktree_lifecycle]` policy (`abandoned_commits_retention`, `salvage_window`) governs total retention duration. Defaults: 30 days total retention, 7 day salvage window.
@@ -289,7 +289,7 @@ Read-class intents (allowed under `halt_admit`):
 
 ### 7.4 In-flight operations during halt
 
-Halt applies at admission only — operations already past admission continue. This is crucial for `IntegrationMerge` because Phases 2 and 3 must complete before the kernel is fully consistent (per `integration-merge.md §11`). Reserved headroom is sized to allow any reasonable in-flight write to complete:
+Halt applies at admission only — operations already past admission continue. This is crucial for `IntegrationMerge` because Phases 2 and 3 must complete before the kernel is fully consistent (per [`integration-merge.md §11`](integration-merge.md)). Reserved headroom is sized to allow any reasonable in-flight write to complete:
 
 - The `min_free_disk_mb` headroom (default 5 GiB) is sized to absorb: typical pack-fetch (≤ 1 GiB), SQLite WAL flush (≤ 256 MiB), audit segment append (≤ 1 MiB per event), and a comfortable safety margin.
 - Plans that produce unusually large merges (gigabyte-scale generated artifacts) can declare `[plan] expected_max_merge_mb = N` and the kernel adjusts the per-initiative reservation. If the operator declares more than the host supports, `approve_plan` returns `FAIL_INSUFFICIENT_HEADROOM`.
@@ -311,15 +311,15 @@ The canonical disk-pressure abort audits in V2:
 
 | Subsystem | Audit event | Canonical home |
 |---|---|---|
-| Gateway streaming spill (`max_response_buffer_mb`) breached | `InferenceAttemptAborted { abort_reason: DiskPressure }` | `provider-failure-handling.md §7.4.1` |
-| Verifier-VM staging area cap breached | `VerifierAbortedByDiskPressure` | `verifier-processes.md §10` (extension) |
-| Plan-bundle staging during admission | `PlanBundleAdmissionAbortedByDiskPressure` | `plan-bundle-sealing.md §8.1` (admission step 3a, future extension) |
+| Gateway streaming spill (`max_response_buffer_mb`) breached | `InferenceAttemptAborted { abort_reason: DiskPressure }` | [`provider-failure-handling.md §7.4.1`](provider-failure-handling.md) |
+| Verifier-VM staging area cap breached | `VerifierAbortedByDiskPressure` | [`verifier-processes.md §10`](verifier-processes.md) (extension) |
+| Plan-bundle staging during admission | `PlanBundleAdmissionAbortedByDiskPressure` | [`plan-bundle-sealing.md §8.1`](plan-bundle-sealing.md) (admission step 3a, future extension) |
 
 A subsystem that aborts on disk pressure WITHOUT writing one of
 these audit events is a spec violation. Test surfaces in each
 subsystem's spec MUST include a disk-pressure abort case that
 asserts the audit event is committed before the abort path returns
-to its caller. See `provider-failure-handling.md §7.4.2` for the
+to its caller. See [`provider-failure-handling.md §7.4.2`](provider-failure-handling.md) for the
 detailed rationale (forensic missing-half pattern).
 
 ### 7.6 Audit reserve exhausted: total halt
@@ -342,7 +342,7 @@ Recovery from `AuditWriteImpossible` requires kernel restart (operator must free
 
 ### 7.8 Interaction with abandoned-worktree retention (`INV-CONVERGENCE-05`)
 
-Per `agent-disagreement.md §7` and `INV-CONVERGENCE-05`, abandoned worktrees from `Failed` tasks consume `disk_root` space and may contribute to disk pressure. The disk watchdog and any `gc_then_retry` GC pass MUST NOT auto-purge abandoned worktrees that are still inside their `salvage_window` (default 7 days). This is a deliberate trade-off: the forensic record survives transient disk pressure; reclamation requires explicit operator action.
+Per [`agent-disagreement.md §7`](agent-disagreement.md) and `INV-CONVERGENCE-05`, abandoned worktrees from `Failed` tasks consume `disk_root` space and may contribute to disk pressure. The disk watchdog and any `gc_then_retry` GC pass MUST NOT auto-purge abandoned worktrees that are still inside their `salvage_window` (default 7 days). This is a deliberate trade-off: the forensic record survives transient disk pressure; reclamation requires explicit operator action.
 
 The exact interactions:
 
@@ -364,7 +364,7 @@ The exact interactions:
 
 This section directly answers the question: can a disk-full condition during `IntegrationMerge` produce a partial transaction or unrecoverable state?
 
-**Answer: no.** The three-phase model in `integration-merge.md §11` is structurally robust to disk-full at every phase, provided the audit reserve (§7.5) is preserved. Every phase either fully succeeds, fully fails (rolling back via SQLite atomicity), or fails at a recoverable boundary (handled by §11.3 startup recovery). This section enumerates each disk-full point and shows the resulting state.
+**Answer: no.** The three-phase model in [`integration-merge.md §11`](integration-merge.md) is structurally robust to disk-full at every phase, provided the audit reserve (§7.5) is preserved. Every phase either fully succeeds, fully fails (rolling back via SQLite atomicity), or fails at a recoverable boundary (handled by §11.3 startup recovery). This section enumerates each disk-full point and shows the resulting state.
 
 ### 8.1 Staging directories involved
 
@@ -666,13 +666,13 @@ When the disk-full watchdog (§7.1) detects `free_mb < min_free_disk_mb`, no wri
 
 **Scenario it prevents:** Disk fills during heavy admission; kernel keeps accepting intents; subsequent SQLite or git writes fail unpredictably; partial state accumulates. INV-CAPACITY-02 stops admission early enough that in-flight operations have headroom to finish cleanly.
 
-**Composition with `INV-CONVERGENCE-05`:** When the disk-pressure source is in-window abandoned worktrees, `INV-CAPACITY-02` halts new admission and `INV-CONVERGENCE-05` (canonical home: `agent-disagreement.md §7`) forbids the watchdog from auto-purging those worktrees. The operator must either provision more disk, wait for `salvage_window` to elapse, or explicitly run `raxis worktree purge --force` to reclaim forensic data. See §7.8 for the full interaction matrix.
+**Composition with `INV-CONVERGENCE-05`:** When the disk-pressure source is in-window abandoned worktrees, `INV-CAPACITY-02` halts new admission and `INV-CONVERGENCE-05` (canonical home: [`agent-disagreement.md §7`](agent-disagreement.md)) forbids the watchdog from auto-purging those worktrees. The operator must either provision more disk, wait for `salvage_window` to elapse, or explicitly run `raxis worktree purge --force` to reclaim forensic data. See §7.8 for the full interaction matrix.
 
 ### INV-CAPACITY-03 — No partial `IntegrationMerge` transactions under disk-full
 
-For any disk-full event during `IntegrationMerge` (any phase, any sub-case), the resulting state is one of: (a) pre-merge unchanged, (b) `git_apply_pending = 1` with kernel-recoverable git lag, (c) `git_apply_pending = 1` with git fully consistent. Recovery per `integration-merge.md §11.3` restores consistency in cases (b) and (c). State (a) is observably equivalent to the merge having never been submitted.
+For any disk-full event during `IntegrationMerge` (any phase, any sub-case), the resulting state is one of: (a) pre-merge unchanged, (b) `git_apply_pending = 1` with kernel-recoverable git lag, (c) `git_apply_pending = 1` with git fully consistent. Recovery per [`integration-merge.md §11.3`](integration-merge.md) restores consistency in cases (b) and (c). State (a) is observably equivalent to the merge having never been submitted.
 
-**Where:** §8 (full enumeration); `integration-merge.md §11.3` (recovery).
+**Where:** §8 (full enumeration); [`integration-merge.md §11.3`](integration-merge.md) (recovery).
 
 **Scenario it prevents:** Operator suspects a disk-full event during a merge and worries that git is "stuck" in a half-merged state. INV-CAPACITY-03 guarantees that no such state exists; the worst case is auto-recoverable on next disk-healthy transition.
 
@@ -849,7 +849,7 @@ The decision is so categorical that there is no automatic recovery path. The ker
 
 - **Priority inversion.** A High-Priority Orchestrator can be blocked waiting for a Low-Priority Reviewer (which the Orchestrator delegated to) to finish. The Orchestrator's "high priority" doesn't propagate naturally through delegated sub-tasks. Solving this requires priority-inheritance rules that themselves have edge cases (what if two High-Priority Orchestrators are blocked on the same Low-Priority Reviewer? what if a Low-Priority Reviewer is upgraded mid-execution?).
 - **Starvation.** Low-Priority work may never run if High-Priority work continuously arrives. Mitigation requires an aging policy ("after N seconds at Low, promote to Normal"), which is its own design rabbit hole (what's the right N? does aging cross priority classes? how does this interact with `starvation_protection_window_seconds`?).
-- **Preemption.** A Low-Priority VM is running. A High-Priority intent arrives but no slot is free. Do we kill the Low-Priority VM mid-execution? If yes, cascading sub-task termination per `key-revocation.md §7.3` applies — every preemption costs in-flight work. If no, "priority" is meaningless beyond admission-time tiebreaking.
+- **Preemption.** A Low-Priority VM is running. A High-Priority intent arrives but no slot is free. Do we kill the Low-Priority VM mid-execution? If yes, cascading sub-task termination per [`key-revocation.md §7.3`](key-revocation.md) applies — every preemption costs in-flight work. If no, "priority" is meaningless beyond admission-time tiebreaking.
 
 V2 already ships hierarchical orchestration, the kernel push protocol, the immutable artifact store, the credential proxy architecture, and host capacity management. Adding a well-designed priority system on top would be a significant additional design and operational cost.
 
@@ -869,8 +869,8 @@ If the kernel is SIGKILL'd:
 
 - SQLite WAL may be in an inconsistent state. SQLite's WAL crash recovery handles process death cleanly in the common case, but a SIGKILL during WAL header rewrite (a rare-but-real timing window) can leave the database requiring `.recover` to read.
 - Pending audit events queued in the kernel's in-memory ring buffer (between durable-write boundaries) are lost.
-- VSock connections to all VMs die simultaneously; planners detect EOF and reconnect (per `kernel-push-protocol.md §6.2`), but the in-memory loss means some pushes may be re-emitted on reconnect (idempotent, but observable).
-- In-flight `IntegrationMerge` operations in Phase 2 (per `integration-merge.md §11`) leave `git_apply_pending = 1`, requiring §11.3 startup recovery.
+- VSock connections to all VMs die simultaneously; planners detect EOF and reconnect (per [`kernel-push-protocol.md §6.2`](kernel-push-protocol.md)), but the in-memory loss means some pushes may be re-emitted on reconnect (idempotent, but observable).
+- In-flight `IntegrationMerge` operations in Phase 2 (per [`integration-merge.md §11`](integration-merge.md)) leave `git_apply_pending = 1`, requiring §11.3 startup recovery.
 
 Each of these is recoverable, but each is observable and each costs operator confidence. The control plane (kernel) must survive at all costs. Strict admission caps ensure host memory always has headroom for the kernel itself.
 
@@ -932,7 +932,7 @@ Open a fresh SQLite connection for each intent, close it on completion. Rejected
 
 ### Alt H — `disk_full_behavior = silently_drop_oldest`
 
-When disk approaches full, drop the oldest sessions' worktrees to free space. Rejected: violates `INV-MERGE-WORKTREE-RETAIN` (`integration-merge.md §11.4`) and forensic retention (`key-revocation.md §7.4`). Also: silent data destruction is fundamentally hostile to operator trust. `gc_then_retry` GCs only the immutable artifact store (whose garbage-collectable items are explicitly safe to remove); it does not touch worktrees.
+When disk approaches full, drop the oldest sessions' worktrees to free space. Rejected: violates `INV-MERGE-WORKTREE-RETAIN` ([`integration-merge.md §11.4`](integration-merge.md)) and forensic retention ([`key-revocation.md §7.4`](key-revocation.md)). Also: silent data destruction is fundamentally hostile to operator trust. `gc_then_retry` GCs only the immutable artifact store (whose garbage-collectable items are explicitly safe to remove); it does not touch worktrees.
 
 ### Alt I — Allow per-initiative VM caps to be lifted by operator approval at admission time
 

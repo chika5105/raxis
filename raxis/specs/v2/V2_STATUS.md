@@ -54,7 +54,7 @@
 | `raxis-image-builder` (Ed25519 signing, SHA-256 image digest, `SOURCE_DATE_EPOCH`) | shipped | `crates/image-builder/` |
 | `raxis-canonical-images` (kernel-pinned image digests via `build.rs`) | shipped | `crates/canonical-images/` (env vars: `RAXIS_KERNEL_SIGNING_KEY_HEX`, `RAXIS_EXPECTED_*_IMAGE_DIGEST_HEX`) |
 | `raxis-image-cache` (OCI digest → local rootfs path resolver) | shipped | `crates/image-cache/` |
-| `cargo xtask images bake` — single-command end-to-end pipeline (preflight + bake-rootfs + dev-stage + build-all + vmlinux stage; per-role `*.bake.json` integrity manifest; fail-closed input preflight) | shipped | `xtask/src/images.rs::run_bake`, `canonical-images.md §7`; invariants `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`, `INV-IMAGE-BAKE-VMLINUX-STAGED-01`, `INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01`, `INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01`, `INV-IMAGE-CPIO-MULTI-ARCHIVE-PRESERVED-01` |
+| `cargo xtask images bake` — single-command end-to-end pipeline (preflight + bake-rootfs + dev-stage + build-all + vmlinux stage; per-role `*.bake.json` integrity manifest; fail-closed input preflight) | shipped | `xtask/src/images.rs::run_bake`, [`canonical-images.md §7`](canonical-images.md); invariants `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`, `INV-IMAGE-BAKE-VMLINUX-STAGED-01`, `INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01`, `INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01`, `INV-IMAGE-CPIO-MULTI-ARCHIVE-PRESERVED-01` |
 | `cargo xtask images preflight` — read-only verifier of every bake input (CI gate) | shipped | `xtask/src/images.rs::run_preflight` |
 
 ### 1.5 Egress (two-tier)
@@ -74,7 +74,7 @@ credential bytes to the agent VM.
 
 | `proxy_type` | Status | Scope | Reference |
 |---|---|---|---|
-| `postgres` | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full simple-query relay against a live Postgres via `tokio-postgres`, real `RowDescription`/`DataRow`/`CommandComplete` frames, lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); V2.4 SQL walker + `allowed_tables` / `forbidden_tables` / `max_result_rows` streaming cap / `enforce = false` audit-only mode per `proxy-table-allowlists.md` | `crates/credential-proxy-postgres/` + integration tests in `tests/proxy_handshake.rs` (6 passing) + live-e2e slices `postgres-proxy`, `postgres-proxy-restrictions`, `postgres-proxy-table-allowlists` |
+| `postgres` | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full simple-query relay against a live Postgres via `tokio-postgres`, real `RowDescription`/`DataRow`/`CommandComplete` frames, lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope (`DatabaseQueryCompleted`, `CredentialProxyUpstreamConnected`, `CredentialProxyUpstreamFailed`); V2.4 SQL walker + `allowed_tables` / `forbidden_tables` / `max_result_rows` streaming cap / `enforce = false` audit-only mode per [`proxy-table-allowlists.md`](proxy-table-allowlists.md) | `crates/credential-proxy-postgres/` + integration tests in `tests/proxy_handshake.rs` (6 passing) + live-e2e slices `postgres-proxy`, `postgres-proxy-restrictions`, `postgres-proxy-table-allowlists` |
 | `http`     | shipped | bearer / basic auth modes, host rewrite, method+path-prefix allowlist, real upstream forwarding | `crates/credential-proxy-http/` + live-e2e slices `http-proxy-bearer`, `http-proxy-restrictions` |
 | `k8s`      | shipped (rides HTTP) | bearer auth, RBAC-style verb allowlist via the HTTP proxy | `crates/credential-proxy-http/` (k8s convenience layer) |
 | `smtp`     | shipped (real-upstream-tier) | RCPT/MAIL/DATA framing, sender allowlist, recipient-domain allowlist, per-message and per-minute rate caps, real upstream relay with optional STARTTLS | `crates/credential-proxy-smtp/` + live-e2e slice `smtp-proxy` |
@@ -83,7 +83,7 @@ credential bytes to the agent VM.
 | `gcp`      | shipped (handshake-tier — real cloud creds) | metadata-server endpoints (`/computeMetadata/v1/...`), `Metadata-Flavor: Google` enforcement, path allowlist; same real-credentials posture as AWS | `crates/credential-proxy-gcp/` + live-e2e slice `gcp-proxy` |
 | `azure`    | shipped (handshake-tier — real cloud creds) | IMDS `/metadata/identity/oauth2/token`, `Metadata: true` enforcement, resource allowlist; same real-credentials posture as AWS | `crates/credential-proxy-azure/` + live-e2e slice `azure-proxy` |
 | `mysql`    | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full `COM_QUERY` relay against a live MySQL upstream via a hand-rolled `mysql_native_password` connector, byte-relayed text-resultset frames (`ResultSetHeader`/`ColumnDef`/`EOF`/`RowData`/`EOF`), lazy upstream connect on first allowed query, `allow_only_select` short-circuits before upstream, V2.1 audit envelope; V2.4 SQL walker + `allowed_tables` / `forbidden_tables` / `max_result_rows` (truncating `ERR_Packet` 1226/54000 on overflow) / `enforce = false` audit-only mode; `caching_sha2_password` deferred to V3 | `crates/credential-proxy-mysql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mysql-proxy` |
-| `mssql`    | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full `SQLBatch` relay against a live SQL Server upstream over plaintext TDS — `PRELOGIN` (ENC_NOT_SUP), `LOGIN7` with SQL Authentication (nibble-swap+XOR(0xA5) password obfuscation per `[MS-TDS] 2.2.6.4`), TABULAR_RESULT relay-until-EOM, `allow_only_select` short-circuits before upstream, V2.1 audit envelope; V2.4 T-SQL walker + `allowed_tables` / `forbidden_tables` / `enforce = false` audit-only mode. `max_result_rows` is plumbed + audited but its streaming cap is a V2 followup (TDS token-stream parsing — see `proxy-table-allowlists.md §11.1`). Windows Auth / Entra ID / `?encrypt=true` deferred to V3 | `crates/credential-proxy-mssql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mssql-proxy` |
+| `mssql`    | **shipped (real-upstream-tier, V2.1; V2.4 table allowlists)** | full `SQLBatch` relay against a live SQL Server upstream over plaintext TDS — `PRELOGIN` (ENC_NOT_SUP), `LOGIN7` with SQL Authentication (nibble-swap+XOR(0xA5) password obfuscation per `[MS-TDS] 2.2.6.4`), TABULAR_RESULT relay-until-EOM, `allow_only_select` short-circuits before upstream, V2.1 audit envelope; V2.4 T-SQL walker + `allowed_tables` / `forbidden_tables` / `enforce = false` audit-only mode. `max_result_rows` is plumbed + audited but its streaming cap is a V2 followup (TDS token-stream parsing — see [`proxy-table-allowlists.md §11.1`](proxy-table-allowlists.md)). Windows Auth / Entra ID / `?encrypt=true` deferred to V3 | `crates/credential-proxy-mssql/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slice `mssql-proxy` |
 | `mongodb`  | **shipped (real-upstream-tier, V2.1; V2.4 collection allowlists + cursor cap)** | full `OP_MSG` relay against a `--noauth` upstream, hello/isMaster/ping/buildInfo answered locally, `allow_read_only` short-circuits before upstream, V2.1 audit envelope; V2.4 BSON command walker resolves primary collection + `$db`; `allowed_collections` / `forbidden_collections` admit/deny; `max_documents` cursor-rewrite cap (truncate `firstBatch` / `nextBatch` + zero cursor id per `§7.4`); fail-closed secondary-collection rejection for `$lookup` / `$unionWith` / `$merge` / `$out`; `enforce = false` audit-only mode. SCRAM-SHA-256 upstream auth + TLS upstream deferred to V2.2 (URLs with userinfo or `tls=true` fail fast with `CredentialProxyUpstreamFailed { reason: "ProtocolHandshakeFailed" }`) | `crates/credential-proxy-mongodb/` + integration tests in `tests/proxy_upstream.rs` (4 passing) + live-e2e slices `mongodb-proxy`, `mongodb-proxy-collection-allowlists` |
 
 **V2.1 real-upstream-forwarding contract** (per `credential-proxy.md
@@ -175,10 +175,10 @@ specific named slice when an API key is not available.
 `cargo xtask spec-graph --strict` succeeds with **0 findings** across
 **50 spec files, 120 unique fail codes, 64 unique audit kinds** at
 the current HEAD (the file count rose from 44→50 with the V2.4
-`proxy-table-allowlists.md` spec and the five `raxis-concepts/`
+[`proxy-table-allowlists.md`](proxy-table-allowlists.md) spec and the five `raxis-concepts/`
 explainer-tier documents that index it; the fail-code count remains
 at 120 because table-allowlist denials reuse the existing
-proxy-error envelope per `proxy-table-allowlists.md §7`).
+proxy-error envelope per [`proxy-table-allowlists.md §7`](proxy-table-allowlists.md)).
 
 ---
 
@@ -186,7 +186,7 @@ proxy-error envelope per `proxy-table-allowlists.md §7`).
 
 ### 2.1 Pre-merge verifier runtime dispatch (Check 5d)
 
-**Spec home:** `verifier-processes.md §16`, `integration-merge.md §4 Check 5d`.
+**Spec home:** [`verifier-processes.md §16`](verifier-processes.md), [`integration-merge.md §4 Check 5d`](integration-merge.md).
 
 **What's missing:** the actual VM-spawn pipeline that, on
 `IntegrationMerge` admission:
@@ -201,7 +201,7 @@ proxy-error envelope per `proxy-table-allowlists.md §7`).
    `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`) on `block_merge` failure
    or advances `main` on pass.
 
-**Why deferred:** `verifier-processes.md §19.8` plans this as a
+**Why deferred:** [`verifier-processes.md §19.8`](verifier-processes.md) plans this as a
 **five-phase, ~13-engineer-day** rollout with three new crates
 (`raxis-verifier-protocol`, `raxis-verifier`, `raxis-verifier-runtime`)
 plus a new image-build pipeline (`raxis-verifier-images`). Each phase
@@ -217,7 +217,7 @@ block; that is the runtime piece §16 specifies.
 
 ### 2.2 Worktree-provision wiring into `ApprovePlan` / `ActivateSubTask`
 
-**Spec home:** `kernel-lifecycle.md §Step 24 / 24b`.
+**Spec home:** [`kernel-lifecycle.md §Step 24 / 24b`](kernel-lifecycle.md).
 
 **What's missing:** the kernel currently spawns the orchestrator with
 its working tree provided by the test harness. The intended flow is:
@@ -270,7 +270,7 @@ PR.
 
 ### 2.5 Real-upstream-forwarding refinements (V2.2 / V3)
 
-**Spec home:** `credential-proxy.md §14` + per-proxy notes in §14.8.
+**Spec home:** [`credential-proxy.md §14`](credential-proxy.md) + per-proxy notes in §14.8.
 
 **What's shipped (V2.1):** all six TCP-protocol proxies (Postgres,
 MySQL, MSSQL, MongoDB, Redis, SMTP) open a real upstream
@@ -320,7 +320,7 @@ are protocol extensions; the core relay path is V2-shipped.
 
 ### 2.6 Planner agent loop (T1-1 from the V2.1 audit)
 
-**Spec home:** `planner-harness.md` (the §15 VSock control-plane
+**Spec home:** [`planner-harness.md`](planner-harness.md) (the §15 VSock control-plane
 section is forthcoming; for now the harness's §14 boot contract is
 authoritative for the scaffold that ships today).
 

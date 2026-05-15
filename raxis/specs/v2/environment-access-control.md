@@ -2,12 +2,12 @@
 
 > **Status:** V2 Specified
 > **Cross-references:**
-> - `policy-plan-authority.md §INV-POLICY-01` — Policy as immutable floor
-> - `v2-deep-spec.md §INV-VM-CAP-04` — VirtioFS mounts hardcoded; credentials/ never mounted
-> - `integration-merge.md §12` — Escalation-as-amendment pattern
-> - `kernel-mediated-egress.md` — Two-level egress allowlist baseline
+> - [`policy-plan-authority.md §INV-POLICY-01`](policy-plan-authority.md) — Policy as immutable floor
+> - [`v2-deep-spec.md §INV-VM-CAP-04`](v2-deep-spec.md) — VirtioFS mounts hardcoded; credentials/ never mounted
+> - [`integration-merge.md §12`](integration-merge.md) — Escalation-as-amendment pattern
+> - [`kernel-mediated-egress.md`](kernel-mediated-egress.md) — Two-level egress allowlist baseline
 > - `invariants.md §Environment` — `INV-ENV-01` Task Environment Consistency
-> - `operator-ergonomics.md` — environments are an opt-in compliance feature; default deployments do not declare any
+> - [`operator-ergonomics.md`](operator-ergonomics.md) — environments are an opt-in compliance feature; default deployments do not declare any
 
 ---
 
@@ -577,7 +577,7 @@ same_cluster_acknowledged = false
 
 ### 5b.3 Validation at policy load
 
-When the policy bundle is admitted (`policy-plan-authority.md §INV-POLICY-01`):
+When the policy bundle is admitted ([`policy-plan-authority.md §INV-POLICY-01`](policy-plan-authority.md)):
 
 1. Each `[environments.<label>]` table parses with the schema above.
    Unknown fields fail with `FAIL_POLICY_ENV_UNKNOWN_FIELD` unless they
@@ -625,7 +625,7 @@ The canonical list of reserved field names in V2.0:
 | `audit_retention_days` | Per-environment audit-retention override; satisfies regulated-environment retention windows (HIPAA, SOC 2). |
 | `require_two_party_sign` | Per-environment two-operator co-signing requirement on submitted plans. |
 | `escalation_default_class` | Per-environment default escalation class for ambiguous escalations. |
-| `override_reviewer_alias` | Per-environment Reviewer model override. When a task's binding (per `§11 INV-ENV-01`) resolves to this environment, the Reviewer activated for that task uses this `[provider_aliases.<alias>]` chain instead of the plan's `[provider_aliases.reviewer]`. Lets operators upgrade Reviewer reasoning specifically for production-bound tasks (e.g., `claude-opus-4.7-thinking-high`) without inflating cost on beta-bound tasks (`provider-model-selection.md §6.1`). The alias name on the right MUST resolve to a `[provider_aliases.<alias>]` block in the plan or the deployment-wide policy; resolution failures will be caught at admission once V2.x lands the field. |
+| `override_reviewer_alias` | Per-environment Reviewer model override. When a task's binding (per `§11 INV-ENV-01`) resolves to this environment, the Reviewer activated for that task uses this `[provider_aliases.<alias>]` chain instead of the plan's `[provider_aliases.reviewer]`. Lets operators upgrade Reviewer reasoning specifically for production-bound tasks (e.g., `claude-opus-4.7-thinking-high`) without inflating cost on beta-bound tasks ([`provider-model-selection.md §6.1`](provider-model-selection.md)). The alias name on the right MUST resolve to a `[provider_aliases.<alias>]` block in the plan or the deployment-wide policy; resolution failures will be caught at admission once V2.x lands the field. |
 
 V2.0 implementations MUST treat any of these names in a
 `[environments.<label>]` table as parseable but inert, with a
@@ -1154,8 +1154,8 @@ An attacker needs to compromise multiple independent layers simultaneously.
       - Add `FAIL_POLICY_ENV_LABEL_INVALID { label }` per §5b.3
       - Add `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field, env }` per §5b.4
       - Add `TaskEnvironmentBinding` field to `InitiativeCreated` audit event per §11.9
-      - Reviewer / Orchestrator schema continues to forbid `[[plan.tasks.credentials]]` and `allowed_egress` declarations per `planner-harness.md §3` (no change required for INV-ENV-01; the structural prohibition makes the consistency check a no-op for these roles per §11.6)
-      - `raxis-cli plan explain` (`operator-ergonomics.md §9`) renders per-task environment binding ("Bound: production" / "Neutral" / "SameClusterAcknowledged")
+      - Reviewer / Orchestrator schema continues to forbid `[[plan.tasks.credentials]]` and `allowed_egress` declarations per [`planner-harness.md §3`](planner-harness.md) (no change required for INV-ENV-01; the structural prohibition makes the consistency check a no-op for these roles per §11.6)
+      - `raxis-cli plan explain` ([`operator-ergonomics.md §9`](operator-ergonomics.md)) renders per-task environment binding ("Bound: production" / "Neutral" / "SameClusterAcknowledged")
 
 - [ ] V2 environment-binding tests:
       - **Inert default.** Policy with zero `[environments.<label>]` declared → all V2 environment checks are no-ops; admitted plans get `TaskEnvironmentBinding::Neutral` for every task without any binding consideration.
@@ -1177,7 +1177,7 @@ An attacker needs to compromise multiple independent layers simultaneously.
       - **Reserved field tolerance.** Policy declares `[environments.beta] blast_radius = "high"` → policy loads with `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field: "blast_radius", env: "beta" }`; field has no kernel-side effect.
       - **Unknown field rejection.** Policy declares `[environments.beta] frobnitz = "x"` (not a reserved name) → `FAIL_POLICY_ENV_UNKNOWN_FIELD { field: "frobnitz" }`.
       - **Label syntax rejection.** `[environments.Beta]` (uppercase) → `FAIL_POLICY_ENV_LABEL_INVALID`.
-      - **Reviewer cannot declare credentials.** Plan with `[[plan.tasks.credentials]]` on a Reviewer task → existing `FAIL_REVIEWER_CREDENTIALS_NOT_ALLOWED` (per `planner-harness.md`); test that this fires before any environment-binding logic so Reviewers never participate in INV-ENV-01.
+      - **Reviewer cannot declare credentials.** Plan with `[[plan.tasks.credentials]]` on a Reviewer task → existing `FAIL_REVIEWER_CREDENTIALS_NOT_ALLOWED` (per [`planner-harness.md`](planner-harness.md)); test that this fires before any environment-binding logic so Reviewers never participate in INV-ENV-01.
       - **Orchestrator declarations rejected.** Operator attempts to declare an Orchestrator task in `plan.toml` → existing `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED` per INV-PLANNER-HARNESS-06.1; environment-binding logic never reached.
       - **`--no-strict` does not bypass.** Plan with cross-env credentials submitted with `--no-strict` → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` still fires (structural invariant; not a warning-class check).
       - **`--no-strict` does not bypass same-cluster.** Plan with same-cluster conflation, no acknowledgment, `--no-strict` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` still fires.
@@ -1457,11 +1457,11 @@ name = "registry-prod-write"         # bound to "production" — task is bound t
 
 **Cross-references:**
 
-- `verifier-processes.md §6` — artifact mechanism for handing
+- [`verifier-processes.md §6`](verifier-processes.md) — artifact mechanism for handing
   structured data between tasks.
-- `kernel-mechanics-prompt.md §3.2` — Orchestrator sees the DAG
+- [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) — Orchestrator sees the DAG
   topology when sequencing tasks.
-- `operator-ergonomics.md §9` (`raxis-cli plan explain`) — renders
+- [`operator-ergonomics.md §9`](operator-ergonomics.md) (`raxis-cli plan explain`) — renders
   the DAG and per-task environment binding so the operator can
   inspect the handoff structure at authoring time.
 
@@ -1482,7 +1482,7 @@ This means:
 1. **An operator never declares an environment binding on a Reviewer
    or Orchestrator task.** The schema for those roles forbids
    `[[plan.tasks.credentials]]` and `allowed_egress` declarations
-   already (per `planner-harness.md §3` role table); the
+   already (per [`planner-harness.md §3`](planner-harness.md) role table); the
    environment-consistency check is a no-op for them.
 2. **A cross-environment DAG (§11.5) where the Reviewer gates the
    handoff between a beta task and a prod task is well-defined**:
@@ -1510,7 +1510,7 @@ environment binding is meaningless for it.
 | `environments` | Sorted list of distinct labels that the task's resources resolved to. Always size ≥ 2 when this code fires. |
 | `sources` | Per-label list of `(EnvSource, label)` pairs. Each `EnvSource` is one of `Credential(name)` or `EgressUrl(url_prefix)`. Lets the operator pinpoint exactly which credential or which URL caused the binding. |
 
-CLI rendering (per the `operator-ergonomics.md §20` failure-code
+CLI rendering (per the [`operator-ergonomics.md §20`](operator-ergonomics.md) failure-code
 display contract):
 
 ```yaml

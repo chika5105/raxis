@@ -89,7 +89,7 @@ raxis-site/
 
 ## Editorial source-of-truth rules
 
-- The **paradigm spec** (`raxis/specs/paradigm.md`) wins over any wording on the website. Copy in `src/lib/paradigm.ts` is downstream and must be updated whenever the spec changes.
+- The **paradigm spec** ([`raxis/specs/paradigm.md`](../raxis/specs/paradigm.md)) wins over any wording on the website. Copy in `src/lib/paradigm.ts` is downstream and must be updated whenever the spec changes.
 - **Honesty about gaps.** The site says explicitly where the current reference implementation falls short — Tier 3 not yet claimed, no hardware root of trust, no model identity attestation, no semantic effect verification. Match the source docs (`perspectives/raxis-concept.md`, `perspectives/case-against-raxis.md`).
 - **No "Docker for agents," no "AI safety platform," no vague verbs.** The spec rejects these framings explicitly; the site follows.
 

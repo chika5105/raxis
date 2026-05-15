@@ -2,7 +2,7 @@
 
 Vite + React + TypeScript + Tailwind app. Talks to the Raxis kernel
 dashboard server over the HTTP/SSE API documented in
-`raxis/specs/v2/v2_extended_gaps.md §4`. JWT auth via the
+[`raxis/specs/v2/v2_extended_gaps.md §4`](../specs/v2/v2_extended_gaps.md). JWT auth via the
 challenge-response flow in `pages/Login.tsx`.
 
 ## Development

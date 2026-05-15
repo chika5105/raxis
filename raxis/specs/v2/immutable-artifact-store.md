@@ -3,9 +3,9 @@
 > **Status:** V2 Specified
 > **Cross-references:**
 > - `security/raxis-security-model.md §Part 16` — Store isolation and INV-STORE-02
-> - `policy-plan-authority.md §INV-POLICY-01` — Policy as immutable floor
-> - `v2-deep-spec.md §INV-VM-CAP-03` — VM image OCI digest pinning
-> - `integration-merge.md §7` — Audit events (IntegrationMergeCompleted)
+> - [`policy-plan-authority.md §INV-POLICY-01`](policy-plan-authority.md) — Policy as immutable floor
+> - [`v2-deep-spec.md §INV-VM-CAP-03`](v2-deep-spec.md) — VM image OCI digest pinning
+> - [`integration-merge.md §7`](integration-merge.md) — Audit events (IntegrationMergeCompleted)
 
 ---
 

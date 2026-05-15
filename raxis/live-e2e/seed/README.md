@@ -11,7 +11,7 @@ Deterministic seed data for the extended e2e scenario described in
 | `mongo/01-seed.js` | Idempotent mongo shell script for `raxis_e2e_mongo.seeded_docs` (25 docs). |
 | `expected/postgres_rows.json` | Canonical expected output, one entry per seeded row. |
 | `expected/mongo_docs.json` | Canonical expected output, one entry per seeded doc. |
-| `prompts/materializer.md` | Verbatim prompt for the `materialize-records` Executor task. |
+| [`prompts/materializer.md`](prompts/materializer.md) | Verbatim prompt for the `materialize-records` Executor task. |
 | `prompts/injection_payloads.toml` | Reviewable malicious-prompt-injection payloads for the deny-path tests. |
 
 ## Determinism contract

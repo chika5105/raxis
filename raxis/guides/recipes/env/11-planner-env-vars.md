@@ -35,10 +35,16 @@ These tell the planner how to reach the kernel from inside its VM.
 
 The planner picks transport at runtime:
 
-```text
-1. RAXIS_KERNEL_PLANNER_SOCKET set + non-empty → use UDS.
-2. RAXIS_KERNEL_VSOCK_CID + RAXIS_KERNEL_VSOCK_PORT set → use vsock.
-3. Otherwise → KernelTransportConfig::None (parking mode).
+<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+     1. RAXIS_KERNEL_PLANNER_SOCKET set + non-empty → use UDS.
+     2. RAXIS_KERNEL_VSOCK_CID + RAXIS_KERNEL_VSOCK_PORT set → use vsock.
+     3. Otherwise → KernelTransportConfig::None (parking mode).
+-->
+```mermaid
+flowchart LR
+    N1_RAXIS_KERNEL_PLANNER_SOCKET_set_non_empty["1. RAXIS_KERNEL_PLANNER_SOCKET set + non-empty"] --> use_UDS["use UDS."]
+    N2_RAXIS_KERNEL_VSOCK_CID_RAXIS_KERNEL_VSOCK_PORT_set["2. RAXIS_KERNEL_VSOCK_CID + RAXIS_KERNEL_VSOCK_PORT set"] --> use_vsock["use vsock."]
+    N3_Otherwise["3. Otherwise"] --> KernelTransportConfig_None_parking_mode["KernelTransportConfig::None (parking mode)."]
 ```
 
 ---

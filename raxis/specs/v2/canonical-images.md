@@ -2,21 +2,21 @@
 
 > **Companion specs.**
 >
-> - `image-cache.md` — on-disk cache layout (`<data_dir>/oci-cache/`),
+> - [`image-cache.md`](image-cache.md) — on-disk cache layout (`<data_dir>/oci-cache/`),
 >   the `ImageResolver` trait surface, pull-and-verify pipeline, GC,
 >   and failure-mode taxonomy. This document treats `ImageResolver`
 >   as a black box and only specifies how the kernel binds the
 >   resolved bytes to a particular role-trust contract.
-> - `release-and-distribution.md §4.2` — how the canonical
+> - [`release-and-distribution.md §4.2`](release-and-distribution.md) — how the canonical
 >   `<role>.manifest.toml` files get signed by the kernel signing
 >   key and shipped alongside the kernel binary.
-> - `planner-harness.md §4.7` (Reviewer) and `§4.8` (Orchestrator) —
+> - [`planner-harness.md §4.7`](planner-harness.md) (Reviewer) and `§4.8` (Orchestrator) —
 >   the per-role harness contracts that anchor
 >   `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05`.
 > - `invariants.md §10.5` — the three normative trust contracts
 >   (`INV-IMAGE-RESOLUTION-PER-ROLE-01`,
 >   `INV-OPERATOR-CUSTOM-IMAGE-01`, `INV-OPERATOR-CUSTOM-IMAGE-02`).
-> - `audit-paired-writes.md §4.3` — the single-class roster that
+> - [`audit-paired-writes.md §4.3`](audit-paired-writes.md) — the single-class roster that
 >   classifies `VmImageResolved` and `SecurityViolationDetected`.
 > - `kernel/src/canonical_images_preflight.rs` — the
 >   compiled-in-digest preflight invoked by Reviewer / Orchestrator
@@ -42,8 +42,8 @@ source. The other two roles (Executor, Verifier) are
 `oci_digest`, and target them per-task or wire one to the default
 Executor / Verifier slot.
 
-Several places in the tree (`audit-paired-writes.md §4.3`,
-`release-and-distribution.md §9.2`, `cli/src/commands/setup.rs`,
+Several places in the tree ([`audit-paired-writes.md §4.3`](audit-paired-writes.md),
+[`release-and-distribution.md §9.2`](release-and-distribution.md), `cli/src/commands/setup.rs`,
 the new `INV-IMAGE-*` / `INV-OPERATOR-CUSTOM-IMAGE-*`
 invariants) cross-reference "the canonical images spec" for the
 trust contract that binds operator-declared digests to the
@@ -71,12 +71,12 @@ codify, in one place:
 What this spec does NOT cover:
 
 * The on-disk cache layout, the OCI pull pipeline, and the
-  `ImageResolver` trait surface — those live in `image-cache.md`.
+  `ImageResolver` trait surface — those live in [`image-cache.md`](image-cache.md).
 * The release pipeline that bakes the canonical kernel signing
   key and produces `<role>.manifest.toml` — that lives in
-  `release-and-distribution.md`.
+  [`release-and-distribution.md`](release-and-distribution.md).
 * The Reviewer and Orchestrator harness contracts (no-egress,
-  no-code-exec) — those live in `planner-harness.md`.
+  no-code-exec) — those live in [`planner-harness.md`](planner-harness.md).
 
 ---
 
@@ -89,7 +89,7 @@ What this spec does NOT cover:
 | Orchestrator | yes      | no                    | `EXPECTED_ORCHESTRATOR_IMAGE_DIGEST` (kernel bin) | `canonical_images_preflight.rs`                        |
 | Reviewer     | yes      | no                    | `EXPECTED_REVIEWER_IMAGE_DIGEST` (kernel bin)     | `canonical_images_preflight.rs`                        |
 | Executor     | yes\*    | yes                   | `[[vm_images]] oci_digest` in `policy.toml`       | `handlers/intent.rs::resolve_vm_image_override`        |
-| Verifier     | yes\*    | yes                   | `[[vm_images]] oci_digest` in `policy.toml`       | (verifier-side, see `verifier-processes.md §13`)       |
+| Verifier     | yes\*    | yes                   | `[[vm_images]] oci_digest` in `policy.toml`       | (verifier-side, see [`verifier-processes.md §13`](verifier-processes.md))       |
 
 \* The kernel ships a canonical `executor-starter` and
 `verifier-starter` image as a default; operators who want a richer
@@ -209,7 +209,7 @@ toolchain authors:
 3. **An on-disk staging step** that places the rootfs + sidecar
    manifests under
    `<data_dir>/oci-cache/images/sha256/<aa>/<full>/` per
-   `image-cache.md §4`. The harness helper
+   [`image-cache.md §4`](image-cache.md). The harness helper
    `extended_e2e_support/byo_image.rs::stage_byo_image_in_oci_cache`
    demonstrates the layout (`rootfs.img`, synthesised
    `manifest.json`, synthesised `config.json`).
@@ -243,7 +243,7 @@ activation row carries a non-empty `vm_image_alias` (from either
    resolver implementation
    (`PrePopulatedResolver` for offline-staged caches;
    `ProductionResolver` for registry-backed pulls per
-   `image-cache.md §6`) stream-hashes the on-disk rootfs and
+   [`image-cache.md §6`](image-cache.md)) stream-hashes the on-disk rootfs and
    compares against `oci_digest`. A divergence returns
    `ImageResolverError::DigestMismatch { expected, actual, path }`.
 4. Maps the resolver error to `VmImageResolveError::DigestMismatch`
@@ -295,7 +295,7 @@ forward-compatibility for V3 registry pulls are all uniform.
 | Failure event severity     | `Critical`                                       | `Critical`                                               |
 | Success event              | preflight log line `canonical_image_ok`           | `VmImageResolved { agent_role: "Executor" }`             |
 | Activation gating          | activation refused, row stays `PendingActivation`| activation refused, row stays `PendingActivation`        |
-| Future registry-pull path  | n/a (kernel-bundled blob)                        | `ProductionResolver` (per `image-cache.md §6`)           |
+| Future registry-pull path  | n/a (kernel-bundled blob)                        | `ProductionResolver` (per [`image-cache.md §6`](image-cache.md))           |
 
 Adding a new role in V3 (e.g. a dedicated `Auditor` image) only
 requires extending the `SecurityViolationDetected` `violation_kind`
@@ -444,7 +444,7 @@ try to install the package and waste a turn on a tproxy block.
 
 This applies BOTH to the canonical `raxis-executor-starter`
 image (where the kernel team controls what is pre-installed,
-per `planner-harness.md §10.6`) AND to operator-published BYO
+per [`planner-harness.md §10.6`](planner-harness.md)) AND to operator-published BYO
 images (where the operator's `Containerfile` controls what is
 pre-installed, per `INV-OPERATOR-CUSTOM-IMAGE-01`). The LLM
 needs an **image-agnostic** way to discover what its specific
@@ -783,20 +783,20 @@ dir.
 
 * **V3 registry-pull resolver.** The current `PrePopulatedResolver`
   requires the operator to stage the rootfs on every host
-  out-of-band. `image-cache.md §6` sketches the
+  out-of-band. [`image-cache.md §6`](image-cache.md) sketches the
   `ProductionResolver` that pulls from a registry. This spec's
   trust contract is forward-compatible: the resolver-side
   digest re-hash and the activation-side audit-event surface
   do not change. The only new surface is the registry-side
-  authentication / TLS contract, which `image-cache.md` owns.
+  authentication / TLS contract, which [`image-cache.md`](image-cache.md) owns.
 * **Verifier-side BYO.** Verifier activations currently route
-  through `verifier-processes.md §13`'s gate-runner harness,
+  through [`verifier-processes.md §13`](verifier-processes.md)'s gate-runner harness,
   not through `handle_activate_sub_task`. A Verifier-side BYO
   flow would emit `VmImageResolved { agent_role: "Verifier" }`
   from the verifier-runner activation path; this spec's per-role
   contract already admits the `"Verifier"` value but the audit
   emit-site does not exist yet.
-* **Operator-image GC.** `image-cache.md §8`'s GC walks the
+* **Operator-image GC.** [`image-cache.md §8`](image-cache.md)'s GC walks the
   set of digests referenced by the live policy bundle. When the
   operator rotates a BYO image (re-signs `policy.toml` with a
   new digest), the old rootfs becomes GC-eligible after the

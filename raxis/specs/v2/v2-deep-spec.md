@@ -80,12 +80,12 @@ invariant requirement. Dynamic delegation at runtime means:
 its `session_agent_type`, its retry budgets, and its dependency edges — is declared by the
 human operator in a `plan.toml` file before any computation begins. The operator signs and
 submits this file in a single atomic `raxis-cli submit plan <plan.toml>` invocation
-(per `plan-bundle-sealing.md §4`). The CLI bundles `plan.toml` plus any transitively-
+(per [`plan-bundle-sealing.md §4`](plan-bundle-sealing.md)). The CLI bundles `plan.toml` plus any transitively-
 referenced host-side artifacts into a canonical byte array, hashes it, signs the hash with
 the operator's Ed25519 key, and sends `(bundle_bytes, signature)` to the Kernel via IPC in
 a single operation. The Kernel verifies the signature at `create_initiative` time and seals
 the bundle bytes into the `plan_bundles` / `plan_bundle_artifacts` tables (per
-`plan-bundle-sealing.md §8.2`). The plan is then immutable: neither the Orchestrator nor any
+[`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md)). The plan is then immutable: neither the Orchestrator nor any
 sub-planner can modify it, and the kernel never re-reads the plan from the host filesystem
 again (`INV-INIT-06` post-admission read discipline).
 
@@ -133,7 +133,7 @@ NIC-less guest. This is not a firewall rule — it is the complete absence of a
 network device. The guest kernel has no interface to bring up.
 
 The Executor boots unconditionally with `EgressTier::Mediated` (Path A3
-universal-airgap; see `airgap-architecture.md`). Outbound TCP flows via
+universal-airgap; see [`airgap-architecture.md`](airgap-architecture.md)). Outbound TCP flows via
 in-guest `raxis-tproxy` → AF_VSOCK → kernel admission gate → host TCP socket
 → upstream. DNS likewise flows over vsock through an in-guest stub forwarder.
 The kernel's admission gate is the **sole arbiter** of every guest-originated
@@ -559,7 +559,7 @@ bearing kernel concern with **three mutually exclusive paths**:
    kernel scaled it up on retry, not because of an operator
    misconfiguration. See `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`
    in `specs/invariants.md` for the full witness/enforcement list
-   and `planner-harness.md §5.9.1` for the operator-facing
+   and [`planner-harness.md §5.9.1`](planner-harness.md) for the operator-facing
    summary.
 
 The storm-guard's `pending_exists && !active_exists` predicate is
@@ -636,7 +636,7 @@ Rejected. `session_id` alone does not establish lineage. An auditor cannot deter
 
 **Alternative B — Store the full plan bytes in every audit event.**
 Rejected. Plan bytes are already sealed in the V2 `plan_bundles` table (per
-`plan-bundle-sealing.md §8.2`; the V1 `signed_plan_artifacts` table for legacy
+[`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md); the V1 `signed_plan_artifacts` table for legacy
 initiatives). Repeating them in every audit event bloats the JSONL chain and violates the
 audit log's principle of recording decisions, not data.
 
@@ -665,13 +665,13 @@ spec for forensic reproducibility.
 
 > **Authority boundary clarification (`INV-KERNEL-DAG-AUTHORITY-01`).** "Orchestrator owns
 > the merge" in this section — and in any cross-spec reference such as
-> `integration-merge.md §Cross-references` — refers narrowly to *who semantically resolves
+> [`integration-merge.md §Cross-references`](integration-merge.md) — refers narrowly to *who semantically resolves
 > conflicts in the merge clone and emits the `IntegrationMerge` advisory intent*. It does
 > NOT mean the Orchestrator decides whether the merge lands. The kernel structurally
 > adjudicates every `IntegrationMerge` intent against (a) the dispatch matrix, (b) the
 > hybrid path allowlist (Check 5), (c) ancestry / reachability (Check 4 / 8), and (d) the
 > iter49 outstanding-review fail-closed backstop (`run_phase_a` Step 3d, per
-> `agent-disagreement.md §3.6`). Only after every gate admits does the kernel call
+> [`agent-disagreement.md §3.6`](agent-disagreement.md)). Only after every gate admits does the kernel call
 > `raxis_domain_git::commit_merge_to_main` to advance `refs/heads/main`. A rejected
 > `IntegrationMerge` intent leaves `target_ref` untouched.
 
@@ -704,7 +704,7 @@ the Orchestrator's clone). Only then does the Kernel fast-forward the main branc
   `(IntentKind::IntegrationMerge, SessionAgentType::Orchestrator) → Authorized` row
   enforces "Orchestrator-only" mechanically, before any handler logic runs. The Reviewer
   / Executor rows are `Unauthorized`.
-* **Hybrid allowlist (Check 5 of `integration-merge.md §4`):**
+* **Hybrid allowlist (Check 5 of [`integration-merge.md §4`](integration-merge.md)):**
   `kernel/src/path_scope.rs::check_paths_hybrid` is dispatched from
   `kernel/src/handlers/intent.rs::run_pre_gate` whenever
   `intent_kind == IntegrationMerge`. The fold computes
@@ -712,7 +712,7 @@ the Orchestrator's clone). Only then does the Kernel fast-forward the main branc
   in-memory `PlanRegistry`, with the same fail-closed posture as the per-task
   `check_paths` path. Tested in
   `kernel/src/path_scope.rs::tests::hybrid_*`.
-* **Main fast-forward (Phase 2 of Check 8 in `integration-merge.md §11`):**
+* **Main fast-forward (Phase 2 of Check 8 in [`integration-merge.md §11`](integration-merge.md)):**
   [`raxis-domain-git`](../../crates/domain-git/src/lib.rs) — the V2 SE-domain
   `DomainAdapter::commit` reference. `commit_merge_to_main(main, orch, sha)` walks
   every commit/tree/blob reachable from the Orchestrator's `commit_sha` (skipping
@@ -721,7 +721,7 @@ the Orchestrator's clone). Only then does the Kernel fast-forward the main branc
   transaction whose `MustExistAndMatch` precondition catches concurrent writers. The
   whole operation is idempotent: re-running with the same `commit_sha` returns
   `MainAdvance { already_at_target: true }` and performs no work — the recovery
-  path of `integration-merge.md §11.3` relies on this contract.
+  path of [`integration-merge.md §11.3`](integration-merge.md) relies on this contract.
 
 These three components together implement the kernel's side of Step 8: the Orchestrator
 is the unique merger, the Kernel verifies path containment via the hybrid allowlist, and
@@ -861,7 +861,7 @@ socket. The framing protocol is length-prefixed bincode (unchanged from V1 UDS f
   + `VZSharedDirectory` for VirtioFS; **no** `VZ*NetworkDevice*` for any
   shipped `EgressTier` — Path A3 / `EgressTier::Mediated` is the only
   non-`None` tier and structurally omits the virtio-net device; see
-  `airgap-architecture.md` for the universal-airgap model that uses a vsock
+  [`airgap-architecture.md`](airgap-architecture.md) for the universal-airgap model that uses a vsock
   chokepoint to the kernel admission gate;
   `VZVirtioSocketDeviceConfiguration` for the planner channel) and (b) the
   async lifecycle (`startWithCompletionHandler:`, `stopWithCompletionHandler:`,
@@ -1007,10 +1007,10 @@ notifications.
 **Admission precondition — two retry-eligibility classes (`INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` + iter54 reversal `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`).** `handle_retry_sub_task` admits a `RetrySubTask` against a prior activation row in exactly two states:
 
 1. `activation_state = 'Failed'` — the classic crash / `ReportFailure` path. The anchor in the audit chain is the preceding `TaskStateChanged { state: Failed }`.
-2. `activation_state = 'Completed'` AND `review_reject_count > 0` — the Reviewer-rejection retry (per `agent-disagreement.md §3.6` "Option A"). The Executor's task-FSM stays `Completed` regardless of reviewer verdict (per `kernel-store.md §2.5.1`); the `> 0` counter is the canonical witness that "a Reviewer rejected this round". The anchor in the audit chain is `ExecutorRespawnFromReviewRejection { task_id, prior_activation_id, new_activation_id, review_reject_count }` (defined in `crates/audit/src/event.rs`) — emitted by `handle_retry_sub_task` immediately after the new row is committed, paired post-commit with the SQLite insert per `audit-paired-writes.md §4`. A `Completed` activation with `review_reject_count = 0` represents a clean completion and is REJECTED with `FAIL_INVALID_REQUEST` — admitting it would let the orchestrator force a re-run of a successful task (paradigm-`R-6` Fail-Closed Default violation).
+2. `activation_state = 'Completed'` AND `review_reject_count > 0` — the Reviewer-rejection retry (per [`agent-disagreement.md §3.6`](agent-disagreement.md) "Option A"). The Executor's task-FSM stays `Completed` regardless of reviewer verdict (per `kernel-store.md §2.5.1`); the `> 0` counter is the canonical witness that "a Reviewer rejected this round". The anchor in the audit chain is `ExecutorRespawnFromReviewRejection { task_id, prior_activation_id, new_activation_id, review_reject_count }` (defined in `crates/audit/src/event.rs`) — emitted by `handle_retry_sub_task` immediately after the new row is committed, paired post-commit with the SQLite insert per [`audit-paired-writes.md §4`](audit-paired-writes.md). A `Completed` activation with `review_reject_count = 0` represents a clean completion and is REJECTED with `FAIL_INVALID_REQUEST` — admitting it would let the orchestrator force a re-run of a successful task (paradigm-`R-6` Fail-Closed Default violation).
 ~~3. `activation_state = 'PendingActivation'` AND `review_reject_count > 0`~~ — REMOVED in iter54 (`INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`). The iter48 extension admitted this branch as a structural backstop for orchestrators that exited between `RetrySubTask` and the follow-up `ActivateSubTask`. In practice the admission contradicted the iter48 NNSP rule 3a (which already directed the orchestrator to call `activate_subtask` against the existing pending row): because the kernel was happy to accept the second `retry_subtask`, the KSB stamped `retry_admissible=true`, the NNSP's primary clause won over its diagnostic clause, and the orchestrator chained `retry_subtask → exit → respawn → retry_subtask` until `orchestrator_respawn_ceiling_exceeded` killed the initiative — iter54 reproduced this end-to-end on `lint-runner`. The kernel now REJECTS this branch with `FAIL_INVALID_REQUEST`; the KSB stamps `retry_admissible=false reason="prior state PendingActivation; …"`; the NNSP rule 3a steers the LLM to `activate_subtask`; `handle_activate_sub_task` promotes the existing pending row to `Active` and spawns the executor for the fresh activation. The iter48 NNSP fix (commit `4d19026`) was the LLM-facing half of the correct contract; the iter54 predicate flip is the kernel-facing half. The same `ExecutorRespawnFromReviewRejection` audit anchor is still emitted by the round-2 `Completed + review_reject_count > 0` admission; the round-3+ retry that hits this rejection path emits `RetrySubTaskRejectedNotRetryable` (not the respawn anchor). N.B. the original iter48 NNSP claim that `retry_admissible=false reason="prior state PendingActivation; …"`, but the kernel admit predicate here is the load-bearing structural backstop: a future NNSP regression, KSB projection bug, harness bug, or LLM hallucination MUST NOT deadlock the kernel. A `PendingActivation` activation with `review_reject_count = 0` (a brand-new round-1 admission, no Reviewer ever voted) is REJECTED — the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert. An `Active` activation is REJECTED regardless of `review_reject_count` — the executor VM is still running and admitting would race the executor's eventual `CompleteTask` cascade.
 
-The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim from the prior row. The prior row is NOT mutated (the FSM is forward-only — `Completed → Failed` backward transitions are forbidden; this is the load-bearing distinction from the rejected Option B in `agent-disagreement.md §3.6`). Both rows coexist for the same `task_id`; subsequent counter bumps in `increment_executor_review_reject_count` target the LATEST row by `created_at` (per-round counter semantics). On the iter48 `PendingActivation` branch the per-task activation row count is therefore at least 3 after a successful re-retry (round-1 `Completed`, round-2 `PendingActivation` from the prior admit, round-3 `PendingActivation` from this admit); the round-2 row stays immutable.
+The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim from the prior row. The prior row is NOT mutated (the FSM is forward-only — `Completed → Failed` backward transitions are forbidden; this is the load-bearing distinction from the rejected Option B in [`agent-disagreement.md §3.6`](agent-disagreement.md)). Both rows coexist for the same `task_id`; subsequent counter bumps in `increment_executor_review_reject_count` target the LATEST row by `created_at` (per-round counter semantics). On the iter48 `PendingActivation` branch the per-task activation row count is therefore at least 3 after a successful re-retry (round-1 `Completed`, round-2 `PendingActivation` from the prior admit, round-3 `PendingActivation` from this admit); the round-2 row stays immutable.
 
 **V2.5 rationale extension — why `ReportFailure` from an Executor counts (and why this is not the same as letting a planner game its own counter).** The `crash_retry_count` was originally drafted as "kernel-side OS-level events only — never bumped by a planner-side intent". The clause was a hostile-planner mitigation: the *principal that asks for retries* (the **Orchestrator**) is also the principal that reads the ceiling check (`handle_retry_sub_task` returns `Accepted` or `FAIL_INVALID_REQUEST` based on `crash_retry_count < max_crash_retries`). If that same principal could bump the counter via an intent, a hostile planner could pretend to crash, observe nothing happens, and keep retrying forever — the budget would be advisory rather than load-bearing. So `ReportFailure` from the Orchestrator stays unauthorised (per the Step 11 dispatch matrix at line 1017) and the Orchestrator cannot self-promote a "retry-attempted" event into the budget.
 
@@ -1020,7 +1020,7 @@ The `bump_executor_crash_retry_count_in_tx` helper (`kernel/src/handlers/intent.
 
 **V2.5b extension — Orchestrator no-progress respawn counter.** A third counter family, registered at the **per-initiative** scope rather than per-`subtask_activations` row, closes one loop class neither `crash_retry_count` nor `review_reject_count` covers: the Orchestrator's short-lived decision-cycle session boots, reads the KSB, calls one terminal tool, exits cleanly, and is re-spawned by the post-exit hook. When the kernel rejects the called intent (e.g. `RetrySubTaskRejectedNotRetryable` per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`), neither dual counter ever bumps because (a) the Orchestrator's task FSM never transitions to `Failed` — it exits cleanly — and (b) the bookkeeping `subtask_activations` rows belong to Executors, not Orchestrators. `iter42`-second-run reproduced this in production: 45 `SessionVmSpawned` events in 18 min, zero `crash_retry_count` bumps, zero `review_reject_count` bumps, zero progress.
 
-The counter lives on `initiatives.orchestrator_no_progress_respawn_count` (Migration 19; see `crates/store/src/migration.rs::render_migration_19_ddl`), increments by 1 inside `session_spawn_orchestrator::respawn_orchestrator_for_initiative` BEFORE the substrate spawn step (Step 1b), and resets to 0 inside `initiatives::task_transitions::transition_task_in_tx` on every legal task FSM transition. Honest DAG progress observably IS the reset signal. When the post-increment value strictly exceeds `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3, the kernel constant `orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS`), the kernel marks the initiative `InitiativeState::Failed` in the same SQLite transaction and emits `AuditEventKind::OrchestratorRespawnCeilingExceeded { initiative_id, attempts, max_attempts }` per `audit-paired-writes.md §4`. Subsequent post-exit-hook triggers for the offending initiative are silently skipped by the `is_executing` preflight. Pinned by `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` (`invariants.md §6 Scheduler / lifecycle limits`).
+The counter lives on `initiatives.orchestrator_no_progress_respawn_count` (Migration 19; see `crates/store/src/migration.rs::render_migration_19_ddl`), increments by 1 inside `session_spawn_orchestrator::respawn_orchestrator_for_initiative` BEFORE the substrate spawn step (Step 1b), and resets to 0 inside `initiatives::task_transitions::transition_task_in_tx` on every legal task FSM transition. Honest DAG progress observably IS the reset signal. When the post-increment value strictly exceeds `MAX_ORCH_NO_PROGRESS_RESPAWNS` (default 3, the kernel constant `orch_respawn_ceiling::MAX_ORCH_NO_PROGRESS_RESPAWNS`), the kernel marks the initiative `InitiativeState::Failed` in the same SQLite transaction and emits `AuditEventKind::OrchestratorRespawnCeilingExceeded { initiative_id, attempts, max_attempts }` per [`audit-paired-writes.md §4`](audit-paired-writes.md). Subsequent post-exit-hook triggers for the offending initiative are silently skipped by the `is_executing` preflight. Pinned by `INV-ORCH-RESPAWN-NO-PROGRESS-CEILING-01` (`invariants.md §6 Scheduler / lifecycle limits`).
 
 Why per-initiative rather than per-`subtask_activations` row: the loop class is "the orchestrator chooses the same wrong terminal tool over and over"; the relevant scope is "this orchestrator's decision-cycles for this DAG", not "this Executor's activations". Two concurrent initiatives each cycling cleanly carry independent counters; one stalled initiative does not poison the unrelated other. The schema delta is minimal — one `INTEGER NOT NULL DEFAULT 0` column on the existing `initiatives` table rather than a new sibling table.
 
@@ -1256,7 +1256,7 @@ The diagnostic must always include a concrete remediation suggestion, not just t
 |---|------|--------|----------------|
 | 4 | Path format         | **Live** (kernel) | `kernel/src/initiatives/lifecycle.rs::validate_path_allowlist_v2_format` (Step 19). |
 | 5 | DAG acyclicity      | **Live** (kernel) | `kernel/src/initiatives/lifecycle.rs::validate_plan_dag` — covers `duplicate_task_id`, `self_loop`, `dangling_dependency`, and `cyclic_dependency` over the V1-compatible `predecessors` field. The Orchestrator-listed-as-dep sub-rule activates once `session_agent_type` reaches the parser (rule 2 / V2 schema work). |
-| 1, 2, 3, 6, 7 | V2-schema-dependent rules | **Pending** | Land alongside `plan-bundle-sealing.md §8.2` once `parse_plan_tasks` learns to read `session_agent_type`, `clone_strategy`, `[plan.orchestrator]`, and `[[subtasks]]`. |
+| 1, 2, 3, 6, 7 | V2-schema-dependent rules | **Pending** | Land alongside [`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md) once `parse_plan_tasks` learns to read `session_agent_type`, `clone_strategy`, `[plan.orchestrator]`, and `[[subtasks]]`. |
 
 The `validate_plan_dag` and `validate_path_allowlist_v2_format` validators run BEFORE
 `BEGIN TRANSACTION` in `approve_plan`. Order is: DAG validation first (a malformed
@@ -1337,7 +1337,7 @@ entry. The full check is O(|allowlist| × |path|) — trivially fast. No NFA con
 no negation logic, no platform-specific behavior. Validate at `approve_plan` time.
 
 **Canonical error code:** `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` (see
-`policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`). The reason field is one
+[`policy-plan-authority.md §FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`](policy-plan-authority.md)). The reason field is one
 of five stable, wire-side strings (rejecting strictly more than the original spec wording —
 the empty-string and negation-marker cases were missing in earlier drafts and have been
 added so the validator's reason taxonomy is exhaustive over realistic operator typos):
@@ -1551,7 +1551,7 @@ evaluate the same frozen `evaluation_sha` — there is no semantic reason they m
   `wire_str()` into `DagRow::aggregate_verdict` so the orchestrator's NNSP rule 3a
   pivots on the kernel's TERMINAL verdict (not the per-Reviewer `reviewer_verdicts=`
   block, which fires `approved=false` as soon as the FIRST sibling votes Reject and
-  produces a respawn loop per the iter42 regression — see `agent-disagreement.md §3.6`
+  produces a respawn loop per the iter42 regression — see [`agent-disagreement.md §3.6`](agent-disagreement.md)
   and `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`). The same function backs both the
   kernel's admission gate (`handle_submit_review`'s post-commit aggregator branch) AND
   the orchestrator's prompt logic — pinned equivalence in
@@ -1741,7 +1741,7 @@ task-state gate.
 **Activation-row updates and downstream pushes.** The `subtask_activations` row
 update (`activation_state` transition) and the `KernelPush::ReviewRejected` /
 `AllReviewersPassed` notifications (Step 25) are NOT yet wired in this iteration:
-the V2 plan-bundle sealing path (Step 1.2 / `plan-bundle-sealing.md` §8.2) does not
+the V2 plan-bundle sealing path (Step 1.2 / [`plan-bundle-sealing.md`](plan-bundle-sealing.md) §8.2) does not
 yet populate `subtask_activations`, so adding those writes here would silently fail
 in production and pass in fixtures — the worst possible failure mode. They land
 together with the activation-row population call site (Plan Bundle Sealing task).
@@ -1803,8 +1803,8 @@ Reviewer's activation row. The Reviewer VM boots with this SHA already injected 
 
 > **V2 architectural amendment.** The original V1-flavored design described below
 > assumed the Reviewer VM contained `git` and could `fetch` + `checkout` from a
-> staged bundle. Under the V2 Pure-Static Reviewer (`planner-harness.md §4.2`)
-> and Canonical Reviewer Image (`planner-harness.md §4.5` /
+> staged bundle. Under the V2 Pure-Static Reviewer ([`planner-harness.md §4.2`](planner-harness.md))
+> and Canonical Reviewer Image ([`planner-harness.md §4.5`](planner-harness.md) /
 > `INV-PLANNER-HARNESS-02`) decisions, the Reviewer image (`raxis-reviewer-core`)
 > contains **no `git` binary**. All git work for the Reviewer must complete
 > **host-side before VM boot**. The Reviewer VM sees a checked-out worktree at
@@ -1864,7 +1864,7 @@ The kernel:
      short SHA + commit message subject + author + timestamp.
    - `/raxis/<verifier_name>/<artifact_basename>` — for each V2 task verifier
      declared on the Executor's task that produced an `artifact` (per
-     `verifier-processes.md §6`), the staged artifact bytes are placed here
+     [`verifier-processes.md §6`](verifier-processes.md)), the staged artifact bytes are placed here
      before VM boot.
 7. Sets the VirtioFS mount of `/workspace/` to **read-only** (Reviewer cannot
    mutate worktree contents — the worktree is a static evidence base, not
@@ -1890,7 +1890,7 @@ The Reviewer VM, on boot, finds:
   system_prompt.txt            # NNSP per kernel-mechanics-prompt.md §3.3
 ```
 
-The Reviewer's NNSP (per `kernel-mechanics-prompt.md §3.3`) directs it to begin
+The Reviewer's NNSP (per [`kernel-mechanics-prompt.md §3.3`](kernel-mechanics-prompt.md)) directs it to begin
 with `read_file /raxis/diff.patch`. No bootstrap step; no git activity inside
 the VM.
 
@@ -1921,7 +1921,7 @@ re-reads `/raxis/diff.patch` cheaply on every call.
   task transitions to `Failed`. Operator investigates (the Orchestrator's
   worktree is forensically retained per `INV-CONVERGENCE-05`).
 - If `gix` cannot copy objects (disk full): same handling per
-  `host-capacity.md §7` halt-admit policy; the activation queues until disk
+  [`host-capacity.md §7`](host-capacity.md) halt-admit policy; the activation queues until disk
   recovers.
 - If `evaluation_sha` is not actually present in the Orchestrator's object
   store (kernel bug; should never happen): same `FAIL_REVIEWER_PROVISIONING_FAILED`;
@@ -1964,8 +1964,8 @@ isolation backend.
 > original V1-flavored spec because the Orchestrator was implicitly
 > provisioned by the operator's `vm_image` declaration (`raxis/base`
 > in the prior example). Under V2's Canonical Orchestrator Image
-> (`planner-harness.md §4.7` / `INV-PLANNER-HARNESS-05`) and
-> Invisible Orchestrator (`planner-harness.md §4.8` /
+> ([`planner-harness.md §4.7`](planner-harness.md) / `INV-PLANNER-HARNESS-05`) and
+> Invisible Orchestrator ([`planner-harness.md §4.8`](planner-harness.md) /
 > `INV-PLANNER-HARNESS-06`) decisions, the kernel auto-creates the
 > Orchestrator session at initiative admission and provisions its
 > workspace from the initiative's base SHA without any operator
@@ -2117,7 +2117,7 @@ Test coverage:
   `audit_kind_returns_*`).
 - Unit tests in `kernel/src/canonical_images_preflight.rs::tests`
   pin the `<install_dir>/images/raxis-{reviewer,orchestrator}-core-<kernel_version>.img`
-  filename layout against `system-requirements.md §1.1`,
+  filename layout against [`system-requirements.md §1.1`](system-requirements.md),
   the missing-image warning-only branch, and the
   unpopulated-digest warning-only branch.
 - Launch-time defense-in-depth (re-verifying the digest at the
@@ -2136,7 +2136,7 @@ Test coverage:
 
 > **V2 amendment.** The Orchestrator NNSP is now **kernel-pinned and
 > version-locked with the kernel binary** per `INV-PLANNER-HARNESS-06.3`
-> — the canonical text lives in `kernel-mechanics-prompt.md §3.2` and
+> — the canonical text lives in [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) and
 > the binary embeds it as `ORCHESTRATOR_NNSP_BYTES`. The 4-step "MERGE
 > DUTY" prompt below has been superseded by the structured
 > `[KERNEL: INTEGRATION MERGE PROTOCOL]` + `[KERNEL: CONFLICT RESOLUTION
@@ -2149,7 +2149,7 @@ Test coverage:
 > state, kernel-computed `newly_activatable`, verbatim merge
 > instructions to defeat hallucinated workflows) remains correct and
 > applies to the new NNSP. The exact prompt text shown below is
-> historical illustration; `kernel-mechanics-prompt.md §3.2` is
+> historical illustration; [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) is
 > normative.
 
 **Context:** The Orchestrator is an LLM. It must: (1) know which sub-tasks to activate and
@@ -2246,7 +2246,7 @@ substitution layer: only the five spec-mandated tokens are substituted —
 `<cross_cutting_artifacts>`. Defence-in-depth: the renderer rejects any
 `<initiative_description>` containing the literal `[RAXIS:KERNEL_STATE` (INV-KSB-01) or
 exceeding `MAX_INITIATIVE_DESCRIPTION_BYTES = 8 KiB`. Tests pin every protocol block
-required by `kernel-mechanics-prompt.md §3.2` (`IDENTITY`, `KSB LEGEND`, `INITIATIVE
+required by [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) (`IDENTITY`, `KSB LEGEND`, `INITIATIVE
 GUIDANCE`, `INTEGRATION MERGE PROTOCOL`, `CONFLICT RESOLUTION PROTOCOL`, `DAG
 ACTIVATION`, `ESCALATION PROTOCOL`, `TOKEN LIMIT PROTOCOL`, `KSB ALERT CLASSES`) plus
 the spec-mandated absences (`BACKGROUND PROCESS TOOLS`, `CUSTOM TOOLS`, `CREDENTIAL
@@ -2320,7 +2320,7 @@ sparse-checkout configuration from the already-signed allowlist.
 `raxis_types::CloneStrategy` (`Full | Blobless | Sparse`, lower-case at-rest /
 TOML strings) is the typed surface. Per-task TOML reads `clone_strategy = "..."`
 and `session_agent_type = "..."`; defaults are `Blobless` and `Executor`
-(the Orchestrator is auto-created at admission per `planner-harness.md §4.8`,
+(the Orchestrator is auto-created at admission per [`planner-harness.md §4.8`](planner-harness.md),
 not declared in `[[tasks]]`).
 
 `parse_plan_tasks` rejects unknown values for either field at parse time
@@ -2944,8 +2944,8 @@ design decision, not an oversight.
 | Git add / git commit (Executor, Orchestrator only) | `bash::run` → `git` CLI within worktree. Reviewer image contains no `git` binary; worktree pre-populated host-side. | No (until `SingleCommit`) |
 | Commit to RAXIS record | `IntentKind::SingleCommit { commit_sha }` | **Yes — full admission pipeline** |
 | Inference | `IntentKind::InferenceRequest` | **Yes** |
-| Public egress (curl, npm, cargo, pip, git, …) | `bash::run` → standard tool → `raxis-tproxy` SNI allowlist | No per-request kernel intent (network-layer enforcement). See `vm-network-isolation.md` and the **Unified Egress** decision in §Part 7. |
-| Authenticated egress (APIs, k8s, cloud, DB) | Standard tool → per-session `localhost:<port>` Credential Proxy → URL+method allowlist | No per-request kernel intent (HTTP-layer enforcement at the localhost proxy). See `credential-proxy.md`. |
+| Public egress (curl, npm, cargo, pip, git, …) | `bash::run` → standard tool → `raxis-tproxy` SNI allowlist | No per-request kernel intent (network-layer enforcement). See [`vm-network-isolation.md`](vm-network-isolation.md) and the **Unified Egress** decision in §Part 7. |
+| Authenticated egress (APIs, k8s, cloud, DB) | Standard tool → per-session `localhost:<port>` Credential Proxy → URL+method allowlist | No per-request kernel intent (HTTP-layer enforcement at the localhost proxy). See [`credential-proxy.md`](credential-proxy.md). |
 
 #### Why the Kernel Does Not Review Every File Change
 
@@ -3062,7 +3062,7 @@ The VM image provides tools. The worktree provides the project. They are indepen
 > **V2 amendment.** The example below originally included an
 > `orchestrator` task with `session_agent_type = "Orchestrator"` and a
 > `vm_image = "raxis/base"` field. Both are now prohibited per
-> `INV-PLANNER-HARNESS-06` (see `planner-harness.md §4.8` and
+> `INV-PLANNER-HARNESS-06` (see [`planner-harness.md §4.8`](planner-harness.md) and
 > `policy-plan-authority.md FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`).
 > Operators do not declare Orchestrator tasks in V2 — the kernel
 > auto-creates the Orchestrator session per initiative and boots it
@@ -3203,7 +3203,7 @@ environment and are therefore reachable by the agent — including via prompt in
 This is a violation of `INV-02A` in spirit, but **it is not enforceable by the Kernel**.
 The Kernel cannot scan image layers for secret-shaped values, and any attempt to do so
 would be both incomplete and bypassable (secrets could be base64-encoded, split across
-vars, or assembled at runtime). The credential proxy architecture (`credential-proxy.md`)
+vars, or assembled at runtime). The credential proxy architecture ([`credential-proxy.md`](credential-proxy.md))
 is the correct mechanism for runtime secret access. Embedding secrets in image env vars
 is operator error; RAXIS cannot prevent it.
 
@@ -3452,14 +3452,14 @@ alert-class taxonomy all live in [`specs/v2/planner-harness.md`](planner-harness
 That spec is normative for everything in its scope. The integration map
 tables above (Borrowed As-Is / Wrapped / Excluded) remain in this file
 because they pair with the `ApiClient` / `raxis-gateway` discussion;
-`planner-harness.md §3` adds the role-asymmetric tool-surface matrix on
-top of that map and `planner-harness.md §4–§5` is where every decision
+[`planner-harness.md §3`](planner-harness.md) adds the role-asymmetric tool-surface matrix on
+top of that map and [`planner-harness.md §4–§5`](planner-harness.md) is where every decision
 amending those tables is recorded.
 
-When this section and `planner-harness.md` disagree, `planner-harness.md`
+When this section and [`planner-harness.md`](planner-harness.md) disagree, [`planner-harness.md`](planner-harness.md)
 wins. Cross-references in other specs that point at Part 7 for
 planner-harness-specific material should be migrated to point to
-`planner-harness.md`.
+[`planner-harness.md`](planner-harness.md).
 
 ---
 
@@ -3509,7 +3509,7 @@ CREATE TABLE IF NOT EXISTS subtask_activations (
 
 | Operation | Tables written atomically |
 |---|---|
-| `create_initiative` (V2) | `initiatives`, `plan_bundles`, `plan_bundle_artifacts`, audit-pointer (per `plan-bundle-sealing.md §8.2`) |
+| `create_initiative` (V2) | `initiatives`, `plan_bundles`, `plan_bundle_artifacts`, audit-pointer (per [`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md)) |
 | `approve_plan` (V2) | `initiatives`, `tasks`, `task_dag_edges`, `subtask_activations`, audit-pointer (plan bundle bytes already sealed at `create_initiative` time and read read-only here) |
 | `handlers/activate_subtask` | `subtask_activations` (→ Active), `sessions` (insert), audit-pointer |
 | `handlers/complete_task` | `tasks` (completed_sha, state), `task_dag_edges` (release_successors), audit-pointer |
@@ -3528,7 +3528,7 @@ and final decisions. Provider-agnostic throughout. All V1 invariants preserved.*
 V2 introduces enough cross-spec references (failure-code
 catalogs, capability classes, audit-event names, invariant IDs,
 section anchors) that bit-rot is the dominant medium-term risk.
-A reference to "see `kernel-mechanics-prompt.md §2`" that
+A reference to "see [`kernel-mechanics-prompt.md §2`](kernel-mechanics-prompt.md)" that
 silently no-ops when §2 is renamed to §3 is the failure mode
 this lint exists to prevent. The lint is implemented as a
 `cargo xtask` target (`cargo xtask spec-graph`) and runs in CI
@@ -3565,10 +3565,10 @@ on every PR that touches `raxis/specs/**`.
 5. **Capability-class completeness.** Every top-level
    `policy.toml` key referenced in the policy-plan-authority
    spec has a corresponding entry in
-   `policy-epoch-diffing.md §2.2` (the section map). This
+   [`policy-epoch-diffing.md §2.2`](policy-epoch-diffing.md) (the section map). This
    lint complements (and is independent from) the runtime
    crate-level test specified in
-   `policy-epoch-diffing.md §2.3 Section-Map Drift Lint`. The
+   [`policy-epoch-diffing.md §2.3 Section-Map Drift Lint`](policy-epoch-diffing.md). The
    xtask runs at the spec-text level; the crate test runs at
    the Rust-source level. Both must pass; both must agree on
    the section map.
@@ -3576,7 +3576,7 @@ on every PR that touches `raxis/specs/**`.
    variant in the `AuditEventKind` enum (the canonical
    inventory lives in `crates/audit/src/event.rs`) MUST
    appear in exactly one of the two classification lists in
-   `audit-paired-writes.md §4` (paired class — §4.1; single
+   [`audit-paired-writes.md §4`](audit-paired-writes.md) (paired class — §4.1; single
    class — §4 table). A variant in neither, in both, or
    missing from the spec entirely emits
    `LINT_SPEC_GRAPH_AUDIT_CLASSIFICATION_MISSING { variant,
@@ -3662,10 +3662,10 @@ disabled on PRs whose `spec-graph` job is red.
 
 The check #3 / #4 single-definition rule is defeated by specs
 that intentionally re-tabulate codes / audit-event variants
-for narrative completeness — e.g., `policy-plan-authority.md`
+for narrative completeness — e.g., [`policy-plan-authority.md`](policy-plan-authority.md)
 maintains a master *index* of plan-bundle-sealing failure codes
 even though the canonical definitions live in
-`plan-bundle-sealing.md`. A pair of HTML-comment markers makes
+[`plan-bundle-sealing.md`](plan-bundle-sealing.md). A pair of HTML-comment markers makes
 the duplication explicit so the lint can distinguish "another
 copy of the definition" from "a reference to the definition":
 
@@ -3701,7 +3701,7 @@ vector this lint was built to close.
 - It does NOT check Rust-source references; that is the job
   of the `cargo test` suite, the `compile_assert_all_variants_tested!`
   macro on `KernelPush` / `AuditEventKind`, and the section-map
-  test in `policy-epoch-diffing.md §2.3`.
+  test in [`policy-epoch-diffing.md §2.3`](policy-epoch-diffing.md).
 
 The lint catches structural drift; semantic drift remains the
 reviewer's responsibility.
@@ -3734,8 +3734,8 @@ implementation roadmap:
   parsing; today the index lives as a prose list in
   `invariants.md` §1.
 - **#5 — Capability-class completeness.** Every top-level
-  `policy.toml` key referenced in `policy-plan-authority.md`
-  must have a matching entry in `policy-epoch-diffing.md §2.2`.
+  `policy.toml` key referenced in [`policy-plan-authority.md`](policy-plan-authority.md)
+  must have a matching entry in [`policy-epoch-diffing.md §2.2`](policy-epoch-diffing.md).
   Implementation depends on adding a structured-data block
   to both specs that the lint can read; the prose-table form
   used today is too lossy for mechanical comparison.
@@ -3756,7 +3756,7 @@ into a core orchestration subsystem that warrants its own detailed mechanical sp
 |---|---|---|
 | Per-capability policy epoch staleness diffing (A.18 promotion) | [`policy-epoch-diffing.md`](policy-epoch-diffing.md) | V2 Specified |
 | `IntegrationMerge` — complete intent spec, 8-check admission pipeline, multi-task sequencing, operator-approval gate for sensitive paths | [`integration-merge.md`](integration-merge.md) | V2 Specified |
-| Kernel-mediated egress (DEPRECATED — superseded by unified egress decision in §Part 7) — original `raxis-egress` proxy + `IntentKind::EgressRequest` design. Functionality consolidated into `vm-network-isolation.md` (transport-layer SNI allowlist via `raxis-tproxy`) and `credential-proxy.md` (HTTP-layer URL+method allowlist on per-session localhost). `INV-EGRESS-01` and `INV-EGRESS-INTENT-01` deprecated. | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | **Deprecated** |
+| Kernel-mediated egress (DEPRECATED — superseded by unified egress decision in §Part 7) — original `raxis-egress` proxy + `IntentKind::EgressRequest` design. Functionality consolidated into [`vm-network-isolation.md`](vm-network-isolation.md) (transport-layer SNI allowlist via `raxis-tproxy`) and [`credential-proxy.md`](credential-proxy.md) (HTTP-layer URL+method allowlist on per-session localhost). `INV-EGRESS-01` and `INV-EGRESS-INTENT-01` deprecated. | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | **Deprecated** |
 | Policy-plan authority hierarchy — INV-POLICY-01, `approve_plan` warning system, `--strict` mode, warning catalog (4 warning types), `[push_policy]` and `[approve_policy]` policy bundle sections | [`policy-plan-authority.md`](policy-plan-authority.md) | V2 Specified |
 | Immutable artifact store — content-addressed storage for policy bundles, plans, and operator keys; `PolicyEpochAdvanced` extended with SHA-256 fields; full audit query model | [`immutable-artifact-store.md`](immutable-artifact-store.md) | V2 Specified |
 | Token limit enforcement — `InferenceCompleted` audit event, `TokenLimit::Uncapped/Count`, per-request and cumulative limits, `limit_behavior` modes, plan immutability tension, budget vs. token analysis, Kernel State Block (KSB), CLI commands, prompt engineering | [`token-limit-enforcement.md`](token-limit-enforcement.md) | V2 Specified |

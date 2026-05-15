@@ -9,7 +9,7 @@
 
 ## §1 — Objective
 
-`full_e2e_session_lifecycle.rs` (per `e2e-live-test-gap.md`) drives the
+`full_e2e_session_lifecycle.rs` (per [`e2e-live-test-gap.md`](e2e-live-test-gap.md)) drives the
 **single happy-path lifecycle**: one Executor, one Reviewer, one
 trivial `hello.txt` write. That test pins the wire surface
 end-to-end but says nothing about (a) concurrent agents, (b) real
@@ -36,7 +36,7 @@ This spec defines a **second** integration test —
        formatter, manifest) that exercise the scheduler under
        concurrent load.
      * one **disagreement** Reviewer — first review intentionally
-       rejects (forces a re-review round per `agent-disagreement.md`).
+       rejects (forces a re-review round per [`agent-disagreement.md`](agent-disagreement.md)).
      * one **approval** Reviewer — second pass approves.
 
 3. **Three enforcement-layer assertions.**
@@ -290,7 +290,7 @@ gzip'd initramfs CPIO as "Invalid disk image. The disk image
 format is not recognized." Surfacing this in seconds via the
 fast-fail keeps the failure mode legible; the operator remediation
 (rebuild the kernel with `RAXIS_KERNEL_SIGNING_KEY_HEX` exported)
-lives in `release-and-distribution.md §8.2`.
+lives in [`release-and-distribution.md §8.2`](release-and-distribution.md).
 
 ---
 
@@ -572,7 +572,7 @@ re-submitted. Submit `SubmitReview { approved: true, ... }`.
 """
 ```
 
-Per `agent-disagreement.md §3` the kernel tracks
+Per [`agent-disagreement.md §3`](agent-disagreement.md) the kernel tracks
 `task.review_rounds_consumed`. The first reject increments to 1;
 the second-round approve closes the task at
 `review_rounds_consumed == 1` (well below the default
@@ -658,7 +658,7 @@ the same paths are unaffected.
   planner has no filesystem path into `<data_dir>` from inside the
   VM. If the VM substrate changes (e.g. a new VirtioFS mount
   policy), this payload may need a new witness (e.g. INV-FS-01
-  guarded write attempts). Track in `vm-network-isolation.md`.
+  guarded write attempts). Track in [`vm-network-isolation.md`](vm-network-isolation.md).
 * The witness for the postgres `INSERT` deny (§5 row "Postgres
   credential restriction") depends on whether the kernel emits
   `DatabaseQueryExecuted { blocked: true }` or only
@@ -666,7 +666,7 @@ the same paths are unaffected.
   bug-hunt may settle this; if both paths are present the witness
   matches either.
 * The `ResolveSubEscalation` Orchestrator surface
-  (`agent-disagreement.md §6.3`) is not exercised in V2.0 — the
+  ([`agent-disagreement.md §6.3`](agent-disagreement.md)) is not exercised in V2.0 — the
   injection-escalation in §6.2 is a routing-only assertion. A
   follow-up extended scenario should wire the Orchestrator's
   resolve path once `IntentKind::ResolveSubEscalation` is on the

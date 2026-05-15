@@ -5,7 +5,7 @@
 `raxis/kernel/src/gateway/client.rs`,
 `raxis/crates/dashboard/src/routes/tasks.rs`. Pinned by
 `INV-DASHBOARD-TASK-LLM-CAPTURE-01..03`
-(`raxis/specs/invariants.md §11.16`).
+([`raxis/specs/invariants.md §11.16`](../invariants.md)).
 
 **Author intent.** Operators debugging a Failed task need to see
 what the LLM actually returned on the turn that broke — not just

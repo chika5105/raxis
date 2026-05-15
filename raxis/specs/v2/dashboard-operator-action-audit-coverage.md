@@ -3,9 +3,9 @@
 > **Canonical home for**
 > `INV-DASHBOARD-OPERATOR-ACTION-AUDIT-COVERAGE-01`,
 > `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`.
-> Pairs with `audit-paired-writes.md` (the audit-emission contract),
-> `dashboard-hardening.md` (the dashboard's TCB boundary), and
-> `secrets-model.md` (the credential lifecycle).
+> Pairs with [`audit-paired-writes.md`](audit-paired-writes.md) (the audit-emission contract),
+> [`dashboard-hardening.md`](dashboard-hardening.md) (the dashboard's TCB boundary), and
+> [`secrets-model.md`](secrets-model.md) (the credential lifecycle).
 >
 > **Update log**
 >
@@ -51,7 +51,7 @@ agent's behaviour with high fidelity and the operator's behaviour
 with massive blind spots.
 
 `INV-AUDIT-OPERATOR-ACTION-01` (canonical home:
-`dashboard-hardening.md §2.2`) pins the per-emission contract:
+[`dashboard-hardening.md §2.2`](dashboard-hardening.md)) pins the per-emission contract:
 exactly one structured `Operator*` event per action, with
 `operator_fingerprint`, resource correlation fields, and a stable
 `outcome` discriminant. This spec extends that contract to the
@@ -342,7 +342,7 @@ admits only:
 The allow-list lives in **one** place so a reviewer can audit
 the curation policy at a glance. The dashboard FE never makes
 a policy decision about what to hide — the read-only TCB
-projection rule from `dashboard-hardening.md` extends here. New
+projection rule from [`dashboard-hardening.md`](dashboard-hardening.md) extends here. New
 state-affecting variants MUST be added to
 `IMPORTANT_EVENT_KINDS` if they should appear on the Overview.
 
@@ -478,7 +478,7 @@ forward guarantee against future regressions.
 
   * `INV-AUDIT-OPERATOR-ACTION-01` — the per-emission contract
     every row in §2 fans out from. Canonical home:
-    `dashboard-hardening.md §2.2`.
+    [`dashboard-hardening.md §2.2`](dashboard-hardening.md).
   * `INV-NOTIF-SCOPE-01` — the audit→notification routing this
     spec's severity column maps onto.
   * `INV-DASHBOARD-CREDENTIAL-DEFAULT-MASKED-01` /
@@ -486,7 +486,7 @@ forward guarantee against future regressions.
     `INV-DASHBOARD-CREDENTIAL-REVEAL-ROLE-GATED-01` /
     `INV-DASHBOARD-CREDENTIAL-AUTO-HIDE-01` — the credential-
     viewer family this spec extends.
-  * `audit-paired-writes.md §credential-reveal` — the audit-
+  * [`audit-paired-writes.md §credential-reveal`](audit-paired-writes.md) — the audit-
     emission contract for the reveal path.
-  * `secrets-model.md §dashboard-reveal` — the credential-life
+  * [`secrets-model.md §dashboard-reveal`](secrets-model.md) — the credential-life
     cycle model the dashboard reveal slots into.

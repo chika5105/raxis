@@ -1,8 +1,8 @@
 # RAXIS V2 — Secrets Model
 
-> **Status:** V2 Specified — doctrinal companion to `credential-proxy.md`,
-> `vm-network-isolation.md`, `v2-deep-spec.md §INV-VM-CAP-04`,
-> `extensibility-traits.md §4` (`CredentialBackend`).
+> **Status:** V2 Specified — doctrinal companion to [`credential-proxy.md`](credential-proxy.md),
+> [`vm-network-isolation.md`](vm-network-isolation.md), [`v2-deep-spec.md §INV-VM-CAP-04`](v2-deep-spec.md),
+> [`extensibility-traits.md §4`](extensibility-traits.md) (`CredentialBackend`).
 >
 > **Audience:** Operators, kernel engineers, and test authors who need a
 > one-page articulation of *what* RAXIS treats as secret material,
@@ -61,7 +61,7 @@ material they themselves placed.
 ### 2.2 — Secrets live in `CredentialBackend`
 
 The canonical home for real credential material is the
-`CredentialBackend` trait (`extensibility-traits.md §4`). The V2
+`CredentialBackend` trait ([`extensibility-traits.md §4`](extensibility-traits.md)). The V2
 default impl is `FileCredentialBackend` (`raxis-credentials-file`),
 which reads `<data_dir>/credentials/<name>.env` and
 `<data_dir>/providers/<name>.toml` — both required to be `chmod 0600`
@@ -76,7 +76,7 @@ Three structural properties hold across every conformant impl:
    `CredentialBackend::resolve(name, consumer)` call is invoked from
    kernel address space. The bytes never cross the VM boundary; no
    VirtioFS mount exposes the credentials directory
-   (`v2-deep-spec.md §INV-VM-CAP-04`).
+   ([`v2-deep-spec.md §INV-VM-CAP-04`](v2-deep-spec.md)).
 2. **The agent VM never sees the bytes.** Not as a file mount, not as
    an env var, not in a config blob, not in a generated kubeconfig.
    Anything stamped into the VM's environment is either non-sensitive
@@ -111,8 +111,8 @@ only in the kernel's process space, outside the VM boundary.
 
 ### 2.4 — Egress allowlist mechanically enforces "proxy is the only path"
 
-The kernel's two-tier unified egress (`vm-network-isolation.md` Tier 1
-SNI allowlist + `credential-proxy.md` Tier 2 credential-proxy
+The kernel's two-tier unified egress ([`vm-network-isolation.md`](vm-network-isolation.md) Tier 1
+SNI allowlist + [`credential-proxy.md`](credential-proxy.md) Tier 2 credential-proxy
 loopback) means there is no IP-level route from inside the agent VM
 to an authenticated upstream that bypasses the proxy. Any attempt by
 the agent to dial the real upstream host:port directly is denied at
@@ -219,7 +219,7 @@ strictly outside the worktree.
 A previous design considered scanning `InferenceRequest` payloads
 for byte-substrings matching the credential value before forwarding
 to the gateway. This was considered and rejected for the reasons
-enumerated in `credential-proxy.md §8.3`:
+enumerated in [`credential-proxy.md §8.3`](credential-proxy.md):
 
 * Base64 / hex / URL-encoded forms bypass byte matching.
 * Character-split exfiltration ("the first half is X, the second half
@@ -371,12 +371,12 @@ Cross-reference:
 
 ## 6. Related specs
 
-* `credential-proxy.md` — proxy types, restrictions, audit events,
+* [`credential-proxy.md`](credential-proxy.md) — proxy types, restrictions, audit events,
   and the rejected env-var-injection design (§8) that motivates this
   spec.
-* `vm-network-isolation.md` — Tier 1 SNI-allowlist tproxy + the
+* [`vm-network-isolation.md`](vm-network-isolation.md) — Tier 1 SNI-allowlist tproxy + the
   proxy-bypass denial reason this spec asserts mechanically.
-* `extensibility-traits.md §4` — `CredentialBackend` trait + the
+* [`extensibility-traits.md §4`](extensibility-traits.md) — `CredentialBackend` trait + the
   conformance contract every concrete backend MUST satisfy.
-* `v2-deep-spec.md §INV-VM-CAP-04` — the structural enforcement that
+* [`v2-deep-spec.md §INV-VM-CAP-04`](v2-deep-spec.md) — the structural enforcement that
   `credentials/` is not mountable into a session VM.

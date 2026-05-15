@@ -4,9 +4,9 @@
 > something — what does that mean?", contributors changing
 > `kernel/src/handlers/escalation.rs`, and reviewers auditing why an
 > escalation was admitted or denied. The companion docs are
-> `04-delegations-and-authority.md` (the typical happy-path payoff
+> [`04-delegations-and-authority.md`](04-delegations-and-authority.md) (the typical happy-path payoff
 > of an escalation — a fresh, scoped, time-bounded delegation) and
-> `01-claims-and-gates.md` (the most common reason an agent has to
+> [`01-claims-and-gates.md`](01-claims-and-gates.md) (the most common reason an agent has to
 > ask).
 >
 > **Authority.** Wire shapes, FSM, audit events, and CLI flags below
@@ -324,7 +324,7 @@ On `Ok(ApprovalStatus::Valid)`, the kernel:
 
 The approval token is **the one-shot release valve**, not a long-
 lived credential. Long-lived authority is what the *delegation*
-provides — see `04-delegations-and-authority.md`.
+provides — see [`04-delegations-and-authority.md`](04-delegations-and-authority.md).
 
 ---
 

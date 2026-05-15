@@ -47,7 +47,7 @@ For grounding, this is the V2 limit hierarchy already established by other specs
 | L4 | Budget lane admission units | Lane (shared across tasks/sessions) | `policy.toml × plan.toml [budget_lane]` | `FAIL_BUDGET_EXHAUSTED`; lane frozen until operator extends | v2-deep-spec |
 | L5 | `INV-04` financial ceiling | Operator | `policy.toml` | Hard halt across all initiatives for that operator | invariants |
 | L6 | Escalation TTL (default 7d) | Escalation | `policy.toml [escalations]` | Session fails as `FAIL_ESCALATION_TIMEOUT` | v2-deep-spec |
-| L7 | Host capacity caps (disk, FD, worktree quota) | Host | `policy.toml [host_capacity]` | `halt_admit` per `host-capacity.md` | host-capacity |
+| L7 | Host capacity caps (disk, FD, worktree quota) | Host | `policy.toml [host_capacity]` | `halt_admit` per [`host-capacity.md`](host-capacity.md) | host-capacity |
 
 The mechanisms below insert at order L1.5 to L1.8 — between per-request and per-task budget. They give operators visibility and intervention windows before money is spent on stuck loops.
 
@@ -162,7 +162,7 @@ If `on_max_rounds = "fail_task"`, step 6 instead transitions the task directly t
 > (`subtask_activations.crash_retry_count` / `review_reject_count`, `lane_reservations`,
 > `host_capacity.max_concurrent_vms`, `INV-04` financial ceiling) BEFORE any task FSM
 > transition or VM spawn. A rejected intent never advances state; an admitted intent is
-> mutated by the kernel atomically (paired-write per `audit-paired-writes.md §4`); only after
+> mutated by the kernel atomically (paired-write per [`audit-paired-writes.md §4`](audit-paired-writes.md)); only after
 > admission does the kernel call `ctx.session_spawn.spawn_session()` to provision the VM.
 > The Orchestrator therefore cannot (i) skip a review gate by activating a downstream
 > Executor before its predecessors complete (`handle_activate_sub_task` rejects with
@@ -177,9 +177,9 @@ If `on_max_rounds = "fail_task"`, step 6 instead transitions the task directly t
 
 The kernel mechanisms in §3.1–§3.5 enforce the *ceiling* on reviewer-rejection rounds, but the actual `RetrySubTask` intent that triggers the kernel's admit pipeline must originate from the Orchestrator agent in-band. The kernel does not auto-issue `RetrySubTask` on `AtLeastOneRejected` aggregator outcomes — the Orchestrator emits the advisory intent (the kernel adjudicates whether to admit it via `admit_retry_subtask_check`), and the Executor task remains in `Completed` state from the kernel FSM's perspective regardless of reviewer verdict (per `kernel-store.md §2.5.1` the executor's task-FSM is independent of downstream review verdicts; the verdict is captured in `subtask_activations.review_reject_count` and the cross-Reviewer aggregator's `ReviewAggregationCompleted` audit row).
 
-The Orchestrator's KSB (per `v2_extended_gaps.md §2.4`) renders the kernel's cross-Reviewer state in **two** distinct surfaces (see `crates/ksb/src/lib.rs::render_ksb`):
+The Orchestrator's KSB (per [`v2_extended_gaps.md §2.4`](v2_extended_gaps.md)) renders the kernel's cross-Reviewer state in **two** distinct surfaces (see `crates/ksb/src/lib.rs::render_ksb`):
 
-1. **Per-Executor terminal verdict** — the `dag=` block's per-row `aggregate=<verdict>` field, where `<verdict>` is one of `Pending` / `AllPassed` / `AtLeastOneRejected` / `NoSuccessors`. This is the kernel's TERMINAL cross-Reviewer aggregator output (per `v2-deep-spec.md §Step 25`), surfaced by `kernel/src/initiatives/ksb_assembly.rs::read_dag_rows_for_initiative` calling `review_aggregation::compute_aggregate_review_outcome_with_conn` per `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`. Reviewer / Orchestrator rows omit the field.
+1. **Per-Executor terminal verdict** — the `dag=` block's per-row `aggregate=<verdict>` field, where `<verdict>` is one of `Pending` / `AllPassed` / `AtLeastOneRejected` / `NoSuccessors`. This is the kernel's TERMINAL cross-Reviewer aggregator output (per [`v2-deep-spec.md §Step 25`](v2-deep-spec.md)), surfaced by `kernel/src/initiatives/ksb_assembly.rs::read_dag_rows_for_initiative` calling `review_aggregation::compute_aggregate_review_outcome_with_conn` per `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01`. Reviewer / Orchestrator rows omit the field.
 2. **Per-Reviewer critique feed** — the `reviewer_verdicts=` block, with rows of the shape `reviewer=<task_id> sha=<40-hex> approved=<bool> "<critique>"`. Forensic source for per-Reviewer rationale text. Populated by `read_reviewer_verdicts_for_initiative`.
 
 The Orchestrator NNSP — shipped at `crates/planner-core/src/driver.rs::render_system_prompt_for_role(Role::Orchestrator, …)` — MUST:
@@ -208,7 +208,7 @@ A natural alternative is "kernel auto-issues `RetrySubTask` on `AtLeastOneReject
 
 - **§1.1 — "It does not arbitrate disagreements."** Auto-synthesizing the intent would be a kernel-side judgment that the rejection is recoverable. The kernel cannot know that — only the agent sees the critique. An auto-retry of a structurally unrecoverable rejection (e.g., "the requested feature is incompatible with the codebase") wastes budget on a doomed loop until `max_rounds` fires; the Orchestrator's read of the critique is the only way to short-circuit. (Note: this is about *intent synthesis*, NOT about admission authority — the kernel still adjudicates every retry intent the Orchestrator submits via the same `admit_retry_subtask_check` gate.)
 - **paradigm.md `R-12` — Out-of-Band Escalation.** Disagreement is a coordination failure to be resolved by an authorized principal. The Orchestrator IS that principal in the V2 hierarchical model; routing the *intent-synthesis* decision through the agent layer is on-paradigm. The kernel-side adjudication of the resulting intent is unchanged.
-- **`integration-merge.md §8` — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" *as a positive admission criterion* because the executor task is `Completed` regardless of verdict; coupling the merge handler to the cross-Reviewer aggregator as a positive predicate would tangle the dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt — but iter49 added a *negative* fail-closed backstop (Step 3d above) that REJECTS the merge when an Executor row reads `aggregate=AtLeastOneRejected`. The backstop is paradigm-`R-6` enforcement, not arbitration: the kernel does NOT synthesize a retry intent on the orchestrator's behalf; it only refuses to silently fast-forward `target_ref` over an outstanding reviewer objection. The orchestrator's next decision-cycle still owns the retry-vs-escalate intent-emission decision per §3, and the kernel still adjudicates the resulting intent via the dispatch matrix + admit predicates.
+- **[`integration-merge.md §8`](integration-merge.md) — IntegrationMerge predicate.** The merge predicate (kernel-side) does NOT include "no outstanding rejections" *as a positive admission criterion* because the executor task is `Completed` regardless of verdict; coupling the merge handler to the cross-Reviewer aggregator as a positive predicate would tangle the dispatch matrix. The cleaner factoring is to keep the merge handler simple and let the Orchestrator gate via the prompt — but iter49 added a *negative* fail-closed backstop (Step 3d above) that REJECTS the merge when an Executor row reads `aggregate=AtLeastOneRejected`. The backstop is paradigm-`R-6` enforcement, not arbitration: the kernel does NOT synthesize a retry intent on the orchestrator's behalf; it only refuses to silently fast-forward `target_ref` over an outstanding reviewer objection. The orchestrator's next decision-cycle still owns the retry-vs-escalate intent-emission decision per §3, and the kernel still adjudicates the resulting intent via the dispatch matrix + admit predicates.
 
 #### Kernel-side projection contract (the verdict feed)
 
@@ -250,9 +250,9 @@ A naive `prior_state != "Failed"` rejection would loop forever here — the Orch
 | Reviewer-rejection retry (Option A) | `Completed` | `> 0` | `ExecutorRespawnFromReviewRejection` |
 | Reviewer-rejection retry — iter48 extension | `PendingActivation` | `> 0` | `ExecutorRespawnFromReviewRejection` (same event reused) |
 
-A `Completed + review_reject_count = 0` activation is REJECTED with `FAIL_INVALID_REQUEST` — that combination represents a clean completion the orchestrator MUST NOT be allowed to redo (paradigm-`R-6` Fail-Closed Default). A `PendingActivation + review_reject_count = 0` activation is also REJECTED — that is a brand-new round-1 admission and the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert. An `Active` activation is REJECTED regardless of `review_reject_count` — the executor VM is still running and admitting would race the executor's eventual `CompleteTask` cascade. The `review_reject_count` counter is the canonical witness — bumped in `increment_executor_review_reject_count` at the post-`SubmitReview` aggregator's terminal-`AtLeastOneRejected` branch (paired in the same SQLite transaction with the `ReviewAggregationCompleted` audit emission per `audit-paired-writes.md §4`), so any `Completed` or `PendingActivation` activation with a positive counter is provably "rejected somewhere in the cumulative trajectory, not clean".
+A `Completed + review_reject_count = 0` activation is REJECTED with `FAIL_INVALID_REQUEST` — that combination represents a clean completion the orchestrator MUST NOT be allowed to redo (paradigm-`R-6` Fail-Closed Default). A `PendingActivation + review_reject_count = 0` activation is also REJECTED — that is a brand-new round-1 admission and the orchestrator MUST issue `ActivateSubTask` (not `RetrySubTask`); admitting would race the pending spawn against the retry handler's revoke + insert. An `Active` activation is REJECTED regardless of `review_reject_count` — the executor VM is still running and admitting would race the executor's eventual `CompleteTask` cascade. The `review_reject_count` counter is the canonical witness — bumped in `increment_executor_review_reject_count` at the post-`SubmitReview` aggregator's terminal-`AtLeastOneRejected` branch (paired in the same SQLite transaction with the `ReviewAggregationCompleted` audit emission per [`audit-paired-writes.md §4`](audit-paired-writes.md)), so any `Completed` or `PendingActivation` activation with a positive counter is provably "rejected somewhere in the cumulative trajectory, not clean".
 
-**The iter48 `PendingActivation` extension** covers the orchestrator-died-between-RetrySubTask-and-ActivateSubTask case. After Option A admits a `Completed + review_reject_count > 0` retry, the kernel inserts a `PendingActivation` row carrying the counter forward. If the orchestrator session that submitted that retry exits cleanly BEFORE issuing the follow-up `ActivateSubTask` (decision-cycle sessions exit after each terminal tool call per `v2-deep-spec.md §Step 12 V2.5b`), the post-exit hook respawns a fresh orchestrator. The fresh orchestrator reads the cumulative-trajectory witness (`review_reject_count = 1`, still `aggregate=AtLeastOneRejected`) and re-issues `RetrySubTask`. The iter48 NNSP fix steers the LLM toward `ActivateSubTask` when `retry_admissible=false reason="prior state PendingActivation; …"`, but the kernel admit predicate is the structural backstop: the same `> 0` witness gates both branches, and the handler's revoke step is a no-op on the PendingActivation branch (no session was bound) so re-inserting a fresh `PendingActivation` row is structurally safe. The iter48 reproduction trace is documented in `specs/invariants.md INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.
+**The iter48 `PendingActivation` extension** covers the orchestrator-died-between-RetrySubTask-and-ActivateSubTask case. After Option A admits a `Completed + review_reject_count > 0` retry, the kernel inserts a `PendingActivation` row carrying the counter forward. If the orchestrator session that submitted that retry exits cleanly BEFORE issuing the follow-up `ActivateSubTask` (decision-cycle sessions exit after each terminal tool call per [`v2-deep-spec.md §Step 12 V2.5b`](v2-deep-spec.md)), the post-exit hook respawns a fresh orchestrator. The fresh orchestrator reads the cumulative-trajectory witness (`review_reject_count = 1`, still `aggregate=AtLeastOneRejected`) and re-issues `RetrySubTask`. The iter48 NNSP fix steers the LLM toward `ActivateSubTask` when `retry_admissible=false reason="prior state PendingActivation; …"`, but the kernel admit predicate is the structural backstop: the same `> 0` witness gates both branches, and the handler's revoke step is a no-op on the PendingActivation branch (no session was bound) so re-inserting a fresh `PendingActivation` row is structurally safe. The iter48 reproduction trace is documented in `specs/invariants.md INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`.
 
 The retry inserts a NEW `PendingActivation` row carrying both counters forward verbatim. The prior `Completed` row is NOT mutated — the FSM is forward-only, and both rows coexist for the same `task_id`. Subsequent counter bumps target the LATEST row by `created_at` (per-round counter semantics).
 
@@ -544,7 +544,7 @@ V3 may introduce multi-level orchestration hierarchies (Orchestrator-of-Orchestr
 
 When a task fails after disagreement, the Executor's accumulated commits sit in the worktree. There is no current spec for what happens to them. This section defines a lifecycle: retain for forensic review, allow operator salvage during a window, archive read-only, eventually purge.
 
-> **DomainAdapter integration (`extensibility-traits.md §2.2.C`).** This entire lifecycle is the SE-domain instantiation of the trait's two cleanup primitives:
+> **DomainAdapter integration ([`extensibility-traits.md §2.2.C`](extensibility-traits.md)).** This entire lifecycle is the SE-domain instantiation of the trait's two cleanup primitives:
 >
 > - `DomainAdapter::teardown_workspace(handle)` is called the moment a task transitions to `Failed` (the `AbandonedSalvageable` entry transition below). It releases VirtioFS mounts and closes the per-session `gix::Repository`, but does **NOT** delete the underlying state — the audit-retention window requires it for forensic replay.
 > - `DomainAdapter::purge_workspace(handle)` is called by the daily kernel sweep when `abandoned_commits_retention` elapses (the `Purged` transition below). It permanently deletes the underlying state.
@@ -582,7 +582,7 @@ flowchart TD
     AbandonedArchived -- "abandoned_commits_retention elapses" --> Purged
 ```
 
-Transitions are time-driven by a daily kernel sweep (similar to the disk watchdog in `host-capacity.md`). Audited at every transition.
+Transitions are time-driven by a daily kernel sweep (similar to the disk watchdog in [`host-capacity.md`](host-capacity.md)). Audited at every transition.
 
 ### 7.3 CLI surface
 
@@ -622,7 +622,7 @@ raxis worktree purge <task_id> --force
 
 ### 7.5 Interaction with host-capacity
 
-Abandoned worktrees still count against the `worktree_quota_mb` per-initiative limit and against the global disk minimum. The disk watchdog (`host-capacity.md` §7) does NOT auto-purge abandoned worktrees even when disk is low — the retention guarantee is a hard contract per `INV-CONVERGENCE-05` (§8). On disk pressure with abandoned worktrees consuming space, the watchdog instead transitions to `halt_admit` and surfaces the situation to the operator via `DiskPressureWithAbandonedRetention { abandoned_count, abandoned_total_mb, retention_remaining_breakdown }`. The operator's options are:
+Abandoned worktrees still count against the `worktree_quota_mb` per-initiative limit and against the global disk minimum. The disk watchdog ([`host-capacity.md`](host-capacity.md) §7) does NOT auto-purge abandoned worktrees even when disk is low — the retention guarantee is a hard contract per `INV-CONVERGENCE-05` (§8). On disk pressure with abandoned worktrees consuming space, the watchdog instead transitions to `halt_admit` and surfaces the situation to the operator via `DiskPressureWithAbandonedRetention { abandoned_count, abandoned_total_mb, retention_remaining_breakdown }`. The operator's options are:
 
 - Manually `raxis worktree purge --force` on selected abandoned tasks
 - Lower `[worktree_lifecycle] abandoned_commits_retention` in policy
@@ -811,7 +811,7 @@ The mechanisms in §3–§7 are governed by the following invariants. These are 
 
 ## 9. Foundational Design Decisions
 
-Following the `host-capacity.md §15` pattern, this section documents the rationale for key choices and the alternatives considered and rejected. Future contributors reading this should not re-litigate these decisions without surfacing new considerations.
+Following the [`host-capacity.md §15`](host-capacity.md) pattern, this section documents the rationale for key choices and the alternatives considered and rejected. Future contributors reading this should not re-litigate these decisions without surfacing new considerations.
 
 ### 9.1 Why round-count caps in addition to token budgets
 
@@ -1048,7 +1048,7 @@ This spec is the canonical source for non-convergence handling. When other V2 sp
 
 This section enumerates every file, schema migration, audit event, CLI command, and test surface required to ship the convergence-bound mechanisms in §3–§7. An implementer reading §14 plus the spec body (§3–§7) MUST have enough information to land V2 in their first pass.
 
-> **Trait-boundary preconditions.** §7's abandoned-worktree lifecycle drives `DomainAdapter::teardown_workspace` and `DomainAdapter::purge_workspace` (`extensibility-traits.md §2.2.C`); the salvage path of §7.4 routes through `DomainAdapter::commit` with `CommitContext { mode: SalvageToBranch { target } }`. §14 therefore assumes the V2 trait extraction in `extensibility-traits.md §10` Phase A+B has landed.
+> **Trait-boundary preconditions.** §7's abandoned-worktree lifecycle drives `DomainAdapter::teardown_workspace` and `DomainAdapter::purge_workspace` ([`extensibility-traits.md §2.2.C`](extensibility-traits.md)); the salvage path of §7.4 routes through `DomainAdapter::commit` with `CommitContext { mode: SalvageToBranch { target } }`. §14 therefore assumes the V2 trait extraction in [`extensibility-traits.md §10`](extensibility-traits.md) Phase A+B has landed.
 
 ### 14.1 Crate layout
 
@@ -1132,7 +1132,7 @@ CREATE INDEX idx_abandoned_tasks_state ON abandoned_tasks(state);
 CREATE INDEX idx_abandoned_tasks_retention ON abandoned_tasks(retention_deadline) WHERE state != 'Purged';
 ```
 
-The `workspace_handles` table referenced in `workspace_handle_id` is already created by `0008_domain_handles.sql` (per `extensibility-traits.md §2.6`); this migration depends on its having landed.
+The `workspace_handles` table referenced in `workspace_handle_id` is already created by `0008_domain_handles.sql` (per [`extensibility-traits.md §2.6`](extensibility-traits.md)); this migration depends on its having landed.
 
 ### 14.3 Files to change
 
@@ -1149,7 +1149,7 @@ The `workspace_handles` table referenced in `workspace_handle_id` is already cre
 - `handle_escalation_request()` learns the §6 two-tier routing:
   - Look up `policy.toml [plan.escalation.routing.<class>]` (or `policy.toml [escalation.routing.<class>]` if the plan didn't set one). The default for any class not listed is `operator_only`.
   - If `routing_mode = "operator_only"`, the existing flow (operator notification + Resolved/Rejected/TimedOut FSM) runs unchanged.
-  - If `routing_mode = "orchestrator_first"`, the kernel sends a new `KernelPush::SubEscalationResolutionRequired` payload (variant added per §10's `kernel-push-protocol.md` cross-spec impact) to the Orchestrator session and awaits resolution within `orchestrator_resolution_deadline_seconds` (default 600s).
+  - If `routing_mode = "orchestrator_first"`, the kernel sends a new `KernelPush::SubEscalationResolutionRequired` payload (variant added per §10's [`kernel-push-protocol.md`](kernel-push-protocol.md) cross-spec impact) to the Orchestrator session and awaits resolution within `orchestrator_resolution_deadline_seconds` (default 600s).
   - The Orchestrator may submit one of the two §6.3 `IntentKind`s (`ResolveSubEscalation` or `EscalateUpward`); `ResolveSubEscalation` closes the escalation iff its payload stays within the Orchestrator's own delegated authority (`INV-CONVERGENCE-04`), `EscalateUpward` bumps it to `operator_only` per §6.4 with the Orchestrator's notes attached.
   - If the Orchestrator times out (`orchestrator_timeout` elapses without either intent), the escalation auto-bumps to `operator_only` per §6.4 and audit-event `EscalationOrchestratorTimedOut` is emitted.
 - `handle_orchestrator_resolution()` (NEW handler function): validates the resolving Orchestrator owns the source task's initiative, applies the resolution outcome, and writes `escalations.orchestrator_resolution_outcome`.
@@ -1162,7 +1162,7 @@ The `workspace_handles` table referenced in `workspace_handle_id` is already cre
 `raxis/kernel/src/runtime/heartbeat.rs`:
 
 - `spawn_periodic_jobs()` gains a new 24h ticker that calls `kernel::initiatives::abandoned::daily_sweep(&ctx)`.
-- `Snapshot` struct gains `abandoned_count: u64`, `abandoned_total_mb: u64`, `abandoned_oldest_age_hours: u64` fields populated from the `abandoned_tasks` table (used by `host-capacity.md §7` `DiskPressureWithAbandonedRetention` event).
+- `Snapshot` struct gains `abandoned_count: u64`, `abandoned_total_mb: u64`, `abandoned_oldest_age_hours: u64` fields populated from the `abandoned_tasks` table (used by [`host-capacity.md §7`](host-capacity.md) `DiskPressureWithAbandonedRetention` event).
 
 `raxis/kernel/src/handlers/session.rs::end_session`:
 
@@ -1206,9 +1206,9 @@ The `workspace_handles` table referenced in `workspace_handle_id` is already cre
 
 - Wire the four new `worktree` subcommands.
 
-`raxis/specs/v1/planner-api.md`:
+[`raxis/specs/v1/planner-api.md`](../v1/planner-api.md):
 
-- Add the four new `FAIL_*` codes to the §3 error-code table footnote (same edit pattern as `planner-harness.md §14.3` adds for that spec's V2 codes).
+- Add the four new `FAIL_*` codes to the §3 error-code table footnote (same edit pattern as [`planner-harness.md §14.3`](planner-harness.md) adds for that spec's V2 codes).
 
 ### 14.4 Test fixtures and helpers
 

@@ -94,7 +94,7 @@ The detailed step numbers and their canonical homes:
 | 7 | VCS diff → `touched_paths` | `domain.compute_touched_paths` | `kernel-core.md §vcs/diff.rs` (INV-07) |
 | 7A | Path-scope coverage check | `path_scope::check_paths` / `check_paths_hybrid` | INV-TASK-PATH-01 |
 | 8 | Compute admission cost | `scheduler::budget::compute_admission_cost` | INV-02A |
-| 9 | Gate evaluation (Phase B) | `gates::evaluate_claims` | `01-claims-and-gates.md` |
+| 9 | Gate evaluation (Phase B) | `gates::evaluate_claims` | [`01-claims-and-gates.md`](01-claims-and-gates.md) |
 | 10 | Atomic budget reservation | `scheduler::budget::reserve_budget_in_tx` | INV-STORE-02 (TOCTOU fix) |
 | 11 | FSM transition | `task_transitions::transition_task_in_tx` | INV-INIT-04 |
 | 12 | Update intent fields | `update_task_intent_fields_in_tx` | INV-TASK-PATH-02 substrate |

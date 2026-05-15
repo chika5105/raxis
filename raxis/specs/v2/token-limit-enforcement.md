@@ -2,9 +2,9 @@
 
 > **Status:** V2 Specified
 > **Cross-references:**
-> - `v2-deep-spec.md §Part 6` — Budget lanes and admission units
-> - `immutable-artifact-store.md §2.4` — Audit log immutability
-> - `integration-merge.md §12` — Escalation-as-amendment pattern
+> - [`v2-deep-spec.md §Part 6`](v2-deep-spec.md) — Budget lanes and admission units
+> - [`immutable-artifact-store.md §2.4`](immutable-artifact-store.md) — Audit log immutability
+> - [`integration-merge.md §12`](integration-merge.md) — Escalation-as-amendment pattern
 > - `security/raxis-security-model.md §Part 16` — Always-recorded audit events
 
 ---
@@ -574,7 +574,7 @@ admit_inference(InferenceRequest, session, plan, policy):
 The `lane_reservations` table is the gate: a reservation row is
 held against `lane_used + lane_reserved` for the duration of the
 in-flight request. If the kernel crashes between step 3 and step 6,
-recovery (`kernel-lifecycle.md §10.5` maintenance loop's
+recovery ([`kernel-lifecycle.md §10.5`](kernel-lifecycle.md) maintenance loop's
 companion `lane_reservation_orphan_sweep` job, registered alongside
 the §10.5.2 built-ins) reclaims orphaned reservations whose
 `session_id` is no longer in `Active` state, restoring lane capacity

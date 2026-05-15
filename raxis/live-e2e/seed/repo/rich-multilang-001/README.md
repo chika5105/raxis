@@ -14,7 +14,7 @@ not:
   * Multi-language source tree (Rust workspace member, TS/JS
     package, Python module) — exercises language-specific
     formatters/linters in cross-file edits.
-  * Mixed file modes — `README.md`, an executable shell script
+  * Mixed file modes — [`README.md`](README.md), an executable shell script
     under `scripts/`, and a small binary fixture under `fixtures/`
     (~1 KiB) so virtio-fs / vsock-RPC workspace mount throughput
     and file-mode preservation through `worktree-provision` are
@@ -91,7 +91,7 @@ unmodified.
   new realistic-scenario integration test.
 * `raxis/kernel/tests/extended_e2e_support/seeds.rs` — seed
   materialization helper that shells out to this script.
-* `raxis/live-e2e/seed/prompts/cross_file_refactor.md` — the
+* [`raxis/live-e2e/seed/prompts/cross_file_refactor.md`](../../prompts/cross_file_refactor.md) — the
   executor prompt that drives the rename across this fixture.
-* `raxis/live-e2e/seed/prompts/lint_defect.md` — the executor
+* [`raxis/live-e2e/seed/prompts/lint_defect.md`](../../prompts/lint_defect.md) — the executor
   prompt that deliberately introduces a clippy/eslint/ruff defect.

@@ -17,7 +17,7 @@ spec doc that now covers it — or, where a gap existed, the closing
 commit this sweep landed.
 
 **Out of scope.** This is NOT an invariant audit. The
-`raxis/specs/invariants.md` ledger is the downstream worker's
+[`raxis/specs/invariants.md`](invariants.md) ledger is the downstream worker's
 concern; the present sweep promoted one invariant
 (`INV-CRED-PROXY-VM-REACHABILITY-02`) from a per-protocol spec
 into the canonical ledger but did not enumerate the full
@@ -78,7 +78,7 @@ MySQL/MSSQL fixes, macOS firewall, compose-rename) land in the
 
 | # | Behaviour change | Code commits | Canonical spec home | Status |
 |---|---|---|---|---|
-| 1 | **Substrate vsock-loopback chain.** Per-platform host bridge (AVF `VZVirtioSocketListener` / Firecracker per-session UDS multiplexer reverse-direction listener) splices in-VM `127.0.0.1:N` to host `127.0.0.1:N`. Composer (`session-spawn`) stamps `RAXIS_VSOCK_LOOPBACK_PLAN` and calls `Session::register_loopback_listener` per credential proxy. In-guest forwarder activated by `planner-executor::activate_vsock_loopback_forwarder` after PID 1 brings `lo` up. | `8a26540`, `84a2d49`, `b54e8d4`, `f5fc077`, `a332a70`, `1b15d19`, `10fe454`, `137a7a2`, `70ad36c` | `credential-proxy.md §12a` (full architecture), `invariants.md` `INV-CRED-PROXY-VM-REACHABILITY-01` (existing) + `-02` (promoted), `vm-network-isolation.md` (cross-reference), `extensibility-traits.md §3` (`IsolatedSession::register_loopback_listener`) | **CLOSED.** Mission-1 commit `312abbf` lifted `-02` into invariants.md; commit `b97dd9b` corrected §12a.3 step 2 (in-process forwarder activation site + `lo` bring-up prerequisite) and added the cross-reference to vm-network-isolation.md. Parallel docs worker also landed `fdcca0e` (§12a alignment) and `567ac31` (`IsolatedSession` trait extension). |
+| 1 | **Substrate vsock-loopback chain.** Per-platform host bridge (AVF `VZVirtioSocketListener` / Firecracker per-session UDS multiplexer reverse-direction listener) splices in-VM `127.0.0.1:N` to host `127.0.0.1:N`. Composer (`session-spawn`) stamps `RAXIS_VSOCK_LOOPBACK_PLAN` and calls `Session::register_loopback_listener` per credential proxy. In-guest forwarder activated by `planner-executor::activate_vsock_loopback_forwarder` after PID 1 brings `lo` up. | `8a26540`, `84a2d49`, `b54e8d4`, `f5fc077`, `a332a70`, `1b15d19`, `10fe454`, `137a7a2`, `70ad36c` | `credential-proxy.md §12a` (full architecture), [`invariants.md`](invariants.md) `INV-CRED-PROXY-VM-REACHABILITY-01` (existing) + `-02` (promoted), `vm-network-isolation.md` (cross-reference), `extensibility-traits.md §3` (`IsolatedSession::register_loopback_listener`) | **CLOSED.** Mission-1 commit `312abbf` lifted `-02` into invariants.md; commit `b97dd9b` corrected §12a.3 step 2 (in-process forwarder activation site + `lo` bring-up prerequisite) and added the cross-reference to vm-network-isolation.md. Parallel docs worker also landed `fdcca0e` (§12a alignment) and `567ac31` (`IsolatedSession` trait extension). |
 | 2 | **Crash-budget bump on Executor ReportFailure.** `handle_report_failure` now bumps `subtask_activations.crash_retry_count` against the matching active row inside the single-tx contract so `RetrySubTask`'s ceiling check trips on stuck executors. | `6237618` | `v2-deep-spec.md §Step 12` (decision + ceiling), `kernel/src/initiatives/plan_registry.rs::TaskPlanFields::max_crash_retries` doc-comment | **CLOSED at landing.** `6237618` updated §Step 12 in the same commit; follow-up `d0b9ef0` expanded the hostile-planner-vs-executor-self-fail rationale; parallel `6358c49` added a second paragraph on the dispatch-matrix argument. No additional drift. |
 | 3 | **Activation-FSM cascade on terminal task transitions.** Closing the `Active` row in `subtask_activations` is now load-bearing for the orchestrator post-exit storm-guard. Wired in `transition_task_in_tx` (Failed / Aborted / Cancelled) and `commit_task_completion` (Completed). | `c986e6d`, `09222b8` | `v2-deep-spec.md §Step 5` (activation FSM definition), `kernel-store.md §2.5.8` (single-tx cascade contract) | **CLOSED.** Commit `a1aac92` added the "Activation-FSM cascade rule (V2.5 hardening)" sub-block to §Step 5 with the full task-FSM → activation-FSM mapping table, idempotency guard, and code-site pins. Parallel `dc9887f` extended kernel-store §2.5.8 with the matching cascade-on-completion contract. |
 | 4 | **Orchestrator-continuation re-spawn architecture.** Two-tier respawn: EarlyResponse dispatch for worker terminal intents (CompleteTask / SubmitReview / ReportFailure) + post-exit hook for orchestrator-driven edges (RetrySubTask). Storm-guard predicate `pending_exists && !active_exists`. Retry-handler watchdog wraps `terminate_session` in `tokio::spawn` + `tokio::time::timeout` because AVF `Session::shutdown` is synchronous and can hang on a half-dead vsock bridge. | `3e3605e`, `d7ca482`, `aafd4f2` | `v2-deep-spec.md §Step 5` (orchestrator-continuation re-spawn architecture sub-block) | **CLOSED.** Commit `bbc9f7b` added the normative sub-block: two mutually exclusive re-spawn paths, the `pending_exists && !active_exists` storm-guard predicate, the watchdog deadline `grace + 8s` rationale, and the code-site pins. |
@@ -86,7 +86,7 @@ MySQL/MSSQL fixes, macOS firewall, compose-rename) land in the
 | 6 | **MySQL CLIENT_SSL clear in HandshakeResponse41.** Proxy MUST clear `CLIENT_SSL` / `CLIENT_COMPRESS` / `CLIENT_ODBC` / `CLIENT_LOCAL_FILES` bits in its proxy→upstream capability mask. MySQL 8.0.36 hangs on `net_read_timeout` waiting for the TLS Client Hello the proxy never sends when `CLIENT_SSL` is advertised. Pinned by `const _: () = ...` build-time guard + named unit test. | `94c2ffe` | `credential-proxy.md §14.8.2.a` (new normative sub-section) | **CLOSED.** Commit `5d4b7b0` added §14.8.2.a with the full four-bit forbidden-flag table, the load-bearing-bit annotation on CLIENT_SSL, the required positive set, and the regression-pin reference. Also annotated the §14.8 matrix row. |
 | 7 | **MSSQL SQLBatch ALL_HEADERS rewrite.** Proxy MUST rewrite the agent's `ALL_HEADERS` preamble to a TDS 7.4-compliant 22-byte Transaction-Descriptor block before forwarding. SQL Server 2022 rejects the degenerate `TotalLength=4` body with error 4002 ("MARS TDS header is missing"). Semantics-preserving because the proxy never carries a multi-statement transaction; SQL text preserved verbatim so `sql_sha256` is stable. | `dfe7dea` | `credential-proxy.md §14.8.3.a` (new normative sub-section) | **CLOSED.** Commit `5d4b7b0` added §14.8.3.a with the exact rewrite layout, the load-bearing TDS 7.4 + SQL Server 2022 rationale, semantics-preservation argument, audit-chain-stability proof, and the four named regression tests. Also annotated the §14.8 matrix row. |
 | 8 | **macOS firewall prereq.** New `cargo xtask macos-firewall-prereq` (idempotent, `--dry-run` / `--release-only` / `--debug-only` flags) + `cargo xtask macos-firewall-status`. Step 7 of `cargo xtask dev-prereqs` auto-runs it on macOS hosts. | `77d8390` | `guides/recipes/setup/11-macos-firewall-popup.md`, `guides/getting-started/01-prereqs.md`, `guides/getting-started/04-troubleshooting.md` | **CLOSED at landing.** `77d8390` shipped all three doc surfaces in the same commit; the recipe file documents the full flag set, the troubleshooting doc points operators at it from the symptom side, and the prereqs doc lists it as a one-time step. No drift to close. |
-| 9 | **Compose project rename `live-e2e` → `raxis-live-e2e-test`.** Both compose files pin the namespace via top-level `name:` field. Network / volume prefix is now stable across invocation directories. Per-service `container_name:` directives keep `raxis-e2e-pg` / `raxis-e2e-mongo` short names. Prometheus `external_labels.cluster: raxis-live-e2e-test` aligned. | `9a2fbb3` | `live-e2e/README.md` (migration note + namespace explanation), `v3/observability-prometheus.md §2.1` (renamed volumes), `v3/observability-prometheus.md §2.1a` (Prometheus `external_labels.cluster` lockstep contract) | **CLOSED.** README + §2.1 were updated in the original `9a2fbb3` commit. Commit `ad86d0d` (this sweep) added §2.1a pinning the `external_labels.cluster` ↔ compose `name:` lockstep contract and the operator-fork rule. |
+| 9 | **Compose project rename `live-e2e` → `raxis-live-e2e-test`.** Both compose files pin the namespace via top-level `name:` field. Network / volume prefix is now stable across invocation directories. Per-service `container_name:` directives keep `raxis-e2e-pg` / `raxis-e2e-mongo` short names. Prometheus `external_labels.cluster: raxis-live-e2e-test` aligned. | `9a2fbb3` | `live-e2e/README.md` (migration note + namespace explanation), [`v3/observability-prometheus.md §2.1`](v3/observability-prometheus.md) (renamed volumes), [`v3/observability-prometheus.md §2.1a`](v3/observability-prometheus.md) (Prometheus `external_labels.cluster` lockstep contract) | **CLOSED.** README + §2.1 were updated in the original `9a2fbb3` commit. Commit `ad86d0d` (this sweep) added §2.1a pinning the `external_labels.cluster` ↔ compose `name:` lockstep contract and the operator-fork rule. |
 
 ---
 
@@ -99,32 +99,32 @@ in parity at landing time:
 * **Cloud-proxy V3 forwarding (AWS / GCP / Azure).** `581af0b`,
   `c73a899`, `69b9a2c`, `f0003f2`, `439a385`, `3645ab0`, `4e572f4`,
   `0910d85`, `4cdb9dd`, `6e38b83`. Spec home:
-  `v3/cloud-proxy-forwarding.md` + companion recipe
-  `v3/cloud-proxy-forwarding-recipe.md` (both landed alongside the
+  [`v3/cloud-proxy-forwarding.md`](v3/cloud-proxy-forwarding.md) + companion recipe
+  [`v3/cloud-proxy-forwarding-recipe.md`](v3/cloud-proxy-forwarding-recipe.md) (both landed alongside the
   code).
 * **Egress Option-C defaults + stall detector.** `87145ef`,
   `b42aeb3`, `5af645b`, `4d8f5dc`, `28a91eb`. Spec home:
-  `v2/reviewer-egress-defaults-decision.md` +
-  `v2/proxy-table-allowlists.md`. Doc commits landed with the code.
+  [`v2/reviewer-egress-defaults-decision.md`](v2/reviewer-egress-defaults-decision.md) +
+  [`v2/proxy-table-allowlists.md`](v2/proxy-table-allowlists.md). Doc commits landed with the code.
 * **Dashboard failure-visibility surface.** `c54d8e8`, `f34bae9`,
   `5e2b923`, `e5c1cd5`, `6f0cde1`. Spec home:
-  `v2/dashboard-hardening.md §5` + `INV-DASHBOARD-FAILURE-
+  [`v2/dashboard-hardening.md §5`](v2/dashboard-hardening.md) + `INV-DASHBOARD-FAILURE-
   VISIBILITY-01` in invariants.md (added in the same chain).
 * **Notification-scope taxonomy.** `7acf59e`, `436f505`, `1fd29e0`,
-  `5ba3c97`. Spec home: `v2/dashboard-hardening.md §2.6` +
+  `5ba3c97`. Spec home: [`v2/dashboard-hardening.md §2.6`](v2/dashboard-hardening.md) +
   `INV-NOTIF-SCOPE-01` (added in the same chain).
 * **Operator-audit-everything + chain-status banner.** `e8d9af1`,
   `834d966`, `9988cae`, `f3f6c2c`, `011905f`. Spec home:
-  `v2/dashboard-hardening.md §4` + `INV-DASHBOARD-STREAM-*` +
+  [`v2/dashboard-hardening.md §4`](v2/dashboard-hardening.md) + `INV-DASHBOARD-STREAM-*` +
   `INV-AUDIT-DASHBOARD-*` + `INV-AUDIT-OPERATOR-*` (all already in
   invariants.md).
 * **Secrets-model articulation + credential-substitution canary.**
   `a6d9e08`, `0b49346`, `c79e69b`, `6114f49`, `e0f7d82`. Spec home:
-  `v2/secrets-model.md` + `INV-SECRET-01..05` in invariants.md
+  [`v2/secrets-model.md`](v2/secrets-model.md) + `INV-SECRET-01..05` in invariants.md
   (landed with the code).
 * **Cursor-aware observability browser dispatch.** `616b98a`,
   `be7fefa`, `45bc723`, `48bc92c`, `b32e3f8`, `61e6e66`. Spec home:
-  `v3/observability-prometheus.md §2.2` (auto-open landing pages).
+  [`v3/observability-prometheus.md §2.2`](v3/observability-prometheus.md) (auto-open landing pages).
 * **Realistic-scenario reporter test fixture URL hardening.**
   `1a2737b`. Cosmetic test fixture change — no spec surface.
 * **Dashboard chip-style status legend + DAG fade.** `acf09e2`,

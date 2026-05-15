@@ -4,7 +4,7 @@
 > RAXIS against a real repo, real provider, and real local kernel.
 
 This is the **practical cookbook**. Each guide under `scenarios/` is a
-self-contained folder with a `README.md`, a runnable `plan.toml`, a
+self-contained folder with a [`README.md`](README.md), a runnable `plan.toml`, a
 local-policy `policy.toml`, and a `credential.toml` template. Every guide
 is built to be plug-and-play: clone the folder, fill in the credential
 placeholders, run the setup commands, and watch RAXIS drive the work.
@@ -20,14 +20,14 @@ placeholders, run the setup commands, and watch RAXIS drive the work.
 1. **First time on RAXIS?** Walk the five-page
    [`getting-started/`](getting-started/) cluster before anything
    here. Thirty minutes from `git clone` to "kernel ran my plan,
-   audit chain verifies". It supersedes the older `SETUP.md` long-form
+   audit chain verifies". It supersedes the older [`SETUP.md`](SETUP.md) long-form
    walkthrough, which remains as the inspect-every-step variant.
 2. Returning to a machine that already ran genesis? Use the
    "Confirming an existing install" check at the bottom of
    [`SETUP.md`](SETUP.md), then jump straight into a scenario below.
 3. Pick a scenario. Each guide is rated by complexity (⭐ – ⭐⭐⭐⭐⭐) and
    estimated wall-clock time.
-4. `cd` into the scenario folder and follow its `README.md`. The `plan.toml`
+4. `cd` into the scenario folder and follow its [`README.md`](README.md). The `plan.toml`
    in each folder has already passed `raxis plan validate`; you can re-run
    the validator at any time to confirm.
 5. Iterate. Most scenarios end with a "Variations" section — knobs you can
@@ -162,7 +162,7 @@ read-order.
 ## Adding a new scenario
 
 Use [`scenarios/_template/`](scenarios/_template/) as the starting
-point. Copy the folder, rename, edit the four files (`README.md`,
+point. Copy the folder, rename, edit the four files ([`README.md`](README.md),
 `plan.toml`, `policy.toml`, `credential.toml`), then run:
 
 ```bash

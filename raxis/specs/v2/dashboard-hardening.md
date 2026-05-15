@@ -1,6 +1,6 @@
 # Dashboard backend hardening contract (V2.5)
 
-Normative companion to `v2_extended_gaps.md §4` (operator
+Normative companion to [`v2_extended_gaps.md §4`](v2_extended_gaps.md) (operator
 dashboard). This document records the guarantees the
 `raxis-dashboard` HTTP backend MUST hold through the live
 end-to-end run and the bounds it enforces to honour them.
@@ -645,7 +645,7 @@ credential and the audit class; the audit emission is
 `severity = "critical"`; the auto-hide is 15 seconds; the
 event surfaces in the operator notifications inbox at
 `Critical` priority so a second operator catches it in real
-time. See `dashboard-operator-action-audit-coverage.md §6`
+time. See [`dashboard-operator-action-audit-coverage.md §6`](dashboard-operator-action-audit-coverage.md)
 for the full contract.
 
 ## 2.8 Autologin URL (`INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`)
@@ -1189,7 +1189,7 @@ paths.
 
 | Approval status   | Header                          | Rationale                                                 |
 |-------------------|---------------------------------|-----------------------------------------------------------|
-| `approved`        | `Cache-Control: private, max-age=60` | Approved plans are immutable post-approval (`plan-bundle-sealing.md §8.2`); 60 s of client-side caching dramatically reduces dashboard ↔ kernel round-trips when an operator clicks back-and-forth between tabs. `private` (not `public`) means no proxy-side caching — operator JWT context is per-request and operator-bound; never share the response across operators. |
+| `approved`        | `Cache-Control: private, max-age=60` | Approved plans are immutable post-approval ([`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md)); 60 s of client-side caching dramatically reduces dashboard ↔ kernel round-trips when an operator clicks back-and-forth between tabs. `private` (not `public`) means no proxy-side caching — operator JWT context is per-request and operator-bound; never share the response across operators. |
 | `pending` / `rejected` | `Cache-Control: private, no-store` | Draft bytes are still mutable (the operator may re-seal); caching them across refreshes leaks stale plans to the frontend. |
 
 The frontend's `useInitiativePlan` TanStack Query hook
@@ -1288,7 +1288,7 @@ Pre-V2.5 the dashboard's HS256 signing secret was minted via
 `OsRng` on every kernel boot and discarded on shutdown. That
 contract was operator-friendly while the only way the kernel
 restarted was an operator-initiated stop+start (rare, expected
-session loss). After `self-healing-supervisor.md` shipped, the
+session loss). After [`self-healing-supervisor.md`](self-healing-supervisor.md) shipped, the
 kernel can autonomously restart on deadlock detection, panic,
 or OOM — at which point operators in the middle of reviewing
 an initiative would silently lose their JWT, get bounced to
@@ -1365,7 +1365,7 @@ of recovery in one panel — supervisor-side process recovery
 (this spec) and kernel-side logical recovery (the fix-loop
 worker's invariant). The banner switch is a one-liner in
 `KernelLifecycleBanner::headlineFor`; the cross-spec coordination
-ticket lives in `self-healing-supervisor.md §10.7`.
+ticket lives in [`self-healing-supervisor.md §10.7`](self-healing-supervisor.md).
 
 Cross-reference: `INV-DASHBOARD-KERNEL-LIFECYCLE-01`
 (`specs/invariants.md §11.12`),
@@ -1529,7 +1529,7 @@ push-protocol companion),
 The synthetic IntegrationMerge coordinator-task row that
 `kernel/src/initiatives/lifecycle.rs::auto_spawn_orchestrator_session_in_tx`
 admits in lockstep with the Orchestrator session
-(`v2-deep-spec.md §Step 11 IntegrationMerge`) has
+([`v2-deep-spec.md §Step 11 IntegrationMerge`](v2-deep-spec.md)) has
 `task_id == initiative_id` by construction so that downstream
 FK consumers (`task_intent_ranges`,
 `lane_budget_reservations`) can join against a real `tasks`

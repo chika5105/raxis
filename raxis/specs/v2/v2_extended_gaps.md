@@ -2,7 +2,7 @@
 
 > **Last updated:** 2026-05-09
 > **Scope:** Items discovered during the V2.5 code audit that are
-> **not covered** by `V2_GAPS.md`. That document tracks spec-vs-code
+> **not covered** by [`V2_GAPS.md`](V2_GAPS.md). That document tracks spec-vs-code
 > reconciliation for the 30 V2 specification documents. This document
 > tracks **functional gaps**, **ergonomic features**, and **new
 > subsystems** that the code audit surfaced as necessary for
@@ -127,7 +127,7 @@ is fully implemented, including:
 * Boot recovery (`kernel/src/recovery.rs::reconcile_git_apply_pending`,
   invoked from `main.rs` Step 8a after `KernelStarted` and before
   IPC accept) walks every flagged initiative and dispatches Cases
-  A / B / C from `integration-merge.md §11.3`, emitting one of
+  A / B / C from [`integration-merge.md §11.3`](integration-merge.md), emitting one of
   `GitConsistencyRepaired` / `GitConsistencyVerified` /
   `GitStateInconsistent` per initiative.
 * `IntegrationMergeCompleted` carries the fully-qualified
@@ -139,14 +139,14 @@ is fully implemented, including:
   5 s deadline, emitting `PushFailed { category: "pending_git_apply" }`
   on timeout.
 
-The `[ ]` checklist at the bottom of `integration-merge.md §11`
+The `[ ]` checklist at the bottom of [`integration-merge.md §11`](integration-merge.md)
 is now entirely `[x]`. There is no remaining V3 deferral on the
 git-↔-SQLite transactional boundary.
 
 **Forward-only mandate.** Per the V2 cleanup, there is no longer a
 "backwards-compatibility audit-only path." Every successful
 `IntegrationMerge` intent now drives the kernel through the
-two-phase commit defined by `integration-merge.md §11`:
+two-phase commit defined by [`integration-merge.md §11`](integration-merge.md):
 
 * **Phase 1 (SQLite intent commit).** The kernel state machine is
   advanced and `IntegrationMergeCompleted` is emitted. (Same as
@@ -338,7 +338,7 @@ configure `--noauth` on the upstream. The agent's view is unchanged
           the server close the conversation.
    * `UpstreamError` gains an `AuthRejected(String)` variant that
      maps to audit reason `AuthRejected` per
-     `credential-proxy.md §14.5.3`. Wrong-password / unknown-user /
+     [`credential-proxy.md §14.5.3`](credential-proxy.md). Wrong-password / unknown-user /
      server-signature mismatch / RFC violation all surface as this.
 2. `crates/credential-proxy-mongodb/src/wire.rs` — `BsonBuilder`
    gains `binary(key, bytes)` for BSON BinData subtype 0
@@ -615,7 +615,7 @@ speculative further investigation).
 
 The resolver precedence chain itself
 (`INV-PLANNER-MAX-TURNS-PRECEDENCE-01`) is documented in
-`v2-deep-spec.md §Step 12` and `guides/recipes/env/11-planner-env-vars.md`.
+[`v2-deep-spec.md §Step 12`](v2-deep-spec.md) and `guides/recipes/env/11-planner-env-vars.md`.
 
 **Original problem statement (preserved for context).** The planner's
 system prompt was previously a hardcoded string template in
@@ -721,7 +721,7 @@ tables are operator-declared in policy (same trust model as
 **Status.** ✅ Implemented in V2.5
 (`crates/planner-core/src/sidecar_client.rs` +
 `crates/planner-core/src/streaming.rs` +
-`extensibility-traits.md §9A.5A`).
+[`extensibility-traits.md §9A.5A`](extensibility-traits.md)).
 
 **What shipped.**
 
@@ -742,7 +742,7 @@ tables are operator-declared in policy (same trust model as
    so the retry shell re-issues the full request against the same
    sidecar (or falls through to the next provider via
    `FallbackModelClient`).  This matches
-   `provider-failure-handling.md §7.5`'s "no resumable streams"
+   [`provider-failure-handling.md §7.5`](provider-failure-handling.md)'s "no resumable streams"
    stance.
 
 3. **Mid-stream budget abort.** Already shipped via
@@ -757,7 +757,7 @@ tables are operator-declared in policy (same trust model as
 **Wire shape.** New `POST <endpoint>/v1/stream` endpoint on the
 sidecar — request shape and HMAC headers identical to
 `/v1/complete`; response is `text/event-stream` with the eight
-event kinds documented in `extensibility-traits.md §9A.5A`.  The
+event kinds documented in [`extensibility-traits.md §9A.5A`](extensibility-traits.md).  The
 terminal `complete` event carries an HMAC-SHA256 signature over
 `<request_id>:<timestamp_ms>:<canonical_json(response)>` so the
 planner can verify provenance end-to-end without per-event
@@ -787,7 +787,7 @@ signing (the only bytes the dispatch loop ever feeds into
   comparator used in signature verification.
 
 **Invariant safety.** The sidecar runs outside the kernel trust
-boundary (`extensibility-traits.md §9A.6`).  The streaming path
+boundary ([`extensibility-traits.md §9A.6`](extensibility-traits.md)).  The streaming path
 preserves every invariant the buffered path satisfies:
 
 * `INV-PROVIDER-04` (atomic per-turn delivery) — the dispatch
@@ -1121,7 +1121,7 @@ identity only.
      `CertEnforcer::enforce` (same path as CLI auth).
    * Returns a JWT (24 hour TTL by default, HS256 with a kernel-
      generated ephemeral secret rotated at boot — see
-     `dashboard-hardening.md §2.8` and
+     [`dashboard-hardening.md §2.8`](dashboard-hardening.md) and
      `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`; the per-boot
      secret regeneration still invalidates every token the
      instant the kernel exits):

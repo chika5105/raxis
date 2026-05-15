@@ -138,7 +138,7 @@ The fit is not strained:
 
 I did not set out to “implement RAXIS.” I set out to make a control plane I could trust: separation of actor and verifier, crypto at the boundary, an append-only record of admissions. Those habits came from payment systems, security work, and watching verification save teams from themselves. **RAXIS** is the name for what that habit produces when the workload is an intelligent system.
 
-Renaming CJBrain to RAXIS is partly honesty—the architecture earned the term. It is also a claim you can argue with. `raxis-concept.md` spells out where this stack stops short (no hardware root of trust, weak model identity story, mostly retrospective attestation, no interoperability standard yet). Those gaps are the roadmap, not an excuse to pretend we are done.
+Renaming CJBrain to RAXIS is partly honesty—the architecture earned the term. It is also a claim you can argue with. [`raxis-concept.md`](raxis-concept.md) spells out where this stack stops short (no hardware root of trust, weak model identity story, mostly retrospective attestation, no interoperability standard yet). Those gaps are the roadmap, not an excuse to pretend we are done.
 
 CJBrain was what I named it on day one. RAXIS is what the spec turned out to describe.
 
@@ -168,6 +168,6 @@ Together that is the enforcement-heavy half of the RAXIS picture: runtime gates,
 
 AI governance is not a checkbox inside a single vendor roadmap. Hardware attestation, model identity, prospective authorization, semantic checks: those need open review and people who enjoy finding holes.
 
-If you work on protocols, formal methods, crypto, or distributed systems, I want the criticism. The code is Rust; the contracts live under `specs/v1/`. `raxis-concept.md` states the limitations on purpose so argument can start from facts.
+If you work on protocols, formal methods, crypto, or distributed systems, I want the criticism. The code is Rust; the contracts live under `specs/v1/`. [`raxis-concept.md`](raxis-concept.md) states the limitations on purpose so argument can start from facts.
 
 The goal is simple to say and hard to reach: agents whose actions are *checkable by someone who is not the agent*, with a log that survives storytelling. RAXIS is my attempt to build that foundation. It is incomplete. It is also real enough to extend, and I would rather extend it in public than polish a private fiction.

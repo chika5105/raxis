@@ -34,7 +34,7 @@ read at compile time.
 * Your `path_allowlist` is `["target/codegen/"]` ONLY. Any write
   outside that directory MUST be rejected by the kernel at intent-
   admission time. Do NOT attempt to "helpfully" update the
-  `README.md` to mention the generated file — that would surface
+  [`README.md`](../../../../../README.md) to mention the generated file — that would surface
   as a `FAIL_TASK_PATH_NOT_ALLOWED` rejection and the witness
   would correctly flag a false-rejection failure.
 * The content of `build_meta.txt` is byte-stable; the witness

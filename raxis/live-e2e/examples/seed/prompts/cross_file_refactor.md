@@ -56,7 +56,7 @@ MUST propagate consistently across all three trees:
 ## Constraints
 
 * Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
-  ONLY. You MUST NOT modify `README.md`, `.gitignore`,
+  ONLY. You MUST NOT modify [`README.md`](../../../../../README.md), `.gitignore`,
   `scripts/`, or `fixtures/`. The binary fixture under
   `fixtures/logo.bin` is explicitly not yours to touch — any
   modification there is a deliberate breakage and will be

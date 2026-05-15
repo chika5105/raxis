@@ -14,7 +14,7 @@
 > `plan_artifact_sha256` column (the SHA-256 of `plan.toml` bytes). V2 ships
 > with **Plan Bundle Sealing**, which replaces that column with
 > `plan_bundle_sha256` (the SHA-256 of the canonical bundle encoding per
-> `plan-bundle-sealing.md §3.2`). Where this spec writes
+> [`plan-bundle-sealing.md §3.2`](plan-bundle-sealing.md)). Where this spec writes
 > `plan_artifact_sha256`, V2 deployments use `plan_bundle_sha256`; the
 > revocation logic, key-trust state machine, and audit attribution chain
 > are otherwise unchanged. The legacy spelling is preserved in the V1
@@ -202,7 +202,7 @@ Within the same `BEGIN IMMEDIATE` transaction that commits the new policy:
    For each affected session:
    - UPDATE `sessions SET state = 'Failed', failure_reason = 'KeyCompromised'`.
    - INSERT `audit_events (kind = 'SessionTerminated', reason = 'KeyCompromised', session_id, signing_key_id, revocation_reference)`.
-   - INSERT into `pending_pushes` a `KernelPush::SessionRevoked { reason: KeyCompromised, key_id, revocation_reference }` (per `kernel-push-protocol.md §10.3`). The push is mostly for audit completeness — for `KeyCompromised`, signal handling is **Immediate** per §7.1 and the planner will be killed by hypervisor stop before it can read the push. The enqueue is correct per INV-PUSH-01 atomicity regardless.
+   - INSERT into `pending_pushes` a `KernelPush::SessionRevoked { reason: KeyCompromised, key_id, revocation_reference }` (per [`kernel-push-protocol.md §10.3`](kernel-push-protocol.md)). The push is mostly for audit completeness — for `KeyCompromised`, signal handling is **Immediate** per §7.1 and the planner will be killed by hypervisor stop before it can read the push. The enqueue is correct per INV-PUSH-01 atomicity regardless.
    - Stash the session row for post-commit teardown.
 4a. For each key in `compromised_keys` whose role is provider-credential
    (i.e., the key is referenced from `policy.toml [[providers.credentials]]`),
@@ -265,7 +265,7 @@ Sequence:
    Either way, treat as `SecurityViolation { kind: KeyVanished, session_id, key_id }`, terminate the session with reason `KeyVanished`, halt acceptance of new policies until operator intervention. This is the most severe case and should never happen in a correct implementation.
 
    **Case 4b — `trust_now.state = 'Active'`.**
-   Session continues. Re-bind VSock listener (per `kernel-push-protocol.md §6.2`). Done.
+   Session continues. Re-bind VSock listener (per [`kernel-push-protocol.md §6.2`](kernel-push-protocol.md)). Done.
 
    **Case 4c — `trust_now.state = 'Rotated'`.**
    Compare `session.admission_policy_epoch` vs the epoch in which the key was rotated. Specifically, find the smallest `policy_epoch` where this key's state became `Rotated`:
@@ -536,7 +536,7 @@ For both Immediate and Graceful termination, in order:
 1. Within the triggering transaction (whether §5.2 policy push, §5.3 restart reconciliation, or §6.6 emergency apply):
    - UPDATE `sessions.state = 'Failed'`, `sessions.failure_reason = <reason>`, `sessions.terminated_at = NOW()`.
    - INSERT `audit_events (kind = 'SessionTerminated', reason, session_id, ...)` with the full attribution chain (signing_key_id, fingerprint, revocation_reference, authorized_by where applicable, initiative_id, plan_artifact_sha256, policy_epoch).
-   - Enqueue `KernelPush::SessionRevoked { reason, ... }` (per `kernel-push-protocol.md §10.3` atomicity rules; the push enqueue commits with the state change). For Immediate cases, the planner will be killed before reading the push; the enqueue is for audit completeness and for the rare reconnect-during-teardown case.
+   - Enqueue `KernelPush::SessionRevoked { reason, ... }` (per [`kernel-push-protocol.md §10.3`](kernel-push-protocol.md) atomicity rules; the push enqueue commits with the state change). For Immediate cases, the planner will be killed before reading the push; the enqueue is for audit completeness and for the rare reconnect-during-teardown case.
 2. Commit the SQLite transaction.
 3. Post-commit, apply signal handling per §7.1:
    - **Immediate**: invoke the hypervisor stop primitive (Firecracker `PUT /actions { action_type: "InstanceStop" }` or AVF `VZVirtualMachine.stop(completionHandler:)` with abrupt termination). If the primitive fails or returns an error, fall back to `kill -9 <vm_process_pid>` on the host.

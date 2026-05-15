@@ -7,32 +7,32 @@
 > integration verdicts, in-VM backgrounded execution model, KSB alert
 > classes, and per-role image requirements. It consolidates and extends
 > the *Integration & Harness Decisions* originally drafted in
-> `v2-deep-spec.md §Part 7`.
+> [`v2-deep-spec.md §Part 7`](v2-deep-spec.md).
 >
 > **Cross-references (canonical homes for adjacent material):**
 >
-> - `v2-deep-spec.md §Part 7` — `ApiClient` trait, `RaxisKernelApiClient`
+> - [`v2-deep-spec.md §Part 7`](v2-deep-spec.md) — `ApiClient` trait, `RaxisKernelApiClient`
 >   wrapping, `raxis-gateway` provider routing, in-VM capability model
 >   (`INV-VM-CAP-01..05`), VirtioFS mount table.
-> - `vm-network-isolation.md` — transport-layer egress enforcement
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — transport-layer egress enforcement
 >   (`raxis-tproxy`).
-> - `credential-proxy.md` — HTTP/protocol-layer egress enforcement
+> - [`credential-proxy.md`](credential-proxy.md) — HTTP/protocol-layer egress enforcement
 >   (per-session `localhost:<port>` proxies).
-> - `agent-disagreement.md` — non-convergence bounds, two-tier escalation,
+> - [`agent-disagreement.md`](agent-disagreement.md) — non-convergence bounds, two-tier escalation,
 >   `INV-CONVERGENCE-*`.
-> - `host-capacity.md` — VM-aggregate CPU/memory/disk caps.
-> - `kernel-mechanics-prompt.md` — KSB schema, role-specific system
+> - [`host-capacity.md`](host-capacity.md) — VM-aggregate CPU/memory/disk caps.
+> - [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) — KSB schema, role-specific system
 >   prompts, prompt assembler rules. The KSB Alert Classes section of
 >   this spec (§9) is the source for the alert-rendering subsection of
 >   that file.
-> - `system-requirements.md` — host & VM kernel version requirements.
+> - [`system-requirements.md`](system-requirements.md) — host & VM kernel version requirements.
 >   This spec mandates Linux 5.14+ as the guest VM kernel (see §10.2).
-> - `custom-tools.md` — operator-defined custom tools, the third tool
+> - [`custom-tools.md`](custom-tools.md) — operator-defined custom tools, the third tool
 >   category alongside base tools (this spec) and kernel-mediated
 >   intents. Canonical home for `INV-PLANNER-HARNESS-04` (Reviewer
 >   Custom Tool Prohibition); cross-listed in this spec's §13
 >   invariants index.
-> - `verifier-processes.md` — operator-declared task-level verifier
+> - [`verifier-processes.md`](verifier-processes.md) — operator-declared task-level verifier
 >   subsystem; the supported answer to "I want operator code to
 >   influence Reviewer judgment" since `INV-PLANNER-HARNESS-04`
 >   prohibits Reviewer custom tools.
@@ -52,7 +52,7 @@ sub-decisions into a cohesive subsystem with its own invariants
 (`INV-PLANNER-HARNESS-*`), its own configuration surface in `plan.toml`,
 its own KSB sections, and its own cross-spec dependencies.
 
-`v2-deep-spec.md §Part 7` originally housed all of this material inline.
+[`v2-deep-spec.md §Part 7`](v2-deep-spec.md) originally housed all of this material inline.
 That arrangement made sense when the integration map was a few tables and
 one or two decisions; it stopped making sense as the design accreted to
 six full decisions, multiple invariants, the `cgroup`-based execution
@@ -86,16 +86,16 @@ planner-harness-specific material should be migrated to point here.
 **Out of scope (covered by other specs).**
 
 - The `ApiClient` trait, `RaxisKernelApiClient` implementation, and
-  `raxis-gateway` provider routing — `v2-deep-spec.md §Part 7`.
+  `raxis-gateway` provider routing — [`v2-deep-spec.md §Part 7`](v2-deep-spec.md).
 - Per-call admission of intents (dispatch matrix, error codes, audit
   emission) — `kernel-store.md`, `planner-api.md`.
-- Network-layer egress enforcement — `vm-network-isolation.md`.
-- HTTP-layer egress enforcement — `credential-proxy.md`.
+- Network-layer egress enforcement — [`vm-network-isolation.md`](vm-network-isolation.md).
+- HTTP-layer egress enforcement — [`credential-proxy.md`](credential-proxy.md).
 - Verifier-process VM lifecycle, witness schema, `on_failure` rules — a
-  follow-up `verifier-processes.md` spec to be created (this spec
+  follow-up [`verifier-processes.md`](verifier-processes.md) spec to be created (this spec
   references the architectural concept and the `artifact` extension).
-- VM aggregate resource caps — `host-capacity.md`.
-- Plan/policy authority hierarchy — `policy-plan-authority.md`.
+- VM aggregate resource caps — [`host-capacity.md`](host-capacity.md).
+- Plan/policy authority hierarchy — [`policy-plan-authority.md`](policy-plan-authority.md).
 
 ---
 
@@ -128,13 +128,13 @@ authoritative enforcement layer for any tool that produces an `IntentKind`.
 | `oauth`, `remote`, `trust_resolver`, `hooks`, `worker_boot`, `sandbox` | ❌ | ❌ | ❌ | Per-module exclusions (§4.1 borrowed-module table) |
 | `Agent` (claw-code sub-agent spawn) | ✅ via `ActivateSubTask` | ❌ | ❌ | Replaced by kernel-mediated DAG; Orchestrator delegates only |
 | Kernel-mediated intents (`SingleCommit`, `InferenceRequest`, `EscalationRequest`, etc.) | per `kernel-store.md` dispatch matrix | per dispatch matrix | per dispatch matrix | Authoritative enforcement at the kernel layer regardless of harness exposure |
-| Operator-defined custom tools (`[[profiles.<name>.custom_tool]]`) | ❌ | ✅ | ❌ | Third tool category alongside base tools and kernel intents; canonical home `custom-tools.md`. Reviewer prohibition is `INV-PLANNER-HARNESS-04` (§4.6); Orchestrator prohibition is `INV-PLANNER-HARNESS-06` (§4.8) — operators do not declare Orchestrator profiles at all, so there is no surface on which to declare custom tools. |
+| Operator-defined custom tools (`[[profiles.<name>.custom_tool]]`) | ❌ | ✅ | ❌ | Third tool category alongside base tools and kernel intents; canonical home [`custom-tools.md`](custom-tools.md). Reviewer prohibition is `INV-PLANNER-HARNESS-04` (§4.6); Orchestrator prohibition is `INV-PLANNER-HARNESS-06` (§4.8) — operators do not declare Orchestrator profiles at all, so there is no surface on which to declare custom tools. |
 
 **Plan-side authoring surface (not tools, but role-asymmetric):**
 
 | Field | Orchestrator | Executor | Reviewer | Notes |
 |---|---|---|---|---|
-| `[plan.tasks.<id>] path_allowlist` | n/a (Orchestrator is not operator-configurable per §4.8 + `INV-PLANNER-HARNESS-06`) | required (explicit, no kernel default per `operator-ergonomics.md §4.5`) | **forbidden** — declaring the field in any form, including `[]`, hard-fails admission with `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` | Structural ban: Reviewer's `/workspace` is RO and the Reviewer harness has no commit-pathway intent (no `SingleCommit`, no `IntegrationMerge`, no `edit_file`, no `bash`); the field is structurally meaningless. Mirrors the `vm_image` ban (§4.5, `INV-PLANNER-HARNESS-02`) and custom-tool ban (§4.6, `INV-PLANNER-HARNESS-04`). The `INV-PLANNER-HARNESS-01` invariant statement is extended to enumerate this prohibition explicitly. |
+| `[plan.tasks.<id>] path_allowlist` | n/a (Orchestrator is not operator-configurable per §4.8 + `INV-PLANNER-HARNESS-06`) | required (explicit, no kernel default per [`operator-ergonomics.md §4.5`](operator-ergonomics.md)) | **forbidden** — declaring the field in any form, including `[]`, hard-fails admission with `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` | Structural ban: Reviewer's `/workspace` is RO and the Reviewer harness has no commit-pathway intent (no `SingleCommit`, no `IntegrationMerge`, no `edit_file`, no `bash`); the field is structurally meaningless. Mirrors the `vm_image` ban (§4.5, `INV-PLANNER-HARNESS-02`) and custom-tool ban (§4.6, `INV-PLANNER-HARNESS-04`). The `INV-PLANNER-HARNESS-01` invariant statement is extended to enumerate this prohibition explicitly. |
 
 **The asymmetric defense pattern.** Reviewer's tool surface is intentionally
 the smallest. The argument (§4) is structural: the Reviewer is the backstop
@@ -284,23 +284,23 @@ typically consume 2–3× the per-review tokens of an LSP-equipped Reviewer
 (more `grep_search` calls, more `read_file` reads, longer search windows).
 This is a real but bounded cost. The Kernel has no opinion about which
 model a Reviewer uses — model choice is operator policy, declared in the
-plan via the provider-aliases mechanism (`provider-failure-handling.md`).
+plan via the provider-aliases mechanism ([`provider-failure-handling.md`](provider-failure-handling.md)).
 When authoring plans, operators should consider routing Reviewer roles to
 a cheaper/faster model alias than Executor roles if their plan-level
 economics make the increased token volume material; adjusting per-task
-token caps and wall-clock budgets (`agent-disagreement.md`
+token caps and wall-clock budgets ([`agent-disagreement.md`](agent-disagreement.md)
 `INV-CONVERGENCE-03`) for large-codebase reviews; and pre-computing a
 `symbol_index.json` artifact via a parser-only verifier (see §8 and
-`verifier-processes.md`) so the Reviewer can resolve symbols without
+[`verifier-processes.md`](verifier-processes.md)) so the Reviewer can resolve symbols without
 scanning the worktree.
 
 **V2 amendment — symbol-index auto-injection.** The third bullet above
 is no longer purely operator-DIY. By default
 (`policy.toml [prepare] auto_inject_symbol_index = true` per
-`policy-plan-authority.md §4 [prepare]`), `raxis-cli plan prepare`
+[`policy-plan-authority.md §4 [prepare]`](policy-plan-authority.md)), `raxis-cli plan prepare`
 auto-injects a `symbol_index` verifier into every Executor task whose
 touched paths include source files, using the kernel-canonical
-`raxis-verifier-symbol-index` image (per `verifier-processes.md §14`
+`raxis-verifier-symbol-index` image (per [`verifier-processes.md §14`](verifier-processes.md)
 and `INV-VERIFIER-12`). The injected verifier produces
 `/raxis/symbol_index.json` per `§8.3`, which the Reviewer reads via
 `read_file`. The auto-injection is a structural fix for the Pure-Static
@@ -312,7 +312,7 @@ existing knob silences the warning); operators who want to opt out
 deployment-wide set the policy knob to `false`. The annotation
 `# @raxis-default v0.4.0 symbol-index-auto-inject` makes the injected
 entry visibly operator-owned in the signed plan bytes (per
-`operator-ergonomics.md §4.2`).
+[`operator-ergonomics.md §4.2`](operator-ergonomics.md)).
 
 The first two bullets remain operator-DIY: model selection is operator
 policy, and per-task token caps are operator authoring choices. RAXIS
@@ -367,7 +367,7 @@ its only operations on the worktree are `read_file`, `glob_search`,
    verifier architecture.** Test runs, lint runs, type checks, build
    attempts — every code-aware check the Reviewer might want — happens
    in a separate verifier VM whose output is in `witness_records` before
-   the Reviewer is even activated (per `v2-deep-spec.md §Step 23`,
+   the Reviewer is even activated (per [`v2-deep-spec.md §Step 23`](v2-deep-spec.md),
    sequential activation). The Reviewer reads witnesses from its KSB; it
    does not re-run tests. Removing `bash` therefore removes a capability
    with no legitimate consumer, leaving only the attack surface.
@@ -410,7 +410,7 @@ its only operations on the worktree are `read_file`, `glob_search`,
 - *"What about Reviewers that need to consult external context (e.g.,
   organization style guide, design docs)?"* Static reference material
   pulled from operator-controlled sources is provided through the system
-  prompt at session activation (`kernel-mechanics-prompt.md`), which the
+  prompt at session activation ([`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md)), which the
   kernel writes into `/raxis/system_prompt.txt` before VM boot. The
   Reviewer reads the prompt at startup; no runtime fetch is needed. If
   large reference corpora are required, the kernel can additionally
@@ -436,7 +436,7 @@ mistakenly believe `path_allowlist` would constrain. Declaring the field
 in any form (including `path_allowlist = []`) hard-fails admission with
 `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` per `policy-plan-authority.md
 §3b` and `INV-PLANNER-HARNESS-01`. `raxis-cli plan prepare` surfaces the
-same hard-refusal pre-signing per `operator-ergonomics.md §4.5.5` so the
+same hard-refusal pre-signing per [`operator-ergonomics.md §4.5.5`](operator-ergonomics.md) so the
 operator catches the issue before bundle sealing. The kernel does NOT
 silently strip the field — every byte the operator signed is the operator's
 responsibility, including the bytes that are now structurally invalid.
@@ -553,7 +553,7 @@ update the Reviewer image, and conversely cannot accidentally run a stale
 Reviewer image against a newer kernel.
 
 **No registry dependency.** The image is a local file on disk. Air-gapped
-operators (per `system-requirements.md`) can run RAXIS Reviewers without
+operators (per [`system-requirements.md`](system-requirements.md)) can run RAXIS Reviewers without
 any registry access. The kernel does not pull from any OCI registry for
 the Reviewer image.
 
@@ -682,16 +682,16 @@ are blocked until the operator resolves the install state.
 >   no commit-pathway intent (`SingleCommit`, `IntegrationMerge`,
 >   `edit_file`, `bash`); the field is structurally meaningless;
 >   admission FAIL `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` per
->   `policy-plan-authority.md §3b` and §3 role table above. The kernel
+>   [`policy-plan-authority.md §3b`](policy-plan-authority.md) and §3 role table above. The kernel
 >   never silently mutates an operator-signed plan; the operator must
 >   delete the field themselves (`raxis-cli plan prepare` surfaces the
->   hard-refusal pre-signing per `operator-ergonomics.md §4.5.5`).
+>   hard-refusal pre-signing per [`operator-ergonomics.md §4.5.5`](operator-ergonomics.md)).
 >
 > Future V2.x additions to this enumeration MUST follow the same
 > discipline: (a) document why the field is structurally meaningless on
 > a Reviewer task; (b) add the corresponding `FAIL_REVIEWER_*` admission
-> code in `policy-plan-authority.md §3b`; (c) extend `plan prepare`'s
-> §4.5 surface in `operator-ergonomics.md` to surface the rejection
+> code in [`policy-plan-authority.md §3b`](policy-plan-authority.md); (c) extend `plan prepare`'s
+> §4.5 surface in [`operator-ergonomics.md`](operator-ergonomics.md) to surface the rejection
 > pre-signing; (d) update this corollary block.
 
 ### 4.5 `INV-PLANNER-HARNESS-02` — Reviewer Image Is Kernel-Owned
@@ -740,7 +740,7 @@ are blocked until the operator resolves the install state.
 
 ### 4.6 `INV-PLANNER-HARNESS-04` — Reviewer Custom Tool Prohibition
 
-> **Statement (canonical home: `custom-tools.md` §10).** A profile
+> **Statement (canonical home: [`custom-tools.md`](custom-tools.md) §10).** A profile
 > whose effective role is `Reviewer` MUST NOT declare any
 > `[[profiles.<name>.custom_tool]]` blocks (directly or via
 > `inherits_from`-chain ancestor profiles). Plan admission walks the
@@ -754,7 +754,7 @@ are blocked until the operator resolves the install state.
 
 This invariant is the natural extension of `INV-PLANNER-HARNESS-01`
 (no Reviewer code execution) into the operator-extension surface
-introduced by `custom-tools.md`. A custom tool is, by definition,
+introduced by [`custom-tools.md`](custom-tools.md). A custom tool is, by definition,
 arbitrary code execution: a forked subprocess running operator-defined
 argv with operator-defined input. Permitting custom tools on a
 Reviewer profile would re-introduce exactly the attack class
@@ -773,10 +773,10 @@ message, is the correct fail-closed posture.
 
 **The supported alternative for operators who want operator code to
 influence Reviewer judgment:** declare a verifier
-(`verifier-processes.md`). Verifier output reaches the Reviewer via
+([`verifier-processes.md`](verifier-processes.md)). Verifier output reaches the Reviewer via
 `verifier_witnesses` in the KSB and properly gates review activation
 per `INV-VERIFIER-04`, all while keeping the Reviewer's tool surface
-pure-static. The decision tree in `custom-tools.md §11` makes this
+pure-static. The decision tree in [`custom-tools.md §11`](custom-tools.md) makes this
 choice explicit.
 
 **Three-layer composition with prior `INV-PLANNER-HARNESS-*`:**
@@ -907,7 +907,7 @@ and produce code in the operator's specific language ecosystem).
 >    as a versioned constant (`ORCHESTRATOR_NNSP_BYTES`) and is
 >    version-locked with the Orchestrator image per
 >    `INV-PLANNER-HARNESS-05`. Operators cannot edit it; the spec text
->    in `kernel-mechanics-prompt.md §3.2` is illustrative, the kernel
+>    in [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) is illustrative, the kernel
 >    binary is normative.
 > 4. **No operator-declared custom tools.** The Orchestrator surface
 >    has no `[[profiles.<name>.custom_tool]]` declaration path — there
@@ -1137,7 +1137,7 @@ happening concurrently.
 > 2. Remove the cgroup.
 >
 > Session-end teardown is universal: kernel SIGTERMs the planner (PID 1
-> in VM) per `kernel-lifecycle.md` shutdown; the planner has 5s grace
+> in VM) per [`kernel-lifecycle.md`](kernel-lifecycle.md) shutdown; the planner has 5s grace
 > within which it iterates all `bash-bg-*` cgroups and writes `"1"` to
 > each `cgroup.kill`. Whether or not the planner completes this within
 > grace, the kernel's subsequent VM-stop reaps every PID at the
@@ -1150,7 +1150,7 @@ beyond its session.
 
 ### 5.4 cgroup-Based CPU Priority
 
-VM-aggregate CPU caps from `host-capacity.md` bound the entire VM's
+VM-aggregate CPU caps from [`host-capacity.md`](host-capacity.md) bound the entire VM's
 share of host CPU. They say nothing about how that share is distributed
 inside the VM. A backgrounded compiler or test loop that pegs the VM's
 allocated CPU at 100% can starve the planner itself: VSock keepalives
@@ -1293,7 +1293,7 @@ responsibility to acknowledge handled crashes is explicit.
 ### 5.6 Session-End Teardown
 
 When the planner session ends — `CompleteTask`, crash, kill, deadline
-exceeded — the kernel's existing VM-teardown sequence (`kernel-lifecycle.md`)
+exceeded — the kernel's existing VM-teardown sequence ([`kernel-lifecycle.md`](kernel-lifecycle.md))
 sends SIGTERM to PID 1 (the planner) with a 5-second grace period before
 SIGKILL.
 
@@ -1331,7 +1331,7 @@ bg_cpu_weight            = 100       # cgroup cpu.weight for bg processes; 100 d
 | `bg_cpu_weight` | 100 | 1000 | cgroup `cpu.weight` for bg processes. Hard cap at 1000 equals the harness weight; the harness MUST always be ≥ bg priority. |
 
 **Operator note — capacity composition.** These caps interact with
-`host-capacity.md`'s VM-aggregate CPU and memory caps. A plan that
+[`host-capacity.md`](host-capacity.md)'s VM-aggregate CPU and memory caps. A plan that
 permits 16 background processes and raises `bg_cpu_weight` to 1000 each
 will compete with the harness for CPU under contention; under aggregate
 VM CPU pressure, the harness's responsiveness degrades. Operators
@@ -1348,7 +1348,7 @@ realities that shaped it:
 |---|---|---|---|
 | Containment against POSIX daemonization | `/proc` walk for descendants of shell PID; iterate kill(2) | Double-fork daemons reparent to PID 1; `/proc` walk misses them. PGID-based kill defeated by `setsid()`. Race conditions between walk and new forks. | cgroup v2 with `cgroup.kill` (atomic, in-kernel, fork-race-free) |
 | Silent bg crashes burning agent tokens | Agent polls `bg_status` periodically | LLMs are reactive; they don't poll; the burn happens before the agent suspects the bg process | Proactive KSB injection between every turn, persisting "Recently Exited" until agent acknowledges |
-| Bg processes starving the harness control loop | VM-aggregate cgroup caps from `host-capacity.md` | VM-aggregate caps say nothing about in-VM scheduling; runaway bg can pin the harness | cgroup `cpu.weight = 1000` for harness, `cpu.weight = 100` (default) for bg; harness always has priority under contention |
+| Bg processes starving the harness control loop | VM-aggregate cgroup caps from [`host-capacity.md`](host-capacity.md) | VM-aggregate caps say nothing about in-VM scheduling; runaway bg can pin the harness | cgroup `cpu.weight = 1000` for harness, `cpu.weight = 100` (default) for bg; harness always has priority under contention |
 
 ---
 
@@ -1377,7 +1377,7 @@ Per-task (`[[tasks]] max_turns = N` in the plan TOML) and policy
 (`[gateway].planner_max_turns_default = N` in `policy.toml`)
 overrides exist for plans that mix Reviewer (~5 turns) and
 materializer-Executor (~150 turns) tasks in one initiative. See
-`v2-deep-spec.md §Step 12` for the full precedence chain and
+[`v2-deep-spec.md §Step 12`](v2-deep-spec.md) for the full precedence chain and
 `guides/recipes/env/11-planner-env-vars.md` for the operator
 recipe.
 
@@ -1602,11 +1602,11 @@ template as §6.1.
 ## §7 — Unified Egress (Pointer)
 
 Egress is unified into a two-tier model with no per-request kernel
-intent. The full design lives in `vm-network-isolation.md` (transport
-layer) and `credential-proxy.md` (HTTP / protocol layer); the
-historical `kernel-mediated-egress.md` design (with `IntentKind::EgressRequest`
+intent. The full design lives in [`vm-network-isolation.md`](vm-network-isolation.md) (transport
+layer) and [`credential-proxy.md`](credential-proxy.md) (HTTP / protocol layer); the
+historical [`kernel-mediated-egress.md`](kernel-mediated-egress.md) design (with `IntentKind::EgressRequest`
 and the `raxis-egress` proxy) is **deprecated** — see the *Decision —
-Unified Egress* recorded in `v2-deep-spec.md §Part 7` for the rationale
+Unified Egress* recorded in [`v2-deep-spec.md §Part 7`](v2-deep-spec.md) for the rationale
 and the deprecation history.
 
 Brief recap:
@@ -1620,7 +1620,7 @@ Brief recap:
   credential.
 - **Dynamic exception requests** (URL not in either allowlist): operator
   amendment via `IntentKind::EscalationRequest` (per
-  `agent-disagreement.md §6`). On approval, plan/policy widening
+  [`agent-disagreement.md §6`](agent-disagreement.md)). On approval, plan/policy widening
   through normal amendment flow. There is no per-request RPC primitive
   for "fetch this URL with kernel approval."
 
@@ -1640,24 +1640,24 @@ Canonical Reviewer Image (§4.5), are recorded here so the
 planner-harness model is complete.
 
 **V2 unified runtime.** As of V2, the verifier subsystem has a
-single runtime model (per `verifier-processes.md §7` — no V1/V2 split,
+single runtime model (per [`verifier-processes.md §7`](verifier-processes.md) — no V1/V2 split,
 no legacy `policy.toml` claim-based gates parallel path). One
 `raxis-verifier` PID-1 binary, one `WitnessSubmission` IPC frame, one
 `witness_records` SQLite schema, one set of audit events. Three
 authoring sources fan into the unified runtime, each fired at the
-right lifecycle hook (per `verifier-processes.md §15`):
+right lifecycle hook (per [`verifier-processes.md §15`](verifier-processes.md)):
 
 | Authoring source | Lifecycle hook | Default `on_failure` | Authority |
 |---|---|---|---|
 | `policy.toml [[gates]]` (claim-based) | `CompleteTask` admission | `block_review` (implicit) | Operator-signed |
 | `[[plan.tasks.<id>.verifiers]]` | `CompleteTask` admission | `block_review` (operator's plan choice) | Plan-author-signed |
-| `[[plan.integration_merge_verifiers]]` and `policy.toml [[integration_merge_verifiers]]` | `IntegrationMerge` admission (Check 5d per `integration-merge.md §4`) | `block_merge` (operator-side: required; plan-side: defaults to `block_merge` but `warn_only` permitted) | Plan-author-signed (plan side) or operator-signed (policy side) |
+| `[[plan.integration_merge_verifiers]]` and `policy.toml [[integration_merge_verifiers]]` | `IntegrationMerge` admission (Check 5d per [`integration-merge.md §4`](integration-merge.md)) | `block_merge` (operator-side: required; plan-side: defaults to `block_merge` but `warn_only` permitted) | Plan-author-signed (plan side) or operator-signed (policy side) |
 
 The pre-`IntegrationMerge` hook is new in V2 and is the operator's
 mechanism for "regression gating": tests that should pass at the
 final integration boundary, not just inside individual tasks. See
-`integration-merge.md §4 Check 5d` for the kernel-side admission flow
-and `verifier-processes.md §15` for the schema and `applies_to`
+[`integration-merge.md §4 Check 5d`](integration-merge.md) for the kernel-side admission flow
+and [`verifier-processes.md §15`](verifier-processes.md) for the schema and `applies_to`
 semantics (`"all"` | `"task_set"` | `"last"`).
 
 ### 8.1 Why Verifier Processes Exist
@@ -1705,7 +1705,7 @@ artifact    = "/raxis/test_report.json"   # optional; staged into dependent Revi
 ```
 
 Multiple verifiers can be declared per task; they run in parallel
-where the kernel has capacity (subject to `host-capacity.md` caps),
+where the kernel has capacity (subject to [`host-capacity.md`](host-capacity.md) caps),
 and the Reviewer is activated only after all of them have written
 their witnesses.
 
@@ -1714,7 +1714,7 @@ their witnesses.
 - `block_review`: failed verifier prevents Reviewer activation; the
   Executor's `CompleteTask` is rolled into a Failed task with the
   verifier output surfaced as the failure reason (similar to
-  `FAIL_REVIEW_LOOP_EXCEEDED` handling in `agent-disagreement.md §3`).
+  `FAIL_REVIEW_LOOP_EXCEEDED` handling in [`agent-disagreement.md §3`](agent-disagreement.md)).
 - `warn_only`: failed verifier does not block Reviewer activation;
   the Reviewer's KSB carries the witness summary including the
   failure as a flagged item.
@@ -1769,18 +1769,18 @@ the operator's audit log (`VerifierActivated` and `VerifierCompleted`
 events with `hook_kind = "pre_merge"`) and in the operator-facing
 `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` failure payload that the
 Orchestrator routes to operator escalation per
-`verifier-processes.md §16.6`.
+[`verifier-processes.md §16.6`](verifier-processes.md).
 
 The full schema and the verifier VM lifecycle, audit events, and
 `raxis-verifier` PID-1 binary specification live in
-`verifier-processes.md`.
+[`verifier-processes.md`](verifier-processes.md).
 
 ---
 
 ## §9 — KSB Alert Classes
 
 The KSB (Kernel State Block, prepended to every inference request per
-`token-limit-enforcement.md`) carries dynamic state from the kernel
+[`token-limit-enforcement.md`](token-limit-enforcement.md)) carries dynamic state from the kernel
 into the agent's prompt. Some of that state is **alerts** — events
 that occurred between the previous turn and this one and that should
 override the agent's planned next action. As the design has accreted,
@@ -1791,8 +1791,8 @@ needs; this section standardizes them as a single taxonomy.
 
 | Alert class | Source | Trigger | Canonical home |
 |---|---|---|---|
-| `TokenLimitApproaching` | Token budget enforcement | Per-task or per-session token usage crosses warning thresholds (e.g., 80% / 95% of limit) | `token-limit-enforcement.md` |
-| `EscalationRequestStatus` | Escalation lifecycle | `EscalationResolved` / `EscalationRejected` / `EscalationTimedOut` / `SubEscalationResolutionRequired` events become available since last turn | `kernel-push-protocol.md`, `agent-disagreement.md` |
+| `TokenLimitApproaching` | Token budget enforcement | Per-task or per-session token usage crosses warning thresholds (e.g., 80% / 95% of limit) | [`token-limit-enforcement.md`](token-limit-enforcement.md) |
+| `EscalationRequestStatus` | Escalation lifecycle | `EscalationResolved` / `EscalationRejected` / `EscalationTimedOut` / `SubEscalationResolutionRequired` events become available since last turn | [`kernel-push-protocol.md`](kernel-push-protocol.md), [`agent-disagreement.md`](agent-disagreement.md) |
 | `BackgroundProcessExited` | bg lifecycle (this spec) | A backgrounded shell process changes state from `Running` to `Exited` or `Killed` between turns | this spec, §5.5 |
 
 The deprecated `EgressApprovalRequired` class is retired with the
@@ -1872,7 +1872,7 @@ agent's awareness of the crash a positive action in the audit trail.
 
 **Why `EscalationRequestStatus` does not require acknowledgement:**
 the underlying `KernelPush` delivery already has at-least-once
-semantics with idempotent application (per `kernel-push-protocol.md`);
+semantics with idempotent application (per [`kernel-push-protocol.md`](kernel-push-protocol.md));
 the KSB rendering is just a one-time "this happened since last turn"
 notification. Subsequent decisions about how to handle the resolution
 are tracked through the FSM, not through KSB persistence.
@@ -1926,7 +1926,7 @@ kernel as a session-activation error before any inference happens.
 Linux ≥ 5.14 (released August 2021). RAXIS V2 requires Linux 5.14+ as
 the **VM guest kernel** for any planner image.
 
-This is a stricter requirement than `system-requirements.md`'s baseline
+This is a stricter requirement than [`system-requirements.md`](system-requirements.md)'s baseline
 of Linux 5.10+ for the host kernel. The host can run any 5.10+ kernel;
 the VM guest kernel must be 5.14+.
 
@@ -2071,7 +2071,7 @@ above; verifies cgroup v2 mountpoint and Linux ≥ 5.14 guest kernel.
 > (`INV-PLANNER-HARNESS-02`) and Orchestrator (`INV-PLANNER-HARNESS-05`)
 > canonical images — which are mandatory and operator-inaccessible —
 > the Executor starter image is a **defaulting target** consumed by the
-> operator-ergonomics layer (`operator-ergonomics.md §3` D1, §4.2). An
+> operator-ergonomics layer ([`operator-ergonomics.md §3`](operator-ergonomics.md) D1, §4.2). An
 > operator's task that omits `vm_image` gets this image filled in by
 > `raxis-cli plan prepare`. Operators in production typically pin their
 > own digest-pinned Executor image and never use the starter; the
@@ -2137,7 +2137,7 @@ image AND omits `allowed_egress` is admitted with `allowed_egress = []`
 (empty allowlist; no network access). Operators who want network access
 declare egress hosts explicitly in their plan; `plan prepare` does NOT
 auto-default egress hosts even if the starter image is selected
-(`operator-ergonomics.md §4.2`). This keeps the dangerous axes (network,
+([`operator-ergonomics.md §4.2`](operator-ergonomics.md)). This keeps the dangerous axes (network,
 custom tools) opt-in even when the image-pin axis is defaulted.
 
 **Image digest.** The image's SHA-256 digest is published in the RAXIS
@@ -2252,7 +2252,7 @@ surface intentionally so the LLM can write scripts that use
 the proxies. The discovery surface is **image-agnostic** —
 identical mechanism for the canonical starter image and for
 operator-pinned BYO images per `INV-OPERATOR-CUSTOM-IMAGE-01`.
-Full schema and redaction rules: `canonical-images.md §6`.
+Full schema and redaction rules: [`canonical-images.md §6`](canonical-images.md).
 
 **Cargo-offline default
 (`INV-EXECUTOR-IMAGE-RUST-OFFLINE-01`).** The Rust half of
@@ -2311,9 +2311,9 @@ from the egress side: `v2/airgap-architecture.md §9`.
 > `raxis-verifier-symbol-index` image is the structural answer:
 > trusted, kernel-built, kernel-bound digest-checked, auto-injected
 > by `raxis-cli plan prepare` (per
-> `operator-ergonomics.md §4.2` and `policy-plan-authority.md §4
+> [`operator-ergonomics.md §4.2`](operator-ergonomics.md) and `policy-plan-authority.md §4
 > [prepare]`). This is enforced by **`INV-VERIFIER-12`** in
-> `verifier-processes.md` (Pure-Static Reviewer's symbol-index witness
+> [`verifier-processes.md`](verifier-processes.md) (Pure-Static Reviewer's symbol-index witness
 > source MUST be a kernel-canonical image when auto-injected;
 > operator-published images MAY produce alternate symbol indexes only
 > when auto-injection is disabled or per-task suppressed).
@@ -2374,7 +2374,7 @@ Notably absent (deliberately):
 ```
 
 This is the command auto-injected by `raxis-cli plan prepare` per
-`operator-ergonomics.md §4.2`. Operators who want a different
+[`operator-ergonomics.md §4.2`](operator-ergonomics.md). Operators who want a different
 symbol-extraction command must (a) opt out of auto-injection
 (`policy.toml [prepare] auto_inject_symbol_index = false`) and (b)
 declare a custom verifier in their plan with their own image. The
@@ -2386,12 +2386,12 @@ kernel binary** (`EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST`),
 mirroring the Reviewer and Orchestrator manifests. The kernel
 verifies the on-disk digest at every symbol-index verifier spawn and
 refuses to boot the VM with `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH`
-on any mismatch (per `verifier-processes.md §14.4`). Unlike the
+on any mismatch (per [`verifier-processes.md §14.4`](verifier-processes.md)). Unlike the
 Executor starter image, the symbol-index image's digest is NOT
 operator-pinnable — operators have no `[[vm_images]] oci_digest`
 entry for it, because the alias `"raxis-verifier-symbol-index"` is
 **reserved at policy load** (`FAIL_POLICY_RESERVED_VM_IMAGE_NAME` per
-`verifier-processes.md §14.3` and `policy-plan-authority.md §3b`).
+[`verifier-processes.md §14.3`](verifier-processes.md) and [`policy-plan-authority.md §3b`](policy-plan-authority.md)).
 Plan-side references to the alias resolve to the kernel-bound
 canonical image.
 
@@ -2402,7 +2402,7 @@ brings the new compiled-in digest with it). This matches the
 Reviewer/Orchestrator pattern.
 
 `raxis doctor canonical-images` covers the image per
-`system-requirements.md §11.1`: presence (required when `[prepare]
+[`system-requirements.md §11.1`](system-requirements.md): presence (required when `[prepare]
 auto_inject_symbol_index = true` AND any plan touches source files),
 digest match against `EXPECTED_SYMBOL_INDEX_VERIFIER_IMAGE_DIGEST`,
 content sanity (`raxis-verifier` PID 1, `ctags` resolves to
@@ -2418,12 +2418,12 @@ images bundled with the kernel release are NOT structural to any
 invariant in this spec — they are operator-ergonomics conveniences
 for the common case of `cargo test` / `npm test` / `pytest` /
 `go test` verifiers. Their full content specification lives in
-`verifier-processes.md §14.5`. The trust model for them is
+[`verifier-processes.md §14.5`](verifier-processes.md). The trust model for them is
 **operator-pinned** (not kernel-canonical): the operator's policy
 declares `[[vm_images]] oci_digest` for each starter they want to
 use, and the kernel verifies the per-plan digest at every verifier
 spawn (existing mechanism from §10.5 / §10.6, not a new invariant).
-The `setup wizard` (per `operator-ergonomics.md §16.3` phase 6)
+The `setup wizard` (per [`operator-ergonomics.md §16.3`](operator-ergonomics.md) phase 6)
 auto-populates these `[[vm_images]]` entries for any starter the
 operator selects.
 
@@ -2437,25 +2437,25 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
 
 ### 11.1 Already Applied
 
-- ✅ `v2-deep-spec.md §Part 7` — original *Integration & Harness Decisions*
+- ✅ [`v2-deep-spec.md §Part 7`](v2-deep-spec.md) — original *Integration & Harness Decisions*
   section now contains a pointer to this spec (per §11.2 below).
-- ✅ `v2-deep-spec.md` Related Specifications table — `planner-harness.md`
+- ✅ [`v2-deep-spec.md`](v2-deep-spec.md) Related Specifications table — [`planner-harness.md`](planner-harness.md)
   row added (per §11.2 below).
-- ✅ `v2-deep-spec.md` In-VM capability table — egress rows split per
+- ✅ [`v2-deep-spec.md`](v2-deep-spec.md) In-VM capability table — egress rows split per
   unified-egress decision; bash row qualified for Executor/Orchestrator
   only.
-- ✅ `kernel-mediated-egress.md` — marked DEPRECATED with redirect
+- ✅ [`kernel-mediated-egress.md`](kernel-mediated-egress.md) — marked DEPRECATED with redirect
   header (Unified Egress, §7).
 
 ### 11.2 Pending Application (Follow-up Amendments)
 
-- ⏳ `v2-deep-spec.md §Step 24` (Reviewer Clone Provisioning) — amend
+- ⏳ [`v2-deep-spec.md §Step 24`](v2-deep-spec.md) (Reviewer Clone Provisioning) — amend
   to specify host-side worktree pre-population at `evaluation_sha` via
   the kernel's `gix` library before VM boot; the Reviewer VM contains
   no `git` binary and runs no `git` bootstrap inside the VM. The
   `/raxis/diff.patch` and `/raxis/log.txt` pre-computed artifacts are
   written here.
-- ⏳ `kernel-mechanics-prompt.md` — amend the KSB schema to add the
+- ⏳ [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) — amend the KSB schema to add the
   `verifier_witnesses` first-class field and the `BackgroundProcessExited`
   alert class. Adopt the rendering envelope and ordering from §9. The
   Reviewer's non-negotiable system prompt must state plainly that the
@@ -2464,13 +2464,13 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   source for code-running verification outcomes, and that
   `[ALERT: <ClassName>]` blocks are asynchronous FSM events that
   override the current line of reasoning.
-- ⏳ `policy-plan-authority.md` — add `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`
+- ⏳ [`policy-plan-authority.md`](policy-plan-authority.md) — add `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`
   to the warning catalog (as a hard `FAIL_*`, not a warning, per §4.3).
   Add `WARN_REVIEWER_MISSING_SYMBOL_INDEX` and its strict-mode variant
   `FAIL_REVIEWER_MISSING_SYMBOL_INDEX` (per the symbol-index decision
   to be folded in here once finalized). Add
   `FAIL_DECLARED_ARTIFACT_MISSING` for runtime artifact verification.
-- ✅ `policy-plan-authority.md §3b` + `§5 step 3.a/3.b` — admission
+- ✅ [`policy-plan-authority.md §3b`](policy-plan-authority.md) + `§5 step 3.a/3.b` — admission
   pipeline rejects Reviewer-task `path_allowlist` with
   `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED`; rejects Executor-task
   missing `path_allowlist` with `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST`;
@@ -2481,13 +2481,13 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`. The Reviewer-side rejection is
   the structural enforcement of `INV-PLANNER-HARNESS-01`'s plan-side
   authoring corollary (§4.4).
-- ✅ `operator-ergonomics.md §4.5` — explicit-required-fields surface
+- ✅ [`operator-ergonomics.md §4.5`](operator-ergonomics.md) — explicit-required-fields surface
   for `path_allowlist`: `# @raxis-required` template injection,
   `# @raxis-explicit no-write-acknowledged` annotation taxonomy,
   CLI-local worktree directory suggestions via `git rev-parse
   --show-toplevel` or `--suggest-from <path>`, Reviewer-side hard
   refusal pre-signing per §4.5.5.
-- ⏳ `system-requirements.md` — bump VM guest kernel requirement from
+- ⏳ [`system-requirements.md`](system-requirements.md) — bump VM guest kernel requirement from
   Linux 5.10+ to Linux 5.14+ (host kernel can remain 5.10+). Add
   cgroup v2 + required controllers as image-conformance check items
   for `raxis doctor`.
@@ -2510,7 +2510,7 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   Reviewer image is not registered in `[[vm_images]]` at all (it is
   kernel-internal); any `[[vm_images]]` entry with `role_restriction`
   including `Reviewer` is silently ignored for Reviewer activation.
-- ⏳ `kernel-lifecycle.md` — amend session-end teardown to specify the
+- ⏳ [`kernel-lifecycle.md`](kernel-lifecycle.md) — amend session-end teardown to specify the
   bg-cgroup grace-period sweep described in §5.6.
 
 ### 11.3 New Specs (Status)
@@ -2529,7 +2529,7 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   `symbol_index.json` artifact (field definitions, `schema_version`
   field, ctags-json mapping table). Now that the symbol-index
   auto-injection decision has landed (§4.1 amendment +
-  `verifier-processes.md §14`), this schema spec is required so that
+  [`verifier-processes.md §14`](verifier-processes.md)), this schema spec is required so that
   the canonical `/usr/local/bin/raxis-symbol-index` wrapper output is
   contractually stable across kernel releases for the Reviewer's
   consumption side.
@@ -2596,7 +2596,7 @@ are marked ⏳; items deferred to post-V2-GA are marked 🔮.
   5. **Audit paired writes.** `SessionYielded` is a paired-class event —
      every yield must be paired with exactly one `SessionResumed` or
      `SessionYieldTimeout`. These variants must be added to the
-     `audit-paired-writes.md §4.1` classification table and the
+     [`audit-paired-writes.md §4.1`](audit-paired-writes.md) classification table and the
      standalone `raxis-audit-verify` binary must understand them. Small
      in isolation, but the audit chain is the most invariant-sensitive
      surface in the kernel.
@@ -2658,17 +2658,17 @@ Invariants introduced or strengthened by this spec:
 | `INV-PLANNER-HARNESS-01` | Reviewer Code Execution Prohibition: no shells, LSPs, compilers, runtimes, debuggers, REPLs, or wrappers thereof in the Reviewer's tool surface; three-layer enforcement (image, harness, kernel dispatch). Plan-side authoring corollary: any plan field whose semantics presuppose a capability the Reviewer lacks (`vm_image`, custom tools, `path_allowlist`) is structurally meaningless on a Reviewer task and is hard-rejected at admission, never silently stripped. | §4.4 (plus enumeration in the corollary block) |
 | `INV-PLANNER-HARNESS-02` | Reviewer Image Is Kernel-Owned: no operator-supplied Reviewer image; kernel-bundled, kernel-digest-verified `raxis-reviewer-core`; `plan.toml` schema rejects `vm_image` on Reviewer tasks. | §4.5 |
 | `INV-PLANNER-HARNESS-03` | In-VM Process Containment via cgroup v2: every shell command (sync or backgrounded) placed in a dedicated cgroup; teardown via `cgroup.kill`, not `/proc` walking or PGID-based signaling; survives POSIX double-fork daemonization. | §5.3 |
-| `INV-PLANNER-HARNESS-04` | Reviewer Custom Tool Prohibition: profiles whose effective role is `Reviewer` MUST NOT declare any `[[profiles.<name>.custom_tool]]` blocks (directly or via inheritance). Plan admission rejects with `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`. Canonical home `custom-tools.md §10`; mirrored here as §4.6. | §4.6 |
+| `INV-PLANNER-HARNESS-04` | Reviewer Custom Tool Prohibition: profiles whose effective role is `Reviewer` MUST NOT declare any `[[profiles.<name>.custom_tool]]` blocks (directly or via inheritance). Plan admission rejects with `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`. Canonical home [`custom-tools.md §10`](custom-tools.md); mirrored here as §4.6. | §4.6 |
 | `INV-PLANNER-HARNESS-05` | Canonical Orchestrator Image: the Orchestrator role boots from a kernel-bundled, kernel-digest-verified `raxis-orchestrator-core` image; operator-supplied images are categorically prohibited (parallel to the Reviewer pattern in `INV-PLANNER-HARNESS-02`). Runtime mismatch → `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` + `SecurityViolationDetected`. | §4.7 |
 | `INV-PLANNER-HARNESS-06` | Orchestrator Is Not Operator-Configurable: the Orchestrator's complete behavior surface is kernel-owned and version-locked with the kernel binary. `plan.toml` cannot declare an Orchestrator profile, an Orchestrator task, `inherits_from = "Orchestrator"`, custom tools for the Orchestrator, or NNSP overrides. Operator policy MAY tune three orthogonal knobs in `policy.toml [orchestrator]` (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`). | §4.8 |
 
 These compose with adjacent invariants whose canonical homes are
 elsewhere:
 
-- `INV-VM-CAP-01..05` (`v2-deep-spec.md §Part 7`) — in-VM capability
+- `INV-VM-CAP-01..05` ([`v2-deep-spec.md §Part 7`](v2-deep-spec.md)) — in-VM capability
   model, image policy, mount table.
-- `INV-NETISO-01` (`vm-network-isolation.md`) — air-gapped VM model.
-- `INV-CONVERGENCE-01..06` (`agent-disagreement.md`) — non-convergence
+- `INV-NETISO-01` ([`vm-network-isolation.md`](vm-network-isolation.md)) — air-gapped VM model.
+- `INV-CONVERGENCE-01..06` ([`agent-disagreement.md`](agent-disagreement.md)) — non-convergence
   bounds.
 - `INV-DISPATCH` (Kernel dispatch matrix authoritative) — referenced
   throughout §3 and §4.4.
@@ -2742,7 +2742,7 @@ pinned per-variant by the inline unit tests in
 
 This section enumerates every crate, binary, source file, image artefact, and test surface required to ship the planner harness as specified in §3–§10. An implementer reading §14 alone (plus §3 for the role tool surface and §10 for image manifests) MUST have enough information to land V2 in their first pass without making architectural decisions.
 
-> **Trait-boundary preconditions.** `raxis-planner` is the agent-side binary that boots inside an isolated VM via `IsolationBackend::spawn` (`extensibility-traits.md §3`) and operates on a `WorkspaceMount` provisioned by `DomainAdapter::provision_workspace` (`extensibility-traits.md §2`). `§14.2`–`§14.3` therefore assume the V2 trait extraction in `extensibility-traits.md §10` Phase A and Phase B has landed; the planner harness changes themselves are scheduled in Phase D's per-handler PR sequence.
+> **Trait-boundary preconditions.** `raxis-planner` is the agent-side binary that boots inside an isolated VM via `IsolationBackend::spawn` ([`extensibility-traits.md §3`](extensibility-traits.md)) and operates on a `WorkspaceMount` provisioned by `DomainAdapter::provision_workspace` ([`extensibility-traits.md §2`](extensibility-traits.md)). `§14.2`–`§14.3` therefore assume the V2 trait extraction in [`extensibility-traits.md §10`](extensibility-traits.md) Phase A and Phase B has landed; the planner harness changes themselves are scheduled in Phase D's per-handler PR sequence.
 
 ### §14.1 Crate layout
 
@@ -2787,7 +2787,7 @@ V2 introduces three planner role binaries built from one shared workspace, plus 
 | `binaries/raxis-planner-executor/`             | `[bin]`       | NEW            | Executor role binary; depends on `raxis-planner-core` + `raxis-planner-tools` with feature `executor`. Runs PID 1 in the canonical Executor starter image (`§10.6`) or in an operator-pinned image (`INV-VM-CAP-03`). |
 | `binaries/raxis-planner-reviewer/`             | `[bin]`       | NEW            | Reviewer role binary; depends on `raxis-planner-core` only (`raxis-planner-tools` is excluded entirely at link time per `INV-PLANNER-HARNESS-01`). Bundled into `raxis-reviewer-core` (`§10.5`). |
 | `binaries/raxis-planner-orchestrator/`         | `[bin]`       | NEW            | Orchestrator role binary; depends on `raxis-planner-core` + `raxis-planner-tools` with feature `orchestrator` (which sets `bash`, `edit_file`, `grep_search`, `glob_search`, but NOT `write_file` — orchestrator manipulates files via `edit_file` and `git apply` per §4.7). Bundled into `raxis-orchestrator-core` (`§10.7`). |
-| `crates/raxis-image-builder/`                  | `[bin]`       | NEW            | Reproducible builder for the kernel-canonical Reviewer image (`raxis-reviewer-core`), the kernel-canonical Orchestrator image (`raxis-orchestrator-core`), and the opt-in Executor starter (`raxis-executor-starter`). Output is an OCI image + an EROFS rootfs blob; signed with the kernel signing key per `system-requirements.md §11.2`. |
+| `crates/raxis-image-builder/`                  | `[bin]`       | NEW            | Reproducible builder for the kernel-canonical Reviewer image (`raxis-reviewer-core`), the kernel-canonical Orchestrator image (`raxis-orchestrator-core`), and the opt-in Executor starter (`raxis-executor-starter`). Output is an OCI image + an EROFS rootfs blob; signed with the kernel signing key per [`system-requirements.md §11.2`](system-requirements.md). |
 | `crates/raxis-image-manifest/`                 | `[lib]`       | NEW            | Typed `ImageManifest` struct + verifier (sha256 every file, recompute the bundle hash, signature-check). Used both by the kernel boot path (to admit a registered image) and by `cargo test` in CI to assert determinism of the canonical images. |
 
 Cross-cutting compile-time guard: `crates/raxis-planner-core/build.rs` emits a `compile_error!` if both the `executor` and `reviewer` features are enabled simultaneously, so a misconfigured downstream crate cannot accidentally link Bash into a Reviewer binary. Tested by a `trybuild` UI test in `crates/raxis-planner-core/tests/role_features.rs`.
@@ -2801,14 +2801,14 @@ Cross-cutting compile-time guard: `crates/raxis-planner-core/build.rs` emits a `
 - `crates/raxis-planner-core/src/loop_engine.rs` — the claw-code-style execution loop:
   - `pub async fn run<H: PlannerHarness>(harness: H, transport: Box<dyn IsolatedSession>) -> ExitCode`
   - Manages the `KernelPush → tool dispatch → IntentRequest` cycle, alert-class pre-emption, deterministic seed handling.
-- `crates/ksb/src/lib.rs` — KSB rendering envelope per `kernel-mechanics-prompt.md §4`:
+- `crates/ksb/src/lib.rs` — KSB rendering envelope per [`kernel-mechanics-prompt.md §4`](kernel-mechanics-prompt.md):
   - `pub struct KsbRenderer { template: KsbTemplate, sections: Vec<KsbSection> }`
   - `pub fn render(&self, frame: &KernelPush, history: &SessionHistory) -> String`
   - Renders sections in the canonical order (system prompt header → policy epoch banner → witness witnesses → alerts → conversation → cursor) defined in §9.
 - `crates/raxis-planner-core/src/alert_pump.rs` — async alert-class FIFO + pre-emption logic:
   - Six alert classes from `§9` (`VsockSilent`, `BashCgroupKilled`, `BackgroundProcessExited`, `ToolBudgetExceeded`, `WallClockBudgetExceeded`, `PolicyEpochAdvanced`).
   - `pub fn drain_pending(&mut self) -> Vec<RenderedAlert>` returns alerts that MUST appear at the top of the next KSB.
-- `crates/raxis-planner-core/src/transport.rs` — wraps the `IsolatedSession::push` / `recv_intent` traits from `extensibility-traits.md §3.3` with the planner-side framing (length-prefixed bincode `IpcMessage`).
+- `crates/raxis-planner-core/src/transport.rs` — wraps the `IsolatedSession::push` / `recv_intent` traits from [`extensibility-traits.md §3.3`](extensibility-traits.md) with the planner-side framing (length-prefixed bincode `IpcMessage`).
 - `crates/raxis-planner-core/src/system_prompt.rs` — loads the role-specific NNSP from a kernel-pinned bytes blob (`include_bytes!`) per `INV-PLANNER-HARNESS-06`.
 - `crates/raxis-planner-core/src/role.rs` — `pub enum Role { Executor, Reviewer, Orchestrator }` + role-aware tool-registry construction (`pub fn tools_for(role: Role) -> ToolRegistry`).
 - `crates/raxis-planner-core/build.rs` — feature-mutex guard described in §14.1.
@@ -2887,8 +2887,8 @@ Three planner binaries:
 - `start_planner_session()` (or the equivalent function in the V2 refactor) now does:
   1. Resolves the role-appropriate image: kernel-canonical `raxis-reviewer-core` for Reviewer (refuses any operator-supplied image) and `raxis-orchestrator-core` for Orchestrator (same), per `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-05`. Executor uses operator-pinned image, falling back to `raxis-executor-starter` if the plan omitted `vm_image` and `policy.toml [prepare] starter_image_enabled = true`.
   2. Calls `kernel-image-admit` (new helper in `kernel/src/initiatives/image_admission.rs`) which loads the image manifest via `raxis_image_manifest::verify`, checks `policy.toml [vm_images]` admit list for Executor/Orchestrator images, and emits `ImageAdmitted { image_digest, role, signing_key_fp, manifest_schema }` to the audit chain.
-  3. Calls `ctx.domain.provision_workspace(...)` per `extensibility-traits.md §2.2.A` to obtain a `WorkspaceMount`. Reviewer gets a read-only mount at `evaluation_sha`; Executor/Orchestrator get read-write mounts.
-  4. Calls `ctx.isolation.spawn(image, workspace, vm_spec)` per `extensibility-traits.md §3.3` and stores the returned `Box<dyn IsolatedSession>` in `SessionRuntime`.
+  3. Calls `ctx.domain.provision_workspace(...)` per [`extensibility-traits.md §2.2.A`](extensibility-traits.md) to obtain a `WorkspaceMount`. Reviewer gets a read-only mount at `evaluation_sha`; Executor/Orchestrator get read-write mounts.
+  4. Calls `ctx.isolation.spawn(image, workspace, vm_spec)` per [`extensibility-traits.md §3.3`](extensibility-traits.md) and stores the returned `Box<dyn IsolatedSession>` in `SessionRuntime`.
 
 `raxis/kernel/src/initiatives/image_admission.rs` (NEW):
 
@@ -2905,7 +2905,7 @@ Three planner binaries:
 
 `raxis/crates/types/src/intent.rs` (the canonical home of `IntentKind`):
 
-- `enum IntentKind` — REMOVE the `EgressRequest` variant entirely (per §7 unified-egress); fetches go through the V2 unified `FetchRequest` path. Confirm no other spec carries forward an `EgressRequest` cross-reference (the `kernel-mediated-egress.md` file is already marked DEPRECATED per §11.1).
+- `enum IntentKind` — REMOVE the `EgressRequest` variant entirely (per §7 unified-egress); fetches go through the V2 unified `FetchRequest` path. Confirm no other spec carries forward an `EgressRequest` cross-reference (the [`kernel-mediated-egress.md`](kernel-mediated-egress.md) file is already marked DEPRECATED per §11.1).
 
 `raxis/crates/types/src/operator_wire.rs`:
 
@@ -2934,7 +2934,7 @@ Three planner binaries:
 
 - New checks per §14.7 below.
 
-`raxis/specs/v1/planner-api.md`:
+[`raxis/specs/v1/planner-api.md`](../v1/planner-api.md):
 
 - Add a footnote to the §3 error-code table noting the V2 additions (`FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`, `FAIL_VM_GUEST_KERNEL_TOO_OLD`, `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`, `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`). The wire schema is not changed; the codes are added to the enum and surface through the existing rejection envelope.
 
@@ -2988,12 +2988,12 @@ Build-time CI:
 
 Kernel boot-time admission:
 
-- `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per `extensibility-traits.md §9.1`). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
+- `kernel/src/main.rs` calls `raxis_image_manifest::verify(&embedded_reviewer_manifest, &kernel_signing_pubkey)?` and `verify(&embedded_orchestrator_manifest, ...)?` immediately after `IsolationBackend::verify_isolation_guarantee` (boot-order step 6a per [`extensibility-traits.md §9.1`](extensibility-traits.md)). A signature failure aborts boot with `BootError::ImageManifestSignatureMismatch { role }`.
 
 ### §14.4a Dev-host bake / stage / build pipeline (macOS-hermetic)
 
 The production EROFS pipeline (§14.4) requires `mkfs.erofs`, which is
-not available on macOS dev hosts (per `e2e-live-test-gap.md`). To
+not available on macOS dev hosts (per [`e2e-live-test-gap.md`](e2e-live-test-gap.md)). To
 unblock local AVF demos and the realistic-scenario live-e2e harness,
 `cargo xtask images` exposes a **three-step dev-host pipeline** that
 emits the same signed-manifest shape but with
@@ -3090,7 +3090,7 @@ deterministic remediation hint pointing the developer at
 `cargo xtask images bake-rootfs --role <ROLE>`.
 
 **Path-shape divergence between the two preflights (see L-3 in
-`known-latent-issues.md`).** The dev-stage guard runs against the
+[`known-latent-issues.md`](known-latent-issues.md)).** The dev-stage guard runs against the
 staging tree on the host filesystem and uses `Path::exists()`, which
 follows symlinks; on a `usrmerge` tree (`bin -> usr/bin`) the staging
 guard's `bin/bash` lookup resolves through the symlink. The cpio
@@ -3143,7 +3143,7 @@ required-binary cpio walk), `raxis/kernel/tests/extended_e2e_support/
 kernel_driver.rs::require_canonical_images` (auto-bake call site),
 `raxis/images/executor-starter/Containerfile` (the source of truth
 for executor-starter rootfs content; cross-arch + ca-certificates +
-build-essential per L-2 in `known-latent-issues.md`; pinned
+build-essential per L-2 in [`known-latent-issues.md`](known-latent-issues.md); pinned
 `ruff==0.7.4` Python lint and `eslint@9.15.0` / `prettier@3.3.3` /
 `typescript@5.6.3` / `tsx@4.19.2` / `@types/node@20.17.6` JS lint
 per `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` +
@@ -3158,7 +3158,7 @@ toolchain is present + pin-matched in the baked rootfs).
 - `mod.rs` — re-exports.
 - `fake_planner.rs` — `pub struct FakePlanner { intents: VecDeque<IntentRequest>, expected_pushes: VecDeque<KernelPush> }` driven from a recorded session (`fixtures/planner-sessions/<test_name>.jsonl`). Used by kernel handler tests to replace a real `IsolatedSession` with a deterministic transcript player.
 - `mock_workspace.rs` — `pub struct MockWorkspace { tmp: TempDir, files: HashMap<PathBuf, Vec<u8>> }` provides a workspace-mount-shaped tempdir for integration tests; on `drop` snapshots the final state for fixture comparison.
-- `mock_isolation.rs` — re-exports `MockIsolation` from `crates/raxis-isolation/src/mock.rs` (per `extensibility-traits.md §3`); the test crate adds a higher-level builder `MockIsolationBuilder::with_planner(FakePlanner) -> Arc<MockIsolation>`.
+- `mock_isolation.rs` — re-exports `MockIsolation` from `crates/raxis-isolation/src/mock.rs` (per [`extensibility-traits.md §3`](extensibility-traits.md)); the test crate adds a higher-level builder `MockIsolationBuilder::with_planner(FakePlanner) -> Arc<MockIsolation>`.
 - `image_fixtures.rs` — small, hermetic image manifests (single-file rootfs) used by image-admission tests; signed by a fixture signing key in `crates/test-support/data/test-signing-key.bin`.
 - `ksb_fixture.rs` — tools to capture and replay `(KernelPush stream, expected response)` pairs.
 
@@ -3172,7 +3172,7 @@ toolchain is present + pin-matched in the baked rootfs).
 
 ### §14.6 Integration tests
 
-Per the level-of-detail benchmark from `raxis/specs/v1/cli-ceremony.md §4.3` (Integration Test Fixtures), every behavioural commitment in §3–§9 needs an integration test, and the spec MUST name the test file. The matrix:
+Per the level-of-detail benchmark from [`raxis/specs/v1/cli-ceremony.md §4.3`](../v1/cli-ceremony.md) (Integration Test Fixtures), every behavioural commitment in §3–§9 needs an integration test, and the spec MUST name the test file. The matrix:
 
 | Test file (NEW)                                                                    | Asserts                                                                                                                                  | Spec section |
 | ---------------------------------------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- | ------------ |
@@ -3184,18 +3184,18 @@ Per the level-of-detail benchmark from `raxis/specs/v1/cli-ceremony.md §4.3` (I
 | `raxis/kernel/tests/planner_harness/bg_lifecycle.rs`                               | Spawn a backgrounded shell command via `bg_start`; confirm `bg_status` reports running; trigger session-end; assert `BgProcessHarvest` audit event recorded with `killed_by = "session_end"`. | §5           |
 | `raxis/kernel/tests/planner_harness/bg_double_fork_reaped.rs`                      | Spawn a backgrounded process that does POSIX double-fork; confirm cgroup teardown reaps the orphan grandchild within `bg_grace_period_seconds + 1s`.                                          | §5.3         |
 | `raxis/kernel/tests/planner_harness/ksb_alert_pump.rs`                             | All six alert classes (`§9`) appear in deterministic order at the top of the next KSB after their triggering condition; alerts are not duplicated.                                            | §9           |
-| `raxis/kernel/tests/planner_harness/policy_epoch_alert.rs`                         | A `PolicyEpochAdvanced` alert is delivered to active sessions on epoch rollover; a session that ignores it is killed at next intent admission with `FAIL_STALE_POLICY_EPOCH`.                | §9, `policy-epoch-diffing.md` |
+| `raxis/kernel/tests/planner_harness/policy_epoch_alert.rs`                         | A `PolicyEpochAdvanced` alert is delivered to active sessions on epoch rollover; a session that ignores it is killed at next intent admission with `FAIL_STALE_POLICY_EPOCH`.                | §9, [`policy-epoch-diffing.md`](policy-epoch-diffing.md) |
 | `raxis/kernel/tests/planner_harness/image_admission_signature.rs`                  | A tampered Reviewer image manifest causes kernel boot to fail with `BootError::ImageManifestSignatureMismatch { role: Role::Reviewer }`.                                                       | §10, §14.4   |
 | `raxis/kernel/tests/planner_harness/image_role_restriction.rs`                     | An Executor task pointing at a `[[vm_images]]` entry whose `role_restriction = ["Reviewer"]` (which would never normally exist; constructed in test) is rejected with `FAIL_VM_IMAGE_ROLE_RESTRICTION_VIOLATION`. | §14.3        |
 | `raxis/crates/raxis-image-builder/tests/determinism.rs`                            | Two parallel builds of the canonical Reviewer image produce byte-identical EROFS blobs.                                                  | §14.4        |
 | `raxis/binaries/raxis-planner-executor/tests/full_session_smoke.rs`                | End-to-end against `MockIsolation`: 5-turn agent session emits all expected `IntentRequest`s, observes all expected `KernelPush`es; asserts no symbols from §6 exclusion list are reachable. | §3, §6       |
-| `raxis/binaries/raxis-planner-orchestrator/tests/conflict_resolution_protocol.rs`  | The Orchestrator's pinned `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` NNSP block fires on a synthesized merge conflict; the Orchestrator emits `IntegrationMerge` with the expected resolved tree sha within `wall_clock_limit_seconds`.                                                                               | §4.7, `integration-merge.md §8` |
+| `raxis/binaries/raxis-planner-orchestrator/tests/conflict_resolution_protocol.rs`  | The Orchestrator's pinned `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` NNSP block fires on a synthesized merge conflict; the Orchestrator emits `IntegrationMerge` with the expected resolved tree sha within `wall_clock_limit_seconds`.                                                                               | §4.7, [`integration-merge.md §8`](integration-merge.md) |
 
 All integration tests use `MockIsolation` + the `FakePlanner` harness so they run in CI without `/dev/kvm`. Real Firecracker tests live in `raxis/tests/e2e/firecracker_planner.rs` and run only on the `[ci-firecracker]` Linux runner.
 
 ### §14.7 `raxis doctor` checks specific to the planner harness
 
-Per `system-requirements.md §11`, the doctor surfaces image-admission state. New checks added to `raxis/cli/src/commands/doctor.rs`:
+Per [`system-requirements.md §11`](system-requirements.md), the doctor surfaces image-admission state. New checks added to `raxis/cli/src/commands/doctor.rs`:
 
 - `[CHECK] planner-harness.image.reviewer` — confirms the embedded Reviewer manifest's `bundle_hash` matches the live binary; `[FAIL]` on tamper.
 - `[CHECK] planner-harness.image.orchestrator` — same for the Orchestrator manifest.
@@ -3203,13 +3203,13 @@ Per `system-requirements.md §11`, the doctor surfaces image-admission state. Ne
 - `[CHECK] planner-harness.guest-kernel` — for the candidate Executor image (if pinned), confirms guest kernel version is ≥ 5.14 per `INV-PLANNER-HARNESS-03`.
 - `[CHECK] planner-harness.cgroup-v2` — host capability check for cgroup v2 with `cpu`, `memory`, and `pids` controllers.
 
-Each check has a short `--explain` text linking back to `planner-harness.md §<section>` and the relevant invariant.
+Each check has a short `--explain` text linking back to [`planner-harness.md §<section>`](planner-harness.md) and the relevant invariant.
 
 ### §14.8 Phased migration
 
 The work lands in five mergeable phases; each phase is a single PR.
 
-- **Phase 1 — Trait wiring (depends on `extensibility-traits.md §10` Phase A + B).** Add `Role` enum, `IsolatedSession`/`DomainAdapter` plumbing into `kernel/src/handlers/session.rs`. No image-build changes; canonical Reviewer/Orchestrator images replaced by zero-byte placeholders. Existing planner code compiles unchanged but now boots through the trait. ~3 days.
+- **Phase 1 — Trait wiring (depends on [`extensibility-traits.md §10`](extensibility-traits.md) Phase A + B).** Add `Role` enum, `IsolatedSession`/`DomainAdapter` plumbing into `kernel/src/handlers/session.rs`. No image-build changes; canonical Reviewer/Orchestrator images replaced by zero-byte placeholders. Existing planner code compiles unchanged but now boots through the trait. ~3 days.
 - **Phase 2 — `raxis-planner-core` extraction.** Move the existing planner loop into `crates/raxis-planner-core/`. Existing `kernel/src/planner/*` is deleted in this PR. Featureless single-binary `raxis-planner-executor` produced; Reviewer + Orchestrator binaries land but are bit-for-bit copies of Executor (role-asymmetry comes in Phase 3). ~3 days.
 - **Phase 3 — Reviewer feature-cut + custom-tool rejection.** Land `crates/raxis-planner-reviewer-tools/`, the `executor`/`reviewer`/`orchestrator` mutex feature flags, and the `nm`-based no-exec test. `INV-PLANNER-HARNESS-04` admission rejection for Reviewer custom tools lands here. ~2 days.
 - **Phase 4 — Backgrounded shell + KSB alert pump.** Land `bash::bg`, the `BgRegistry`, the cgroup teardown, and all six `§9` alert classes. ~3 days.

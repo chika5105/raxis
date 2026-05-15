@@ -10,7 +10,7 @@ route), and
 `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01`,
 `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`,
 `INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01`
-(`raxis/specs/invariants.md §11.19`).
+([`raxis/specs/invariants.md §11.19`](../invariants.md)).
 
 **Author intent.** Operators reported that "the session data
 gets deleted once the session is done" — the dashboard's
@@ -177,4 +177,4 @@ the one-click affordance for the post-mortem case.
   Witness: `session_ids_are_isolated_per_namespace`.
 
 All invariant text is canonical in
-`raxis/specs/invariants.md §11.19`.
+[`raxis/specs/invariants.md §11.19`](../invariants.md).

@@ -48,7 +48,7 @@ These are the nouns every Raxis sentence is built from.
 
 | Term | Meaning | Defined in |
 |---|---|---|
-| **Raxis** | The project. A multi-agent orchestration kernel that runs operator-signed plans against operator-isolated microVMs and merges the results into operator-controlled git refs. The kernel is the only trusted code in the loop. | top-level `README.md`, [`specs/v2/v2-deep-spec.md`](../specs/v2/v2-deep-spec.md) |
+| **Raxis** | The project. A multi-agent orchestration kernel that runs operator-signed plans against operator-isolated microVMs and merges the results into operator-controlled git refs. The kernel is the only trusted code in the loop. | top-level [`README.md`](README.md), [`specs/v2/v2-deep-spec.md`](../specs/v2/v2-deep-spec.md) |
 | **Kernel** | The single trusted binary (`raxis-kernel`) that admits intents, spawns agent VMs, runs verifiers, persists the audit chain, and enforces every invariant. Everything else (planners, agents, CLI) is unprivileged client. | [`specs/v1/kernel-core.md`](../specs/v1/kernel-core.md) |
 | **Operator** | A human (or fleet of humans) holding an Ed25519 keypair the kernel trusts to sign `policy.toml` and (optionally) to approve plans. Operators are the highest authority Raxis recognises. | [04](04-delegations-and-authority.md), [`specs/v1/policy.md`](../specs/v1/policy.md) |
 | **Initiative** | One logical unit of work the kernel is driving end-to-end: a plan, its task DAG, its in-flight sessions, its audit subset, its merge target. Initiative state lives in the `initiatives` table. | [10](10-v2-orchestration.md) |

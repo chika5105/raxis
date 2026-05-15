@@ -2,20 +2,20 @@
 
 > **Status:** V2 Specified
 > **Cross-references:**
-> - `integration-merge.md §12` — Protected path approval gate
-> - `integration-merge.md §12.b` — Plan-level integration merge gates (additive)
-> - `integration-merge.md §13` — Git push approval gate
-> - `vm-network-isolation.md` — Tier-1 (public) egress via tproxy SNI allowlist
-> - `credential-proxy.md` — Tier-2 (authenticated) egress via per-credential URL/method allowlist
-> - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress (see above)
-> - `v2-deep-spec.md §INV-VM-CAP-03` — VM image policy bundle validation
-> - `planner-harness.md §4.5` — Canonical Reviewer image (`INV-PLANNER-HARNESS-02`); the basis for `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` and `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`
-> - `planner-harness.md §4.7` — Canonical Orchestrator image (`INV-PLANNER-HARNESS-05`); the basis for `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` and `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH`
-> - `planner-harness.md §4.8` — Orchestrator not operator-configurable (`INV-PLANNER-HARNESS-06`); the basis for `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED`, `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`, `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`, and the new `[orchestrator]` policy section
-> - `planner-harness.md §10.2` — Linux 5.14+ VM guest kernel (`INV-PLANNER-HARNESS-03`); the basis for `FAIL_VM_GUEST_KERNEL_TOO_OLD`
-> - `verifier-processes.md §3` — V2 task verifier schema; the basis for `FAIL_VERIFIER_*` codes
-> - `verifier-processes.md §6.3` — Artifact validation; the basis for `FAIL_DECLARED_ARTIFACT_MISSING`
-> - `custom-tools.md` — Operator-defined custom tools; the basis for `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` and the `FAIL_CUSTOM_TOOL_*` family. `INV-PLANNER-HARNESS-04` (Reviewer Custom Tool Prohibition) is the basis for `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`.
+> - [`integration-merge.md §12`](integration-merge.md) — Protected path approval gate
+> - [`integration-merge.md §12.b`](integration-merge.md) — Plan-level integration merge gates (additive)
+> - [`integration-merge.md §13`](integration-merge.md) — Git push approval gate
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — Tier-1 (public) egress via tproxy SNI allowlist
+> - [`credential-proxy.md`](credential-proxy.md) — Tier-2 (authenticated) egress via per-credential URL/method allowlist
+> - ~~[`kernel-mediated-egress.md`](kernel-mediated-egress.md)~~ — DEPRECATED in V2 in favor of unified two-tier egress (see above)
+> - [`v2-deep-spec.md §INV-VM-CAP-03`](v2-deep-spec.md) — VM image policy bundle validation
+> - [`planner-harness.md §4.5`](planner-harness.md) — Canonical Reviewer image (`INV-PLANNER-HARNESS-02`); the basis for `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` and `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`
+> - [`planner-harness.md §4.7`](planner-harness.md) — Canonical Orchestrator image (`INV-PLANNER-HARNESS-05`); the basis for `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` and `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH`
+> - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator not operator-configurable (`INV-PLANNER-HARNESS-06`); the basis for `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED`, `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`, `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`, and the new `[orchestrator]` policy section
+> - [`planner-harness.md §10.2`](planner-harness.md) — Linux 5.14+ VM guest kernel (`INV-PLANNER-HARNESS-03`); the basis for `FAIL_VM_GUEST_KERNEL_TOO_OLD`
+> - [`verifier-processes.md §3`](verifier-processes.md) — V2 task verifier schema; the basis for `FAIL_VERIFIER_*` codes
+> - [`verifier-processes.md §6.3`](verifier-processes.md) — Artifact validation; the basis for `FAIL_DECLARED_ARTIFACT_MISSING`
+> - [`custom-tools.md`](custom-tools.md) — Operator-defined custom tools; the basis for `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` and the `FAIL_CUSTOM_TOOL_*` family. `INV-PLANNER-HARNESS-04` (Reviewer Custom Tool Prohibition) is the basis for `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED`.
 
 ---
 
@@ -78,7 +78,7 @@ target_ref_locked  = false                 # plans may override (recommended for
   RAXIS-only PR-branch convention).
 
 The corresponding plan-side field is `[workspace] target_ref`
-(see `plan-bundle-sealing.md §8`); resolution chain runs at
+(see [`plan-bundle-sealing.md §8`](plan-bundle-sealing.md)); resolution chain runs at
 `lifecycle::approve_plan` admission time.
 
 ### Why Approach A Has the Strongest Security Model
@@ -368,7 +368,7 @@ If the task is genuinely unbounded, declare `"uncapped"` explicitly.
 one verifier (declared either at task scope under
 `[[plan.tasks.<evaluation_target>.verifiers]]` for the Reviewer's evaluation
 target, or at the Reviewer's task scope itself) that produces an artifact at
-`/raxis/symbol_index.json` per `verifier-processes.md §6`.
+`/raxis/symbol_index.json` per [`verifier-processes.md §6`](verifier-processes.md).
 
 **Kernel behavior:** The Reviewer is activated normally with no symbol index in
 its `/raxis/`. The Reviewer LLM falls back to `grep_search` for symbol resolution
@@ -391,7 +391,7 @@ should consider declaring a symbol-index verifier; the kernel does NOT make
 this decision on the operator's behalf.
 
 **Suppressing the warning:** Either (a) declare a symbol-index verifier per
-`verifier-processes.md §6.1`:
+[`verifier-processes.md §6.1`](verifier-processes.md):
 
 ```toml
 [[plan.tasks.web_implementer.verifiers]]
@@ -422,7 +422,7 @@ For smaller codebases or doc/config-only review tasks, set
 ### WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH
 
 **Trigger:** A profile's effective custom-tool set (after the
-inheritance merge per `custom-tools.md §8`) renders to a tool-schema
+inheritance merge per [`custom-tools.md §8`](custom-tools.md)) renders to a tool-schema
 JSON payload whose token count, when tokenized for the smallest
 context window across the profile's `[provider_aliases]` chain,
 occupies between 10% (inclusive) and 25% (exclusive) of that context
@@ -452,7 +452,7 @@ audit the descriptions for verbosity. The `raxis admin plan
 custom-tool-budget <plan_file>` CLI breaks down the projection per
 tool to identify the largest contributors.
 
-**Canonical home:** `custom-tools.md §9.3`.
+**Canonical home:** [`custom-tools.md §9.3`](custom-tools.md).
 
 ---
 
@@ -480,9 +480,9 @@ mechanism — this is a structural ban, not a permission check.
 
 **Recommended fix:** Remove the field from the Reviewer task. The kernel will
 boot the canonical `raxis-reviewer-core` image automatically. See
-`planner-harness.md §4.5` for the rationale.
+[`planner-harness.md §4.5`](planner-harness.md) for the rationale.
 
-**Canonical home:** `planner-harness.md §4.5`, `INV-PLANNER-HARNESS-02`.
+**Canonical home:** [`planner-harness.md §4.5`](planner-harness.md), `INV-PLANNER-HARNESS-02`.
 
 ---
 
@@ -494,7 +494,7 @@ boot the canonical `raxis-reviewer-core` image automatically. See
 `path_allowlist` field at all (any value, including the empty array `[]`).
 
 **Kernel behavior:** Plan rejected. The Reviewer's `/workspace` is mounted
-read-only per `planner-harness.md §3` (role table); the Reviewer harness has
+read-only per [`planner-harness.md §3`](planner-harness.md) (role table); the Reviewer harness has
 no commit-pathway intent (no `SingleCommit`, no `IntegrationMerge`, no
 `edit_file`, no `bash`); the path-allowlist field is therefore **structurally
 meaningless** for Reviewer tasks, not just unused. The kernel never silently
@@ -504,11 +504,11 @@ operator must remove the field themselves. This mirrors the existing
 `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED` discipline.
 
 **Recommended fix:** Delete the `path_allowlist` line(s) from the Reviewer
-task. `raxis-cli plan prepare` (per `operator-ergonomics.md §4.5` and §5.2)
+task. `raxis-cli plan prepare` (per [`operator-ergonomics.md §4.5`](operator-ergonomics.md) and §5.2)
 emits the equivalent warning at prepare-time so this rarely surfaces at
 `submit plan`.
 
-**Canonical home:** `planner-harness.md §3` (role table), `§4.2` (Pure-Static
+**Canonical home:** [`planner-harness.md §3`](planner-harness.md) (role table), `§4.2` (Pure-Static
 Reviewer), `INV-PLANNER-HARNESS-01`.
 
 ---
@@ -531,19 +531,19 @@ admission, producing a confusing failure mode for a task the operator
 believed they had authored correctly).
 
 **Recommended fix:** Run `raxis-cli plan prepare` (per
-`operator-ergonomics.md §5.2`) — `plan prepare` inserts a commented-out
+[`operator-ergonomics.md §5.2`](operator-ergonomics.md)) — `plan prepare` inserts a commented-out
 `path_allowlist` template with a required-annotation marker into the
 Executor task, optionally accompanied by deterministic top-level-directory
 suggestions sourced from the operator's local worktree (per
-`operator-ergonomics.md §4.5.2`). The operator uncomments and customizes
+[`operator-ergonomics.md §4.5.2`](operator-ergonomics.md)). The operator uncomments and customizes
 the template, then resubmits. If the operator genuinely intends a no-write
 Executor (rare; e.g., a task that produces only `/raxis/` artifacts for a
 successor task to consume), they declare `path_allowlist = []` with the
 explicit acknowledgement annotation per `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`
 below.
 
-**Canonical home:** `operator-ergonomics.md §4.5`,
-`v2-deep-spec.md §6` (path-allowlist syntax).
+**Canonical home:** [`operator-ergonomics.md §4.5`](operator-ergonomics.md),
+[`v2-deep-spec.md §6`](v2-deep-spec.md) (path-allowlist syntax).
 
 ---
 
@@ -555,17 +555,17 @@ below.
 `path_allowlist = []` (the literal empty array) AND does NOT carry the
 required acknowledgement annotation `# @raxis-explicit no-write-acknowledged`
 on the empty-array line or the line immediately above it (per
-`operator-ergonomics.md §4.5.4`).
+[`operator-ergonomics.md §4.5.4`](operator-ergonomics.md)).
 
 **Kernel behavior:** Plan rejected. Empty allowlist on an Executor is
 structurally suspicious in the common case — the Executor's harness has
 the full write surface (`bash`, `edit_file`, `bash run` with backgrounding
-per `planner-harness.md §3`), but no commit it produces will admit. Without
+per [`planner-harness.md §3`](planner-harness.md)), but no commit it produces will admit. Without
 the explicit annotation the operator has no way to signal "this is
 intentional" versus "I forgot to populate this." The annotation is the
 binary acknowledgement (no value, no version stamp; it is a structural
 opt-in akin to `same_cluster_acknowledged = true` in
-`environment-access-control.md §11.4`).
+[`environment-access-control.md §11.4`](environment-access-control.md)).
 
 **Recommended fix:** Either populate `path_allowlist` with the directories
 the Executor needs to touch, OR add the annotation. `plan prepare` will
@@ -577,7 +577,7 @@ When admitted with the annotation, the kernel records
 event so reviewers and auditors can see the operator explicitly opted into
 the no-write Executor.
 
-**Canonical home:** `operator-ergonomics.md §4.5.4`.
+**Canonical home:** [`operator-ergonomics.md §4.5.4`](operator-ergonomics.md).
 
 ---
 
@@ -586,7 +586,7 @@ the no-write Executor.
 **Phase:** `approve_plan`.
 
 **Trigger:** A `[[plan.tasks.X]]` `path_allowlist` entry violates the
-trailing-slash discipline canonical to `v2-deep-spec.md §6` table 4.
+trailing-slash discipline canonical to [`v2-deep-spec.md §6`](v2-deep-spec.md) table 4.
 Specific reasons:
 
 - `"empty_entry"` — entry is the empty string. An empty
@@ -631,15 +631,15 @@ operator's mental model.
 **Recommended fix:** For directory entries, append `/` (e.g.,
 `"src/components/"`). For exact files, omit the trailing slash. For
 multi-directory needs, declare each directory as a separate entry. See
-`v2-deep-spec.md §6` table 4 for the full syntax.
+[`v2-deep-spec.md §6`](v2-deep-spec.md) table 4 for the full syntax.
 
-**Canonical home:** `v2-deep-spec.md §6` table 4, `INV-TASK-PATH-01`.
+**Canonical home:** [`v2-deep-spec.md §6`](v2-deep-spec.md) table 4, `INV-TASK-PATH-01`.
 
 ---
 
 ### FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH
 
-**Phase:** Runtime, at every Reviewer activation (Step 24 in `v2-deep-spec.md`).
+**Phase:** Runtime, at every Reviewer activation (Step 24 in [`v2-deep-spec.md`](v2-deep-spec.md)).
 
 **Trigger:** The on-disk SHA-256 of `$RAXIS_INSTALL_DIR/images/raxis-reviewer-core-<version>.img`
 does not match the kernel-binary's compiled-in expected digest.
@@ -654,7 +654,7 @@ the kernel does NOT silently retry.
 kernel version. Do NOT attempt to "fix" by replacing the image with a custom
 build — that is exactly what `INV-PLANNER-HARNESS-02` prohibits.
 
-**Canonical home:** `planner-harness.md §4.5`, `system-requirements.md §11.2`
+**Canonical home:** [`planner-harness.md §4.5`](planner-harness.md), [`system-requirements.md §11.2`](system-requirements.md)
 (`raxis doctor canonical-images` check).
 
 ---
@@ -677,11 +677,11 @@ mechanism — this is a structural ban, not a permission check.
 guidance to the Orchestrator can be supplied via the
 `[plan.initiative] description` free-form field, which is rendered
 into the Orchestrator's KSB as `[KERNEL: INITIATIVE GUIDANCE]` per
-`kernel-mechanics-prompt.md §3.2`. Deployment-wide Orchestrator
+[`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md). Deployment-wide Orchestrator
 behavior is tuned via `policy.toml [orchestrator]` (this spec §4.5).
-See `planner-harness.md §4.8` for the rationale.
+See [`planner-harness.md §4.8`](planner-harness.md) for the rationale.
 
-**Canonical home:** `planner-harness.md §4.8`, `INV-PLANNER-HARNESS-06`.
+**Canonical home:** [`planner-harness.md §4.8`](planner-harness.md), `INV-PLANNER-HARNESS-06`.
 
 ---
 
@@ -708,7 +708,7 @@ the kernel's coordination role), declare it as an Executor task with
 the relevant `path_allowlist` / `acceptance_criteria` and let the
 kernel-managed Orchestrator handle inter-task DAG coordination.
 
-**Canonical home:** `planner-harness.md §4.8`, `INV-PLANNER-HARNESS-06`.
+**Canonical home:** [`planner-harness.md §4.8`](planner-harness.md), `INV-PLANNER-HARNESS-06`.
 
 ---
 
@@ -733,8 +733,8 @@ declaration. If the operator is trying to add deployment-wide
 constraints on Orchestrator behavior, those go in `policy.toml
 [orchestrator]` (this spec §4.5).
 
-**Canonical home:** `planner-harness.md §4.8`, `INV-PLANNER-HARNESS-06`,
-`custom-tools.md §8.1`.
+**Canonical home:** [`planner-harness.md §4.8`](planner-harness.md), `INV-PLANNER-HARNESS-06`,
+[`custom-tools.md §8.1`](custom-tools.md).
 
 ---
 
@@ -761,7 +761,7 @@ was specifically Orchestrator-targeted.
 `role_restriction` array. (Note: `"Reviewer"` is similarly forbidden
 in `role_restriction` per `INV-PLANNER-HARNESS-02`.)
 
-**Canonical home:** `planner-harness.md §4.7`, `INV-PLANNER-HARNESS-05`.
+**Canonical home:** [`planner-harness.md §4.7`](planner-harness.md), `INV-PLANNER-HARNESS-05`.
 
 ---
 
@@ -769,7 +769,7 @@ in `role_restriction` per `INV-PLANNER-HARNESS-02`.)
 
 **Phase:** Runtime, at every Orchestrator activation (kernel boots
 the Orchestrator session at initiative admission per
-`v2-deep-spec.md`).
+[`v2-deep-spec.md`](v2-deep-spec.md)).
 
 **Trigger:** The on-disk SHA-256 of
 `$RAXIS_INSTALL_DIR/images/raxis-orchestrator-core-<version>.img`
@@ -788,7 +788,7 @@ the running kernel version. Do NOT attempt to "fix" by replacing the
 image with a custom build — that is exactly what
 `INV-PLANNER-HARNESS-05` prohibits.
 
-**Canonical home:** `planner-harness.md §4.7`, `system-requirements.md §11.2`
+**Canonical home:** [`planner-harness.md §4.7`](planner-harness.md), [`system-requirements.md §11.2`](system-requirements.md)
 (`raxis doctor canonical-images` check).
 
 ---
@@ -812,7 +812,7 @@ prohibits this image from booting in the requested role.
 the plan task at a different image whose `role_restriction` permits the
 role.
 
-**Canonical home:** `policy-plan-authority.md §4` (this spec, `[[vm_images]] role_restriction` subsection of §4 below).
+**Canonical home:** [`policy-plan-authority.md §4`](policy-plan-authority.md) (this spec, `[[vm_images]] role_restriction` subsection of §4 below).
 
 ---
 
@@ -822,7 +822,7 @@ role.
 
 **Trigger:** A `[[vm_images]]` entry's operator-declared
 `linux_kernel_version_min` is below 5.14 (the cgroup-v2 floor; see
-`planner-harness.md §4.3`).
+[`planner-harness.md §4.3`](planner-harness.md)).
 
 **Kernel behavior:** Policy bundle rejected at `epoch advance`.
 
@@ -833,8 +833,8 @@ Debian 12+, RHEL 9+, Fedora 36+, Alpine 3.18+) — and update
 image by `oci_digest`, so the field is a trust-equivalent surface;
 the kernel does not introspect the rootfs.
 
-**Canonical home:** `system-requirements.md §2.5`,
-`planner-harness.md §4.3`, `INV-PLANNER-HARNESS-03`.
+**Canonical home:** [`system-requirements.md §2.5`](system-requirements.md),
+[`planner-harness.md §4.3`](planner-harness.md), `INV-PLANNER-HARNESS-03`.
 
 (The legacy spelling `FAIL_VM_GUEST_KERNEL_TOO_OLD` is retained as an
 alias in audit/event payloads for operator scripts that grep on the
@@ -861,7 +861,7 @@ operator-side decision context.
 
 ### FAIL_DECLARED_ARTIFACT_MISSING
 
-**Phase:** Runtime, at verifier completion (per `verifier-processes.md §6.3`).
+**Phase:** Runtime, at verifier completion (per [`verifier-processes.md §6.3`](verifier-processes.md)).
 
 **Trigger:** A V2 task verifier completes (exit 0) with `artifact` declared
 in the plan, but at exit time the artifact file is missing, empty, or
@@ -871,7 +871,7 @@ the Reviewer activation is blocked.
 **Returned to:** The Executor whose `CompleteTask` was rolled into `Failed`.
 
 **Kernel behavior:** Reviewer not activated. Task transitions to Failed per
-`agent-disagreement.md §3`. Counted as a review round toward
+[`agent-disagreement.md §3`](agent-disagreement.md). Counted as a review round toward
 `INV-CONVERGENCE-01`. Audit: `VerifierArtifactMissing` event with
 `declared_artifact_path` and `observed_artifact_size_bytes`.
 
@@ -881,14 +881,14 @@ KSB). Typical causes: command silently changed working directory, command
 wrote to a wrong path, or the artifact file was correctly produced but
 exceeded the declared cap.
 
-**Canonical home:** `verifier-processes.md §6.3`, `INV-VERIFIER-05`.
+**Canonical home:** [`verifier-processes.md §6.3`](verifier-processes.md), `INV-VERIFIER-05`.
 
 ---
 
 ### FAIL_VERIFIER_BLOCKED
 
 **Phase:** Runtime, returned to the Executor on its next intent after a
-`block_review` verifier failure (per `verifier-processes.md §5.2`).
+`block_review` verifier failure (per [`verifier-processes.md §5.2`](verifier-processes.md)).
 
 **Trigger:** The Executor's `CompleteTask` was admitted, V1 policy gates
 passed, but a V2 verifier with `on_failure = "block_review"` produced
@@ -898,7 +898,7 @@ the Executor's next intent receives this code.
 **Returned to:** The Executor.
 
 **Kernel behavior:** Reviewer not activated. Task transitions to Failed per
-`agent-disagreement.md §3`. Counted as a review round toward
+[`agent-disagreement.md §3`](agent-disagreement.md). Counted as a review round toward
 `INV-CONVERGENCE-01`. The Executor may revise the task (within the
 `max_review_rounds` cap) by addressing the verifier failure and submitting
 a new `CompleteTask`.
@@ -907,7 +907,7 @@ a new `CompleteTask`.
 `structured_counters` in the next activation's KSB. Address the root cause
 (failing tests, build error, missing artifact). Submit a new `CompleteTask`.
 
-**Canonical home:** `verifier-processes.md §5.2`, `INV-VERIFIER-04`.
+**Canonical home:** [`verifier-processes.md §5.2`](verifier-processes.md), `INV-VERIFIER-04`.
 
 ---
 
@@ -923,7 +923,7 @@ minutes).
 (b) raise the policy hard cap (operator decision; longer verifier wall-clock
 holds verifier-VM capacity).
 
-**Canonical home:** `verifier-processes.md §3`, `host-capacity.md` (pending
+**Canonical home:** [`verifier-processes.md §3`](verifier-processes.md), [`host-capacity.md`](host-capacity.md) (pending
 amendment to add `max_verifier_timeout_seconds`).
 
 ---
@@ -938,7 +938,7 @@ exceeding `policy.toml [host_capacity] max_artifact_bytes` (default 64 MiB).
 **Recommended fix:** Either reduce the declared cap, or raise the policy
 hard cap.
 
-**Canonical home:** `verifier-processes.md §3`, `host-capacity.md`.
+**Canonical home:** [`verifier-processes.md §3`](verifier-processes.md), [`host-capacity.md`](host-capacity.md).
 
 ---
 
@@ -952,7 +952,7 @@ declare the same `name`.
 **Recommended fix:** Rename one. Verifier names must be unique within a
 task (they key the `witness_records` row and the staging directory).
 
-**Canonical home:** `verifier-processes.md §3`.
+**Canonical home:** [`verifier-processes.md §3`](verifier-processes.md).
 
 ---
 
@@ -965,7 +965,7 @@ task (they key the `witness_records` row and the staging directory).
 **Recommended fix:** Provide a non-empty `command` string. The kernel does
 not infer a default command.
 
-**Canonical home:** `verifier-processes.md §3`.
+**Canonical home:** [`verifier-processes.md §3`](verifier-processes.md).
 
 ---
 
@@ -980,12 +980,12 @@ through inheritance).
 
 **Recommended fix:** Either (a) move the tool to an Executor- or
 Orchestrator-inheriting profile if the use case is execution-time, or
-(b) declare it as a verifier (`verifier-processes.md`) if the intent
+(b) declare it as a verifier ([`verifier-processes.md`](verifier-processes.md)) if the intent
 is to influence Reviewer judgment. Verifier output reaches the
 Reviewer via `verifier_witnesses` in the KSB and properly gates
 review activation.
 
-**Canonical home:** `custom-tools.md §10` (`INV-PLANNER-HARNESS-04`).
+**Canonical home:** [`custom-tools.md §10`](custom-tools.md) (`INV-PLANNER-HARNESS-04`).
 
 ---
 
@@ -1001,7 +1001,7 @@ the task. Custom tools are profile-level only — a profile defines an
 archetype's capability surface; tasks are tickets assigned to that
 archetype.
 
-**Canonical home:** `custom-tools.md §3.4`.
+**Canonical home:** [`custom-tools.md §3.4`](custom-tools.md).
 
 ---
 
@@ -1018,7 +1018,7 @@ list maintained in the kernel binary; exposed by
 (`read_file`, `bash`, etc.) and all kernel-mediated intent names
 (`SingleCommit`, `IntegrationMerge`, etc.).
 
-**Canonical home:** `custom-tools.md §5.1`.
+**Canonical home:** [`custom-tools.md §5.1`](custom-tools.md).
 
 ---
 
@@ -1037,7 +1037,7 @@ parent) precisely to prevent silent capability drift across profile
 hierarchies. If the child legitimately needs a variant tool, name it
 descriptively (e.g., `lint_frontend` instead of overriding `lint`).
 
-**Canonical home:** `custom-tools.md §5.2`, `§8.3`.
+**Canonical home:** [`custom-tools.md §5.2`](custom-tools.md), `§8.3`.
 
 ---
 
@@ -1051,10 +1051,10 @@ JSON Schema (parser error) or violates basic well-formedness rules
 property).
 
 **Recommended fix:** Fix the schema per the Draft-07 vocabulary
-accepted in `custom-tools.md §4.1`. The error message names the JSON
+accepted in [`custom-tools.md §4.1`](custom-tools.md). The error message names the JSON
 pointer into the offending schema location.
 
-**Canonical home:** `custom-tools.md §4.3`.
+**Canonical home:** [`custom-tools.md §4.3`](custom-tools.md).
 
 ---
 
@@ -1072,7 +1072,7 @@ keywords. The accepted vocabulary is the intersection of Anthropic's
 and OpenAI's tool-schema validators; using rejected keywords would
 ship plans that pass admission but fail at first inference.
 
-**Canonical home:** `custom-tools.md §4.2`.
+**Canonical home:** [`custom-tools.md §4.2`](custom-tools.md).
 
 ---
 
@@ -1088,7 +1088,7 @@ non-object roots are unrepresentable.
 that conceptually takes a single string, declare
 `{ "type": "object", "properties": { "input": { "type": "string" } }, "required": ["input"] }`.
 
-**Canonical home:** `custom-tools.md §4.3`.
+**Canonical home:** [`custom-tools.md §4.3`](custom-tools.md).
 
 ---
 
@@ -1105,7 +1105,7 @@ root. If the operator legitimately needs an open-ended input, declare
 a `properties.payload` of type `string` and parse JSON inside the
 script.
 
-**Canonical home:** `custom-tools.md §4.3`.
+**Canonical home:** [`custom-tools.md §4.3`](custom-tools.md).
 
 ---
 
@@ -1115,13 +1115,13 @@ script.
 
 **Trigger:** A profile's effective custom-tool set occupies ≥ 25% of
 the smallest context window across the profile's `[provider_aliases]`
-chain (per `custom-tools.md §9.3`).
+chain (per [`custom-tools.md §9.3`](custom-tools.md)).
 
 **Recommended fix:** Reduce the number or verbosity of custom tools,
 or migrate to a larger-context model. The `raxis admin plan
 custom-tool-budget <plan_file>` CLI shows per-tool token costs.
 
-**Canonical home:** `custom-tools.md §9.3`.
+**Canonical home:** [`custom-tools.md §9.3`](custom-tools.md).
 
 ---
 
@@ -1137,7 +1137,7 @@ disjoint tool sets. The 25-tool cap pushes operators toward
 composition (multiple profiles, multiple tasks in the DAG) rather
 than mega-agents with 100 tools each.
 
-**Canonical home:** `custom-tools.md §9.1`.
+**Canonical home:** [`custom-tools.md §9.1`](custom-tools.md).
 
 ---
 
@@ -1151,12 +1151,12 @@ than mega-agents with 100 tools each.
 
 **Recommended fix:** Lower the per-tool timeout, OR raise the policy
 hard cap (operator decision; a higher cap allows longer synchronous
-stalls of the LLM inference loop, which `custom-tools.md §3.2`
+stalls of the LLM inference loop, which [`custom-tools.md §3.2`](custom-tools.md)
 discourages — operations expected to exceed 5 minutes should run as
-backgrounded `bash` per `planner-harness.md §5` or as a separate task
+backgrounded `bash` per [`planner-harness.md §5`](planner-harness.md) or as a separate task
 in the DAG).
 
-**Canonical home:** `custom-tools.md §3.2`.
+**Canonical home:** [`custom-tools.md §3.2`](custom-tools.md).
 
 ---
 
@@ -1172,7 +1172,7 @@ key that collides with a kernel-supplied environment variable
 supplied variables are reserved to provide stable correlation IDs and
 proxy endpoints to the script.
 
-**Canonical home:** `custom-tools.md §6.6`.
+**Canonical home:** [`custom-tools.md §6.6`](custom-tools.md).
 
 ---
 
@@ -1187,7 +1187,7 @@ contains a cycle.
 (typical inheritance chains are linear: `frontend_dev` →
 `web_executor` → `Executor`).
 
-**Canonical home:** `custom-tools.md §8.1`.
+**Canonical home:** [`custom-tools.md §8.1`](custom-tools.md).
 
 ---
 
@@ -1197,29 +1197,29 @@ The `FAIL_PLAN_BUNDLE_*` family is enforced by **Plan Bundle Sealing**
 (`v2/plan-bundle-sealing.md`). Most are CLI-side rejections that
 fire before any IPC is sent to the kernel; the kernel re-enforces
 the size caps defensively against non-canonical CLIs. Each code's
-canonical semantics live in `plan-bundle-sealing.md §9`; this
+canonical semantics live in [`plan-bundle-sealing.md §9`](plan-bundle-sealing.md); this
 catalog is the failure-code index.
 
 <!-- spec-graph:cross-ref -->
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_PLAN_BUNDLE_INVALID_PATH` | CLI resolve | Path field is empty / null / wrong type. | `plan-bundle-sealing.md §5.2` |
-| `FAIL_PLAN_BUNDLE_ABSOLUTE_PATH` | CLI resolve | Path begins with `/`. | `plan-bundle-sealing.md §5.2` |
-| `FAIL_PLAN_BUNDLE_PATH_ESCAPE` | CLI resolve | Path contains `..` segments OR resolves outside the plan-root tree (after symlink follow). | `plan-bundle-sealing.md §5.2` |
-| `FAIL_PLAN_BUNDLE_SYMLINK_LOOP` | CLI resolve | `realpath` returned `ELOOP` for a referenced path. | `plan-bundle-sealing.md §5.2` |
-| `FAIL_PLAN_BUNDLE_ARTIFACT_UNREADABLE` | CLI bundle | Resolved path is not a regular file or is unreadable. | `plan-bundle-sealing.md §5.2` |
-| `FAIL_PLAN_BUNDLE_NAME_COLLISION` | CLI bundle | Two declared paths produce the same bundle name with different bytes. | `plan-bundle-sealing.md §3.3` |
-| `FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE` | CLI / Kernel | Artifact byte length exceeds `[plan_bundle_limits].max_artifact_bytes`. | `plan-bundle-sealing.md §7.1` |
-| `FAIL_PLAN_BUNDLE_TOO_LARGE` | CLI / Kernel | Total bundle byte length exceeds `[plan_bundle_limits].max_bundle_bytes`. | `plan-bundle-sealing.md §7.1` |
-| `FAIL_PLAN_BUNDLE_TOO_MANY_ARTIFACTS` | CLI / Kernel | Artifact count exceeds `[plan_bundle_limits].max_artifact_count`. | `plan-bundle-sealing.md §7.1` |
-| `FAIL_PLAN_BUNDLE_DECODE_FAILED` | Kernel | IPC envelope failed to decode. | `plan-bundle-sealing.md §8.1` |
-| `FAIL_PLAN_BUNDLE_SHA256_MISMATCH` | Kernel | Wire `bundle_sha256` does not match `SHA-256(plan_bundle)`. | `plan-bundle-sealing.md §3.4` |
-| `FAIL_PLAN_BUNDLE_CANONICAL_DECODE_FAILED` | Kernel | Bundle bytes failed to parse against the canonical encoding. | `plan-bundle-sealing.md §3.2` |
-| `FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH` | Kernel | A per-artifact `sha256` field does not match `SHA-256(artifact.bytes)`. | `plan-bundle-sealing.md §8.1` |
-| `FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML` | Kernel | `artifacts[0].name != "plan.toml"`. | `plan-bundle-sealing.md §3.3` |
-| `FAIL_PLAN_BUNDLE_INVALID_NAME` | Kernel | An artifact name violates the §3.3 naming rules (leading `/`, `..` segment, NUL byte, non-NFC). | `plan-bundle-sealing.md §3.3` |
-| `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` | Policy load | A `[plan_bundle_limits]` value exceeds the implementation hard ceiling. | `plan-bundle-sealing.md §7.4` |
+| `FAIL_PLAN_BUNDLE_INVALID_PATH` | CLI resolve | Path field is empty / null / wrong type. | [`plan-bundle-sealing.md §5.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_ABSOLUTE_PATH` | CLI resolve | Path begins with `/`. | [`plan-bundle-sealing.md §5.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_PATH_ESCAPE` | CLI resolve | Path contains `..` segments OR resolves outside the plan-root tree (after symlink follow). | [`plan-bundle-sealing.md §5.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_SYMLINK_LOOP` | CLI resolve | `realpath` returned `ELOOP` for a referenced path. | [`plan-bundle-sealing.md §5.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_ARTIFACT_UNREADABLE` | CLI bundle | Resolved path is not a regular file or is unreadable. | [`plan-bundle-sealing.md §5.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_NAME_COLLISION` | CLI bundle | Two declared paths produce the same bundle name with different bytes. | [`plan-bundle-sealing.md §3.3`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE` | CLI / Kernel | Artifact byte length exceeds `[plan_bundle_limits].max_artifact_bytes`. | [`plan-bundle-sealing.md §7.1`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_TOO_LARGE` | CLI / Kernel | Total bundle byte length exceeds `[plan_bundle_limits].max_bundle_bytes`. | [`plan-bundle-sealing.md §7.1`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_TOO_MANY_ARTIFACTS` | CLI / Kernel | Artifact count exceeds `[plan_bundle_limits].max_artifact_count`. | [`plan-bundle-sealing.md §7.1`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_DECODE_FAILED` | Kernel | IPC envelope failed to decode. | [`plan-bundle-sealing.md §8.1`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_SHA256_MISMATCH` | Kernel | Wire `bundle_sha256` does not match `SHA-256(plan_bundle)`. | [`plan-bundle-sealing.md §3.4`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_CANONICAL_DECODE_FAILED` | Kernel | Bundle bytes failed to parse against the canonical encoding. | [`plan-bundle-sealing.md §3.2`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH` | Kernel | A per-artifact `sha256` field does not match `SHA-256(artifact.bytes)`. | [`plan-bundle-sealing.md §8.1`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML` | Kernel | `artifacts[0].name != "plan.toml"`. | [`plan-bundle-sealing.md §3.3`](plan-bundle-sealing.md) |
+| `FAIL_PLAN_BUNDLE_INVALID_NAME` | Kernel | An artifact name violates the §3.3 naming rules (leading `/`, `..` segment, NUL byte, non-NFC). | [`plan-bundle-sealing.md §3.3`](plan-bundle-sealing.md) |
+| `FAIL_POLICY_PLAN_BUNDLE_LIMIT_ABOVE_CEILING` | Policy load | A `[plan_bundle_limits]` value exceeds the implementation hard ceiling. | [`plan-bundle-sealing.md §7.4`](plan-bundle-sealing.md) |
 
 `FAIL_PLAN_SIGNATURE_INVALID` (V1, retained) covers signature
 verification failure; in V2 the signing input is the bundle hash,
@@ -1234,29 +1234,29 @@ The `FAIL_TASK_ENVIRONMENT_INCONSISTENT` and
 (`invariants.md §11.5`). Both fire at `approve_plan` and are not
 downgradable by `--no-strict` — they are structural invariants, not
 warning-class hygiene checks. Each code's canonical semantics live in
-`environment-access-control.md`; this catalog is the failure-code
+[`environment-access-control.md`](environment-access-control.md); this catalog is the failure-code
 index. The whole subsystem is opt-in per
-`environment-access-control.md §1.5` — none of these codes can fire
+[`environment-access-control.md §1.5`](environment-access-control.md) — none of these codes can fire
 in a deployment whose policy declares zero `[environments.<label>]`.
 
 <!-- spec-graph:cross-ref -->
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` | `approve_plan` step 3d | A task's environment-bound credentials and/or environment-bound egress URLs resolve to more than one environment label. | `environment-access-control.md §11.7` |
-| `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION { task, url_prefix, conflated_environments, unacknowledged }` | `approve_plan` step 3b (handler) | A task's `allowed_egress` URL prefix matches two or more `[[environment_gates]]` from distinct environment labels, and at least one of those environments does not declare `same_cluster_acknowledged = true`. Promoted from `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` in V2. | `environment-access-control.md §7` |
-| `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source }` | Policy load | A `[[environment_gates]] label` or a `[[permitted_credentials]] environment` references a label that has no `[environments.<label>]` declaration. | `environment-access-control.md §5b.3` |
-| `FAIL_POLICY_ENV_UNKNOWN_FIELD { field }` | Policy load | An `[environments.<label>]` table contains a field that is neither normative nor in the V2.x reserved-field set. | `environment-access-control.md §5b.3` |
-| `FAIL_POLICY_ENV_LABEL_INVALID { label }` | Policy load | An `[environments.<label>]` table is keyed with a label that violates the syntax `^[a-z][a-z0-9_-]{0,31}$`. | `environment-access-control.md §5b.3` |
-| `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field, env }` | Policy load | An `[environments.<label>]` table sets a V2.x-reserved-but-inert field; the field is parsed, ignored, and recorded in the audit chain so future audits can spot deployments that pre-set knobs. | `environment-access-control.md §5b.4` |
+| `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` | `approve_plan` step 3d | A task's environment-bound credentials and/or environment-bound egress URLs resolve to more than one environment label. | [`environment-access-control.md §11.7`](environment-access-control.md) |
+| `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION { task, url_prefix, conflated_environments, unacknowledged }` | `approve_plan` step 3b (handler) | A task's `allowed_egress` URL prefix matches two or more `[[environment_gates]]` from distinct environment labels, and at least one of those environments does not declare `same_cluster_acknowledged = true`. Promoted from `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` in V2. | [`environment-access-control.md §7`](environment-access-control.md) |
+| `FAIL_POLICY_ENV_LABEL_UNDECLARED { label, source }` | Policy load | A `[[environment_gates]] label` or a `[[permitted_credentials]] environment` references a label that has no `[environments.<label>]` declaration. | [`environment-access-control.md §5b.3`](environment-access-control.md) |
+| `FAIL_POLICY_ENV_UNKNOWN_FIELD { field }` | Policy load | An `[environments.<label>]` table contains a field that is neither normative nor in the V2.x reserved-field set. | [`environment-access-control.md §5b.3`](environment-access-control.md) |
+| `FAIL_POLICY_ENV_LABEL_INVALID { label }` | Policy load | An `[environments.<label>]` table is keyed with a label that violates the syntax `^[a-z][a-z0-9_-]{0,31}$`. | [`environment-access-control.md §5b.3`](environment-access-control.md) |
+| `WARN_ENVIRONMENT_RESERVED_FIELD_SET { field, env }` | Policy load | An `[environments.<label>]` table sets a V2.x-reserved-but-inert field; the field is parsed, ignored, and recorded in the audit chain so future audits can spot deployments that pre-set knobs. | [`environment-access-control.md §5b.4`](environment-access-control.md) |
 
 `FAIL_TASK_ENVIRONMENT_INCONSISTENT` and
 `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` are **structural** in the same
 sense as `FAIL_ENVIRONMENT_BLOCKED`: they cannot be downgraded by
 `--no-strict`. The operator's escape hatch is either a plan refactor
-(per `environment-access-control.md §11.5` DAG-split pattern) or a
+(per [`environment-access-control.md §11.5`](environment-access-control.md) DAG-split pattern) or a
 policy-bundle update (declaring `same_cluster_acknowledged = true` on
-all conflated environments, per `environment-access-control.md §11.4`).
+all conflated environments, per [`environment-access-control.md §11.4`](environment-access-control.md)).
 This mirrors the user's "fail loud" posture for environment binding.
 
 ---
@@ -1268,24 +1268,24 @@ operator-ergonomics layer (`v2/operator-ergonomics.md`). Most fire at
 either `OperatorRequest::ProposeDefaults` (during `raxis-cli plan
 prepare`) or at `OperatorRequest::CreateInitiative` (when the operator
 submitted a plan without running `plan prepare` first). Each code's
-canonical semantics live in `operator-ergonomics.md §20`; this catalog
+canonical semantics live in [`operator-ergonomics.md §20`](operator-ergonomics.md); this catalog
 is the failure-code index.
 
 <!-- spec-graph:cross-ref -->
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_PLAN_REQUIRES_PREPARE { missing_fields }` | `submit plan` admission | The plan omits at least one defaultable field whose policy default is set; the operator did not run `plan prepare` first. | `operator-ergonomics.md §20` |
-| `FAIL_PLAN_PARTIAL_PREPARE_DETECTED { prepared_at, cli_version }` | `submit plan` (pre-TOML-parse line-prefix scan) | The plan carries a `# @raxis-prepare-partial offline=true …` marker (`operator-ergonomics.md §5.4.2`) indicating the operator ran `plan prepare --offline` (kernel was unreachable) and never re-ran prepare against a live kernel. Defaultable fields per §4.2 may be missing. | `operator-ergonomics.md §5.7` |
-| `FAIL_PREPARE_KERNEL_UNREACHABLE { socket_path, errno }` | `plan prepare` phase 3 (IPC) | The CLI could not reach the kernel daemon on the operator socket. Without `--offline`, no disk write occurs and the original plan is preserved; with `--offline`, phase 2 changes are persisted with a partial-prepare marker. | `operator-ergonomics.md §5.4` |
-| `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED { fields }` | `plan prepare` IPC | At least one annotated field's policy-default value has drifted; `--upgrade-defaults` not passed. | `operator-ergonomics.md §5.4` |
-| `FAIL_PLAN_FIELD_NOT_DEFAULTABLE { field }` | `plan prepare` IPC | The operator placed a `# @raxis-default` annotation on a field NOT in the defaultable set. | `operator-ergonomics.md §4.2` |
-| `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | `plan prepare` IPC | A defaultable field requires a policy value the policy doesn't declare. | `operator-ergonomics.md §5.4` |
-| `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` | Policy load | `[default_executor_image] alias` doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Executor"`. | `operator-ergonomics.md §18.1` |
-| `FAIL_DEFAULT_EXECUTOR_IMAGE_DIGEST_MISMATCH` | Runtime / `raxis doctor` | The kernel-bundled `raxis-executor-starter` image's digest does not match the manifest. Hard error if any in-flight session is using it; non-fatal warning otherwise. | `planner-harness.md §10.6` |
-| `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND { name }` | `plan init` (CLI-local; never IPC) | Template name not in CLI-bundled set. | `operator-ergonomics.md §6.4` |
-| `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. | `operator-ergonomics.md §11.4` |
-| `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. | `operator-ergonomics.md §14.5` |
+| `FAIL_PLAN_REQUIRES_PREPARE { missing_fields }` | `submit plan` admission | The plan omits at least one defaultable field whose policy default is set; the operator did not run `plan prepare` first. | [`operator-ergonomics.md §20`](operator-ergonomics.md) |
+| `FAIL_PLAN_PARTIAL_PREPARE_DETECTED { prepared_at, cli_version }` | `submit plan` (pre-TOML-parse line-prefix scan) | The plan carries a `# @raxis-prepare-partial offline=true …` marker ([`operator-ergonomics.md §5.4.2`](operator-ergonomics.md)) indicating the operator ran `plan prepare --offline` (kernel was unreachable) and never re-ran prepare against a live kernel. Defaultable fields per §4.2 may be missing. | [`operator-ergonomics.md §5.7`](operator-ergonomics.md) |
+| `FAIL_PREPARE_KERNEL_UNREACHABLE { socket_path, errno }` | `plan prepare` phase 3 (IPC) | The CLI could not reach the kernel daemon on the operator socket. Without `--offline`, no disk write occurs and the original plan is preserved; with `--offline`, phase 2 changes are persisted with a partial-prepare marker. | [`operator-ergonomics.md §5.4`](operator-ergonomics.md) |
+| `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED { fields }` | `plan prepare` IPC | At least one annotated field's policy-default value has drifted; `--upgrade-defaults` not passed. | [`operator-ergonomics.md §5.4`](operator-ergonomics.md) |
+| `FAIL_PLAN_FIELD_NOT_DEFAULTABLE { field }` | `plan prepare` IPC | The operator placed a `# @raxis-default` annotation on a field NOT in the defaultable set. | [`operator-ergonomics.md §4.2`](operator-ergonomics.md) |
+| `FAIL_POLICY_DEFAULT_UNRESOLVABLE { field }` | `plan prepare` IPC | A defaultable field requires a policy value the policy doesn't declare. | [`operator-ergonomics.md §5.4`](operator-ergonomics.md) |
+| `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` | Policy load | `[default_executor_image] alias` doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Executor"`. | [`operator-ergonomics.md §18.1`](operator-ergonomics.md) |
+| `FAIL_DEFAULT_EXECUTOR_IMAGE_DIGEST_MISMATCH` | Runtime / `raxis doctor` | The kernel-bundled `raxis-executor-starter` image's digest does not match the manifest. Hard error if any in-flight session is using it; non-fatal warning otherwise. | [`planner-harness.md §10.6`](planner-harness.md) |
+| `FAIL_PLAN_INIT_TEMPLATE_NOT_FOUND { name }` | `plan init` (CLI-local; never IPC) | Template name not in CLI-bundled set. | [`operator-ergonomics.md §6.4`](operator-ergonomics.md) |
+| `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. | [`operator-ergonomics.md §11.4`](operator-ergonomics.md) |
+| `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. | [`operator-ergonomics.md §14.5`](operator-ergonomics.md) |
 
 `FAIL_PLAN_REQUIRES_PREPARE` is the only one of these that can fire on
 `submit plan` admission. Its `missing_fields` array names the §4.2
@@ -1294,7 +1294,7 @@ fields the plan omitted, giving the operator an actionable next step
 
 ### Verifier and pre-merge failure codes (V2)
 
-The mechanical-witness layer (`verifier-processes.md`) and the
+The mechanical-witness layer ([`verifier-processes.md`](verifier-processes.md)) and the
 pre-`IntegrationMerge` verifier hook (`integration-merge.md §4
 Check 5d`) introduce the following failure codes. All `FAIL_POLICY_*`
 codes prevent the policy from loading; in-flight initiatives keep
@@ -1303,38 +1303,38 @@ and re-pushes.
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_VERIFIER_INVALID_ON_FAILURE { verifier_name, declared, allowed }` | `approve_plan` | A per-task verifier declares `on_failure = "block_merge"`, OR a pre-merge verifier declares `on_failure = "block_review"`. Per-task verifiers gate Reviewer activation only; pre-merge verifiers gate IntegrationMerge advancement only. | `verifier-processes.md §10.3` |
-| `FAIL_VERIFIER_TASK_SET_EMPTY { verifier_name }` | `approve_plan` | A pre-merge verifier declares `applies_to = "task_set"` but provides an empty `task_set` array. | `verifier-processes.md §10.3` |
-| `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK { verifier_name, unknown_task }` | `approve_plan` | A pre-merge verifier's `task_set` references a task ID that is not declared in `[[plan.tasks]]`. | `verifier-processes.md §10.3` |
+| `FAIL_VERIFIER_INVALID_ON_FAILURE { verifier_name, declared, allowed }` | `approve_plan` | A per-task verifier declares `on_failure = "block_merge"`, OR a pre-merge verifier declares `on_failure = "block_review"`. Per-task verifiers gate Reviewer activation only; pre-merge verifiers gate IntegrationMerge advancement only. | [`verifier-processes.md §10.3`](verifier-processes.md) |
+| `FAIL_VERIFIER_TASK_SET_EMPTY { verifier_name }` | `approve_plan` | A pre-merge verifier declares `applies_to = "task_set"` but provides an empty `task_set` array. | [`verifier-processes.md §10.3`](verifier-processes.md) |
+| `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK { verifier_name, unknown_task }` | `approve_plan` | A pre-merge verifier's `task_set` references a task ID that is not declared in `[[plan.tasks]]`. | [`verifier-processes.md §10.3`](verifier-processes.md) |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | `IntegrationMerge` Check 5d | Any matching `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate merged tree is discarded; main is NOT advanced; Orchestrator routes to operator escalation per `verifier-processes.md §16.6`. | `integration-merge.md §4 Check 5d.6` |
+| `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED { verifier_names, primary_witness_summary, candidate_merge_sha }` | `IntegrationMerge` Check 5d | Any matching `block_merge` pre-merge verifier reported `final_status ≠ "passed"`. Candidate merged tree is discarded; main is NOT advanced; Orchestrator routes to operator escalation per [`verifier-processes.md §16.6`](verifier-processes.md). | [`integration-merge.md §4 Check 5d.6`](integration-merge.md) |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | `IntegrationMerge` Check 5d.2 | The candidate merged tree could not be materialized (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at `candidate_merges/` staging area). | `integration-merge.md §4 Check 5d.6` |
-| `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH { expected, actual }` | Verifier-VM spawn | At spawn time, the on-disk `raxis-verifier-symbol-index-<kernel_version>.img` does not match the kernel-binary-embedded canonical digest. Spawn aborted; halts further verifier spawns until `raxis doctor canonical-images` succeeds. Defense-in-depth analog of `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`. | `verifier-processes.md §14.4` |
+| `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED { reason }` | `IntegrationMerge` Check 5d.2 | The candidate merged tree could not be materialized (malformed `commit_sha`, merge conflict the kernel can't represent as an orphan, disk-full at `candidate_merges/` staging area). | [`integration-merge.md §4 Check 5d.6`](integration-merge.md) |
+| `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH { expected, actual }` | Verifier-VM spawn | At spawn time, the on-disk `raxis-verifier-symbol-index-<kernel_version>.img` does not match the kernel-binary-embedded canonical digest. Spawn aborted; halts further verifier spawns until `raxis doctor canonical-images` succeeds. Defense-in-depth analog of `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH`. | [`verifier-processes.md §14.4`](verifier-processes.md) |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). The alias is reserved per `INV-VERIFIER-12` so plan-side references resolve unambiguously to the kernel-bundled image. | `verifier-processes.md §14.3` |
-| `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. | `policy-plan-authority.md §4 [default_verifier_images]` |
-| `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal; the `@<language>` shortcut for that language won't resolve. | `policy-plan-authority.md §4 [default_verifier_images]` |
+| `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). The alias is reserved per `INV-VERIFIER-12` so plan-side references resolve unambiguously to the kernel-bundled image. | [`verifier-processes.md §14.3`](verifier-processes.md) |
+| `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. | [`policy-plan-authority.md §4 [default_verifier_images]`](policy-plan-authority.md) |
+| `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal; the `@<language>` shortcut for that language won't resolve. | [`policy-plan-authority.md §4 [default_verifier_images]`](policy-plan-authority.md) |
 
 ### Notification and SMTP-proxy failure codes (V2)
 
-The operator-notification subsystem (`email-and-notification-channels.md §2`) and the agent SMTP egress proxy (`email-and-notification-channels.md §3`) introduce the following failure codes. All `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` codes are policy-load-time errors emitted by `PolicyBundle::validate`; they prevent the new bundle from becoming active and the previously-loaded policy continues serving in-flight initiatives.
+The operator-notification subsystem ([`email-and-notification-channels.md §2`](email-and-notification-channels.md)) and the agent SMTP egress proxy ([`email-and-notification-channels.md §3`](email-and-notification-channels.md)) introduce the following failure codes. All `FAIL_NOTIFY_*` and `FAIL_SMTP_PROXY_*` codes are policy-load-time errors emitted by `PolicyBundle::validate`; they prevent the new bundle from becoming active and the previously-loaded policy continues serving in-flight initiatives.
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_NOTIFY_CHANNEL_INVALID { channel_id, reason }` | Policy load | An `[[notifications.channels]]` entry has a malformed kind, missing required field, or unparseable target (e.g. `kind = "Email"` without `smtp_relay`). | `email-and-notification-channels.md §2` |
-| `FAIL_NOTIFY_CRED_INVALID { cred_ref, reason }` | Policy load | A `[[notifications.credentials]]` entry references missing or wrong-shape on-disk credential material. | `email-and-notification-channels.md §2.1` |
+| `FAIL_NOTIFY_CHANNEL_INVALID { channel_id, reason }` | Policy load | An `[[notifications.channels]]` entry has a malformed kind, missing required field, or unparseable target (e.g. `kind = "Email"` without `smtp_relay`). | [`email-and-notification-channels.md §2`](email-and-notification-channels.md) |
+| `FAIL_NOTIFY_CRED_INVALID { cred_ref, reason }` | Policy load | A `[[notifications.credentials]]` entry references missing or wrong-shape on-disk credential material. | [`email-and-notification-channels.md §2.1`](email-and-notification-channels.md) |
 | `FAIL_NOTIFY_ROUTE_REFERENCES_UNKNOWN_CHANNEL { route_event_kind, unknown_channel_id }` | Policy load | A `[[notifications.routes]]` entry's `channels` list references a channel id not declared in `[[notifications.channels]]`. | `cli-readonly.md §5.6.2` |
 | `FAIL_NOTIFY_ROUTE_UNKNOWN_EVENT_KIND { event_kind }` | Policy load | A `[[notifications.routes]]` entry's `event_kind` is not a real `AuditEventKind` variant. | `cli-readonly.md §5.6.2` |
-| `WARN_NOTIFY_CHANNEL_PROBE_FAILED { channel_id, reason }` | Boot probe / `raxis notify channel probe` | The channel reachable check failed; channel marked Degraded but boot continues, deliveries still attempted. | `email-and-notification-channels.md §2.4` |
-| `FAIL_SMTP_PROXY_PLAINTEXT_REJECTED { credential_name, real_target }` | Policy load | A `[[permitted_credentials.smtp]]` entry has `require_starttls = false` AND `real_target` does not end in `:465`. Plaintext credentials on the wire are never permitted. | `email-and-notification-channels.md §3.2` |
-| `FAIL_SMTP_PROXY_RECIPIENT_ALLOWLIST_EMPTY { credential_name }` | Policy load | `[[permitted_credentials.smtp]]` declares `allowed_recipient_domains = []`. An open relay is not a valid configuration. | `email-and-notification-channels.md §3.2` |
-| `FAIL_SMTP_PROXY_FROM_ADDRESS_INVALID { credential_name, value }` | Policy load | `from_address` does not parse as RFC 5321 `addr-spec`. | `email-and-notification-channels.md §3.2` |
-| `FAIL_SMTP_PROXY_RECIPIENT_CAP_INVALID { credential_name, value }` | Policy load | `max_recipients_per_message` outside the range [1, 50]. | `email-and-notification-channels.md §3.2` |
-| `FAIL_SMTP_PROXY_RATE_LIMIT_INVALID { credential_name, scope, field, value }` | Policy load | `rate_limit_per_session.count`/`window_seconds` or `rate_limit_per_task.count`/`window_seconds` outside valid ranges (count ≥ 1, window_seconds ∈ [1, 86_400]). | `email-and-notification-channels.md §3.2` |
+| `WARN_NOTIFY_CHANNEL_PROBE_FAILED { channel_id, reason }` | Boot probe / `raxis notify channel probe` | The channel reachable check failed; channel marked Degraded but boot continues, deliveries still attempted. | [`email-and-notification-channels.md §2.4`](email-and-notification-channels.md) |
+| `FAIL_SMTP_PROXY_PLAINTEXT_REJECTED { credential_name, real_target }` | Policy load | A `[[permitted_credentials.smtp]]` entry has `require_starttls = false` AND `real_target` does not end in `:465`. Plaintext credentials on the wire are never permitted. | [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md) |
+| `FAIL_SMTP_PROXY_RECIPIENT_ALLOWLIST_EMPTY { credential_name }` | Policy load | `[[permitted_credentials.smtp]]` declares `allowed_recipient_domains = []`. An open relay is not a valid configuration. | [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md) |
+| `FAIL_SMTP_PROXY_FROM_ADDRESS_INVALID { credential_name, value }` | Policy load | `from_address` does not parse as RFC 5321 `addr-spec`. | [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md) |
+| `FAIL_SMTP_PROXY_RECIPIENT_CAP_INVALID { credential_name, value }` | Policy load | `max_recipients_per_message` outside the range [1, 50]. | [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md) |
+| `FAIL_SMTP_PROXY_RATE_LIMIT_INVALID { credential_name, scope, field, value }` | Policy load | `rate_limit_per_session.count`/`window_seconds` or `rate_limit_per_task.count`/`window_seconds` outside valid ranges (count ≥ 1, window_seconds ∈ [1, 86_400]). | [`email-and-notification-channels.md §3.2`](email-and-notification-channels.md) |
 
 The `WitnessSubmission` and `witness_records` schemas no longer
-carry V1/V2 discriminators (per `verifier-processes.md §7`); all
+carry V1/V2 discriminators (per [`verifier-processes.md §7`](verifier-processes.md)); all
 witness rows for a given initiative use the same schema regardless
 of which authoring source produced them.
 
@@ -1342,7 +1342,7 @@ of which authoring source produced them.
 
 ### Paired-audit failure codes (V2.1)
 
-The V2.1 paired-audit protocol (`audit-paired-writes.md`) introduces
+The V2.1 paired-audit protocol ([`audit-paired-writes.md`](audit-paired-writes.md)) introduces
 the following failure codes covering admission-pipeline crashes and
 the V2.0 → V2.1 schema-migration ceremony. These are emitted by the
 intent admission handler, by the `BEGIN IMMEDIATE` driver in
@@ -1354,7 +1354,7 @@ binaries, and operators reading audit logs need to know which binary
 they're looking at the output of:
 
 - **Standalone** = `raxis-audit-verify` (independence-bearing leaf
-  binary; per `audit-paired-writes.md §5.4`). No kernel runtime
+  binary; per [`audit-paired-writes.md §5.4`](audit-paired-writes.md)). No kernel runtime
   needed; suitable for forensic verification.
 - **Kernel** = `raxis-kernel` runtime emission (intent admission
   handler, recovery, migration). Requires the kernel to be running
@@ -1362,7 +1362,7 @@ they're looking at the output of:
 - **CLI** = `raxis-cli` (kernel-linked convenience commands like
   `raxis verify-chain`). Important: `raxis verify-chain` is a
   **subprocess wrapper** around `raxis-audit-verify`
-  (per `audit-paired-writes.md §5.7`); it does NOT link the verifier
+  (per [`audit-paired-writes.md §5.7`](audit-paired-writes.md)); it does NOT link the verifier
   algorithm. So a code listed as a CLI reporter is in practice
   emitted by a `raxis-audit-verify` subprocess that the CLI spawned,
   with the CLI's exit code identical to the subprocess's. The CLI's
@@ -1379,20 +1379,20 @@ operator ergonomics on top.
 
 | Code | Reporter | Phase | One-line trigger | Canonical home |
 |---|---|---|---|---|
-| `FAIL_AUDIT_PENDING_FSYNC { intent_kind, io_error }` | Kernel | Phase B0 (pre-tx audit) | The kernel could not durably write or `fsync` the `StateChangePending` event before `BEGIN IMMEDIATE`. SQLite is untouched; planner gets a structured rejection so it can retry. No state mutation, no chain entry, no recovery work needed. | `audit-paired-writes.md §7.9` |
-| `FAIL_AUDIT_CONFIRMED_FSYNC_EXHAUSTED { confirms_pending_seq, last_io_error, retry_count }` | Kernel | Phase B2 (post-commit audit) | The augmented existing-kind event (`confirms_pending_seq` + `sqlite_commit_id` + `actual_post_state_digest`) failed to fsync after 3 retries with 100 ms backoff. SQLite already committed; `last_committing_event_seq = pending_seq` is durable on the affected rows. Kernel emits this code, attempts one final fsync, and exits with code 137. The next kernel start runs `reconcile_advisory` which observes the orphan via SQLite and synthesises the missing confirmed event. | `audit-paired-writes.md §7.8` |
-| `FAIL_AUDIT_PRE_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Kernel | Phase B1 (state mutation) | Inside the transaction, the kernel re-hashed the read-set rows post-`BEGIN IMMEDIATE` and the result differs from the `pre_state_digest` recorded in the pending event — meaning another process (operator IPC, background sweep, or another admission acquired the lock first) mutated the rows the pending claimed it had read. The kernel rolls back, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, and rejects with this code so the planner can re-derive and retry. | `audit-paired-writes.md §9.1` |
-| `FAIL_AUDIT_INTENDED_POST_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Kernel | Phase B1 (state mutation) | Inside the transaction, post-write but pre-`COMMIT`, the kernel hashed the actual write-set and the result differs from the pending's `intended_post_state_digest`. Indicates a kernel bug — the announced and committed mutations diverge. The kernel aborts the transaction, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, panics, and exits 138 (operator must investigate). | `audit-paired-writes.md §9.2` |
-| `FAIL_AUDIT_MIGRATION_INCONSISTENT_ROW { table, primary_key, expected_seq, observed }` | Kernel | V2.1 first-boot ceremony | The migration backfill encountered a row whose chain references and SQLite state cannot be reconciled (e.g. SQLite has a row that the chain never mentions). Migration aborts; operator must run `recovery::reconcile` under V2.0 to repair, then re-attempt V2.1 boot. | `audit-paired-writes.md §10.2` |
-| `FAIL_AUDIT_MIGRATION_PARTIAL_BACKFILL { tables_completed, tables_remaining, last_error }` | Kernel | V2.1 first-boot ceremony | Migration backfill crashed before completing all state-bearing tables. The migration is idempotent — restart resumes from the first incomplete table — but the kernel refuses to boot with a partial backfill. | `audit-paired-writes.md §10.2` |
-| `FAIL_BEGIN_IMMEDIATE_TIMEOUT { intent_kind, waited_ms, threshold_ms }` | Kernel | Phase B1 (state mutation) | `BEGIN IMMEDIATE` could not acquire the SQLite write lock within the admission deadline. Kernel emits `StateChangeRolledBack { reason: LockTimeout }` referencing the pending and rejects to the planner. The pending remains in the chain; recovery has no work since no SQLite mutation occurred. | `audit-paired-writes.md §7.7` |
-| `FAIL_AUDIT_CRITICAL_FINDING { finding_kind, details }` | Standalone, Kernel, CLI | Boot (`reconcile_advisory`); `raxis-audit-verify` exit code 3; `raxis verify-chain` exit code 3 | The verifier returned a critical finding (chain break, signature invalid, dangling confirmed/rollback, digest mismatch). When emitted by the standalone binary this is the strict-`R-7` signal — it requires no kernel cooperation. When emitted by the kernel at boot, the kernel refuses to start until the operator first runs `raxis-audit-verify` to obtain an independent verdict, then clears the boot block via `raxis verify-chain --acknowledge-critical` (signed override embedding the standalone verdict's hash). | `audit-paired-writes.md §6.2` |
-| `WARN_AUDIT_ORPHAN_RESOLVED_BY_STATE { pending_seq, table, primary_key }` | Standalone (in `--state-export` mode), Kernel, CLI | Boot — `reconcile_advisory` | The chain has an orphan pending whose state snapshot shows `last_committing_event_seq = pending_seq`. Recovery synthesises a confirmed event so future verifications don't need to consult state. Non-fatal; informational. | `audit-paired-writes.md §6.2` |
-| `WARN_AUDIT_ORPHAN_ROLLBACK_INFERRED { pending_seq, table, primary_key }` | Standalone (in `--state-export` mode), Kernel, CLI | Boot — `reconcile_advisory` | The chain has an orphan pending whose state snapshot shows a different `last_committing_event_seq` (or no row at all). Recovery synthesises `StateChangeRolledBack { reason: CrashInferred }` to make the chain self-resolving. Non-fatal; informational. | `audit-paired-writes.md §6.2` |
-| `WARN_AUDIT_ORPHAN_INDETERMINATE { pending_seq }` | Standalone (chain-only mode) | `raxis-audit-verify` without `--state-export` | The chain has an orphan pending; the standalone binary cannot determine commit-vs-rollback without a state snapshot. Non-fatal; chain integrity is intact. To resolve, run `raxis audit export-state-for-verifier` and pass via `--state-export`. | `audit-paired-writes.md §5.6` |
-| `WARN_AUDIT_PRE_V21_ROW { table, primary_key }` | Standalone, Kernel, CLI | Boot — `reconcile_advisory` and `raxis-audit-verify` / `raxis verify-chain` | Row has `last_committing_event_seq = 0` (predates the V2.1 backfill or the chain lost its history segment). Verifier falls back to V1 reconciliation semantics for the row. Non-fatal; per `INV-AUDIT-PAIRED-07`. | `audit-paired-writes.md §14.7` |
-| `BOOT_WARN_AUDIT_VERIFY_BINARY_MISSING` | Kernel | Boot — `raxis doctor` | The standalone `raxis-audit-verify` binary is not on `$PATH`. Operator-side R-7 verification capability is degraded until installed. Non-fatal; the kernel still runs. | `extensibility-traits.md §5.6` |
-| `BOOT_WARN_AUDIT_VERIFY_BINARY_VERSION_MISMATCH { kernel_version, binary_version }` | Kernel | Boot — `raxis doctor` | The standalone `raxis-audit-verify` binary on `$PATH` is from a different RAXIS release than the kernel. Verification still works (the chain format is stable across patch releases), but operators should install the matching version to keep the verdict-format string aligned. Non-fatal. | `extensibility-traits.md §5.6` |
+| `FAIL_AUDIT_PENDING_FSYNC { intent_kind, io_error }` | Kernel | Phase B0 (pre-tx audit) | The kernel could not durably write or `fsync` the `StateChangePending` event before `BEGIN IMMEDIATE`. SQLite is untouched; planner gets a structured rejection so it can retry. No state mutation, no chain entry, no recovery work needed. | [`audit-paired-writes.md §7.9`](audit-paired-writes.md) |
+| `FAIL_AUDIT_CONFIRMED_FSYNC_EXHAUSTED { confirms_pending_seq, last_io_error, retry_count }` | Kernel | Phase B2 (post-commit audit) | The augmented existing-kind event (`confirms_pending_seq` + `sqlite_commit_id` + `actual_post_state_digest`) failed to fsync after 3 retries with 100 ms backoff. SQLite already committed; `last_committing_event_seq = pending_seq` is durable on the affected rows. Kernel emits this code, attempts one final fsync, and exits with code 137. The next kernel start runs `reconcile_advisory` which observes the orphan via SQLite and synthesises the missing confirmed event. | [`audit-paired-writes.md §7.8`](audit-paired-writes.md) |
+| `FAIL_AUDIT_PRE_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Kernel | Phase B1 (state mutation) | Inside the transaction, the kernel re-hashed the read-set rows post-`BEGIN IMMEDIATE` and the result differs from the `pre_state_digest` recorded in the pending event — meaning another process (operator IPC, background sweep, or another admission acquired the lock first) mutated the rows the pending claimed it had read. The kernel rolls back, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, and rejects with this code so the planner can re-derive and retry. | [`audit-paired-writes.md §9.1`](audit-paired-writes.md) |
+| `FAIL_AUDIT_INTENDED_POST_STATE_DIGEST_MISMATCH { pending_seq, intended, actual }` | Kernel | Phase B1 (state mutation) | Inside the transaction, post-write but pre-`COMMIT`, the kernel hashed the actual write-set and the result differs from the pending's `intended_post_state_digest`. Indicates a kernel bug — the announced and committed mutations diverge. The kernel aborts the transaction, emits `StateChangeRolledBack { reason: KernelInitiatedAbort }`, panics, and exits 138 (operator must investigate). | [`audit-paired-writes.md §9.2`](audit-paired-writes.md) |
+| `FAIL_AUDIT_MIGRATION_INCONSISTENT_ROW { table, primary_key, expected_seq, observed }` | Kernel | V2.1 first-boot ceremony | The migration backfill encountered a row whose chain references and SQLite state cannot be reconciled (e.g. SQLite has a row that the chain never mentions). Migration aborts; operator must run `recovery::reconcile` under V2.0 to repair, then re-attempt V2.1 boot. | [`audit-paired-writes.md §10.2`](audit-paired-writes.md) |
+| `FAIL_AUDIT_MIGRATION_PARTIAL_BACKFILL { tables_completed, tables_remaining, last_error }` | Kernel | V2.1 first-boot ceremony | Migration backfill crashed before completing all state-bearing tables. The migration is idempotent — restart resumes from the first incomplete table — but the kernel refuses to boot with a partial backfill. | [`audit-paired-writes.md §10.2`](audit-paired-writes.md) |
+| `FAIL_BEGIN_IMMEDIATE_TIMEOUT { intent_kind, waited_ms, threshold_ms }` | Kernel | Phase B1 (state mutation) | `BEGIN IMMEDIATE` could not acquire the SQLite write lock within the admission deadline. Kernel emits `StateChangeRolledBack { reason: LockTimeout }` referencing the pending and rejects to the planner. The pending remains in the chain; recovery has no work since no SQLite mutation occurred. | [`audit-paired-writes.md §7.7`](audit-paired-writes.md) |
+| `FAIL_AUDIT_CRITICAL_FINDING { finding_kind, details }` | Standalone, Kernel, CLI | Boot (`reconcile_advisory`); `raxis-audit-verify` exit code 3; `raxis verify-chain` exit code 3 | The verifier returned a critical finding (chain break, signature invalid, dangling confirmed/rollback, digest mismatch). When emitted by the standalone binary this is the strict-`R-7` signal — it requires no kernel cooperation. When emitted by the kernel at boot, the kernel refuses to start until the operator first runs `raxis-audit-verify` to obtain an independent verdict, then clears the boot block via `raxis verify-chain --acknowledge-critical` (signed override embedding the standalone verdict's hash). | [`audit-paired-writes.md §6.2`](audit-paired-writes.md) |
+| `WARN_AUDIT_ORPHAN_RESOLVED_BY_STATE { pending_seq, table, primary_key }` | Standalone (in `--state-export` mode), Kernel, CLI | Boot — `reconcile_advisory` | The chain has an orphan pending whose state snapshot shows `last_committing_event_seq = pending_seq`. Recovery synthesises a confirmed event so future verifications don't need to consult state. Non-fatal; informational. | [`audit-paired-writes.md §6.2`](audit-paired-writes.md) |
+| `WARN_AUDIT_ORPHAN_ROLLBACK_INFERRED { pending_seq, table, primary_key }` | Standalone (in `--state-export` mode), Kernel, CLI | Boot — `reconcile_advisory` | The chain has an orphan pending whose state snapshot shows a different `last_committing_event_seq` (or no row at all). Recovery synthesises `StateChangeRolledBack { reason: CrashInferred }` to make the chain self-resolving. Non-fatal; informational. | [`audit-paired-writes.md §6.2`](audit-paired-writes.md) |
+| `WARN_AUDIT_ORPHAN_INDETERMINATE { pending_seq }` | Standalone (chain-only mode) | `raxis-audit-verify` without `--state-export` | The chain has an orphan pending; the standalone binary cannot determine commit-vs-rollback without a state snapshot. Non-fatal; chain integrity is intact. To resolve, run `raxis audit export-state-for-verifier` and pass via `--state-export`. | [`audit-paired-writes.md §5.6`](audit-paired-writes.md) |
+| `WARN_AUDIT_PRE_V21_ROW { table, primary_key }` | Standalone, Kernel, CLI | Boot — `reconcile_advisory` and `raxis-audit-verify` / `raxis verify-chain` | Row has `last_committing_event_seq = 0` (predates the V2.1 backfill or the chain lost its history segment). Verifier falls back to V1 reconciliation semantics for the row. Non-fatal; per `INV-AUDIT-PAIRED-07`. | [`audit-paired-writes.md §14.7`](audit-paired-writes.md) |
+| `BOOT_WARN_AUDIT_VERIFY_BINARY_MISSING` | Kernel | Boot — `raxis doctor` | The standalone `raxis-audit-verify` binary is not on `$PATH`. Operator-side R-7 verification capability is degraded until installed. Non-fatal; the kernel still runs. | [`extensibility-traits.md §5.6`](extensibility-traits.md) |
+| `BOOT_WARN_AUDIT_VERIFY_BINARY_VERSION_MISMATCH { kernel_version, binary_version }` | Kernel | Boot — `raxis doctor` | The standalone `raxis-audit-verify` binary on `$PATH` is from a different RAXIS release than the kernel. Verification still works (the chain format is stable across patch releases), but operators should install the matching version to keep the verdict-format string aligned. Non-fatal. | [`extensibility-traits.md §5.6`](extensibility-traits.md) |
 
 **Why these are policy-/runtime-time, not policy-load-time.** The
 `FAIL_AUDIT_*` codes above fire at admission or boot, not on
@@ -1409,7 +1409,7 @@ the entire failure-code namespace, paired-audit included.
 
 The defaultable per-role alias chains live in
 `[provider_aliases_defaults]` (§4) and are validated at policy load
-per `provider-model-selection.md §7.2`. All `FAIL_POLICY_*` codes
+per [`provider-model-selection.md §7.2`](provider-model-selection.md). All `FAIL_POLICY_*` codes
 below prevent the policy from loading; in-flight initiatives are
 unaffected because the previous-loaded policy stays active until the
 operator fixes and re-pushes.
@@ -1418,13 +1418,13 @@ operator fixes and re-pushes.
 
 | Code | Phase | One-line trigger | Canonical home |
 |---|---|---|---|
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. | `provider-model-selection.md §10` |
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }` | Policy load | A `[provider_aliases_defaults.<role>] chain` entry references a provider with no `[[providers.credentials]]` entry. | `provider-model-selection.md §10` |
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. | `provider-model-selection.md §10` |
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load | `fallback_behavior` is not `"attempt_in_order"`. | `provider-model-selection.md §10` |
-| `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. Non-fatal; the orphan section is silently ignored. | `provider-model-selection.md §10` |
-| `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load | An alias chain has length 1 in a deployment with 2+ configured providers. Suggests the operator missed the diversification benefit (`provider-model-selection.md §5`). Non-fatal. | `provider-model-selection.md §10` |
-| `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED { alias }` | Policy load | `[orchestrator] provider_alias` resolves to `"fast_low_cost"` (the V1 default name). Recommends rename to `"orchestrator_default"` per §4 `[orchestrator]`. Non-fatal V1 → V2 migration aid. | `provider-model-selection.md §10` |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }` | Policy load | A `[provider_aliases_defaults.<role>] chain` entry references a provider with no `[[providers.credentials]]` entry. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load | `fallback_behavior` is not `"attempt_in_order"`. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. Non-fatal; the orphan section is silently ignored. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load | An alias chain has length 1 in a deployment with 2+ configured providers. Suggests the operator missed the diversification benefit ([`provider-model-selection.md §5`](provider-model-selection.md)). Non-fatal. | [`provider-model-selection.md §10`](provider-model-selection.md) |
+| `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED { alias }` | Policy load | `[orchestrator] provider_alias` resolves to `"fast_low_cost"` (the V1 default name). Recommends rename to `"orchestrator_default"` per §4 `[orchestrator]`. Non-fatal V1 → V2 migration aid. | [`provider-model-selection.md §10`](provider-model-selection.md) |
 
 ---
 
@@ -1503,7 +1503,7 @@ linux_kernel_version_min   = "5.14"
 |---|---|
 | `"Orchestrator"` | **Disallowed.** The Orchestrator role uses the kernel-bundled `raxis-orchestrator-core` image only (`INV-PLANNER-HARNESS-05`); operator-published Orchestrator images are explicitly prohibited. Any `[[vm_images]]` entry whose `role_restriction` contains `"Orchestrator"` is REJECTED at policy load with `FAIL_POLICY_INVALID_ROLE_RESTRICTION` (alias `FAIL_ORCHESTRATOR_VM_IMAGE_NOT_ALLOWED` for messaging). |
 | `"Executor"` | Image may boot for an Executor task |
-| `"Verifier"` | Image may boot for a V2 task verifier (per `verifier-processes.md`) |
+| `"Verifier"` | Image may boot for a V2 task verifier (per [`verifier-processes.md`](verifier-processes.md)) |
 | `"Reviewer"` | **Disallowed.** The Reviewer role uses the kernel-bundled `raxis-reviewer-core` image only (`INV-PLANNER-HARNESS-02`); operator-published Reviewer images are explicitly prohibited. Any `[[vm_images]]` entry whose `role_restriction` contains `"Reviewer"` is REJECTED at policy load with `FAIL_POLICY_INVALID_ROLE_RESTRICTION` and a remediation message. |
 
 **`linux_kernel_version_min` (V2.5 addition).** The operator declares
@@ -1512,7 +1512,7 @@ kernel validates `linux_kernel_version_min ≥ 5.14` at policy load and
 rejects with `FAIL_POLICY_VM_GUEST_LINUX_KERNEL_TOO_OLD` otherwise.
 The 5.14 floor matches the cgroup-v2 (`cpu`, `memory`, `io`)
 delegation contract documented in
-`planner-harness.md §4.3` (`INV-PLANNER-HARNESS-03`). The operator
+[`planner-harness.md §4.3`](planner-harness.md) (`INV-PLANNER-HARNESS-03`). The operator
 already pins the image by `oci_digest`, so the field is a trust-
 equivalent surface; the kernel does not introspect the rootfs.
 
@@ -1538,7 +1538,7 @@ boundary by amending plan.toml — only the operator can amend policy.toml
 ### `[custom_tool_limits]` (V2 addition)
 
 Operator-side hard caps and tunable thresholds for the operator-defined
-custom tools surface (canonical home `custom-tools.md`).
+custom tools surface (canonical home [`custom-tools.md`](custom-tools.md)).
 
 ```toml
 # policy.toml — V2 schema for [custom_tool_limits]
@@ -1571,7 +1571,7 @@ policy decides the absolute ceiling.
 ### `[audit.custom_tools]` (V2 addition)
 
 Optional per-deployment audit configuration for custom-tool payloads
-(canonical home `custom-tools.md §13.2`).
+(canonical home [`custom-tools.md §13.2`](custom-tools.md)).
 
 ```toml
 # policy.toml — V2 schema for [audit.custom_tools]
@@ -1594,7 +1594,7 @@ V2 retains payloads indefinitely; V3 audit-retention lifecycle
 ### `[orchestrator]` (V2 addition)
 
 The Orchestrator role is kernel-managed invisible infrastructure per
-`INV-PLANNER-HARNESS-06` (`planner-harness.md §4.8`). Operators
+`INV-PLANNER-HARNESS-06` ([`planner-harness.md §4.8`](planner-harness.md)). Operators
 **cannot** declare Orchestrator profiles, tasks, NNSPs, custom tools,
 or images. The only operator-controlled inputs to Orchestrator
 behavior are three orthogonal knobs in this policy section.
@@ -1624,7 +1624,7 @@ fallback_behavior = "attempt_in_order"
 
 | Field | Default | Purpose |
 |---|---|---|
-| `provider_alias` | `"orchestrator_default"` (must resolve to an entry in `[provider_aliases]`) | Selects which provider chain the Orchestrator uses for inference. The default name was renamed from V1 `"fast_low_cost"` after the workload analysis in `provider-model-selection.md §3.1` showed the historical "cheap-and-fast" framing was wrong on both axes — the Orchestrator's per-initiative cost saving from a haiku-tier model is dwarfed by the cost of one botched merge sequencing decision. V1 policies using the old name still load with `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED` recommending rename. Operators who want a frontier model for Orchestrator reasoning (large-DAG initiatives, complex semantic merges) override per `provider-model-selection.md §6.2`. |
+| `provider_alias` | `"orchestrator_default"` (must resolve to an entry in `[provider_aliases]`) | Selects which provider chain the Orchestrator uses for inference. The default name was renamed from V1 `"fast_low_cost"` after the workload analysis in [`provider-model-selection.md §3.1`](provider-model-selection.md) showed the historical "cheap-and-fast" framing was wrong on both axes — the Orchestrator's per-initiative cost saving from a haiku-tier model is dwarfed by the cost of one botched merge sequencing decision. V1 policies using the old name still load with `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED` recommending rename. Operators who want a frontier model for Orchestrator reasoning (large-DAG initiatives, complex semantic merges) override per [`provider-model-selection.md §6.2`](provider-model-selection.md). |
 | `max_token_budget_per_initiative` | `1_000_000` | Hard ceiling on cumulative tokens consumed by the Orchestrator session for a single initiative. When reached, the Orchestrator session pauses with a `TokenLimitApproaching` alert and waits for operator action (operator may grant additional budget via the existing escalation mechanism). |
 | `all_merges_require_approval` | `false` | When `true`, every `IntegrationMerge` submitted by the Orchestrator must be paired with an operator-approved `EscalationRequest:MergeAuthorization` (a new escalation class that exists solely for this knob). Useful for high-trust deployments that want a human in the loop on all main-branch advances even when `[plan.protected_paths]` does not require it. |
 
@@ -1639,7 +1639,7 @@ does NOT exist; per-initiative Orchestrator tuning is impossible by
 design. Per-initiative *guidance* (free-form prose) is supplied via
 `[plan.initiative] description`, which the Orchestrator reads via
 its KSB as `[KERNEL: INITIATIVE GUIDANCE]` (per
-`kernel-mechanics-prompt.md §3.2`). This is the only operator-controlled
+[`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md)). This is the only operator-controlled
 instruction surface available within an Orchestrator session.
 
 ---
@@ -1663,7 +1663,7 @@ max_artifact_count  = 200             # default; hard ceiling 1024
 | Field | Default | Hard ceiling | Purpose |
 |---|---|---|---|
 | `max_artifact_bytes` | `1_048_576` (1 MiB) | `67_108_864` (64 MiB) | Maximum byte length of a single bundle artifact. `plan.toml` itself is one artifact; any future host-path-typed field contributes additional artifacts. Exceeding the cap → `FAIL_PLAN_BUNDLE_ARTIFACT_TOO_LARGE`. |
-| `max_bundle_bytes` | `10_485_760` (10 MiB) | `134_217_728` (128 MiB) | Maximum total byte length across all artifacts in a single bundle. The bundle is stored verbatim as an immutable SQLite blob (`plan-bundle-sealing.md §8.2`); this cap bounds the per-initiative kernel-store footprint. Exceeding → `FAIL_PLAN_BUNDLE_TOO_LARGE`. |
+| `max_bundle_bytes` | `10_485_760` (10 MiB) | `134_217_728` (128 MiB) | Maximum total byte length across all artifacts in a single bundle. The bundle is stored verbatim as an immutable SQLite blob ([`plan-bundle-sealing.md §8.2`](plan-bundle-sealing.md)); this cap bounds the per-initiative kernel-store footprint. Exceeding → `FAIL_PLAN_BUNDLE_TOO_LARGE`. |
 | `max_artifact_count` | `200` | `1024` | Maximum number of artifacts in a single bundle. Bounds the SQL-side per-initiative row count in `plan_bundle_artifacts`. Exceeding → `FAIL_PLAN_BUNDLE_TOO_MANY_ARTIFACTS`. |
 
 **Lowering vs. raising.** Operators MAY lower any cap below the
@@ -1684,7 +1684,7 @@ release, not a policy change.
 **Defensive kernel-side enforcement.** The CLI is the normative
 enforcement point — a well-behaved CLI never sends an oversize
 bundle. The kernel re-checks all three caps on
-`OperatorRequest::CreateInitiative` (`plan-bundle-sealing.md §7.3`)
+`OperatorRequest::CreateInitiative` ([`plan-bundle-sealing.md §7.3`](plan-bundle-sealing.md))
 to defend against custom or malicious CLIs that bypass the
 client-side checks.
 
@@ -1701,7 +1701,7 @@ deliberately removes.
 
 The defaultable per-role alias chains consumed by `raxis-cli plan
 prepare` per `operator-ergonomics.md §5` and
-`provider-model-selection.md §7`. Each `[provider_aliases_defaults.<role>]`
+[`provider-model-selection.md §7`](provider-model-selection.md). Each `[provider_aliases_defaults.<role>]`
 entry tells `plan prepare` what to fill into `plan.toml
 [provider_aliases.<role>]` when the operator omits the section.
 
@@ -1726,12 +1726,12 @@ fallback_behavior = "attempt_in_order"
 | Field | Default | Purpose |
 |---|---|---|
 | `[provider_aliases_defaults.<role>] chain` | (none; absence disables defaulting for that role) | The fallback chain `plan prepare` fills into `plan.toml [provider_aliases.<role>]` when the operator's plan omits the section. Recognized role names in V2 are `reviewer` and `executor`; other names produce `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE`. |
-| `[provider_aliases_defaults.<role>] fallback_behavior` | `"attempt_in_order"` | Same semantics as `plan.toml [provider_aliases.<name>] fallback_behavior` per `provider-failure-handling.md §3.2`. Only `"attempt_in_order"` is valid in V2. |
+| `[provider_aliases_defaults.<role>] fallback_behavior` | `"attempt_in_order"` | Same semantics as `plan.toml [provider_aliases.<name>] fallback_behavior` per [`provider-failure-handling.md §3.2`](provider-failure-handling.md). Only `"attempt_in_order"` is valid in V2. |
 
-**Validation at policy load** (per `provider-model-selection.md §7.2`):
+**Validation at policy load** (per [`provider-model-selection.md §7.2`](provider-model-selection.md)):
 
 1. Every model in `chain` must appear in `[providers] permitted_models` (per `INV-PROVIDER-01`); otherwise `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL`.
-2. Every distinct provider referenced in `chain` must have at least one `[[providers.credentials]]` entry; otherwise `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL`. The rationale: a chain entry whose provider has no configured credential will be silently skipped at every alias resolution (per `provider-failure-handling.md §4.1`), so declaring it as a default just delays the failure to a confusing place.
+2. Every distinct provider referenced in `chain` must have at least one `[[providers.credentials]]` entry; otherwise `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL`. The rationale: a chain entry whose provider has no configured credential will be silently skipped at every alias resolution (per [`provider-failure-handling.md §4.1`](provider-failure-handling.md)), so declaring it as a default just delays the failure to a confusing place.
 3. `chain` must be non-empty; otherwise `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN`.
 4. `fallback_behavior` must be `"attempt_in_order"`; otherwise `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR`.
 
@@ -1743,7 +1743,7 @@ own authoring path; defaulting it through the
 the same target and invite drift. The Orchestrator's chain is
 declared inline in `policy.toml [provider_aliases.orchestrator_default]`
 (or whatever alias name the operator picked); the `setup wizard`
-generates this directly per `provider-model-selection.md §9.3`.
+generates this directly per [`provider-model-selection.md §9.3`](provider-model-selection.md).
 
 **Why this is in `policy.toml`, not `plan.toml`:** alias defaults
 are a deployment-wide property (every plan on this deployment
@@ -1801,7 +1801,7 @@ omits `vm_image` is rejected with `FAIL_VM_IMAGE_NOT_PERMITTED`. This
 matches the V1 behaviour and preserves it for operators who never
 want kernel-side image defaulting.
 
-**Cross-reference:** `planner-harness.md §10.6` describes the
+**Cross-reference:** [`planner-harness.md §10.6`](planner-harness.md) describes the
 canonical `raxis-executor-starter` image manifest that the typical
 deployment will reference here.
 
@@ -1810,7 +1810,7 @@ deployment will reference here.
 ### `[token_policy_defaults]` (V2 addition)
 
 Per-role default token budgets consumed by `raxis-cli plan prepare`
-per `operator-ergonomics.md §4.2` and `§18.2`. When an operator omits
+per [`operator-ergonomics.md §4.2`](operator-ergonomics.md) and `§18.2`. When an operator omits
 `[plan.tasks.<id>.token_policy]` on a task, `plan prepare` fills it
 with the per-role defaults from this section.
 
@@ -1852,7 +1852,7 @@ alerts on routine tasks).
 ### `[default_protected_paths]` (V2 addition)
 
 Default paths protected from agent-driven edits, consumed by
-`raxis-cli plan prepare` per `operator-ergonomics.md §4.2` and `§18.3`.
+`raxis-cli plan prepare` per [`operator-ergonomics.md §4.2`](operator-ergonomics.md) and `§18.3`.
 `plan prepare` takes the union of this list and the operator's
 `[plan.protected_paths]`, deduplicated.
 
@@ -1918,7 +1918,7 @@ auto_inject_symbol_index  = true    # default; structural fix for the Pure-Stati
 | Field | Default | Purpose |
 |---|---|---|
 | `auto_upgrade_defaults` | `false` | When `true`, `raxis-cli plan prepare` silently updates default-value drift instead of failing with `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`. The annotation version stamp is bumped to the current CLI version. Production deployments leave this `false`; dev deployments may set it `true` for frictionless iteration. |
-| `auto_inject_symbol_index` | `true` | When `true`, `raxis-cli plan prepare` auto-injects a `symbol_index` verifier (using the kernel-canonical `raxis-verifier-symbol-index` image per `verifier-processes.md §14`) into every Executor task whose touched paths include source files. Operators who want a different symbol-extraction tool, or who don't want auto-inject, set `false`. The plan-author can suppress per-task with `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from `planner-harness.md §4.1`); this policy knob controls the *default* behavior. Per `verifier-processes.md §14.2`, the symbol-index image is structural for the Pure-Static Reviewer; the default is `true` to convert `WARN_REVIEWER_MISSING_SYMBOL_INDEX` from a default-state warning into "yes, by default." |
+| `auto_inject_symbol_index` | `true` | When `true`, `raxis-cli plan prepare` auto-injects a `symbol_index` verifier (using the kernel-canonical `raxis-verifier-symbol-index` image per [`verifier-processes.md §14`](verifier-processes.md)) into every Executor task whose touched paths include source files. Operators who want a different symbol-extraction tool, or who don't want auto-inject, set `false`. The plan-author can suppress per-task with `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from [`planner-harness.md §4.1`](planner-harness.md)); this policy knob controls the *default* behavior. Per [`verifier-processes.md §14.2`](verifier-processes.md), the symbol-index image is structural for the Pure-Static Reviewer; the default is `true` to convert `WARN_REVIEWER_MISSING_SYMBOL_INDEX` from a default-state warning into "yes, by default." |
 
 **Why a policy knob, not a CLI flag.** The decision "should
 default-value drift be silent or loud?" is a deployment-wide policy
@@ -1933,7 +1933,7 @@ upgrades pass `--upgrade-defaults` to `plan prepare` directly.
 
 Per-language verifier-image alias mapping consumed by `raxis-cli plan
 prepare` for the `image = "@<lang>"` shortcut (per
-`verifier-processes.md §14.5`). Lets plan authors write
+[`verifier-processes.md §14.5`](verifier-processes.md)). Lets plan authors write
 `image = "@rust"` instead of the full image alias; `plan prepare`
 resolves through this table at prepare-time, getting the operator's
 preferred image alias filled in with a `# @raxis-default v0.4.0`
@@ -1951,7 +1951,7 @@ go     = "raxis-verifier-go-starter"
 
 | Field | Type | Default | Purpose |
 |---|---|---|---|
-| `[default_verifier_images].<language>` | string (image alias resolving to `[[vm_images]]`) | `setup wizard` populates per the language stacks the operator selected at install (per `operator-ergonomics.md §16.3`) | When a verifier declaration writes `image = "@<language>"`, `plan prepare` substitutes the alias from this table. Operators who want to use their own custom image for a language (e.g., a fork of `raxis-verifier-rust-starter` with extra crates) override the value here. |
+| `[default_verifier_images].<language>` | string (image alias resolving to `[[vm_images]]`) | `setup wizard` populates per the language stacks the operator selected at install (per [`operator-ergonomics.md §16.3`](operator-ergonomics.md)) | When a verifier declaration writes `image = "@<language>"`, `plan prepare` substitutes the alias from this table. Operators who want to use their own custom image for a language (e.g., a fork of `raxis-verifier-rust-starter` with extra crates) override the value here. |
 
 **Validation at policy load:**
 
@@ -1977,7 +1977,7 @@ specific image continue to write the full alias verbatim; the
 ### `[[integration_merge_verifiers]]` (V2 addition)
 
 Operator-global pre-`IntegrationMerge` verifier gates per
-`verifier-processes.md §15.2`. Mirrors `[[plan.integration_merge_verifiers]]`
+[`verifier-processes.md §15.2`](verifier-processes.md). Mirrors `[[plan.integration_merge_verifiers]]`
 in `plan.toml` but is operator-authored and operator-signed; cannot
 be downgraded to `warn_only` by any plan; composes with environment
 binding via `required_for_environments`.
@@ -2007,9 +2007,9 @@ required_for_environments = ["production"]                 # composes with envir
 | `command` | Required | Shell command executed by `raxis-verifier` PID-1 via `sh -lc` inside the verifier VM | Non-empty |
 | `timeout` | Required | Wall-clock timeout, parsed as a duration string | ≥ 5 seconds and ≤ kernel hard cap (`max_verifier_timeout_seconds`) |
 | `on_failure` | Required | Failure routing | MUST be `"block_merge"` (operator-side declarations cannot be downgraded to `warn_only`); `"block_review"` is rejected per `FAIL_VERIFIER_INVALID_ON_FAILURE` |
-| `applies_to` | Optional | Scope filter per `verifier-processes.md §16.3` | `"all"` (default) \| `"task_set"` \| `"last"` |
+| `applies_to` | Optional | Scope filter per [`verifier-processes.md §16.3`](verifier-processes.md) | `"all"` (default) \| `"task_set"` \| `"last"` |
 | `task_set` | Required if `applies_to = "task_set"` | Array of task IDs whose presence in `merged_task_ids` triggers this verifier | All entries must be syntactically valid task IDs (resolution against the plan happens at runtime, since policy is plan-agnostic) |
-| `required_for_environments` | Optional | Bind to environment-access-control framework | All entries must resolve to declared `[environments.<label>]` per `environment-access-control.md §5b`; otherwise `FAIL_POLICY_ENV_LABEL_UNDECLARED` |
+| `required_for_environments` | Optional | Bind to environment-access-control framework | All entries must resolve to declared `[environments.<label>]` per [`environment-access-control.md §5b`](environment-access-control.md); otherwise `FAIL_POLICY_ENV_LABEL_UNDECLARED` |
 | `artifact` | Optional | Absolute path inside verifier VM whose contents stage into `staging/merge/<integration_merge_id>/<verifier_name>/` | Must start with `/raxis/`; max 256 chars |
 | `artifact_max_bytes` | Optional | Cap on staged artifact size | Default 1 MiB; max 64 MiB |
 | `env` | Optional | Additional environment variables | `RAXIS_*` keys forbidden; max 32 entries; max 16 KiB total |
@@ -2019,7 +2019,7 @@ required_for_environments = ["production"]                 # composes with envir
 operator-declared (signed in the policy bundle). They cannot be
 downgraded by any plan. A plan-author who wants to add their own
 pre-merge gates uses `[[plan.integration_merge_verifiers]]` in
-`plan.toml` (per `verifier-processes.md §15.1`). Both surfaces fire
+`plan.toml` (per [`verifier-processes.md §15.1`](verifier-processes.md)). Both surfaces fire
 on the same merge attempt; the union is evaluated by Check 5d.
 
 **Why operator-side declarations are `block_merge` only.**
@@ -2398,20 +2398,20 @@ behavior diverges from the plan's stated intent.
 - [ ] Implement policy-floor enforcement for push approval in initiative activation:
       effective_require_push_approval = plan.require_push_approval || policy.require_push_approval_minimum
 - [ ] Update `raxis plan approve` output format: warning blocks with plan_value / kernel_value
-- [ ] V2 plan-admission additions (per `planner-harness.md §11.2` + `verifier-processes.md §14.1`):
+- [ ] V2 plan-admission additions (per [`planner-harness.md §11.2`](planner-harness.md) + [`verifier-processes.md §14.1`](verifier-processes.md)):
       - Reject Reviewer tasks with any image field → `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED`
       - Reject Reviewer tasks declaring `path_allowlist` (any value) → `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` (per `INV-PLANNER-HARNESS-01` extension)
-      - Reject Executor tasks with no `path_allowlist` field at all → `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` (per `operator-ergonomics.md §4.5`)
+      - Reject Executor tasks with no `path_allowlist` field at all → `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` (per [`operator-ergonomics.md §4.5`](operator-ergonomics.md))
       - Reject Executor tasks with `path_allowlist = []` and no `# @raxis-explicit no-write-acknowledged` annotation → `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`
-      - Reject `path_allowlist` entries containing glob characters, absolute paths, or `..` → `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { task_id, entry, reason }` (per `v2-deep-spec.md §6` table 4)
-      - Annotation parser MUST scan trailing comments on the value line AND the comment line immediately above the value line (operator may write either form); the comment-detection logic is the same one `plan prepare` uses for `# @raxis-default vX.Y.Z` annotations per `operator-ergonomics.md §4.3`
+      - Reject `path_allowlist` entries containing glob characters, absolute paths, or `..` → `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { task_id, entry, reason }` (per [`v2-deep-spec.md §6`](v2-deep-spec.md) table 4)
+      - Annotation parser MUST scan trailing comments on the value line AND the comment line immediately above the value line (operator may write either form); the comment-detection logic is the same one `plan prepare` uses for `# @raxis-default vX.Y.Z` annotations per [`operator-ergonomics.md §4.3`](operator-ergonomics.md)
       - Reject tasks whose vm_image's `role_restriction` lacks the task's role → `FAIL_VM_IMAGE_ROLE_RESTRICTION_MISMATCH`
       - Reject tasks whose vm_image's introspected guest kernel < 5.14 → `FAIL_VM_GUEST_KERNEL_TOO_OLD`
       - Reject `[[verifiers]]` with empty `command` → `FAIL_VERIFIER_COMMAND_REQUIRED`
       - Reject `[[verifiers]]` with `name` collision within a task → `FAIL_VERIFIER_NAME_COLLISION`
       - Reject `[[verifiers]]` with `timeout > max_verifier_timeout_seconds` → `FAIL_VERIFIER_TIMEOUT_EXCEEDS_HARD_CAP`
       - Reject `[[verifiers]]` with `artifact_max_bytes > max_artifact_bytes` → `FAIL_VERIFIER_ARTIFACT_CAP_EXCEEDS_HARD_CAP`
-      - Reject per-task `[[verifiers]]` with `on_failure = "block_merge"` → `FAIL_VERIFIER_INVALID_ON_FAILURE` (per-task verifiers gate Reviewer activation only; pre-merge gating uses `[[plan.integration_merge_verifiers]]` per `verifier-processes.md §15.1`)
+      - Reject per-task `[[verifiers]]` with `on_failure = "block_merge"` → `FAIL_VERIFIER_INVALID_ON_FAILURE` (per-task verifiers gate Reviewer activation only; pre-merge gating uses `[[plan.integration_merge_verifiers]]` per [`verifier-processes.md §15.1`](verifier-processes.md))
       - Reject `[[vm_images]]` whose `role_restriction` includes `"Reviewer"` at policy load → `FAIL_POLICY_INVALID_ROLE_RESTRICTION`
       - Reject `[[vm_images]]` whose alias is `"raxis-verifier-symbol-index"` (reserved per `INV-VERIFIER-12`) → `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`
       - Implement `[[vm_images]] role_restriction` schema field (required; non-empty array)
@@ -2421,31 +2421,31 @@ behavior diverges from the plan's stated intent.
 - [ ] V2 runtime additions:
       - Implement runtime check for canonical Reviewer image SHA-256 at every Reviewer activation → `FAIL_REVIEWER_IMAGE_DIGEST_MISMATCH` + `SecurityViolationDetected` audit
       - Implement runtime check for canonical Orchestrator image SHA-256 at every Orchestrator activation (per initiative) → `FAIL_ORCHESTRATOR_IMAGE_DIGEST_MISMATCH` + `SecurityViolationDetected` audit
-      - Implement runtime check for canonical `raxis-verifier-symbol-index` image SHA-256 at every symbol-index verifier activation → `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` + `SecurityViolationDetected` audit; halts further verifier spawns until `raxis doctor canonical-images` succeeds (per `verifier-processes.md §14.4`)
-      - Implement `FAIL_DECLARED_ARTIFACT_MISSING` runtime path per `verifier-processes.md §6.3`
-      - Implement `FAIL_VERIFIER_BLOCKED` Executor-facing return on `block_review` failure per `verifier-processes.md §5.2`
-- [ ] V2 pre-`IntegrationMerge` verifier additions (per `verifier-processes.md §15` + `integration-merge.md §4 Check 5d`):
-      - Add `[[integration_merge_verifiers]]` operator-global section to `PolicyBundle` struct per `policy-plan-authority.md §4 [[integration_merge_verifiers]]`
+      - Implement runtime check for canonical `raxis-verifier-symbol-index` image SHA-256 at every symbol-index verifier activation → `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH` + `SecurityViolationDetected` audit; halts further verifier spawns until `raxis doctor canonical-images` succeeds (per [`verifier-processes.md §14.4`](verifier-processes.md))
+      - Implement `FAIL_DECLARED_ARTIFACT_MISSING` runtime path per [`verifier-processes.md §6.3`](verifier-processes.md)
+      - Implement `FAIL_VERIFIER_BLOCKED` Executor-facing return on `block_review` failure per [`verifier-processes.md §5.2`](verifier-processes.md)
+- [ ] V2 pre-`IntegrationMerge` verifier additions (per [`verifier-processes.md §15`](verifier-processes.md) + [`integration-merge.md §4 Check 5d`](integration-merge.md)):
+      - Add `[[integration_merge_verifiers]]` operator-global section to `PolicyBundle` struct per [`policy-plan-authority.md §4 [[integration_merge_verifiers]]`](policy-plan-authority.md)
       - Validation at policy load: enforce all field constraints (name uniqueness, image resolution + `Verifier` role_restriction, timeout and artifact-cap bounds, `on_failure = "block_merge"` only)
       - Add `[[plan.integration_merge_verifiers]]` plan-side section to `PlanBundle` struct
       - Validation at `approve_plan` (admission step 3.7): plan-source `on_failure ∈ {"block_merge", "warn_only"}`; cross-source name collision rejects plan-side with `FAIL_VERIFIER_NAME_COLLISION`
       - `applies_to` parsing: `"all"` (default) | `"task_set"` (with `task_set` validated against declared `[[plan.tasks]]`) | `"last"`
-      - `required_for_environments` (operator-side only) entries resolve to declared `[environments.<label>]` per `environment-access-control.md §5b`
-      - Implement matching algorithm at Check 5d.1 per `integration-merge.md §4 Check 5d.1` (cross-spec)
-      - Implement candidate-merge-tree materialization at Check 5d.2 per `integration-merge.md §11.10`
+      - `required_for_environments` (operator-side only) entries resolve to declared `[environments.<label>]` per [`environment-access-control.md §5b`](environment-access-control.md)
+      - Implement matching algorithm at Check 5d.1 per [`integration-merge.md §4 Check 5d.1`](integration-merge.md) (cross-spec)
+      - Implement candidate-merge-tree materialization at Check 5d.2 per [`integration-merge.md §11.10`](integration-merge.md)
       - Implement gating algorithm at Check 5d.4; emit `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED` and `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`
       - Add `FAIL_VERIFIER_INVALID_ON_FAILURE`, `FAIL_VERIFIER_TASK_SET_EMPTY`, `FAIL_VERIFIER_TASK_SET_UNKNOWN_TASK`, `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`, `FAIL_CANDIDATE_MERGE_COMPUTATION_FAILED`, `FAIL_CANONICAL_VERIFIER_IMAGE_DIGEST_MISMATCH`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME` to `raxis-types::PlannerErrorCode`
-- [ ] V2 `[default_verifier_images]` additions (per `policy-plan-authority.md §4`):
+- [ ] V2 `[default_verifier_images]` additions (per [`policy-plan-authority.md §4`](policy-plan-authority.md)):
       - Add `[default_verifier_images]` policy section to `PolicyBundle` struct
       - Validation at policy load: each value resolves to a `[[vm_images]]` entry with `role_restriction` containing `"Verifier"` → otherwise `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`; unrecognized language keys → `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE`
-      - `setup wizard` populates entries per detected language stacks (per `operator-ergonomics.md §16.3` phase 6)
+      - `setup wizard` populates entries per detected language stacks (per [`operator-ergonomics.md §16.3`](operator-ergonomics.md) phase 6)
       - `raxis-cli plan prepare` resolves `image = "@<language>"` shortcuts in `[[plan.tasks.<id>.verifiers]]` and `[[plan.integration_merge_verifiers]]` against this table; substitutes the alias with `# @raxis-default v0.4.0` annotation
-- [ ] V2 `[prepare]` policy knob additions (per `policy-plan-authority.md §4 [prepare]`):
+- [ ] V2 `[prepare]` policy knob additions (per [`policy-plan-authority.md §4 [prepare]`](policy-plan-authority.md)):
       - Add `auto_inject_symbol_index: bool` field to `[prepare]` table; default `true`
       - `raxis-cli plan prepare` reads the knob; when `true`, auto-injects a `symbol_index` verifier (using `image = "raxis-verifier-symbol-index"`) into every Executor task whose touched paths include source files
-      - Suppression hook: `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from `planner-harness.md §4.1`) prevents auto-inject for that task
-      - `raxis doctor canonical-images` (per `system-requirements.md §11`) verifies the `raxis-verifier-symbol-index-<kernel_version>.img` digest matches the kernel-binary-embedded canonical digest
-- [ ] V2 Orchestrator admission additions (per `planner-harness.md §4.7`, §4.8):
+      - Suppression hook: `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from [`planner-harness.md §4.1`](planner-harness.md)) prevents auto-inject for that task
+      - `raxis doctor canonical-images` (per [`system-requirements.md §11`](system-requirements.md)) verifies the `raxis-verifier-symbol-index-<kernel_version>.img` digest matches the kernel-binary-embedded canonical digest
+- [ ] V2 Orchestrator admission additions (per [`planner-harness.md §4.7`](planner-harness.md), §4.8):
       - Reject `[[plan.tasks.<id>]] role = "Orchestrator"` → `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`
       - Reject `[[profiles.<name>]] inherits_from = "Orchestrator"` → `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`
       - Reject `[[profiles.<name>]]` whose effective role is `Orchestrator` → `FAIL_ORCHESTRATOR_PROFILE_NOT_ALLOWED`
@@ -2453,12 +2453,12 @@ behavior diverges from the plan's stated intent.
       - Reject `[orchestrator] provider_alias` not resolving to an entry in `[provider_aliases]` at policy load → `FAIL_POLICY_ORCHESTRATOR_PROVIDER_ALIAS_UNRESOLVED`
       - Add `[orchestrator]` section to `PolicyBundle` struct with fields `provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`
       - Implement Orchestrator session auto-creation at initiative admission (no operator-declared profile required)
-      - Implement `[KERNEL: INITIATIVE GUIDANCE]` injection from `[plan.initiative].description` into the kernel-pinned Orchestrator NNSP per `kernel-mechanics-prompt.md §3.2`
+      - Implement `[KERNEL: INITIATIVE GUIDANCE]` injection from `[plan.initiative].description` into the kernel-pinned Orchestrator NNSP per [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md)
       - When `[orchestrator] all_merges_require_approval = true`, every `IntegrationMerge` admitted by the kernel paths through the existing escalation mechanism (new escalation class `MergeAuthorization`); the Orchestrator NNSP §3.2 IntegrationMerge protocol is unchanged — the escalation requirement is enforced at kernel admission, not in-VM
-- [ ] V2 custom-tools admission additions (per `custom-tools.md §3`, §4, §5, §8, §9, §10):
+- [ ] V2 custom-tools admission additions (per [`custom-tools.md §3`](custom-tools.md), §4, §5, §8, §9, §10):
       - Plan parser accepts `[[profiles.<name>.custom_tool]]` array-of-tables under each profile
       - Plan parser rejects `[[plan.tasks.<id>.custom_tool]]` → `FAIL_CUSTOM_TOOL_TASK_LEVEL_NOT_ALLOWED`
-      - Vendored Draft-07 schema validator implementing the accepted-keyword set in `custom-tools.md §4.1` and rejecting all keywords in §4.2
+      - Vendored Draft-07 schema validator implementing the accepted-keyword set in [`custom-tools.md §4.1`](custom-tools.md) and rejecting all keywords in §4.2
       - Reserved-name list mirrored from kernel binary; `raxis admin reserved-tool-names` CLI exposes it
       - Inheritance walker computes effective custom-tool set; emits `FAIL_PLAN_PROFILE_INHERITANCE_CYCLE`, `FAIL_CUSTOM_TOOL_NAME_COLLISION`, `FAIL_CUSTOM_TOOL_NAME_RESERVED` as appropriate
       - Reviewer-rooted profiles with non-empty effective set → `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED` (`INV-PLANNER-HARNESS-04`)
@@ -2466,54 +2466,54 @@ behavior diverges from the plan's stated intent.
       - Per-tool timeout cap → `FAIL_CUSTOM_TOOL_TIMEOUT_EXCEEDS_HARD_CAP` against `policy.toml [custom_tool_limits].max_custom_tool_timeout_seconds`
       - Operator `env` collision against kernel-reserved keys → `FAIL_CUSTOM_TOOL_ENV_RESERVED_KEY`
       - Effective set count > 25 → `FAIL_CUSTOM_TOOL_COUNT_EXCEEDED`
-      - Token-budget projection via `raxis-gateway` `tokenize` admin interface; emit `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` and `FAIL_CUSTOM_TOOL_SCHEMA_BUDGET_EXCEEDED` per `custom-tools.md §9.3`
+      - Token-budget projection via `raxis-gateway` `tokenize` admin interface; emit `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` and `FAIL_CUSTOM_TOOL_SCHEMA_BUDGET_EXCEEDED` per [`custom-tools.md §9.3`](custom-tools.md)
       - Add `[custom_tool_limits]` and `[audit.custom_tools]` sections to `PolicyBundle` struct
 - [ ] V2 custom-tools runtime additions:
       - Per-invocation cgroup `/sys/fs/cgroup/raxis/customtool-<seq>/` lifecycle in the planner harness
       - Schema-validate LLM input before script invocation; canonical-JSON stdin write
-      - Stdout / stderr cap enforcement with truncation sentinels per `custom-tools.md §6.4`, §6.5
-      - Timeout via `cgroup.kill` per `custom-tools.md §7.2`
-      - `CustomToolInvoked` audit event per `custom-tools.md §12.1`
+      - Stdout / stderr cap enforcement with truncation sentinels per [`custom-tools.md §6.4`](custom-tools.md), §6.5
+      - Timeout via `cgroup.kill` per [`custom-tools.md §7.2`](custom-tools.md)
+      - `CustomToolInvoked` audit event per [`custom-tools.md §12.1`](custom-tools.md)
       - `[audit.custom_tools].archive_full_payloads` payload store path
-      - `raxis log --filter kind=CustomToolInvoked` view per `custom-tools.md §12.3`
-- [ ] V2 environment-binding additions (per `environment-access-control.md`):
-      - Implement `[environments.<label>]` table parsing and validation per `environment-access-control.md §5b`; emit `FAIL_POLICY_ENV_LABEL_INVALID`, `FAIL_POLICY_ENV_UNKNOWN_FIELD`, `FAIL_POLICY_ENV_LABEL_UNDECLARED`, `WARN_ENVIRONMENT_RESERVED_FIELD_SET` at policy load
-      - Implement `compute_task_envs` per `environment-access-control.md §11.3` and `handle_same_cluster_conflation` per `§11.4`
-      - Add admission step 3.5 (env-binding consistency) per §5; runs only when the loaded policy declares at least one `[environments.<label>]`; no-op otherwise per `environment-access-control.md §1.5`
-      - Promote `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` per `environment-access-control.md §7`; the only escape hatch is per-environment `same_cluster_acknowledged = true` (§11.4)
-      - Emit `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` per `environment-access-control.md §11.7`; not bypassable by `--no-strict`
-      - Add `TaskEnvironmentBinding { task_id, binding, bound_via }` to `InitiativeCreated` audit event per `environment-access-control.md §11.9`
+      - `raxis log --filter kind=CustomToolInvoked` view per [`custom-tools.md §12.3`](custom-tools.md)
+- [ ] V2 environment-binding additions (per [`environment-access-control.md`](environment-access-control.md)):
+      - Implement `[environments.<label>]` table parsing and validation per [`environment-access-control.md §5b`](environment-access-control.md); emit `FAIL_POLICY_ENV_LABEL_INVALID`, `FAIL_POLICY_ENV_UNKNOWN_FIELD`, `FAIL_POLICY_ENV_LABEL_UNDECLARED`, `WARN_ENVIRONMENT_RESERVED_FIELD_SET` at policy load
+      - Implement `compute_task_envs` per [`environment-access-control.md §11.3`](environment-access-control.md) and `handle_same_cluster_conflation` per `§11.4`
+      - Add admission step 3.5 (env-binding consistency) per §5; runs only when the loaded policy declares at least one `[environments.<label>]`; no-op otherwise per [`environment-access-control.md §1.5`](environment-access-control.md)
+      - Promote `WARN_SAME_CLUSTER_NAMESPACE_ISOLATION` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION` per [`environment-access-control.md §7`](environment-access-control.md); the only escape hatch is per-environment `same_cluster_acknowledged = true` (§11.4)
+      - Emit `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments, sources }` per [`environment-access-control.md §11.7`](environment-access-control.md); not bypassable by `--no-strict`
+      - Add `TaskEnvironmentBinding { task_id, binding, bound_via }` to `InitiativeCreated` audit event per [`environment-access-control.md §11.9`](environment-access-control.md)
       - All `FAIL_TASK_ENVIRONMENT_INCONSISTENT`, `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION`, `FAIL_POLICY_ENV_*`, `WARN_ENVIRONMENT_RESERVED_FIELD_SET` codes registered in `raxis-types::PlannerErrorCode`
-      - `raxis-cli plan explain` (per `operator-ergonomics.md §9`) renders per-task binding ("Bound: production" / "Neutral" / "SameClusterAcknowledged")
-- [ ] V2 operator-ergonomics additions (per `operator-ergonomics.md`):
-      - Implement `[default_executor_image]` policy section per `operator-ergonomics.md §18.1`; validate at policy load → `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE`
+      - `raxis-cli plan explain` (per [`operator-ergonomics.md §9`](operator-ergonomics.md)) renders per-task binding ("Bound: production" / "Neutral" / "SameClusterAcknowledged")
+- [ ] V2 operator-ergonomics additions (per [`operator-ergonomics.md`](operator-ergonomics.md)):
+      - Implement `[default_executor_image]` policy section per [`operator-ergonomics.md §18.1`](operator-ergonomics.md); validate at policy load → `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE`
       - Implement `[token_policy_defaults.<role>]` policy section per §18.2
       - Implement `[default_protected_paths]` policy section per §18.3; union with operator-declared `[plan.protected_paths]` at `plan prepare` time
       - Implement `[prepare] auto_upgrade_defaults` policy knob per §18.4
-      - Implement `OperatorRequest::ProposeDefaults` IPC handler per `operator-ergonomics.md §5.3`; read-only on kernel state
-      - Implement `OperatorRequest::EstimateCost` IPC handler per `operator-ergonomics.md §11.3`
-      - Implement `OperatorRequest::DryRunAdmit` IPC handler per `operator-ergonomics.md §12.3`; runs full admission chain but does NOT seal the bundle
-      - Implement `OperatorRequest::SubscribeInitiative` and `KernelPush::InitiativeEvent` per `operator-ergonomics.md §13`
-      - Implement `OperatorRequest::DescribeInitiativePause` per `operator-ergonomics.md §14`
+      - Implement `OperatorRequest::ProposeDefaults` IPC handler per [`operator-ergonomics.md §5.3`](operator-ergonomics.md); read-only on kernel state
+      - Implement `OperatorRequest::EstimateCost` IPC handler per [`operator-ergonomics.md §11.3`](operator-ergonomics.md)
+      - Implement `OperatorRequest::DryRunAdmit` IPC handler per [`operator-ergonomics.md §12.3`](operator-ergonomics.md); runs full admission chain but does NOT seal the bundle
+      - Implement `OperatorRequest::SubscribeInitiative` and `KernelPush::InitiativeEvent` per [`operator-ergonomics.md §13`](operator-ergonomics.md)
+      - Implement `OperatorRequest::DescribeInitiativePause` per [`operator-ergonomics.md §14`](operator-ergonomics.md)
       - Add admission step 0e (defaultable-fields pre-check) per §5; emit `FAIL_PLAN_REQUIRES_PREPARE { missing_fields }` when defaultable fields are omitted AND policy declares defaults for them
-      - Implement `DefaultsProposed` and `DryRunAdmitted` audit events per `operator-ergonomics.md §19.2`; rate-limited per operator fingerprint
+      - Implement `DefaultsProposed` and `DryRunAdmitted` audit events per [`operator-ergonomics.md §19.2`](operator-ergonomics.md); rate-limited per operator fingerprint
       - All `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED`, `FAIL_POLICY_DEFAULT_*`, `FAIL_COST_ESTIMATE_*`, `FAIL_INITIATIVE_NOT_PAUSED` codes registered in `raxis-types::PlannerErrorCode`
-- [ ] V2 provider-model-selection additions (per `provider-model-selection.md`):
-      - Implement `[provider_aliases_defaults.<role>]` policy section parsing and validation per `provider-model-selection.md §7`
+- [ ] V2 provider-model-selection additions (per [`provider-model-selection.md`](provider-model-selection.md)):
+      - Implement `[provider_aliases_defaults.<role>]` policy section parsing and validation per [`provider-model-selection.md §7`](provider-model-selection.md)
       - Validation chain at policy load: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR`, `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE`, `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER`
       - Rename `[orchestrator] provider_alias` default value from V1 `"fast_low_cost"` to `"orchestrator_default"`; emit `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED` for V1-style policies that still use the old name
-      - Update `[orchestrator]` recommended chain to a mid-tier reasoning model with cross-provider fallback per `provider-model-selection.md §4`
-      - Extend `OperatorRequest::ProposeDefaults` handler (`operator-ergonomics.md §5.3`) to consume `[provider_aliases_defaults.<role>]` and fill `[provider_aliases.<role>]` entries into the augmented plan when absent (and when the corresponding profile does NOT declare its own `provider_alias`)
+      - Update `[orchestrator]` recommended chain to a mid-tier reasoning model with cross-provider fallback per [`provider-model-selection.md §4`](provider-model-selection.md)
+      - Extend `OperatorRequest::ProposeDefaults` handler ([`operator-ergonomics.md §5.3`](operator-ergonomics.md)) to consume `[provider_aliases_defaults.<role>]` and fill `[provider_aliases.<role>]` entries into the augmented plan when absent (and when the corresponding profile does NOT declare its own `provider_alias`)
       - All new `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes registered in `raxis-types::PlannerErrorCode`
-      - `raxis-cli setup wizard` phases 2–4 per `provider-model-selection.md §9`; per-key smoke test, on-disk credential write to `<data_dir>/providers/<provider>.toml` chmod 0600, auto-population of `[[providers.credentials]]`, `[providers] permitted_models`, `[orchestrator] provider_alias`, and `[provider_aliases_defaults.{reviewer,executor}]` per the §5.2 `auto_diversify` algorithm
+      - `raxis-cli setup wizard` phases 2–4 per [`provider-model-selection.md §9`](provider-model-selection.md); per-key smoke test, on-disk credential write to `<data_dir>/providers/<provider>.toml` chmod 0600, auto-population of `[[providers.credentials]]`, `[providers] permitted_models`, `[orchestrator] provider_alias`, and `[provider_aliases_defaults.{reviewer,executor}]` per the §5.2 `auto_diversify` algorithm
       - `raxis-cli setup wizard --no-diversify` and `--reset-chains` flags
       - `raxis-cli setup wizard --add-provider <id>` re-runs phases 2 + 4 only
-- [ ] V2 Plan Bundle Sealing additions (per `plan-bundle-sealing.md`):
-      - CLI: implement `raxis-cli submit plan <plan.toml> [--initiative-id <id>]` per `plan-bundle-sealing.md §4`
+- [ ] V2 Plan Bundle Sealing additions (per [`plan-bundle-sealing.md`](plan-bundle-sealing.md)):
+      - CLI: implement `raxis-cli submit plan <plan.toml> [--initiative-id <id>]` per [`plan-bundle-sealing.md §4`](plan-bundle-sealing.md)
       - CLI: remove `raxis-cli plan sign` command; reject the V1 `plan submit <id> <dir>` invocation at arg parse with hint
       - CLI: streaming artifact reads with `max_artifact_bytes + 1` cap to avoid OOM on oversize files
       - CLI: path-resolution visitor with V2-empty host-path field set (forward-compatibility hook)
-      - CLI: canonical encoding per `plan-bundle-sealing.md §3.2`; pin via `cli/tests/plan_bundle_canonical_roundtrip.rs`
+      - CLI: canonical encoding per [`plan-bundle-sealing.md §3.2`](plan-bundle-sealing.md); pin via `cli/tests/plan_bundle_canonical_roundtrip.rs`
       - CLI: failure messages include the **declared path** for path-related failures
       - Kernel: `OperatorRequest::CreateInitiative` decoder accepts ONLY the V2 wire shape; V1 shape rejected at decode
       - Kernel: full §5 admission sequence (steps 0a–0d) implemented in order with short-circuit on failure
@@ -2582,7 +2582,7 @@ behavior diverges from the plan's stated intent.
       - V2 Plan Bundle Sealing: per-artifact `sha256` mismatched → kernel rejects with `FAIL_PLAN_BUNDLE_ARTIFACT_HASH_MISMATCH`
       - V2 Plan Bundle Sealing: tampered first artifact name → `FAIL_PLAN_BUNDLE_FIRST_ARTIFACT_NOT_PLAN_TOML`
       - V2 Plan Bundle Sealing: signature minted by operator A; submission claims operator B → `FAIL_PLAN_SIGNATURE_INVALID`
-      - V2 Plan Bundle Sealing: signed by revoked key → `FAIL_KEY_COMPROMISED` (per `key-revocation.md`)
+      - V2 Plan Bundle Sealing: signed by revoked key → `FAIL_KEY_COMPROMISED` (per [`key-revocation.md`](key-revocation.md))
       - V2 Plan Bundle Sealing: V1-shape `CreateInitiative` IPC arrives → rejected at decode (`FAIL_PLAN_BUNDLE_DECODE_FAILED`)
       - V2 Plan Bundle Sealing: after admission, the operator deletes `plan.toml` from disk → `approve_plan` succeeds; KSB rendering succeeds; recovery succeeds; audit reconstruction succeeds (INV-INIT-06 strengthening)
       - V2 Plan Bundle Sealing: two initiatives with byte-identical bundles share a single `plan_bundles` row
@@ -2613,7 +2613,7 @@ behavior diverges from the plan's stated intent.
       - V2 environment-binding: policy with `[environments.beta]` and `[environments.production]`; plan task with both env-bound credentials → `FAIL_TASK_ENVIRONMENT_INCONSISTENT { task, environments: ["beta", "production"], sources: [...] }`
       - V2 environment-binding: same scenario with `--no-strict` → still fails (structural per INV-ENV-01)
       - V2 environment-binding: plan task with one env-bound credential and one neutral credential (no `environment` field on its `[[permitted_credentials]]` entry) → admitted as Bound(env); neutral credential contributes nothing
-      - V2 environment-binding: cross-env DAG split per `environment-access-control.md §11.5` (fetch_from_beta → publish_to_prod) → both tasks admitted; bindings recorded as Bound("beta") and Bound("production"); audit chain shows both
+      - V2 environment-binding: cross-env DAG split per [`environment-access-control.md §11.5`](environment-access-control.md) (fetch_from_beta → publish_to_prod) → both tasks admitted; bindings recorded as Bound("beta") and Bound("production"); audit chain shows both
       - V2 environment-binding: same-cluster (two `[[environment_gates]]` sharing hostname); neither env declares `same_cluster_acknowledged = true` → `FAIL_SAME_CLUSTER_NAMESPACE_ISOLATION`
       - V2 environment-binding: same-cluster, only one env declares `same_cluster_acknowledged = true` → still fails; FAIL message lists the unacknowledged env(s)
       - V2 environment-binding: same-cluster, all conflated envs declare `same_cluster_acknowledged = true` → URL contributes 0 labels; task binding determined by credentials alone
@@ -2621,9 +2621,9 @@ behavior diverges from the plan's stated intent.
       - V2 environment-binding: `[environments.beta] blast_radius = "high"` (reserved-for-V2.x) → policy loads with `WARN_ENVIRONMENT_RESERVED_FIELD_SET`; field has no kernel-side effect
       - V2 environment-binding: `[environments.beta] frobnitz = "x"` (unknown-not-reserved) → `FAIL_POLICY_ENV_UNKNOWN_FIELD`
       - V2 environment-binding: `[environments.Beta]` (uppercase) → `FAIL_POLICY_ENV_LABEL_INVALID`
-      - V2 environment-binding: Reviewer task → step 3.5 records Neutral; INV-ENV-01 trivially passes (cardinality 0 by structural prohibition per `environment-access-control.md §11.6`)
+      - V2 environment-binding: Reviewer task → step 3.5 records Neutral; INV-ENV-01 trivially passes (cardinality 0 by structural prohibition per [`environment-access-control.md §11.6`](environment-access-control.md))
       - V2 environment-binding: Orchestrator tasks (auto-created per `INV-PLANNER-HARNESS-06`) record Neutral; never bind to any environment
-      - V2 environment-binding: `InitiativeCreated` audit event includes `task_environment_bindings: [...]` for every admitted task per `environment-access-control.md §11.9`
+      - V2 environment-binding: `InitiativeCreated` audit event includes `task_environment_bindings: [...]` for every admitted task per [`environment-access-control.md §11.9`](environment-access-control.md)
       - V2 provider-model-selection: policy with `[provider_aliases_defaults.reviewer] chain = ["unpermitted:model"]` → policy load fails with `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL`
       - V2 provider-model-selection: policy default chain references `"google:gemini-2.5-pro"` but no `[[providers.credentials]] provider_id = "google"` → `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL`
       - V2 provider-model-selection: `[provider_aliases_defaults.reviewer] chain = []` → `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN`
@@ -2634,7 +2634,7 @@ behavior diverges from the plan's stated intent.
       - V2 provider-model-selection: re-running `plan prepare` on an already-prepared plan with unchanged policy default → no-op (idempotency)
       - V2 provider-model-selection: bumping `[provider_aliases_defaults.reviewer] chain` in policy → re-running `plan prepare` on previously-prepared plan → `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED { fields: ["provider_aliases.reviewer.chain"] }`
       - V2 provider-model-selection: profile declares `provider_alias = "frontend_dev"` → `plan prepare` does NOT fill `[provider_aliases.executor]` for tasks using that profile
-      - V2 provider-model-selection: `setup wizard` with single Anthropic key → generated chains match `provider-model-selection.md §4.1` exactly
+      - V2 provider-model-selection: `setup wizard` with single Anthropic key → generated chains match [`provider-model-selection.md §4.1`](provider-model-selection.md) exactly
       - V2 provider-model-selection: `setup wizard` with two providers → cross-role diversification per §4.2; Reviewer primary on the SECOND provider
       - V2 provider-model-selection: `setup wizard --no-diversify` with two providers → all primaries on the FIRST provider
       - V2 provider-model-selection: `setup wizard --add-provider openai` on existing single-Anthropic deployment → chains regenerate to two-provider layout

@@ -1,18 +1,18 @@
 # RAXIS V2 — VM Network Isolation Architecture
 
-> **Status:** V2 Specified — Tier1Tproxy deletion applied (`EgressTier::Tier1Tproxy` removed from the codebase; the only non-`None` tier shipped in V2 is `EgressTier::Mediated`, the Path A3 universal-airgap shape). Several mechanism sections in this spec describe the **pre-deletion** Tier1Tproxy shape and are marked **DEPRECATED — describes legacy mechanism** below; the canonical post-deletion contract lives in `airgap-architecture.md`. The Tier-1 admission policy (SNI hostname enforcement, allowlist semantics, audit-event surface) is unchanged and remains canonical here.
-> **Role in V2 unified egress:** This spec is the canonical home for **Tier 1 — Public / Unauthenticated egress**. Together with `credential-proxy.md` (Tier 2 — Authenticated egress), it replaces the previous `kernel-mediated-egress.md` (deprecated; preserved historically only).
+> **Status:** V2 Specified — Tier1Tproxy deletion applied (`EgressTier::Tier1Tproxy` removed from the codebase; the only non-`None` tier shipped in V2 is `EgressTier::Mediated`, the Path A3 universal-airgap shape). Several mechanism sections in this spec describe the **pre-deletion** Tier1Tproxy shape and are marked **DEPRECATED — describes legacy mechanism** below; the canonical post-deletion contract lives in [`airgap-architecture.md`](airgap-architecture.md). The Tier-1 admission policy (SNI hostname enforcement, allowlist semantics, audit-event surface) is unchanged and remains canonical here.
+> **Role in V2 unified egress:** This spec is the canonical home for **Tier 1 — Public / Unauthenticated egress**. Together with [`credential-proxy.md`](credential-proxy.md) (Tier 2 — Authenticated egress), it replaces the previous [`kernel-mediated-egress.md`](kernel-mediated-egress.md) (deprecated; preserved historically only).
 >
 > **Cross-references:**
-> - `credential-proxy.md §1b` — TCP vs HTTP proxy distinction
-> - `credential-proxy.md §12a` — VM↔host loopback plumbing (vsock-loopback bridge) that makes the stock `127.0.0.1:<port>` URLs the credential proxy stamps into the VM env block actually reach the host-bound proxies; backed by `INV-CRED-PROXY-VM-REACHABILITY-01` (the contract) and `INV-CRED-PROXY-VM-REACHABILITY-02` (every in-tree isolation backend implements the bridge fail-closed)
-> - `credential-proxy.md §13` — Intra-VM loopback and dev servers
-> - `credential-proxy.md` (full spec) — Tier-2 (authenticated) egress with HTTP-granular URL/method enforcement
-> - ~~`kernel-mediated-egress.md`~~ — DEPRECATED in V2 in favor of unified two-tier egress
-> - `environment-access-control.md §4` — *This section's `EgressRequest` admission order is V1-flavored; V2 uses two-tier network-layer enforcement and there is no `EgressRequest` intent. The spec needs a separate amendment to align.*
-> - `planner-harness.md §7` — V2 unified egress overview (this spec + `credential-proxy.md`)
-> - `custom-tools.md` — operator-defined custom tools. A custom-tool subprocess shares the planner VM's network namespace and is therefore subject to the same Tier 1 (tproxy SNI allowlist) and Tier 2 (credential proxy URL/method allowlist) enforcement as any other in-VM process. Custom tools introduce **no new authority surface** at the network layer; an HTTP call from a custom-tool script reaches the same tproxy / credential-proxy checks a `bash`-invoked HTTP call would.
-> - `extensibility-traits.md §3` — `IsolationBackend` trait. This spec describes the Tier-1 networking contract every conformant isolation backend MUST satisfy: VM with no virtio-net interface to the host, all egress routed through `raxis-tproxy` running on a kernel-side network namespace, SNI inspection enforced. The V2 default `FirecrackerIsolation` and `AppleVirtualizationIsolation` impls both meet this; future enclave-based isolation impls (TDX/SEV-SNP) MUST too, verified by the `IsolationBackend` conformance kit's network-isolation test fixture.
+> - [`credential-proxy.md §1b`](credential-proxy.md) — TCP vs HTTP proxy distinction
+> - [`credential-proxy.md §12a`](credential-proxy.md) — VM↔host loopback plumbing (vsock-loopback bridge) that makes the stock `127.0.0.1:<port>` URLs the credential proxy stamps into the VM env block actually reach the host-bound proxies; backed by `INV-CRED-PROXY-VM-REACHABILITY-01` (the contract) and `INV-CRED-PROXY-VM-REACHABILITY-02` (every in-tree isolation backend implements the bridge fail-closed)
+> - [`credential-proxy.md §13`](credential-proxy.md) — Intra-VM loopback and dev servers
+> - [`credential-proxy.md`](credential-proxy.md) (full spec) — Tier-2 (authenticated) egress with HTTP-granular URL/method enforcement
+> - ~~[`kernel-mediated-egress.md`](kernel-mediated-egress.md)~~ — DEPRECATED in V2 in favor of unified two-tier egress
+> - [`environment-access-control.md §4`](environment-access-control.md) — *This section's `EgressRequest` admission order is V1-flavored; V2 uses two-tier network-layer enforcement and there is no `EgressRequest` intent. The spec needs a separate amendment to align.*
+> - [`planner-harness.md §7`](planner-harness.md) — V2 unified egress overview (this spec + [`credential-proxy.md`](credential-proxy.md))
+> - [`custom-tools.md`](custom-tools.md) — operator-defined custom tools. A custom-tool subprocess shares the planner VM's network namespace and is therefore subject to the same Tier 1 (tproxy SNI allowlist) and Tier 2 (credential proxy URL/method allowlist) enforcement as any other in-VM process. Custom tools introduce **no new authority surface** at the network layer; an HTTP call from a custom-tool script reaches the same tproxy / credential-proxy checks a `bash`-invoked HTTP call would.
+> - [`extensibility-traits.md §3`](extensibility-traits.md) — `IsolationBackend` trait. This spec describes the Tier-1 networking contract every conformant isolation backend MUST satisfy: VM with no virtio-net interface to the host, all egress routed through `raxis-tproxy` running on a kernel-side network namespace, SNI inspection enforced. The V2 default `FirecrackerIsolation` and `AppleVirtualizationIsolation` impls both meet this; future enclave-based isolation impls (TDX/SEV-SNP) MUST too, verified by the `IsolationBackend` conformance kit's network-isolation test fixture.
 
 ---
 
@@ -22,16 +22,16 @@ The following designs are **DEPRECATED** in V2. Each is preserved in this docume
 
 | # | Deprecated design | Status | Replacement | Locator |
 |---|---|---|---|---|
-| D1 | `EgressTier::Tier1Tproxy` (NAT-attached virtio-net + iptables REDIRECT to in-VM tproxy on a real NIC) | Removed from codebase. Enum variant deleted from `crates/isolation/src/lib.rs`; no production code path constructs it. | `EgressTier::Mediated` (no NIC, in-VM tproxy routes admission + tunnel over AF_VSOCK to a kernel-side handler). | `airgap-architecture.md` (canonical post-deletion contract); §3.1 Path A3 substitution callout. |
-| D2 | OUTPUT-DROP iptables policy + per-port (`80/443/5432/3306/1433/27017/6379`) REDIRECT rules as published in the §3.1 bash block | Moot under `EgressTier::Mediated`: with no NIC, OUTPUT has no device to drop on. The actual A3 rule shape redirects every dport indiscriminately into `raxis-tproxy`, which forwards admission decisions to the kernel over vsock; per-port admission policy is applied kernel-side, not at the iptables layer. | A3 rule shape in `airgap-architecture.md §4` (single-rule REDIRECT + DNS UDP/53 stub forwarder rule). | §3.1 bash block; §6 step 4; §8 checklist iptables items. |
-| D3 | "via iptables REDIRECT" framing in the §3.2 agent ↔ tproxy ↔ kernel-host data-flow diagram | The iptables REDIRECT still exists under A3 but it is no longer the architecturally interesting hop: under `Mediated` the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`. The diagram's "Kernel Host" column collapses into the kernel-side vsock handler. | A3 data-flow diagram in `airgap-architecture.md`. | §3.2 ASCII diagram. |
-| D4 | iptables-rule-as-network-level-enforcer prose for DB bypass detection in §5 | The §13.9 security policy (database direct-connection bypass detection + `FAIL_PROXY_TARGET_BYPASS` + `SecurityViolationDetected`) is preserved unchanged. Only the network-level enforcer differs: under A3 every outbound TCP — including direct DB-host connection attempts — already lands in `raxis-tproxy` because there is no NIC, so the dport-specific REDIRECT rules are redundant; the kernel applies the bypass-target check on the vsock admission path. | Same security policy, A3 enforcer. See `airgap-architecture.md §4` + `credential-proxy.md §13.9`. | §5 prose. |
-| D5 | "Kernel installs iptables rules in VM network namespace" boot-sequence step (§6 step 4) | Step still runs but installs the A3 rule shape (single-rule REDIRECT + DNS stub forwarder rule), not the per-port set published in §3.1. | A3 boot sequence in `airgap-architecture.md`. | §6 step 4. |
+| D1 | `EgressTier::Tier1Tproxy` (NAT-attached virtio-net + iptables REDIRECT to in-VM tproxy on a real NIC) | Removed from codebase. Enum variant deleted from `crates/isolation/src/lib.rs`; no production code path constructs it. | `EgressTier::Mediated` (no NIC, in-VM tproxy routes admission + tunnel over AF_VSOCK to a kernel-side handler). | [`airgap-architecture.md`](airgap-architecture.md) (canonical post-deletion contract); §3.1 Path A3 substitution callout. |
+| D2 | OUTPUT-DROP iptables policy + per-port (`80/443/5432/3306/1433/27017/6379`) REDIRECT rules as published in the §3.1 bash block | Moot under `EgressTier::Mediated`: with no NIC, OUTPUT has no device to drop on. The actual A3 rule shape redirects every dport indiscriminately into `raxis-tproxy`, which forwards admission decisions to the kernel over vsock; per-port admission policy is applied kernel-side, not at the iptables layer. | A3 rule shape in [`airgap-architecture.md §4`](airgap-architecture.md) (single-rule REDIRECT + DNS UDP/53 stub forwarder rule). | §3.1 bash block; §6 step 4; §8 checklist iptables items. |
+| D3 | "via iptables REDIRECT" framing in the §3.2 agent ↔ tproxy ↔ kernel-host data-flow diagram | The iptables REDIRECT still exists under A3 but it is no longer the architecturally interesting hop: under `Mediated` the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`. The diagram's "Kernel Host" column collapses into the kernel-side vsock handler. | A3 data-flow diagram in [`airgap-architecture.md`](airgap-architecture.md). | §3.2 ASCII diagram. |
+| D4 | iptables-rule-as-network-level-enforcer prose for DB bypass detection in §5 | The §13.9 security policy (database direct-connection bypass detection + `FAIL_PROXY_TARGET_BYPASS` + `SecurityViolationDetected`) is preserved unchanged. Only the network-level enforcer differs: under A3 every outbound TCP — including direct DB-host connection attempts — already lands in `raxis-tproxy` because there is no NIC, so the dport-specific REDIRECT rules are redundant; the kernel applies the bypass-target check on the vsock admission path. | Same security policy, A3 enforcer. See [`airgap-architecture.md §4`](airgap-architecture.md) + [`credential-proxy.md §13.9`](credential-proxy.md). | §5 prose. |
+| D5 | "Kernel installs iptables rules in VM network namespace" boot-sequence step (§6 step 4) | Step still runs but installs the A3 rule shape (single-rule REDIRECT + DNS stub forwarder rule), not the per-port set published in §3.1. | A3 boot sequence in [`airgap-architecture.md`](airgap-architecture.md). | §6 step 4. |
 | D6 | "External HTTP — intercepted by iptables → raxis-tproxy → Kernel admission" comment in the §7 dev-server example | Conceptually directionally right; the misleading framing is the implication of a NIC-bound iptables hop. Under A3 the redirect happens in-VM with no NIC; the load-bearing hop is the AF_VSOCK admission. | Same example with A3-correct comment; tracked in §0 D6. | §7 example comment. |
-| D7 | §8 implementation-checklist items implementing the legacy iptables rule shape | Superseded by the A3 rule shape. The checklist's tproxy-binary, vsock-admission, and audit-event items remain valid. | A3-correct rule shape in `airgap-architecture.md §4`. | §8 checklist `Kernel: install iptables rules…` bullet + nested per-port bullet. |
-| D8 | `kernel-mediated-egress.md` (whole spec) | Already deprecated. Preserved historically only. | This spec (Tier 1) + `credential-proxy.md` (Tier 2). | Cross-reference list above; `kernel-mediated-egress.md` itself. |
+| D7 | §8 implementation-checklist items implementing the legacy iptables rule shape | Superseded by the A3 rule shape. The checklist's tproxy-binary, vsock-admission, and audit-event items remain valid. | A3-correct rule shape in [`airgap-architecture.md §4`](airgap-architecture.md). | §8 checklist `Kernel: install iptables rules…` bullet + nested per-port bullet. |
+| D8 | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) (whole spec) | Already deprecated. Preserved historically only. | This spec (Tier 1) + [`credential-proxy.md`](credential-proxy.md) (Tier 2). | Cross-reference list above; [`kernel-mediated-egress.md`](kernel-mediated-egress.md) itself. |
 | D9 | `IntentKind::EgressRequest` + `[[tasks.allowed_egress]] require_intent = true` + `INV-EGRESS-INTENT-01` | Already deprecated and noted in §4 amendment + §4.4. Variant removed from `IntentKind`; `require_intent` parsed for back-compat and ignored at runtime; invariant deprecated. | Two-tier egress: SNI on Tier 1, HTTP-granular on Tier 2 (credential proxy). | §4 amendment callout; §4.4. |
-| D10 | `environment-access-control.md §4` `EgressRequest` admission-order narrative | Already noted as V1-flavored / needs amendment; cross-reference is preserved but the source spec has not been updated. | Pending amendment in `environment-access-control.md §4`. | Cross-reference list above. |
+| D10 | [`environment-access-control.md §4`](environment-access-control.md) `EgressRequest` admission-order narrative | Already noted as V1-flavored / needs amendment; cross-reference is preserved but the source spec has not been updated. | Pending amendment in [`environment-access-control.md §4`](environment-access-control.md). | Cross-reference list above. |
 
 > **How to read the rest of this spec.** Sections describing a deprecated mechanism carry a **DEPRECATED — describes legacy mechanism** banner. The Tier-1 *policy contract* (SNI-only enforcement, allowlist semantics, `TransparentProxyAdmitted`/`TransparentProxyDenied` audit events, `DefaultProviderEgressApplied` post-commit emit, `SessionEgressStallDetected` sliding-window detector) is **canonical and unchanged** in V2 and is NOT marked deprecated. The transport mechanism that delivers traffic into the policy gate has changed (NIC-attached iptables → no-NIC AF_VSOCK), and that is what the deprecation banners flag.
 
@@ -70,7 +70,7 @@ connects to `localhost:5432` → in-guest forwarder → AF_VSOCK → host-side
 listener on the per-VM `VZVirtioSocketDevice` (Apple-VZ) or per-session UDS
 multiplexer (Firecracker) → host `127.0.0.1:5432` → credential proxy → real
 DB with auth. iptables is NOT the load-bearing piece here; the vsock-loopback
-bridge is. See `credential-proxy.md §12a` for the full plumbing and
+bridge is. See [`credential-proxy.md §12a`](credential-proxy.md) for the full plumbing and
 `INV-CRED-PROXY-VM-REACHABILITY-01` / `-02` for the contract.
 
 ### Class 2 — External HTTP/HTTPS calls (requires transparent proxy)
@@ -97,17 +97,17 @@ TCP to it.
 > over the same vsock device. The legacy `EgressTier::Tier1Tproxy`
 > NAT-attached-virtio-net variant was removed in the Tier1Tproxy deletion
 > sweep (TODO `tier1-deletion-fold-into-cleanup-sweep`); see
-> `airgap-architecture.md` for the canonical home of the post-deletion
+> [`airgap-architecture.md`](airgap-architecture.md) for the canonical home of the post-deletion
 > contract.
 
-> **Custom-tool subprocess interaction (cross-reference: `custom-tools.md`).**
+> **Custom-tool subprocess interaction (cross-reference: [`custom-tools.md`](custom-tools.md)).**
 > Operator-defined custom tools (`[[profiles.<name>.custom_tool]]`) execute as
 > subprocesses of the planner harness and inherit the planner VM's network
 > namespace. Any HTTP / HTTPS / arbitrary-TCP call made by a custom-tool script
 > is intercepted by the same `iptables` redirect into `raxis-tproxy` that
 > intercepts a `bash`-invoked HTTP call, and is subject to the same Tier-1
 > SNI allowlist enforcement (§4) and Tier-2 credential-proxy URL/method
-> enforcement (per `credential-proxy.md`). Custom tools introduce **no new
+> enforcement (per [`credential-proxy.md`](credential-proxy.md)). Custom tools introduce **no new
 > authority surface** at the network layer — the per-task `allowed_egress`
 > declaration governs both direct `bash` egress and custom-tool-mediated
 > egress identically.
@@ -122,7 +122,7 @@ owned by `root`, not executable by the agent user).
 
 ### 3.1 — iptables Rules (Installed by Kernel at VM Boot)
 
-> **DEPRECATED — describes legacy mechanism (D2 in §0).** The bash block below publishes the pre-Tier1Tproxy-deletion rule shape. Under `EgressTier::Mediated` (the only non-`None` tier shipped in V2) the VM has no NIC at all, so the `OUTPUT DROP` default policy is moot — there is no device for packets to egress. The REDIRECT rules still install but now catch every dport indiscriminately because the tproxy talks to the kernel over vsock and per-port admission policy is applied kernel-side. A `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries through the in-guest stub forwarder. The canonical post-deletion A3 rule shape lives in `airgap-architecture.md §4`. The block below is retained for historical context.
+> **DEPRECATED — describes legacy mechanism (D2 in §0).** The bash block below publishes the pre-Tier1Tproxy-deletion rule shape. Under `EgressTier::Mediated` (the only non-`None` tier shipped in V2) the VM has no NIC at all, so the `OUTPUT DROP` default policy is moot — there is no device for packets to egress. The REDIRECT rules still install but now catch every dport indiscriminately because the tproxy talks to the kernel over vsock and per-port admission policy is applied kernel-side. A `-p udp --dport 53 -j REDIRECT --to-port 53` rule routes DNS queries through the in-guest stub forwarder. The canonical post-deletion A3 rule shape lives in [`airgap-architecture.md §4`](airgap-architecture.md). The block below is retained for historical context.
 
 ```bash
 # Drop all outbound traffic by default (VM has no direct internet)
@@ -152,26 +152,51 @@ tries to connect to a *non-localhost* address on port 5432 does it hit `raxis-tp
 
 ### 3.2 — What raxis-tproxy Does
 
-> **DEPRECATED framing — describes legacy mechanism (D3 in §0).** The diagram's "Kernel Host" column and "via iptables REDIRECT" header reflect the pre-Tier1Tproxy-deletion shape, where iptables on a NIC-attached VM was the architecturally interesting redirect hop. Under `EgressTier::Mediated` the iptables REDIRECT still happens but it is in-VM only (no NIC); the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`, with the kernel-side handler being the component that opens the upstream socket. The control-flow (admission request, Admit/Deny verdict, CONNECT-style tunnel) is unchanged. The canonical A3 data-flow diagram lives in `airgap-architecture.md`.
+> **DEPRECATED framing — describes legacy mechanism (D3 in §0).** The diagram's "Kernel Host" column and "via iptables REDIRECT" header reflect the pre-Tier1Tproxy-deletion shape, where iptables on a NIC-attached VM was the architecturally interesting redirect hop. Under `EgressTier::Mediated` the iptables REDIRECT still happens but it is in-VM only (no NIC); the load-bearing path is `agent → in-VM tproxy → AF_VSOCK → kernel-side admission handler → upstream`, with the kernel-side handler being the component that opens the upstream socket. The control-flow (admission request, Admit/Deny verdict, CONNECT-style tunnel) is unchanged. The canonical A3 data-flow diagram lives in [`airgap-architecture.md`](airgap-architecture.md).
 
-```text
-Agent process                raxis-tproxy (localhost:3129)        Kernel Host
-                             via iptables REDIRECT
-    |                               |                                |
-    |─ TCP connect stripe.com:443  →|                                |
-    |                               | SO_ORIGINAL_DST: stripe.com:443|
-    |                               |─ vsock: ProxyAdmission {       |
-    |                               |    target: "stripe.com:443",   |
-    |                               |    protocol: "https"           |
-    |                               |  } ──────────────────────────→ |
-    |                               |                                | check egress allowlist
-    |                               |← Admitted / Denied ───────────|
-    |                               |                                |
-    | [if Admitted]                 |─ CONNECT tunnel to Kernel ───→ |─ TCP to stripe.com:443
-    |← TLS ClientHello forwarded ──|← response ────────────────────|
-    | [TLS negotiates end-to-end]   |
-    |─ HTTP request (encrypted) ───→ forwarded through tunnel ─────→ stripe.com
-    |← HTTP response ──────────────── returned through tunnel ──────|
+<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+     Agent process                raxis-tproxy (localhost:3129)        Kernel Host
+                                  via iptables REDIRECT
+         |                               |                                |
+         |─ TCP connect stripe.com:443  →|                                |
+         |                               | SO_ORIGINAL_DST: stripe.com:443|
+         |                               |─ vsock: ProxyAdmission {       |
+         |                               |    target: "stripe.com:443",   |
+         |                               |    protocol: "https"           |
+         |                               |  } ──────────────────────────→ |
+         |                               |                                | check egress allowlist
+         |                               |← Admitted / Denied ───────────|
+         |                               |                                |
+         | [if Admitted]                 |─ CONNECT tunnel to Kernel ───→ |─ TCP to stripe.com:443
+         |← TLS ClientHello forwarded ──|← response ────────────────────|
+         | [TLS negotiates end-to-end]   |
+         |─ HTTP request (encrypted) ───→ forwarded through tunnel ─────→ stripe.com
+         |← HTTP response ──────────────── returned through tunnel ──────|
+-->
+```mermaid
+sequenceDiagram
+    participant Agent as Agent process
+    participant Tproxy as raxis-tproxy (localhost:3129)<br/>via iptables REDIRECT
+    participant Kernel as Kernel Host
+    participant Ext as stripe.com:443
+
+    Agent->>Tproxy: TCP connect stripe.com:443
+    Note over Tproxy: SO_ORIGINAL_DST: stripe.com:443
+    Tproxy->>Kernel: vsock: ProxyAdmission { target: "stripe.com:443", protocol: "https" }
+    Note over Kernel: check egress allowlist
+    Kernel-->>Tproxy: Admitted / Denied
+    
+    alt is Admitted
+        Tproxy->>Kernel: CONNECT tunnel to Kernel
+        Kernel->>Ext: TCP to stripe.com:443
+        Kernel-->>Tproxy: response
+        Tproxy-->>Agent: TLS ClientHello forwarded
+        Note over Agent, Ext: TLS negotiates end-to-end
+        Agent->>Tproxy: HTTP request (encrypted)
+        Tproxy->>Ext: forwarded through tunnel
+        Ext-->>Tproxy: HTTP response
+        Tproxy-->>Agent: returned through tunnel
+    end
 ```
 
 For HTTP (port 80): the TPROXY can read the `Host` header directly (unencrypted).
@@ -185,15 +210,31 @@ end-to-end between the agent and the real server.
 For HTTPS, the TPROXY reads the SNI (Server Name Indication) from the ClientHello
 TLS handshake — this is sent in plaintext before encryption begins:
 
-```text
-Client → raxis-tproxy: [TLS ClientHello with SNI extension: stripe.com]
-raxis-tproxy: extract SNI = "stripe.com"
-raxis-tproxy → Kernel: ProxyAdmission { host: "stripe.com", port: 443, protocol: "https" }
-Kernel: check allowed_egress → admitted
-raxis-tproxy: establish CONNECT tunnel through Kernel to stripe.com:443
-Client → [TLS ClientHello forwarded through tunnel] → stripe.com
-[TLS handshake completes end-to-end]
-[Encrypted traffic flows bidirectionally through tunnel]
+<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+     Client → raxis-tproxy: [TLS ClientHello with SNI extension: stripe.com]
+     raxis-tproxy: extract SNI = "stripe.com"
+     raxis-tproxy → Kernel: ProxyAdmission { host: "stripe.com", port: 443, protocol: "https" }
+     Kernel: check allowed_egress → admitted
+     raxis-tproxy: establish CONNECT tunnel through Kernel to stripe.com:443
+     Client → [TLS ClientHello forwarded through tunnel] → stripe.com
+     [TLS handshake completes end-to-end]
+     [Encrypted traffic flows bidirectionally through tunnel]
+-->
+```mermaid
+sequenceDiagram
+    participant Client
+    participant Tproxy as raxis-tproxy
+    participant Kernel
+    participant Ext as stripe.com:443
+
+    Client->>Tproxy: [TLS ClientHello with SNI extension: stripe.com]
+    Note over Tproxy: extract SNI = "stripe.com"
+    Tproxy->>Kernel: ProxyAdmission { host: "stripe.com", port: 443, protocol: "https" }
+    Note over Kernel: check allowed_egress → admitted
+    Tproxy->>Kernel: establish CONNECT tunnel through Kernel to stripe.com:443
+    Client->>Ext: [TLS ClientHello forwarded through tunnel]
+    Note over Client, Ext: TLS handshake completes end-to-end
+    Note over Client, Ext: Encrypted traffic flows bidirectionally through tunnel
 ```
 
 The Kernel **cannot** inspect the HTTP request method, path, or body over HTTPS —
@@ -207,7 +248,7 @@ the traffic is end-to-end encrypted. The Kernel can only enforce by **hostname**
 > gap" between an explicit `EgressRequest` intent path and the transparent proxy
 > path, including a `require_intent = true` opt-in that forced agents to use the
 > RAXIS SDK for strict-method hosts. This entire framing is V2-deprecated:
-> `IntentKind::EgressRequest` is removed (per `planner-harness.md §7`), the
+> `IntentKind::EgressRequest` is removed (per [`planner-harness.md §7`](planner-harness.md)), the
 > `require_intent` plan field is deprecated and ignored, and `INV-EGRESS-INTENT-01`
 > is deprecated. V2's two-tier egress places method-level enforcement entirely
 > in the **Credential Proxy (Tier 2)** for authenticated endpoints; the
@@ -337,7 +378,7 @@ proxy_port = 9101
 # with bearer token to api.stripe.com/v1/, enforcing method = POST.
 ```
 
-See `credential-proxy.md` for the full credential proxy declaration schema.
+See [`credential-proxy.md`](credential-proxy.md) for the full credential proxy declaration schema.
 
 ---
 
@@ -349,16 +390,33 @@ When the agent tries to connect directly to a real database host (bypassing the
 credential proxy), the iptables rule for port 5432 (excluding localhost) redirects
 to `raxis-tproxy`:
 
-```text
-Agent: psycopg2.connect("postgresql://user:real_pass@postgres-staging.company.internal:5432/mydb")
-  → TCP connect to postgres-staging.company.internal:5432
-  → iptables: NOT localhost → REDIRECT → raxis-tproxy:3129
-  → raxis-tproxy: SO_ORIGINAL_DST = postgres-staging.company.internal:5432
-  → Kernel: ProxyAdmission { host: "postgres-staging.company.internal", port: 5432, protocol: "tcp" }
-  → Kernel: check — does this match a credential proxy real_target? YES
-  → FAIL_PROXY_TARGET_BYPASS → SecurityViolationDetected (§13.9)
-  → raxis-tproxy: close connection with ECONNREFUSED
-  → psycopg2: raises OperationalError: connection refused
+<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+     Agent: psycopg2.connect("postgresql://user:real_pass@postgres-staging.company.internal:5432/mydb")
+       → TCP connect to postgres-staging.company.internal:5432
+       → iptables: NOT localhost → REDIRECT → raxis-tproxy:3129
+       → raxis-tproxy: SO_ORIGINAL_DST = postgres-staging.company.internal:5432
+       → Kernel: ProxyAdmission { host: "postgres-staging.company.internal", port: 5432, protocol: "tcp" }
+       → Kernel: check — does this match a credential proxy real_target? YES
+       → FAIL_PROXY_TARGET_BYPASS → SecurityViolationDetected (§13.9)
+       → raxis-tproxy: close connection with ECONNREFUSED
+       → psycopg2: raises OperationalError: connection refused
+-->
+```mermaid
+sequenceDiagram
+    participant Agent
+    participant Iptables as iptables
+    participant Tproxy as raxis-tproxy:3129
+    participant Kernel
+
+    Agent->>Iptables: psycopg2.connect("...postgres-staging...:5432")<br/>TCP connect to non-localhost:5432
+    Iptables->>Tproxy: NOT localhost → REDIRECT
+    Note over Tproxy: SO_ORIGINAL_DST = postgres-staging...:5432
+    Tproxy->>Kernel: ProxyAdmission { host: "postgres-staging...", port: 5432, protocol: "tcp" }
+    Note over Kernel: check — does this match a credential proxy real_target? YES
+    Note over Kernel: FAIL_PROXY_TARGET_BYPASS → SecurityViolationDetected (§13.9)
+    Kernel-->>Tproxy: Deny
+    Tproxy-->>Agent: close connection with ECONNREFUSED
+    Note over Agent: psycopg2: raises OperationalError: connection refused
 ```
 
 The iptables rule is the network-level enforcer of §13.9's security policy.
@@ -370,22 +428,36 @@ security violation, no audit event, no strike counter.
 
 ## 6. VM Boot Sequence (Updated)
 
-> **DEPRECATED framing on step 4 — describes legacy mechanism (D5 in §0).** Step 4 still runs but installs the A3 rule shape (single-rule REDIRECT into `raxis-tproxy` + DNS `udp/53` stub-forwarder rule), not the per-port set published in §3.1. Steps 1–3 and 5–10 are unchanged under `EgressTier::Mediated`. The canonical A3 boot-sequence walkthrough lives in `airgap-architecture.md`.
+> **DEPRECATED framing on step 4 — describes legacy mechanism (D5 in §0).** Step 4 still runs but installs the A3 rule shape (single-rule REDIRECT into `raxis-tproxy` + DNS `udp/53` stub-forwarder rule), not the per-port set published in §3.1. Steps 1–3 and 5–10 are unchanged under `EgressTier::Mediated`. The canonical A3 boot-sequence walkthrough lives in [`airgap-architecture.md`](airgap-architecture.md).
 
-```text
-1. Kernel allocates VM, assigns session_id
-2. Kernel starts all credential proxies declared in [[tasks.credentials]]:
-   - PostgresProxy → localhost:5432
-   - K8sProxy     → localhost:8001
-   - (etc.)
-3. Kernel installs raxis-tproxy binary in VM at /raxis/bin/raxis-tproxy (root-owned)
-4. Kernel installs iptables rules (§3.1) inside VM network namespace
-5. Kernel generates blank kubeconfig / DATABASE_URL / AWS IMDS env vars
-6. Kernel emits CredentialProxyStarted audit events for each proxy
-7. Kernel boots agent process with injected env vars
-8. Agent boots — dev server can start, make intra-VM calls freely
-9. Agent's external HTTP calls → iptables → raxis-tproxy → Kernel admission
-10. Agent's DB calls → localhost:5432 → credential proxy (no iptables needed)
+<!-- Original ASCII diagram (auto-converted to mermaid in iter62-linkify-repair):
+     1. Kernel allocates VM, assigns session_id
+     2. Kernel starts all credential proxies declared in [[tasks.credentials]]:
+        - PostgresProxy → localhost:5432
+        - K8sProxy     → localhost:8001
+        - (etc.)
+     3. Kernel installs raxis-tproxy binary in VM at /raxis/bin/raxis-tproxy (root-owned)
+     4. Kernel installs iptables rules (§3.1) inside VM network namespace
+     5. Kernel generates blank kubeconfig / DATABASE_URL / AWS IMDS env vars
+     6. Kernel emits CredentialProxyStarted audit events for each proxy
+     7. Kernel boots agent process with injected env vars
+     8. Agent boots — dev server can start, make intra-VM calls freely
+     9. Agent's external HTTP calls → iptables → raxis-tproxy → Kernel admission
+     10. Agent's DB calls → localhost:5432 → credential proxy (no iptables needed)
+-->
+```mermaid
+flowchart TD
+    A["1. Kernel allocates VM, assigns session_id"] --> B
+    B["2. Kernel starts all credential proxies declared in [[tasks.credentials]]<br/>- PostgresProxy → localhost:5432<br/>- K8sProxy → localhost:8001"] --> C
+    C["3. Kernel installs raxis-tproxy binary in VM at /raxis/bin/raxis-tproxy"] --> D
+    D["4. Kernel installs iptables rules inside VM network namespace"] --> E
+    E["5. Kernel generates blank kubeconfig / DATABASE_URL / AWS IMDS env vars"] --> F
+    F["6. Kernel emits CredentialProxyStarted audit events for each proxy"] --> G
+    G["7. Kernel boots agent process with injected env vars"] --> H
+    H["8. Agent boots — dev server can start, make intra-VM calls freely"] --> I
+    
+    I --> J["9. Agent's external HTTP calls<br/>↓<br/>iptables → raxis-tproxy → Kernel admission"]
+    I --> K["10. Agent's DB calls<br/>↓<br/>localhost:5432 → credential proxy (no iptables needed)"]
 ```
 
 ---
@@ -428,7 +500,7 @@ the routing transparently.
       - Direct proxy mode for HTTP (read Host header, proxy request)
       - ECONNREFUSED on denial
 - [ ] Kernel: install raxis-tproxy binary into VM rootfs at boot
-- [ ] Kernel: install iptables rules in VM network namespace at boot — **DEPRECATED rule shape (D7 in §0); implement the A3 rule shape from `airgap-architecture.md §4` instead.** The legacy per-port rule set below is preserved for historical context only:
+- [ ] Kernel: install iptables rules in VM network namespace at boot — **DEPRECATED rule shape (D7 in §0); implement the A3 rule shape from [`airgap-architecture.md §4`](airgap-architecture.md) instead.** The legacy per-port rule set below is preserved for historical context only:
       - ~~Port 80/443 redirect for HTTP/HTTPS~~ → A3: single-rule REDIRECT into `raxis-tproxy`, kernel applies per-port admission policy
       - ~~Port 5432/3306/1433/27017/6379 redirect for DB bypass detection~~ → A3: redundant (no NIC ⇒ every outbound TCP already lands in tproxy); bypass-target check moves to the kernel-side vsock admission handler
       - ~~Accept loopback, drop everything else outbound~~ → A3: `OUTPUT DROP` is moot (no NIC); loopback ACCEPT preserved for intra-VM dev-server calls

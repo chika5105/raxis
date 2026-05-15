@@ -1,7 +1,7 @@
 # `raxis/release/` — release-pipeline assets
 
 This directory holds the static assets the V2 release pipeline
-consumes. **Normative reference:** `raxis/specs/v2/release-and-distribution.md`.
+consumes. **Normative reference:** [`raxis/specs/v2/release-and-distribution.md`](../specs/v2/release-and-distribution.md).
 
 ```text
 release/

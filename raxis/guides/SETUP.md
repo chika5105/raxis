@@ -9,7 +9,7 @@
 This guide is the operationally-shortest path from a clean macOS or
 Linux box to "kernel running, operator key in hand, ready to submit
 a plan". It is the consolidated, modernized successor to
-`raxis/demo-e2e-sample/README.md` Steps 1–7.
+[`raxis/demo-e2e-sample/README.md`](../demo-e2e-sample/README.md) Steps 1–7.
 
 ---
 

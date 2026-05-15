@@ -8,10 +8,10 @@
 > **Navigation:** [README](../../README.md) | [Part 2 Store](kernel-store.md) | [Part 3 Peripherals](peripherals.md) | [Part 4 CLI](cli-ceremony.md)
 >
 > **Authority:** Where this file and another v1 spec disagree on the
-> wire shape of a verifier-spawn env var, `kernel-store.md` §2.5.6
+> wire shape of a verifier-spawn env var, [`kernel-store.md`](kernel-store.md) §2.5.6
 > wins (it is the normative source for the `VerifierSpawnEnvelope`).
-> Where this file and `cli-ceremony.md` disagree on operator-facing
-> CLI env-var fallbacks, `cli-ceremony.md` wins. This file exists to
+> Where this file and [`cli-ceremony.md`](cli-ceremony.md) disagree on operator-facing
+> CLI env-var fallbacks, [`cli-ceremony.md`](cli-ceremony.md) wins. This file exists to
 > give operators a single page they can grep before reaching for
 > any other doc.
 
@@ -83,7 +83,7 @@ precedence when both are present.
 | **Set by** | Operator (typically once per shell or in a systemd unit). |
 | **Default when unset** | `$HOME/.raxis` — see `cli/src/main.rs::run` and `kernel/src/main.rs::data_dir`. If `$HOME` is also unset, falls back to `/root/.raxis` (a safe default for daemonized installs running as root). |
 | **CLI flag override** | `--data-dir <path>` (CLI only — the kernel has no flag override; it reads `$RAXIS_DATA_DIR` directly). |
-| **Contents** | Absolute path to the kernel's data directory (`policy/`, `keys/`, `kernel.db`, `audit/`, `witness/`, `sockets/`, `runtime/`). See `kernel-store.md` §2.5.1 for the full subdirectory layout. |
+| **Contents** | Absolute path to the kernel's data directory (`policy/`, `keys/`, `kernel.db`, `audit/`, `witness/`, `sockets/`, `runtime/`). See [`kernel-store.md`](kernel-store.md) §2.5.1 for the full subdirectory layout. |
 | **Security note** | Path only — never key material. The directory itself is created `0700` by `bootstrap.rs`. |
 
 ### `RAXIS_OPERATOR_KEY`
@@ -103,7 +103,7 @@ precedence when both are present.
 |---|---|
 | **Read by** | `raxis-kernel` — bootstrap path only (`kernel/src/main.rs::main` when `RAXIS_BOOTSTRAP=1`). |
 | **Set by** | Operator (one-shot, usually inline with the bootstrap command itself: `RAXIS_BOOTSTRAP=1 RAXIS_OPERATOR_CERT=/path raxis-kernel`). |
-| **Default when unset** | `None`. The bootstrap path treats this as optional — if absent, the kernel-side ceremony is skipped and the operator is expected to have already run `raxis genesis` (the CLI ceremony) which mints the cert in-process. See `cli-ceremony.md` §4.2. |
+| **Default when unset** | `None`. The bootstrap path treats this as optional — if absent, the kernel-side ceremony is skipped and the operator is expected to have already run `raxis genesis` (the CLI ceremony) which mints the cert in-process. See [`cli-ceremony.md`](cli-ceremony.md) §4.2. |
 | **CLI flag override** | None (this is a kernel-side env var — the CLI uses `--operator-cert <path>` on `raxis genesis` instead). |
 | **Contents** | Absolute path to a pre-minted `*.cert.toml` (typically produced by `raxis cert mint` on an air-gapped workstation). |
 | **Security note** | Path only — the cert file is signed by an offline key the kernel never holds. Cert-mandatory enforcement is `INV-CERT-01` (`specs/invariants.md`). |
@@ -156,7 +156,7 @@ logs, and the integration test suite.
 
 ### Verifier subprocess (`VerifierSpawnEnvelope`)
 
-Normative source: `kernel-store.md` §2.5.6 (this is a one-line
+Normative source: [`kernel-store.md`](kernel-store.md) §2.5.6 (this is a one-line
 pointer back; the full table lives there).
 
 | Env var | Audience | Notes |
@@ -171,7 +171,7 @@ pointer back; the full table lives there).
 
 ### Gateway subprocess
 
-Normative source: `peripherals.md` §gateway and `gateway/src/lib.rs`.
+Normative source: [`peripherals.md`](peripherals.md) §gateway and `gateway/src/lib.rs`.
 
 | Env var | Audience | Notes |
 |---|---|---|
@@ -205,7 +205,7 @@ back to its source.
 | `RAXIS_STUB_SLEEP_MS` | Test harnesses (wall-clock-kill suite) | `raxis-verifier-stub` | Sleep N ms before connecting; lets tests verify the kernel's `max_wall_seconds` SIGKILL. Default `0`. |
 | `RAXIS_STUB_SKIP_SEND` | Test harnesses (kernel-side-EOF suite) | `raxis-verifier-stub` | When `1`, the stub connects then immediately closes; tests how the kernel handles a verifier that exits without submitting. |
 | `RAXIS_TEST_BLEEDOVER_<rand>` | `verifier_runner::tests::env_scrub_bleedover_test` | (none — set in parent, asserted absent in child) | Pinned check that `Command::env_clear()` actually removes the parent's env vars before exec'ing the verifier. Random suffix prevents inter-test races under `cargo test --jobs N`. |
-| `RAXIS_TEST_POLICY_DIR` | Internal test mode | `raxis-policy` test mode | Reserved for test fixtures; absent in release builds (see `philosophy.md` line 219). |
+| `RAXIS_TEST_POLICY_DIR` | Internal test mode | `raxis-policy` test mode | Reserved for test fixtures; absent in release builds (see [`philosophy.md`](philosophy.md) line 219). |
 
 These vars **must not** appear in any production startup script,
 systemd unit, or operator workflow. Their behavior is allowed to

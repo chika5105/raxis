@@ -47,7 +47,7 @@ Three candidates were evaluated for the Linux KVM seat. The substrate ships **Fi
 ### §2.3 Versions and pins
 
 * **Firecracker binary:** ≥ `v1.6.0` (the rust-vmm vsock multiplexer wire format settled in 1.6). The `BACKEND_ID` constant (`crates/raxis-isolation-firecracker/src/lib.rs`) reports `"firecracker-1.x"` so audit consumers can filter without coupling to a point release.
-* **Reference kernel:** Firecracker publishes a known-good vmlinux at `https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/<arch>/vmlinux-<kver>.bin`. RAXIS pins **5.10.225** for `x86_64` and `aarch64` as the floor (matches `system-requirements.md §1.1` "VM guest kernel ≥ 5.10"); the kernel-bundled canonical-image pipeline ships its own RAXIS-built vmlinux (5.14+) so operators on those images get the higher floor without re-staging.
+* **Reference kernel:** Firecracker publishes a known-good vmlinux at `https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.10/<arch>/vmlinux-<kver>.bin`. RAXIS pins **5.10.225** for `x86_64` and `aarch64` as the floor (matches [`system-requirements.md §1.1`](system-requirements.md) "VM guest kernel ≥ 5.10"); the kernel-bundled canonical-image pipeline ships its own RAXIS-built vmlinux (5.14+) so operators on those images get the higher floor without re-staging.
 * **vhost-vsock kernel module:** `vhost_vsock` MUST be loaded (the substrate refuses to spawn otherwise). Modern distros load it on demand; air-gapped / minimal kernels need an explicit `modprobe vhost_vsock` in the boot path.
 
 ---
@@ -146,13 +146,13 @@ and `EgressTier::Mediated` (the only non-`None` tier shipped in V2 after
 the Tier1Tproxy deletion) produce a Firecracker VM with no virtio-net
 device. The kernel arbitrates outbound TCP and DNS over AF_VSOCK via
 the `handlers::tproxy_admit` and `handlers::dns_resolve` listeners
-(see `airgap-architecture.md`); there is no host tap device, no
+(see [`airgap-architecture.md`](airgap-architecture.md)); there is no host tap device, no
 nftables redirect, and no host-side egress namespace.
 
 The substrate does NOT own network plumbing — it only honours the
 operator-declared egress tier. A future `EgressTier::Tier2CredProxy`
 would extend the boot sequence with a per-credential socket-pair,
-gated by `credential-proxy.md`.
+gated by [`credential-proxy.md`](credential-proxy.md).
 
 `EgressTier::None` (Reviewer / Orchestrator images, `INV-NETISO-01`)
 and `EgressTier::Mediated` (Executor, `INV-NETISO-A3-*`) are
@@ -180,7 +180,7 @@ The substrate inherits `paradigm.md §3 R-1` and adds the following Linux-specif
 | cgroups v2 quota (CPU + memory + pids)                         | Kernel-side; the substrate honours `VmSpec.cgroup_quota` by writing the controller files BEFORE `InstanceStart`. | follow-up: enforcement is on the kernel-runtime side, not the substrate |
 | KVM-only; no fallback to user-mode emulation                   | `probe_host` returns `KvmUnavailable` ⇒ kernel admission helper refuses unless `--unsafe-fallback-isolation` is set | ✅ implemented      |
 
-The "follow-up" rows are tracked in `isolation-platform-parity.md` as gaps to close in V2.5 / V3. None of them weaken `R-1`; the microVM seam is the load-bearing isolation, the additional hardenings are defence-in-depth.
+The "follow-up" rows are tracked in [`isolation-platform-parity.md`](isolation-platform-parity.md) as gaps to close in V2.5 / V3. None of them weaken `R-1`; the microVM seam is the load-bearing isolation, the additional hardenings are defence-in-depth.
 
 ---
 

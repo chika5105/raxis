@@ -16,22 +16,22 @@
 > arbitrates over vsock, not over a NAT tap.
 >
 > **Cross-references.**
-> - `vm-network-isolation.md` — admission contract (SNI / Host
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — admission contract (SNI / Host
 >   header allowlist) inherited from the deleted Tier-1 design.
 >   Path A3 keeps the admission contract but uses AF_VSOCK +
 >   kernel-side tunnel as the only transport; the historical
 >   "virtio-net + iptables redirect to kernel" transport described
 >   alongside it is no longer compiled.
-> - `credential-proxy.md §12a` — vsock-loopback bridge for
+> - [`credential-proxy.md §12a`](credential-proxy.md) — vsock-loopback bridge for
 >   credential-proxy URLs. Path A3 reuses the same per-VM vsock
 >   device for its admission channel, its byte-tunnel channel, and
 >   its DNS-over-vsock channel; the credential-proxy bridge is the
 >   architectural precedent.
-> - `extensibility-traits.md §3` — `EgressTier::Mediated` is the
+> - [`extensibility-traits.md §3`](extensibility-traits.md) — `EgressTier::Mediated` is the
 >   only non-`None` egress tier; it produces **no**
 >   `AvfNetworkDevice` and omits Firecracker's `network-interfaces`
 >   PUT.
-> - `kernel-mediated-egress.md` — deprecated; the A3 model
+> - [`kernel-mediated-egress.md`](kernel-mediated-egress.md) — deprecated; the A3 model
 >   *generalises* kernel-mediated egress from "HTTP only" to "every
 >   byte the guest sends outbound".
 > - `INV-NETISO-A3-*` family in `invariants.md §6` — universal
@@ -292,7 +292,7 @@ The egress posture above relies on the canonical
 `executor-starter` image carrying every per-language tool the
 realistic-scenario plan exercises WITHOUT runtime third-party
 network fetches. That contract is codified by four sibling
-invariants whose canonical home is `planner-harness.md §10.6`
+invariants whose canonical home is [`planner-harness.md §10.6`](planner-harness.md)
 (mirrored in `invariants.md`):
 
 - `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` — `ruff`

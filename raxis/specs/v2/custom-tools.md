@@ -15,19 +15,19 @@
 >
 > **Cross-references (canonical homes for adjacent material):**
 >
-> - `planner-harness.md` — the harness's overall tool-surface model;
+> - [`planner-harness.md`](planner-harness.md) — the harness's overall tool-surface model;
 >   custom tools are a third tool category alongside base tools and
 >   kernel-mediated intents (§3 of that file).
-> - `policy-plan-authority.md` — admission-time validation, warning and
+> - [`policy-plan-authority.md`](policy-plan-authority.md) — admission-time validation, warning and
 >   failure catalog (§3, §3b), `policy.toml` hard caps.
-> - `kernel-mechanics-prompt.md` — KSB and NNSP rendering. Custom tools
+> - [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) — KSB and NNSP rendering. Custom tools
 >   are appended to the JSON `tools` array in the LLM API call alongside
 >   base tools and are indistinguishable to the LLM at the protocol
 >   level.
-> - `vm-network-isolation.md`, `credential-proxy.md` — custom-tool
+> - [`vm-network-isolation.md`](vm-network-isolation.md), [`credential-proxy.md`](credential-proxy.md) — custom-tool
 >   subprocesses share the agent VM's network namespace and are subject
 >   to the unified two-tier egress model. No new authority surface.
-> - `verifier-processes.md` — the *other* mechanism for running operator
+> - [`verifier-processes.md`](verifier-processes.md) — the *other* mechanism for running operator
 >   code; verifiers are kernel-invoked preflight gates with structured
 >   witness output. Custom tools are LLM-invoked utilities. §11 of this
 >   spec contrasts the two.
@@ -39,7 +39,7 @@
 
 ## §1 — Why a Standalone Spec
 
-Three of the structural decisions consolidated in `planner-harness.md`
+Three of the structural decisions consolidated in [`planner-harness.md`](planner-harness.md)
 created a gap operators will hit immediately:
 
 1. **Reviewer was hardened to pure-static** (`INV-PLANNER-HARNESS-01`)
@@ -448,7 +448,7 @@ safelist before adding the operator's `env` table:
 | `RAXIS_CUSTOM_TOOL_NAME` | Tool's `name` field | Lets the script identify which tool it's serving (useful for shared scripts). |
 | `RAXIS_TASK_ID` | Current task ID | For audit correlation in operator-side logs. |
 | `RAXIS_INVOCATION_ID` | Per-invocation UUID | Matches the audit event's `invocation_id`. |
-| `RAXIS_CREDENTIAL_PROXY_*` | Per `credential-proxy.md` | Standard credential proxy localhost ports, if any. |
+| `RAXIS_CREDENTIAL_PROXY_*` | Per [`credential-proxy.md`](credential-proxy.md) | Standard credential proxy localhost ports, if any. |
 
 The operator's `env` table is merged on top. Operator-supplied keys
 collide with kernel-supplied keys → admission rejection
@@ -484,9 +484,9 @@ written to `cgroup.procs` immediately after fork, and the cgroup is
 destroyed after the subprocess and all descendants exit.
 
 This reuses the same substrate as backgrounded shells
-(`planner-harness.md §5.3`). Linux 5.14+ guest kernel is required
+([`planner-harness.md §5.3`](planner-harness.md)). Linux 5.14+ guest kernel is required
 (`INV-PLANNER-HARNESS-03`); the guest-kernel requirement is verified
-by `raxis doctor vm-images` per `system-requirements.md §11`.
+by `raxis doctor vm-images` per [`system-requirements.md §11`](system-requirements.md).
 
 ### 7.2 Termination via `cgroup.kill`
 
@@ -498,7 +498,7 @@ returning to the LLM.
 
 `cgroup.kill` semantics are identical to the backgrounded-shell
 substrate; this spec does not duplicate the rationale, see
-`planner-harness.md §5.3`.
+[`planner-harness.md §5.3`](planner-harness.md).
 
 ### 7.3 CPU and memory limits
 
@@ -596,8 +596,8 @@ without reading every audit row).
 Custom-tool subprocesses run with the planner VM's mount table
 unchanged. They have read-write access to `/workspace` (per the
 agent's role; an Executor's `/workspace` is RW, an Orchestrator's is
-RO per `planner-harness.md §3`). They can read `/raxis/` (plan-bundle
-artifacts, KSB-staged data, credentials per `credential-proxy.md`).
+RO per [`planner-harness.md §3`](planner-harness.md)). They can read `/raxis/` (plan-bundle
+artifacts, KSB-staged data, credentials per [`credential-proxy.md`](credential-proxy.md)).
 
 The harness does NOT mount any per-invocation tmpfs. Scripts that
 need scratch space use `/tmp` inside the VM (typically a tmpfs in the
@@ -616,7 +616,7 @@ surface fixed by `INV-PLANNER-HARNESS-01` — they cannot declare custom
 tools, see §10). Profiles attempting `inherits_from = "Orchestrator"`
 are rejected at admission with `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`
 because the **Orchestrator** is kernel-managed invisible infrastructure
-per `INV-PLANNER-HARNESS-06` (`planner-harness.md §4.8`) — operators
+per `INV-PLANNER-HARNESS-06` ([`planner-harness.md §4.8`](planner-harness.md)) — operators
 do not declare Orchestrator profiles at all; the kernel auto-creates
 the Orchestrator session per initiative.
 
@@ -661,7 +661,7 @@ Reviewer and Orchestrator have asymmetric treatment under inheritance:
 - **`inherits_from = "Orchestrator"`** is **rejected outright** at
   admission with `FAIL_PROFILE_ROLE_NOT_CONFIGURABLE`. The
   Orchestrator is kernel-managed invisible infrastructure per
-  `INV-PLANNER-HARNESS-06` (`planner-harness.md §4.8`); there is no
+  `INV-PLANNER-HARNESS-06` ([`planner-harness.md §4.8`](planner-harness.md)); there is no
   operator-declared Orchestrator profile concept in V2 to inherit
   from. The custom-tool prohibition is therefore structural — there
   is no Orchestrator-rooted profile that could declare custom tools
@@ -697,7 +697,7 @@ token-cost projection at admission:
   Anthropic / OpenAI tool-list payload (canonical JSON, sorted keys).
 - Tokenize using the model-family tokenizer declared in the plan's
   `[provider_aliases.<alias>]` for the profile (per
-  `provider-failure-handling.md`).
+  [`provider-failure-handling.md`](provider-failure-handling.md)).
 - Sum across all custom tools.
 - Compute `custom_tool_share = sum / context_window_size` for the
   smallest context window across the profile's alias chain.
@@ -707,8 +707,8 @@ token-cost projection at admission:
 | Threshold | Action |
 |---|---|
 | `< 10%` | Silent. |
-| `≥ 10%` AND `< 25%` | `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH { profile, share, total_tokens }` (per `policy-plan-authority.md §3`). |
-| `≥ 25%` | `FAIL_CUSTOM_TOOL_SCHEMA_BUDGET_EXCEEDED { profile, share, total_tokens, limit_share: 0.25 }` (per `policy-plan-authority.md §3b`). |
+| `≥ 10%` AND `< 25%` | `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH { profile, share, total_tokens }` (per [`policy-plan-authority.md §3`](policy-plan-authority.md)). |
+| `≥ 25%` | `FAIL_CUSTOM_TOOL_SCHEMA_BUDGET_EXCEEDED { profile, share, total_tokens, limit_share: 0.25 }` (per [`policy-plan-authority.md §3b`](policy-plan-authority.md)). |
 
 The 10% / 25% thresholds are V2 defaults. `policy.toml` MAY tighten
 (but not loosen) via:
@@ -729,7 +729,7 @@ will receive the request**, not a generic estimate. This requires
 the kernel to ship the relevant tokenizer tables (Anthropic's BPE
 variant, OpenAI's `cl100k_base` / `o200k_base`, etc.) or to call into
 the gateway's tokenizer subsystem. V2 implements this via the gateway
-(per `provider-failure-handling.md`); the gateway exposes a
+(per [`provider-failure-handling.md`](provider-failure-handling.md)); the gateway exposes a
 `tokenize(model, text) -> u32` admin interface used at admission.
 
 ---
@@ -790,7 +790,7 @@ A Reviewer profile MAY still declare:
 - Profile-level metadata fields shared with all roles (description,
   budgets, etc.).
 - Plan-level review parameters (`symbol_index = "not_needed"`, etc.,
-  per `policy-plan-authority.md`).
+  per [`policy-plan-authority.md`](policy-plan-authority.md)).
 
 It MAY NOT declare:
 
@@ -805,7 +805,7 @@ The Orchestrator role's prohibition on custom tools is *structural*,
 not declarative: in V2, `plan.toml` cannot contain an
 `[profiles.<name>]` whose effective role is `Orchestrator`, and cannot
 contain `[plan.tasks.<id>] role = "Orchestrator"`, per
-`INV-PLANNER-HARNESS-06` (`planner-harness.md §4.8`). Since there is
+`INV-PLANNER-HARNESS-06` ([`planner-harness.md §4.8`](planner-harness.md)). Since there is
 no operator-declared Orchestrator profile, there is no surface on
 which an operator could attach a `[[profiles.<name>.custom_tool]]`
 block targeting the Orchestrator.
@@ -822,7 +822,7 @@ not at the custom-tool stage:
   `FAIL_ORCHESTRATOR_TASK_NOT_ALLOWED`.
 
 Each rejection includes a remediation message pointing at
-`planner-harness.md §4.8` and noting that the Orchestrator is
+[`planner-harness.md §4.8`](planner-harness.md) and noting that the Orchestrator is
 kernel-managed.
 
 **Why the Orchestrator's custom-tool ban is structural, not declarative
@@ -846,7 +846,7 @@ This is the operator-facing decision tree the spec must answer
 unambiguously, because verifiers and custom tools occupy adjacent
 semantic territory and confusion is predictable.
 
-| Concern | Verifier (`verifier-processes.md`) | Custom Tool (this spec) |
+| Concern | Verifier ([`verifier-processes.md`](verifier-processes.md)) | Custom Tool (this spec) |
 |---|---|---|
 | **Invoked by** | Kernel (preflight, on `CompleteTask`) | LLM (on-demand during a session) |
 | **VM** | Dedicated isolated verifier VM | The agent's own VM |
@@ -981,10 +981,10 @@ truncation state, and the resolved command line.
 
 | Spec | Change |
 |---|---|
-| `planner-harness.md` | Add Custom Tools as a third tool category alongside base tools and kernel-mediated intents (extension to §3); list `INV-PLANNER-HARNESS-04` in §13 invariants index. |
-| `policy-plan-authority.md` | New `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` (§3); new `FAIL_CUSTOM_TOOL_*` codes (§3b); admission check ordering update (§5); `policy.toml` `[custom_tool_limits]` and `[audit.custom_tools]` schema (§4). |
-| `kernel-mechanics-prompt.md` | Note that custom tools are appended verbatim to the JSON `tools` array alongside base tools and indistinguishable to the LLM at the protocol level (§3.1, §3.2). Reviewer NNSP confirms no custom tools surface (§3.3). |
-| `vm-network-isolation.md` | Cross-reference: custom-tool subprocesses share the agent VM's network namespace and are subject to tproxy + credential proxy enforcement; no new authority surface. |
+| [`planner-harness.md`](planner-harness.md) | Add Custom Tools as a third tool category alongside base tools and kernel-mediated intents (extension to §3); list `INV-PLANNER-HARNESS-04` in §13 invariants index. |
+| [`policy-plan-authority.md`](policy-plan-authority.md) | New `WARN_CUSTOM_TOOL_SCHEMA_BUDGET_HIGH` (§3); new `FAIL_CUSTOM_TOOL_*` codes (§3b); admission check ordering update (§5); `policy.toml` `[custom_tool_limits]` and `[audit.custom_tools]` schema (§4). |
+| [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) | Note that custom tools are appended verbatim to the JSON `tools` array alongside base tools and indistinguishable to the LLM at the protocol level (§3.1, §3.2). Reviewer NNSP confirms no custom tools surface (§3.3). |
+| [`vm-network-isolation.md`](vm-network-isolation.md) | Cross-reference: custom-tool subprocesses share the agent VM's network namespace and are subject to tproxy + credential proxy enforcement; no new authority surface. |
 | `invariants.md` | Add `INV-PLANNER-HARNESS-04` (§10); update count in TOC and preamble; new composition row. |
 
 ### 13.2 Future amendments (V2.x or V3)
@@ -992,8 +992,8 @@ truncation state, and the resolved command line.
 | Spec | Change | Driver |
 |---|---|---|
 | `audit-retention.md` (V3) | Custom-tool payload archival lifecycle, retention windows, GC. | `[audit.custom_tools]` policy fields above. |
-| `host-capacity.md` | Custom-tool concurrent-invocation limits as a host-aggregate budget category. | If operators report CPU-saturation incidents from runaway concurrent custom tools. |
-| `custom-tools.md` (this file) | Per-tool CPU / memory cgroup limits. | V2.x extension; ships when concrete operator demand exists. |
+| [`host-capacity.md`](host-capacity.md) | Custom-tool concurrent-invocation limits as a host-aggregate budget category. | If operators report CPU-saturation incidents from runaway concurrent custom tools. |
+| [`custom-tools.md`](custom-tools.md) (this file) | Per-tool CPU / memory cgroup limits. | V2.x extension; ships when concrete operator demand exists. |
 
 ---
 

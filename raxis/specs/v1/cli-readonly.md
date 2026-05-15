@@ -2,7 +2,7 @@
 
 > **Status:** v1 normative. This document spec'd in 2026-Q2 and supersedes the
 > ad-hoc references to `raxis-cli status` scattered throughout
-> `kernel-core.md` and `peripherals.md`.
+> [`kernel-core.md`](kernel-core.md) and [`peripherals.md`](peripherals.md).
 
 ---
 
@@ -34,7 +34,7 @@ kernel socket.
 
 `crates/store/src/db.rs` unconditionally executes
 `PRAGMA journal_mode = WAL` at every connection open
-(`kernel-store.md` §2.5.1, "WAL + synchronous=FULL: mandatory; non-negotiable").
+([`kernel-store.md`](kernel-store.md) §2.5.1, "WAL + synchronous=FULL: mandatory; non-negotiable").
 WAL mode guarantees that read transactions never block writers and writers
 never block readers; only `wal_checkpoint(TRUNCATE)` and DDL acquire the
 exclusive lock — and the kernel's own writer never holds either while the IPC
@@ -172,7 +172,7 @@ raxis_store::ro::assert_compatible_schema(
 ```
 
 The kernel writes the canonical schema_version into a `meta` row at the end
-of `migration::apply` (`kernel-store.md` §2.5.1 migration framework). The
+of `migration::apply` ([`kernel-store.md`](kernel-store.md) §2.5.1 migration framework). The
 CLI compares it against its own compiled-in constant; on mismatch it exits
 with `ERR_SCHEMA_MISMATCH (exit 7)` and a message that names both versions
 plus the upgrade path. Fail-closed: a schema-mismatched CLI never displays
@@ -270,14 +270,14 @@ Global flags (apply to every subcommand):
 - `-h, --help` — context-sensitive help.
 
 **Unknown subcommand suggestions.** Read-only commands share the
-top-level dispatcher with `cli-ceremony.md` §4.1, so the
+top-level dispatcher with [`cli-ceremony.md`](cli-ceremony.md) §4.1, so the
 `Did you mean …?` behaviour described there applies equally here:
 typos like `raxis stauts` surface `status`, and typos under a parent
 (e.g. `raxis policy diffr`) surface `diff` / `show`. Ranking,
 length-aware threshold, exact-prefix priority, the 5-suggestion cap,
 and the dispatcher↔catalog drift test all live in
 `cli/src/closeness.rs` + `cli/src/main.rs` and are spec'd once in
-`cli-ceremony.md` §4.1 to avoid drift between this file and that one.
+[`cli-ceremony.md`](cli-ceremony.md) §4.1 to avoid drift between this file and that one.
 
 ### §5.5.1 — `raxis status`
 
@@ -503,7 +503,7 @@ fields are emitted as `{"redacted": true, "len": 12}`.
 - `--task-limit N` — cap the per-task table at `N` rows (default `100`). Exists so a degenerate plan with thousands of tasks cannot make the CLI page through unbounded rows.
 - `--json` — emit a single JSON object with the same fields.
 
-**Operator-bearing fields render with display names** per `kernel-store.md` §2.5.2 — `signed_by` and `quarantined_by` route through the canonical `cli/src/operator_display::format_operator_with_lookup`, so the rendered identity is consistent with `raxis log`, `raxis inbox`, and `raxis policy show --history`.
+**Operator-bearing fields render with display names** per [`kernel-store.md`](kernel-store.md) §2.5.2 — `signed_by` and `quarantined_by` route through the canonical `cli/src/operator_display::format_operator_with_lookup`, so the rendered identity is consistent with `raxis log`, `raxis inbox`, and `raxis policy show --history`.
 
 **Output (human):**
 
@@ -539,7 +539,7 @@ When the initiative is quarantined, the `Quarantine: YES` block expands inline w
 
 **Output (--json):** single JSON object. `plan_signature` is `null` when no `signed_plan_artifacts` row exists; otherwise `{ signed_by: { fingerprint, fingerprint_prefix, display }, stored_at }`. `quarantine` is a discriminated record — `{ quarantined: false }` for the unquarantined case, otherwise `{ quarantined: true, quarantined_at, quarantined_by: { fingerprint, fingerprint_prefix, display }, reason, sweep_target }`. `tasks` is always an array (possibly empty).
 
-**Redaction contract.** `signed_plan_artifacts.plan_bytes` and `plan_sig` are **never** surfaced through this command — `kernel-store.md` §2.5.3 makes the sealed plan bytes audit-grade material, and §5.4.2 (this document) forbids leaking them through any non-`--reveal-*`-gated CLI surface. A future `--reveal-plan` flag (mirroring the `--reveal-paths` audit-gated reveal on §5.5.6) would emit a `PathReadAccessed`-shaped event; not in scope for v1.
+**Redaction contract.** `signed_plan_artifacts.plan_bytes` and `plan_sig` are **never** surfaced through this command — [`kernel-store.md`](kernel-store.md) §2.5.3 makes the sealed plan bytes audit-grade material, and §5.4.2 (this document) forbids leaking them through any non-`--reveal-*`-gated CLI surface. A future `--reveal-plan` flag (mirroring the `--reveal-paths` audit-gated reveal on §5.5.6) would emit a `PathReadAccessed`-shaped event; not in scope for v1.
 
 **Data sources:** `views::initiatives::by_id`, `views::signed_plan_artifacts::header_by_initiative`, `views::initiative_quarantines::get_by_initiative_id`, `views::tasks::list_by_initiative`. Operator name resolution: `cli::operator_display::OperatorNameLookup` (one snapshot of `operator_certificates` per invocation, served from memory for every render call).
 
@@ -549,7 +549,7 @@ When the initiative is quarantined, the `Quarantine: YES` block expands inline w
 
 **Purpose:** the read-only bucketed listing that sits alongside `raxis sessions` and `raxis escalations`. Answers the operator's recurring at-a-glance question "what initiatives are in flight, what shipped, and which are frozen?" in a single command. Companion to (not replacement for) the per-row deep-dive `raxis inspect-initiative` (§5.5.6a).
 
-**Why this command exists separately from `raxis initiative abort` / `raxis initiative quarantine`:** the singular-noun sub-actions are *mutating* operator commands (live in `cli/src/commands/initiative.rs` per `cli-ceremony.md` §4.6). This command is the listing companion (lives in `cli/src/commands/initiatives.rs`) and never opens `operator.sock` — same `escalation.rs` (mutating) vs. `escalations.rs` (read-only) split as §5.5.6.
+**Why this command exists separately from `raxis initiative abort` / `raxis initiative quarantine`:** the singular-noun sub-actions are *mutating* operator commands (live in `cli/src/commands/initiative.rs` per [`cli-ceremony.md`](cli-ceremony.md) §4.6). This command is the listing companion (lives in `cli/src/commands/initiatives.rs`) and never opens `operator.sock` — same `escalation.rs` (mutating) vs. `escalations.rs` (read-only) split as §5.5.6.
 
 **Invocation:**
 
@@ -943,7 +943,7 @@ ops-webhook        Webhook   https://hooks.example.com/raxis       Degraded  202
 The `STATUS` and `LAST PROBE` columns are read from the
 `notification_channel_health` SQLite table (`email-and-notification-channels.md §6.1`).
 Probe results are written by the boot probe (`extensibility-traits.md §9.1` step 9b)
-and by `raxis notify channel probe` (`cli-ceremony.md §4.1`).
+and by `raxis notify channel probe` ([`cli-ceremony.md §4.1`](cli-ceremony.md)).
 
 `--json` output adds the full `OperatorNotificationChannel::probe()` `ProbeOutcome` shape: `{ id, kind, target, reachable, auth_ok, round_trip_ms, server_banner, last_probe_ms, last_error }`.
 
@@ -1087,10 +1087,10 @@ audit-verify-deps` lint enforces this at build time.
 ## §5.6 — Notification channels (replaces email-only)
 
 This section supersedes the four hardcoded email references in
-`kernel-core.md` §2.3 escalation_handler step 5,
-`kernel-core.md` INV-ESC-06,
-`peripherals.md` §3 escalation flow, and
-`planner-api.md` §approval.
+[`kernel-core.md`](kernel-core.md) §2.3 escalation_handler step 5,
+[`kernel-core.md`](kernel-core.md) INV-ESC-06,
+[`peripherals.md`](peripherals.md) §3 escalation flow, and
+[`planner-api.md`](planner-api.md) §approval.
 
 ### §5.6.1 — Why this changes
 
@@ -1182,7 +1182,7 @@ channels   = ["shell", "audit-mirror"]   # security-relevant; force visibility
 
 ### §5.6.3 — Kernel emit path
 
-`kernel-core.md` §2.3 escalation_handler step 5 changes from:
+[`kernel-core.md`](kernel-core.md) §2.3 escalation_handler step 5 changes from:
 
 > Triggers `notification::send_escalation_alert(escalation_id, ...)` —
 > operator notification (email or local alert). Non-fatal: …
@@ -1400,8 +1400,8 @@ For the audit reader:
 ## §5.10 — Out of scope for v1
 
 - **`raxis-cli` mutating commands.** Those continue to go through the
-  existing IPC operator socket (`peripherals.md` §3 + `cli/src/commands/`)
-  and are governed by `cli-ceremony.md` §4.1.
+  existing IPC operator socket ([`peripherals.md`](peripherals.md) §3 + `cli/src/commands/`)
+  and are governed by [`cli-ceremony.md`](cli-ceremony.md) §4.1.
 - **LLM-token accounting.** RAXIS does not track LLM token consumption in
   v1. `raxis budget` is per-lane intent-cost utilization, NOT per-session
   LLM tokens. A future `raxis llm-tokens` subcommand is a v2 design item.

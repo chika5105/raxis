@@ -3,8 +3,8 @@
 > **Status:** **CLOSED V2.4** (initial impls landed; sigv4 gateway leg deferred — see §6).
 >
 > **Normative references:**
-> - `provider-model-selection.md §3` — provider catalogue + `ProviderId` enum
-> - `provider-failure-handling.md §6` — circuit-breaker semantics
+> - [`provider-model-selection.md §3`](provider-model-selection.md) — provider catalogue + `ProviderId` enum
+> - [`provider-failure-handling.md §6`](provider-failure-handling.md) — circuit-breaker semantics
 > - `peripherals.md §3.2` — credential injection precedence
 > - `gateway-substrate.md §3` — host-side gateway egress hop
 > - `INV-GATEWAY-STREAM-ATOMICITY` — non-streaming response is a structural
@@ -208,7 +208,7 @@ For V2, `BedrockClient` only supports Anthropic-on-Bedrock. The full
 provider-agnostic shape) lands in V3 alongside the streaming dispatch
 work that requires it.
 
-This is why `provider-model-selection.md §3.4` notes "no registry
+This is why [`provider-model-selection.md §3.4`](provider-model-selection.md) notes "no registry
 entries yet" for Bedrock — the model ids will be added as a V3 PR
 when `BedrockClient` ships the `Converse` translator.
 

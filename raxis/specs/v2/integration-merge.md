@@ -2,17 +2,17 @@
 
 > **Status:** V2 Specified  
 > **Cross-references:**  
-> - `v2-deep-spec.md §Step 8` — Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It (decision + rationale; the cross-reference language was tightened by `INV-KERNEL-DAG-AUTHORITY-01` — "owns the merge" is shorthand for "semantically resolves conflicts in the merge clone and emits the advisory intent", NOT "decides whether the merge lands")  
-> - `v2-deep-spec.md §Step 9` — Bundle Routing (how Executor commits reach the Orchestrator)  
-> - `v2-deep-spec.md §Step 11` — Hybrid Allowlist computation  
-> - `v2-deep-spec.md §Step 24b` — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)  
-> - `v2-deep-spec.md §Step 30` — Audit Attribution for Operator-Assisted Commits  
-> - `planner-harness.md §4.7` — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution  
-> - `planner-harness.md §4.8` — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration  
-> - `kernel-mechanics-prompt.md §3.2` — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
-> - `policy-plan-authority.md §4` `[orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
-> - `agent-disagreement.md` — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
-> - `extensibility-traits.md §2` — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.  
+> - [`v2-deep-spec.md §Step 8`](v2-deep-spec.md) — Orchestrator Performs `IntegrationMerge`; Kernel Adjudicates It (decision + rationale; the cross-reference language was tightened by `INV-KERNEL-DAG-AUTHORITY-01` — "owns the merge" is shorthand for "semantically resolves conflicts in the merge clone and emits the advisory intent", NOT "decides whether the merge lands")  
+> - [`v2-deep-spec.md §Step 9`](v2-deep-spec.md) — Bundle Routing (how Executor commits reach the Orchestrator)  
+> - [`v2-deep-spec.md §Step 11`](v2-deep-spec.md) — Hybrid Allowlist computation  
+> - [`v2-deep-spec.md §Step 24b`](v2-deep-spec.md) — Orchestrator Workspace Provisioning (RW clone from base SHA at initiative boot; the workspace this spec's merges happen in)  
+> - [`v2-deep-spec.md §Step 30`](v2-deep-spec.md) — Audit Attribution for Operator-Assisted Commits  
+> - [`planner-harness.md §4.7`](planner-harness.md) — Canonical Orchestrator Image (`INV-PLANNER-HARNESS-05`); the source of `bash`, `git`, `ripgrep`, and `edit_file` for V2 semantic conflict resolution  
+> - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator Not Operator-Configurable (`INV-PLANNER-HARNESS-06`); explains why §8's workflow lives in kernel-pinned NNSP bytes rather than operator configuration  
+> - [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md) — **normative** Orchestrator NNSP including the `[KERNEL: INTEGRATION MERGE PROTOCOL]` and `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks  
+> - [`policy-plan-authority.md §4`](policy-plan-authority.md) `[orchestrator]` — operator-tunable policy knobs (`provider_alias`, `max_token_budget_per_initiative`, `all_merges_require_approval`)  
+> - [`agent-disagreement.md`](agent-disagreement.md) — sub-task `CompleteTask` admission gates (`FAIL_CIRCULAR_REVISION`, `FAIL_REVIEW_LOOP_EXCEEDED`, `FAIL_WALL_CLOCK_LIMIT_EXCEEDED`) that fire **before** sub-tasks reach the merge pipeline. `IntegrationMerge` itself is unchanged by that spec; what changes is which sub-tasks ever satisfy Check 4's `state = 'Completed'` precondition.  
+> - [`extensibility-traits.md §2`](extensibility-traits.md) — `DomainAdapter` trait. **`IntegrationMerge` is the SE-domain instantiation of `DomainAdapter::commit`**. The admission pipeline (Checks 1–7), the audit emissions, and the SQLite/git transactional boundary specified here are *paradigm-layer* and stay in the kernel binary. The git-specific cherry-pick / fetch / update-ref / push sequence in Phase 2 of Check 8 (and the touched-paths derivation in Check 5) is *implementation-layer* and lives in `crates/raxis-domain-git`. Other domains (trading, healthcare) reuse this entire spec verbatim and just plug a different adapter into the same Phase 2 call site.  
 >
 > This document is the **complete mechanical specification** for the `IntegrationMerge`
 > intent: its struct, the full admission pipeline, the multi-task merge sequencing model,
@@ -42,7 +42,7 @@ After `IntegrationMerge` is admitted:
 
 ### 1.1 Paradigm-vs-implementation framing
 
-`IntegrationMerge` is the SE-domain instance of the *paradigm primitive* "authorised commit of agent-produced state to canonical external state" (`paradigm.md §2`, `R-11`). The trait that captures that paradigm primitive is `DomainAdapter::commit` (`extensibility-traits.md §2.2.A`). Concretely:
+`IntegrationMerge` is the SE-domain instance of the *paradigm primitive* "authorised commit of agent-produced state to canonical external state" (`paradigm.md §2`, `R-11`). The trait that captures that paradigm primitive is `DomainAdapter::commit` ([`extensibility-traits.md §2.2.A`](extensibility-traits.md)). Concretely:
 
 - The intent struct (§2), the admission pipeline (§4), the multi-task wave model (§5), the audit chain emissions (§7), and the SQLite/git transactional boundary (§11) are *paradigm-layer* mechanisms that stay in the kernel binary unchanged. They apply to **any** domain.
 - The git-specific operations — `gix::diff_tree_to_tree` for the touched-set in Check 5, `git fetch && git update-ref` for the main fast-forward in Check 8 Phase 2, the optional `git push` to upstream in §14 — are *implementation-layer* and live entirely behind the `DomainAdapter` trait, in `crates/raxis-domain-git`. A `TradingAdapter::commit` plugged into the same Phase 2 call site instead submits an order via the credential proxy; an `HealthcareAdapter::commit` POSTs a FHIR resource. The kernel's `IntegrationMerge` handler is unchanged.
@@ -53,7 +53,7 @@ Where this spec uses the word "git" in a normative paragraph, that paragraph des
 
 This spec mentions `refs/heads/main` throughout the historical
 text below. Per the V2.2 amendment landed alongside
-`V2_GAPS.md §12.8 / §12.9`, the kernel actually advances a
+[`V2_GAPS.md §12.8 / §12.9`](V2_GAPS.md), the kernel actually advances a
 **resolved `target_ref`** that defaults to `refs/heads/main` but
 may be overridden per-initiative. The resolution chain runs at
 `lifecycle::approve_plan` admission time:
@@ -177,9 +177,9 @@ Every `task_id` in `merged_task_ids`:
 
 Failure for any of these: `FAIL_TASK_NOT_COMPLETED` with the offending task_id.
 
-**Interaction with `agent-disagreement.md`.** A sub-task only reaches
+**Interaction with [`agent-disagreement.md`](agent-disagreement.md).** A sub-task only reaches
 `state = 'Completed'` after its `CompleteTask` intent admits cleanly.
-Per `agent-disagreement.md`, that admission can be rejected by
+Per [`agent-disagreement.md`](agent-disagreement.md), that admission can be rejected by
 `FAIL_CIRCULAR_REVISION` (§4) or `FAIL_REVIEW_LOOP_EXCEEDED` (§3)
 or terminated by `FAIL_WALL_CLOCK_LIMIT_EXCEEDED` (§5) — in which
 case the sub-task transitions to `Failed`, never to `Completed`,
@@ -190,7 +190,7 @@ spec, is expected to reissue or abandon the affected sub-tasks
 before constructing a merge.
 
 ### Check 5 — Diff Computation and Hybrid Allowlist Check
-The Kernel derives the touched-set via the `DomainAdapter` trait (`extensibility-traits.md §2.2`), which for the SE adapter is a content diff between `base_sha` and `commit_sha`:
+The Kernel derives the touched-set via the `DomainAdapter` trait ([`extensibility-traits.md §2.2`](extensibility-traits.md)), which for the SE adapter is a content diff between `base_sha` and `commit_sha`:
 ```rust
 let touched: TouchedResources = ctx.domain.touched_resources(
     &IntentKind::IntegrationMerge { commit_sha, base_sha, .. },
@@ -202,7 +202,7 @@ let touched_paths: Vec<&str> = touched
     .filter_map(|r| r.uri.strip_prefix("path:///"))
     .collect();
 ```
-The `GitAdapter` impl wraps `gix::diff_tree_to_tree(base_tree, head_tree)`, returning each touched path as a `path:///`-prefixed URI; the kernel strips the prefix here for the allowlist comparison so the rest of this Check stays SE-flavoured. Non-SE adapters return their own URI scheme and the allowlist matcher in `policy.toml` is reframed as URI-prefix matching (`extensibility-traits.md §2.6` files-to-change for `kernel/src/scheduler/admit.rs`).
+The `GitAdapter` impl wraps `gix::diff_tree_to_tree(base_tree, head_tree)`, returning each touched path as a `path:///`-prefixed URI; the kernel strips the prefix here for the allowlist comparison so the rest of this Check stays SE-flavoured. Non-SE adapters return their own URI scheme and the allowlist matcher in `policy.toml` is reframed as URI-prefix matching ([`extensibility-traits.md §2.6`](extensibility-traits.md) files-to-change for `kernel/src/scheduler/admit.rs`).
 
 The set of touched paths is checked against the hybrid allowlist:
 ```text
@@ -264,7 +264,7 @@ Check 5b is a no-op. Proceed to Check 5c.
 
 Runs **immediately after Check 5b** when the policy bundle's
 `[orchestrator]` section sets `all_merges_require_approval = true`
-(per `policy-plan-authority.md §4` `[orchestrator]`,
+(per [`policy-plan-authority.md §4`](policy-plan-authority.md) `[orchestrator]`,
 `INV-PLANNER-HARNESS-06`).
 
 When `all_merges_require_approval = true` AND `operator_approval_id`
@@ -313,7 +313,7 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 
 > **Implementation status (V2 GA):** The plan-author and operator-global
 > surfaces below are **not yet wired** in the kernel. Until the
-> `raxis-verifier-runtime` crate (per `verifier-processes.md §19.1`)
+> `raxis-verifier-runtime` crate (per [`verifier-processes.md §19.1`](verifier-processes.md))
 > lands, the kernel rejects any plan or policy that declares
 > `[[plan.integration_merge_verifiers]]` or `[[integration_merge_verifiers]]`
 > at the earliest gate (plan-approve / policy-load), with
@@ -323,16 +323,16 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 > existing plans and policies.
 >
 > **Tracker.** The full Check 5d implementation is a multi-day phase
-> (per `verifier-processes.md §19` Implementation Plan — Phase 4). It depends on:
+> (per [`verifier-processes.md §19`](verifier-processes.md) Implementation Plan — Phase 4). It depends on:
 >
 > - The `raxis-verifier-runtime` crate (`§19.1`).
 > - `DDL Migration 11` for `integration_merge_attempts` (§11.10.1).
 >   (Originally drafted as Migration 10 but bumped to 11 because
 >   Migration 10 was consumed by `task_credential_proxies` —
->   `credential-proxy.md §1.1`.)
+>   [`credential-proxy.md §1.1`](credential-proxy.md).)
 > - The candidate-merge-tree creation primitive (`§16.2`).
 > - VM-spawn integration with `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`
->   (`verifier-processes.md §11`).
+>   ([`verifier-processes.md §11`](verifier-processes.md)).
 > - Crash-recovery for in-flight pre-merge runs (§11.10.4).
 >
 > The fail-closed posture above ensures no operator can accidentally
@@ -341,7 +341,7 @@ await KernelPush::EscalationResolved; re-submit with operator_approval_id`).
 > the gate fires per the algorithm below.
 
 Runs **immediately after Check 5c** when at least one of the following
-declares pre-merge verifiers (per `verifier-processes.md §15`):
+declares pre-merge verifiers (per [`verifier-processes.md §15`](verifier-processes.md)):
 
 - `plan.toml [[plan.integration_merge_verifiers]]` — plan-author surface
 - `policy.toml [[integration_merge_verifiers]]` — operator-global surface
@@ -355,7 +355,7 @@ main advancement on the candidate merged tree's verifier verdicts.
 on the same merge attempt. Operator-side declarations cannot be
 downgraded to `warn_only` by any plan; plan-side declarations may
 freely choose `block_merge` or `warn_only`. Both sources are subject
-to the `applies_to` filter (per `verifier-processes.md §16.3`):
+to the `applies_to` filter (per [`verifier-processes.md §16.3`](verifier-processes.md)):
 `"all"` (default) | `"task_set"` | `"last"`. Operator-side
 declarations additionally honor `required_for_environments` to bind
 to the environment-access-control framework
@@ -379,7 +379,7 @@ if matching.is_empty() {
 ```
 
 `applies_to_matches` and `environment_filter_matches` are specified
-in `verifier-processes.md §16.3`.
+in [`verifier-processes.md §16.3`](verifier-processes.md).
 
 #### Check 5d.2 — Compute the candidate merged tree
 
@@ -425,7 +425,7 @@ this by re-doing its merge work and re-submitting.
 
 For each verifier in `matching`, the kernel allocates a verifier-VM
 slot (against `[host_capacity] max_concurrent_verifier_vms`) and
-spawns the VM per `verifier-processes.md §4.2`. The
+spawns the VM per [`verifier-processes.md §4.2`](verifier-processes.md). The
 spawn-envelope `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`,
 `RAXIS_INTEGRATION_MERGE_ID` is set, and `/workspace` is mounted
 from the candidate merged tree (NOT from any individual task branch
@@ -437,7 +437,7 @@ matching verifier's witness row) before proceeding.
 
 #### Check 5d.4 — Gating and disposition
 
-Per `verifier-processes.md §5.3`:
+Per [`verifier-processes.md §5.3`](verifier-processes.md):
 
 ```rust
 let block_merge_failures = matching.iter()
@@ -475,7 +475,7 @@ if !block_merge_failures.is_empty() {
 ```
 
 When the Orchestrator receives `FAIL_INTEGRATION_MERGE_VERIFIER_BLOCKED`,
-it routes per `verifier-processes.md §16.6` — typically as an
+it routes per [`verifier-processes.md §16.6`](verifier-processes.md) — typically as an
 operator escalation `EscalationRequest { class:
 IntegrationMergeRegression, ... }`, since pre-merge regressions are
 post-Reviewer and require operator judgment rather than agent retry.
@@ -507,7 +507,7 @@ merges that the operator hasn't approved at the human-gate layer.
 
 Both codes return to the Orchestrator. Neither is retryable
 without operator action (the Orchestrator escalates per
-`agent-disagreement.md §6`).
+[`agent-disagreement.md §6`](agent-disagreement.md)).
 
 ---
 
@@ -600,7 +600,7 @@ under the main-worktree lock, plus (when `[git_push]` is configured per §14) an
 
 The handler dispatches Phase 2 + Phase 3 inline before returning the response to the Orchestrator. If the kernel crashes during Phase 2 or between Phase 2 and Phase 3, recovery on next startup re-runs the missing phases (§11.3).
 
-**Idempotency contract.** `DomainAdapter::commit` MUST return `Err(DomainError::AlreadyApplied { receipt })` if invoked a second time for the same `Snapshot.content_hash` (`extensibility-traits.md §2.7` conformance property #5). The recovery path of §11.3 relies on this: re-running Phase 2 after a crash either re-executes (idempotent fetch + update-ref) or short-circuits via `AlreadyApplied`, both of which leave main at `commit_sha`.
+**Idempotency contract.** `DomainAdapter::commit` MUST return `Err(DomainError::AlreadyApplied { receipt })` if invoked a second time for the same `Snapshot.content_hash` ([`extensibility-traits.md §2.7`](extensibility-traits.md) conformance property #5). The recovery path of §11.3 relies on this: re-running Phase 2 after a crash either re-executes (idempotent fetch + update-ref) or short-circuits via `AlreadyApplied`, both of which leave main at `commit_sha`.
 
 ---
 
@@ -730,16 +730,16 @@ AuditEventKind::InitiativeCompleted {
 ## 8. Orchestrator's Merge Workflow (Step-by-Step)
 
 > **V2 amendment.** The Orchestrator NNSP is **kernel-pinned bytes**
-> per `INV-PLANNER-HARNESS-06.3` (`planner-harness.md §4.8`); the
+> per `INV-PLANNER-HARNESS-06.3` ([`planner-harness.md §4.8`](planner-harness.md)); the
 > normative source for the Orchestrator's merge workflow is
-> `kernel-mechanics-prompt.md §3.2`'s
+> [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md)'s
 > `[KERNEL: INTEGRATION MERGE PROTOCOL]` and
 > `[KERNEL: CONFLICT RESOLUTION PROTOCOL]` blocks, which the kernel
 > binary embeds as `ORCHESTRATOR_NNSP_BYTES`. The text below is
 > retained for historical context and accurately summarizes the
 > *bypass-and-escalate* pre-V2 conflict path; the V2 NNSP additionally
 > permits **in-Orchestrator semantic resolution** of trivial conflicts
-> (criteria T1–T4 in `kernel-mechanics-prompt.md §3.2`) using `bash`,
+> (criteria T1–T4 in [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md)) using `bash`,
 > `git`, and `edit_file` from the kernel-canonical
 > `raxis-orchestrator-core` image (`INV-PLANNER-HARNESS-05`). The
 > path-allowlist constraints in §4 (Check 5 / `hybrid_effective_allow`)
@@ -810,7 +810,7 @@ NNSP §3.2 explicitly forbids committing conflict-marked files.
 **Note on V2 semantic resolution and the path-allowlist gate.** The Orchestrator's
 in-VM `edit_file` invocations during conflict resolution are **not** themselves
 kernel-mediated — they are tool calls inside the Orchestrator's RW workspace per
-Step 24b of `v2-deep-spec.md`. The kernel's enforcement happens at IntegrationMerge
+Step 24b of [`v2-deep-spec.md`](v2-deep-spec.md). The kernel's enforcement happens at IntegrationMerge
 admission (Check 5): the diff between `base_sha` and `commit_sha` is computed
 host-side, and every touched path is checked against `hybrid_effective_allow`. If the
 Orchestrator semantically resolved a conflict by editing a file that is *not* in any
@@ -898,7 +898,7 @@ Check 8 has two distinct durable side effects:
 
 These two operations cannot be made atomic. SQLite has no awareness of git, and `gix` does not participate in SQLite's transaction. There is always a window between them. This section specifies the ordering, the failure modes, and the recovery semantics that restore consistency after a crash.
 
-The corresponding cross-reference from `key-revocation.md §7.5` Case C points here: when a session is revoked while an `IntegrationMerge` is in flight, the revocation interacts with whichever phase the merge has reached.
+The corresponding cross-reference from [`key-revocation.md §7.5`](key-revocation.md) Case C points here: when a session is revoked while an `IntegrationMerge` is in flight, the revocation interacts with whichever phase the merge has reached.
 
 ### 11.1 Ordering: SQLite First, then Git, then SQLite Again
 
@@ -939,7 +939,7 @@ In all cases except #1, the `git_apply_pending = 1` flag in SQLite is the durabl
 
 ### 11.3 Recovery on Startup
 
-After policy load and after `key-revocation.md §5.3` reconciliation, before accepting new IPC connections, `kernel/src/startup.rs` runs the merge-consistency recovery pass:
+After policy load and after [`key-revocation.md §5.3`](key-revocation.md) reconciliation, before accepting new IPC connections, `kernel/src/startup.rs` runs the merge-consistency recovery pass:
 
 ```text
 SELECT id, current_sha, main_repo_path
@@ -998,7 +998,7 @@ Recovery is idempotent: running it twice on the same state produces the same fin
 
 ### 11.4 Worktree Retention Requirement
 
-The recovery procedure depends on the originating Orchestrator's worktree being available on disk for the duration of `git_apply_pending = 1`. This adds a constraint on worktree garbage collection that is parallel to (but distinct from) the forensic retention rule in `key-revocation.md §7.4`:
+The recovery procedure depends on the originating Orchestrator's worktree being available on disk for the duration of `git_apply_pending = 1`. This adds a constraint on worktree garbage collection that is parallel to (but distinct from) the forensic retention rule in [`key-revocation.md §7.4`](key-revocation.md):
 
 **INV-MERGE-WORKTREE-RETAIN.** A session's worktree must NOT be garbage-collected while any initiative referencing the session has `git_apply_pending = 1`.
 
@@ -1015,7 +1015,7 @@ SELECT 1
 
 If any row returns, the worktree is held until `git_apply_pending` clears. In normal operation this is a sub-second window between Phase 2 and Phase 3; the GC essentially never blocks. The check exists to handle the crash-recovery window, where a worktree may need to be retained for as long as the kernel is down.
 
-This complements (does not replace) the forensic retention from `key-revocation.md §7.4`. Forensic retention applies to terminated sessions for 30 days; INV-MERGE-WORKTREE-RETAIN applies to any session whose worktree is needed for an in-flight merge regardless of session state.
+This complements (does not replace) the forensic retention from [`key-revocation.md §7.4`](key-revocation.md). Forensic retention applies to terminated sessions for 30 days; INV-MERGE-WORKTREE-RETAIN applies to any session whose worktree is needed for an in-flight merge regardless of session state.
 
 ### 11.5 Cross-Cutting: Subsequent Operations Must Check `git_apply_pending`
 
@@ -1091,7 +1091,7 @@ These three events are the only places where the SQLite ↔ git boundary surface
 
 ### 11.10 Candidate Merged Tree Lifecycle (V2 — Pre-Merge Verifiers)
 
-When Check 5d (per `verifier-processes.md §15`) fires, the kernel
+When Check 5d (per [`verifier-processes.md §15`](verifier-processes.md)) fires, the kernel
 materializes a **candidate merged tree** as an orphan commit before
 verifier-VM activation. Its lifecycle is bounded by Check 5d: it
 exists only between `Check 5d.2` (creation) and either Check 5d.4
@@ -1254,7 +1254,7 @@ each with a bounded retention window:
 
 #### 11.10.4 Crash-recovery cleanup at startup
 
-Recovery from `kernel-lifecycle.md §7` is extended to handle
+Recovery from [`kernel-lifecycle.md §7`](kernel-lifecycle.md) is extended to handle
 in-flight pre-merge verifier runs. After the existing §11.3
 recovery completes, the kernel:
 
@@ -1269,7 +1269,7 @@ SELECT id, initiative_id, candidate_merge_sha
 For each row:
 
 1. Cross-reference against the verifier-VM cgroup scan from
-   `kernel-lifecycle.md §7` orphan-VM cleanup. Any pre-merge
+   [`kernel-lifecycle.md §7`](kernel-lifecycle.md) orphan-VM cleanup. Any pre-merge
    verifier VM whose `RAXIS_INTEGRATION_MERGE_ID` matches this
    attempt is killed via `cgroup.kill` (already handled by the
    generic verifier-VM orphan cleanup; the pre-merge case requires
@@ -1335,7 +1335,7 @@ AuditEventKind::VerifierBlockedMerge {
 ```
 
 `VerifierActivated` and `VerifierCompleted` (per
-`verifier-processes.md §11`) also fire for pre-merge verifier
+[`verifier-processes.md §11`](verifier-processes.md)) also fire for pre-merge verifier
 spawns; these are the standard verifier audit events with
 `hook_kind = "pre_merge"` and `integration_merge_id` set in place
 of `task_id`.
@@ -1347,10 +1347,10 @@ of `task_id`.
 ### 12.0 DomainAdapter integration (prerequisite)
 
 The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
-(`extensibility-traits.md §2`). Land these before §12.1 starts:
+([`extensibility-traits.md §2`](extensibility-traits.md)). Land these before §12.1 starts:
 
 - [ ] Crate `crates/raxis-domain-git` exists and exports `GitAdapter` (per
-      `extensibility-traits.md §2.5`).
+      [`extensibility-traits.md §2.5`](extensibility-traits.md)).
 - [ ] `kernel/src/handlers/merge.rs::handle_integration_merge` takes a
       `&HandlerContext` whose `ctx.domain: Arc<dyn DomainAdapter<...>>` is wired
       at boot (§9 of the traits spec).
@@ -1420,14 +1420,14 @@ The IntegrationMerge handler is rewritten on top of the `DomainAdapter` trait
       → Result<CandidateMergeSha, FailReason>` producing an orphan commit at
       `$RAXIS_DATA_DIR/candidate_merges/<integration_merge_id>/`
 - [ ] Implement `applies_to_matches` and `environment_filter_matches` per
-      `verifier-processes.md §16.3` (cross-spec; lives in the verifier module)
+      [`verifier-processes.md §16.3`](verifier-processes.md) (cross-spec; lives in the verifier module)
 - [ ] Spawn pre-merge verifier VMs with `RAXIS_VERIFIER_HOOK_KIND = "pre_merge"`,
       `RAXIS_INTEGRATION_MERGE_ID` set, `/workspace` mounted from candidate merged tree
 - [ ] Implement gating algorithm per §4 Check 5d.4; emit `VerifierBlockedMerge` or
       proceed to Check 6a based on outcome
 - [ ] Implement `discard_candidate_merge_tree` per §11.10.3 (worktree removal,
       SQLite update, audit emission)
-- [x] Extend startup recovery (`kernel-lifecycle.md §7`) per §11.10.4 — handle
+- [x] Extend startup recovery ([`kernel-lifecycle.md §7`](kernel-lifecycle.md)) per §11.10.4 — handle
       attempts in `'AwaitingPreMergeVerifiers'` and `'PreMergeVerifiersPassed'`
       states; reconcile with verifier-VM cgroup orphan cleanup. **Implemented**
       as `recovery::reconcile_integration_merge_attempts` in

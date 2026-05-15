@@ -1133,4 +1133,4 @@ collector is pushing into Prometheus.
 
 `cargo xtask perf` reuses this stack automatically when present
 (it never spins up a competing instance). See
-`raxis/guides/recipes/ops/16-measure-perf.md` for the recipe.
+[`raxis/guides/recipes/ops/16-measure-perf.md`](../guides/recipes/ops/16-measure-perf.md) for the recipe.

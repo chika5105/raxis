@@ -16,20 +16,20 @@
 >
 > **Role:** Canonical home for two related but separately-bounded subsystems:
 >
-> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Sidecar today; Slack/PagerDuty/Teams via operator-run sidecar translators).  V1-draft `Webhook` was folded into `Sidecar` in V2.5 (forward-only).  The 7th extensibility trait per `extensibility-traits.md §6A`. Implements forward-compat from `cli-readonly.md §5.6.6`.
-> 2. **`SmtpCredentialProxy`** — agent→external SMTP relay, the 6th `proxy_type` per `credential-proxy.md §3.6`. Lets agents send email as part of their work without ever holding the SMTP password.
+> 1. **`OperatorNotificationChannel`** — the kernel→operator outbound transport seam (Shell, File, Email, Sidecar today; Slack/PagerDuty/Teams via operator-run sidecar translators).  V1-draft `Webhook` was folded into `Sidecar` in V2.5 (forward-only).  The 7th extensibility trait per [`extensibility-traits.md §6A`](extensibility-traits.md). Implements forward-compat from `cli-readonly.md §5.6.6`.
+> 2. **`SmtpCredentialProxy`** — agent→external SMTP relay, the 6th `proxy_type` per [`credential-proxy.md §3.6`](credential-proxy.md). Lets agents send email as part of their work without ever holding the SMTP password.
 >
 > The two subsystems share the SMTP transport library (`crates/raxis-smtp-client/`) but are not the same code path. Mixing them would erase the `R-9` attribution boundary (an operator-attributed channel triggerable from agent intent would let the agent forge operator-attributed email).
 >
 > **Cross-references:**
-> - `extensibility-traits.md §6A` (NEW) — `OperatorNotificationChannel` trait registration + V2 ship list + conformance kit
-> - `extensibility-traits.md §1.1` — The §1.1 rule and the seventh trait row
-> - `extensibility-traits.md §13.1` — Why seven traits, not six (decision rationale)
-> - `credential-proxy.md §3.6` (NEW) — SMTP `proxy_type` reference
+> - [`extensibility-traits.md §6A`](extensibility-traits.md) (NEW) — `OperatorNotificationChannel` trait registration + V2 ship list + conformance kit
+> - [`extensibility-traits.md §1.1`](extensibility-traits.md) — The §1.1 rule and the seventh trait row
+> - [`extensibility-traits.md §13.1`](extensibility-traits.md) — Why seven traits, not six (decision rationale)
+> - [`credential-proxy.md §3.6`](credential-proxy.md) (NEW) — SMTP `proxy_type` reference
 > - `cli-ceremony.md §4.1` — `raxis notify channel | route | credential` operator-write commands
 > - `cli-readonly.md §5.6` — Existing `[notifications]` schema and `raxis inbox`
-> - `policy-plan-authority.md §4` — Schema for `[[notifications.credentials]]` and `[[notifications.channels.email|webhook]]`
-> - `kernel-mechanics-prompt.md §3` — Agent NNSP addition for SMTP proxy availability
+> - [`policy-plan-authority.md §4`](policy-plan-authority.md) — Schema for `[[notifications.credentials]]` and `[[notifications.channels.email|webhook]]`
+> - [`kernel-mechanics-prompt.md §3`](kernel-mechanics-prompt.md) — Agent NNSP addition for SMTP proxy availability
 > - `v1/kernel-core.md §2.3` — Escalation handler step 5 dispatch hook (already routes to `notifications::dispatch`)
 > - `v1/kernel-store.md §2.5.2` — AuditSink ordering invariant (NotificationDelivered events emit post-commit)
 
@@ -59,7 +59,7 @@ A code-review bot summarises findings to a human reviewer; a release-automation 
 | Body | Pre-rendered by per-event-kind formatter | Agent-controlled, hashed for audit, optionally archived |
 | Trust | Operator-trusted | Agent-untrusted (every header/recipient/byte filtered) |
 | Primary `R-*` | `R-7` (audit emits notification record), `R-9` (operator attribution) | `R-2` (mediated egress), `R-9` (task attribution), `INV-VM-CAP-04` |
-| Existing scaffolding | `[[notifications.channels]]` v1 schema; Email/Webhook handlers deferred to v2 (`cli-readonly.md §5.6.6`) | Tier-2 credential proxy in `credential-proxy.md §3` |
+| Existing scaffolding | `[[notifications.channels]]` v1 schema; Email/Webhook handlers deferred to v2 (`cli-readonly.md §5.6.6`) | Tier-2 credential proxy in [`credential-proxy.md §3`](credential-proxy.md) |
 | Audit kind | `NotificationDelivered`, `NotificationDeliveryFailed` | `SmtpProxyConnected`, `SmtpProxyMessageSent`, `SmtpProxyMessageRejected`, `SmtpProxyRateLimited` |
 
 **The R-9 attribution rule** drives the boundary: an operator-attributed email and an agent-attributed email are distinct kinds of message-in-the-world, and they MUST land in distinct audit records and distinct policy surfaces. Combining the trait would let an agent intent (or a buggy handler) emit a `NotificationDelivered` record with operator attribution, which would let the agent forge audit-bound operator messages. The trait surfaces are split for that reason.
@@ -81,7 +81,7 @@ That crate has no policy logic, no audit logic, no credential resolution. It is 
 
 ### §2.1 The §1.1 rule revisited
 
-`extensibility-traits.md §1.1` says: *a subsystem stays concrete if and only if it enforces an `R-*` invariant.* Applying the rule to operator-notification:
+[`extensibility-traits.md §1.1`](extensibility-traits.md) says: *a subsystem stays concrete if and only if it enforces an `R-*` invariant.* Applying the rule to operator-notification:
 
 - **What enforces `R-*`?** The dispatcher's idempotency-on-`(event_seq, channel_id)`, the per-route ACL, the audit emission of `NotificationDelivered`/`NotificationDeliveryFailed`, the requirement that the dispatch never blocks the kernel commit path. All of these stay **kernel-side** in `kernel/src/notifications/dispatch.rs` and DO NOT vary by channel.
 - **What varies by channel?** The wire (filesystem write vs SMTP vs HTTPS POST), the credential source (none vs SMTP password vs HMAC secret), the rate-limit class (instantaneous file write vs round-trip-to-relay).
@@ -420,7 +420,7 @@ These events follow the post-commit emission ordering in `kernel-store.md §2.5.
 
 ## §3 — Goal B: SMTP credential proxy (agent egress)
 
-This section is the canonical home for `proxy_type = "smtp"`. The structural shape mirrors `credential-proxy.md §3.1` (k8s) and §4.1 (PostgreSQL TCP proxying) — re-read those for the surrounding context.
+This section is the canonical home for `proxy_type = "smtp"`. The structural shape mirrors [`credential-proxy.md §3.1`](credential-proxy.md) (k8s) and §4.1 (PostgreSQL TCP proxying) — re-read those for the surrounding context.
 
 ### §3.1 Threat model
 
@@ -521,7 +521,7 @@ proxy_type = "smtp"
 mount_as   = "SMTP_URL"            # → smtp://localhost:2525 (no auth, plain wire — STARTTLS happens proxy-to-upstream)
 ```
 
-The kernel allocates a port from the credential-proxy reserved range (`credential-proxy.md §13.3` — extended in §6.4 of this spec).
+The kernel allocates a port from the credential-proxy reserved range ([`credential-proxy.md §13.3`](credential-proxy.md) — extended in §6.4 of this spec).
 
 ### §3.5 Wire flow
 
@@ -640,7 +640,7 @@ Both counters use a sliding-window-with-bucket implementation (10 buckets per wi
 
 ### §3.10 NNSP additions (agent-facing prompt)
 
-`kernel-mechanics-prompt.md §3` gains an SMTP block when the task has an `[[tasks.credentials]]` entry with `proxy_type = "smtp"`:
+[`kernel-mechanics-prompt.md §3`](kernel-mechanics-prompt.md) gains an SMTP block when the task has an `[[tasks.credentials]]` entry with `proxy_type = "smtp"`:
 
 ```python
 ## SMTP Proxy
@@ -786,7 +786,7 @@ The existing `raxis credential list`, `raxis credential delete`, `raxis credenti
 
 ## §5 — Wiring at boot
 
-### §5.1 Construction order (extends `extensibility-traits.md §9.1`)
+### §5.1 Construction order (extends [`extensibility-traits.md §9.1`](extensibility-traits.md))
 
 The seven-trait composition order becomes:
 
@@ -942,7 +942,7 @@ Total surface: ~14–17 calendar-days for the full V2 email subsystem.
 | --- | --- |
 | `kernel/src/handlers/mod.rs` | Extend `HandlerContext` with `notifications: Arc<NotificationDispatcher>`. Replace direct calls to v1 channel handlers with `ctx.notifications.dispatch(payload)` |
 | `kernel/src/handlers/intent.rs` | At each post-commit notification site (escalation, path-scope override, key-revocation, plan-load, …), build `NotificationPayload` and dispatch |
-| `kernel/src/main.rs` | Phase 9 of `extensibility-traits.md §9.1` — construct channels per policy, register with dispatcher |
+| `kernel/src/main.rs` | Phase 9 of [`extensibility-traits.md §9.1`](extensibility-traits.md) — construct channels per policy, register with dispatcher |
 | `kernel/src/policy_manager.rs` | On policy reload, refresh dispatcher's channel set + routes via `dispatcher.reconcile_with_policy()` |
 | `kernel/src/maintenance.rs` | Add `notification_dispatch` GC sweep + `smtp_proxy_rate_buckets` GC sweep |
 | `crates/store/src/notifications.rs` | NEW (per §6.1) — table DDL, helpers `notifications_check_dispatched`, `notifications_record_delivered`, `smtp_rate_increment`, `smtp_rate_check_and_increment` |
@@ -955,15 +955,15 @@ Total surface: ~14–17 calendar-days for the full V2 email subsystem.
 | `crates/raxis-cred-proxy/src/types.rs` | Add `Smtp` variant to `ProxyType` enum |
 | `crates/audit/src/event.rs` | Add notification + SMTP-proxy audit event variants per §2.5 and §3.9 |
 | `cli/src/main.rs` | Wire `notify` subcommand |
-| `raxis/specs/v2/extensibility-traits.md` | Add `OperatorNotificationChannel` as 7th trait (§6.5 NEW); update §1.2 trait count, §9 boot order, §13.1 "Why seven", §11 cross-spec impacts |
-| `raxis/specs/v2/credential-proxy.md` | Add §3.6 SMTP proxy_type; update §11.1 schema, §13.3 reserved-port table, §6.2 NNSP additions |
-| `raxis/specs/v2/policy-plan-authority.md` | Schema additions for `[[notifications.credentials]]`, channel email/webhook blocks, `[[permitted_credentials.smtp]]` |
-| `raxis/specs/v1/cli-ceremony.md` | Add `raxis notify` channel/route/credential commands; cross-reference this spec |
-| `raxis/specs/v1/cli-readonly.md` | Add `raxis notify channel list`, `raxis notify route list` (read-only) |
-| `raxis/specs/v2/kernel-mechanics-prompt.md` | NNSP block for SMTP proxy availability per §3.10 |
-| `raxis/specs/v2/v2-deep-spec.md` | Register `INV-NOTIFY-01..06`, `INV-SMTP-PROXY-01..05` invariants |
-| `raxis/specs/v2/kernel-lifecycle.md` | Boot-probe step + drain-on-shutdown semantics for notifications |
-| `raxis/specs/invariants.md` | Reference notification/SMTP invariants |
+| [`raxis/specs/v2/extensibility-traits.md`](extensibility-traits.md) | Add `OperatorNotificationChannel` as 7th trait (§6.5 NEW); update §1.2 trait count, §9 boot order, §13.1 "Why seven", §11 cross-spec impacts |
+| [`raxis/specs/v2/credential-proxy.md`](credential-proxy.md) | Add §3.6 SMTP proxy_type; update §11.1 schema, §13.3 reserved-port table, §6.2 NNSP additions |
+| [`raxis/specs/v2/policy-plan-authority.md`](policy-plan-authority.md) | Schema additions for `[[notifications.credentials]]`, channel email/webhook blocks, `[[permitted_credentials.smtp]]` |
+| [`raxis/specs/v1/cli-ceremony.md`](../v1/cli-ceremony.md) | Add `raxis notify` channel/route/credential commands; cross-reference this spec |
+| [`raxis/specs/v1/cli-readonly.md`](../v1/cli-readonly.md) | Add `raxis notify channel list`, `raxis notify route list` (read-only) |
+| [`raxis/specs/v2/kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) | NNSP block for SMTP proxy availability per §3.10 |
+| [`raxis/specs/v2/v2-deep-spec.md`](v2-deep-spec.md) | Register `INV-NOTIFY-01..06`, `INV-SMTP-PROXY-01..05` invariants |
+| [`raxis/specs/v2/kernel-lifecycle.md`](kernel-lifecycle.md) | Boot-probe step + drain-on-shutdown semantics for notifications |
+| [`raxis/specs/invariants.md`](../invariants.md) | Reference notification/SMTP invariants |
 
 ---
 
@@ -1044,7 +1044,7 @@ The SMTP proxy is a concrete impl, not a trait, so its conformance is end-to-end
 | Approach | Rejected because |
 | --- | --- |
 | Tier-1 SNI tproxy + agent-supplied SMTP credentials | Defeats `INV-VM-CAP-04`; agent holds the password |
-| HTTP API only (require Mailgun/SendGrid/SES via HTTPS) | Forces every customer onto a third-party email API; not all deployments can use one. **This option remains available**: an operator can configure `proxy_type = "http_audit_only"` (`credential-proxy.md §3.5`) pointing at their email-provider's REST endpoint. This spec adds `proxy_type = "smtp"` for deployments whose only relay is plain SMTP. |
+| HTTP API only (require Mailgun/SendGrid/SES via HTTPS) | Forces every customer onto a third-party email API; not all deployments can use one. **This option remains available**: an operator can configure `proxy_type = "http_audit_only"` ([`credential-proxy.md §3.5`](credential-proxy.md)) pointing at their email-provider's REST endpoint. This spec adds `proxy_type = "smtp"` for deployments whose only relay is plain SMTP. |
 | Allow agents to set `From:` freely | Spoofing risk; agent could impersonate operator |
 | No body audit | Loses forensic visibility; an exfiltrated body has no audit trail |
 | Per-message AUTH instead of session-AUTH | Wasteful round-trips; modern relays support session auth and reuse |

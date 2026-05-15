@@ -5,15 +5,15 @@
 >
 > **Cross-references:**
 >
-> - `vm-network-isolation.md` — Tier-1 transparent proxy; the
+> - [`vm-network-isolation.md`](vm-network-isolation.md) — Tier-1 transparent proxy; the
 >   `EgressAllowlist` consulted by `raxis-egress-admission`.
-> - `credential-proxy.md` — Tier-2 authenticated proxies (orthogonal to
+> - [`credential-proxy.md`](credential-proxy.md) — Tier-2 authenticated proxies (orthogonal to
 >   this decision).
 > - `peripherals.md §3.2` — gateway-side `is_url_allowed` check.
-> - `provider-failure-handling.md §2.1` — kernel-mediated planner ↔
+> - [`provider-failure-handling.md §2.1`](provider-failure-handling.md) — kernel-mediated planner ↔
 >   gateway flow used by Reviewers and (under VM substrate) Executors and
 >   Orchestrators.
-> - `provider-model-selection.md §4` — the canonical
+> - [`provider-model-selection.md §4`](provider-model-selection.md) — the canonical
 >   `ProviderId::default_base_url` mapping.
 
 ---
@@ -49,7 +49,7 @@ The kernel has **two** independent egress gates:
    after the Tier1Tproxy deletion. There is no virtio-net device in
    the guest; the in-guest tproxy routes admission decisions over
    AF_VSOCK to the kernel admission handler (see
-   `airgap-architecture.md`). The kernel's `EgressAllowlist` is
+   [`airgap-architecture.md`](airgap-architecture.md)). The kernel's `EgressAllowlist` is
    sourced from `policy.[egress] domains` + `[egress] patterns`,
    and a non-allowlisted SNI is denied with
    `DenyReason::HostNotInAllowlist` so the agent sees
@@ -366,12 +366,12 @@ entries to demonstrate the simplified config.
       events at policy install time.
 - [ ] `raxis-kernel::policy_manager`: emit
       `DefaultProviderEgressApplied` on epoch advance.
-- [ ] `raxis/specs/invariants.md`: add INV-EGRESS-DEFAULT-01..03 and
+- [ ] [`raxis/specs/invariants.md`](../invariants.md): add INV-EGRESS-DEFAULT-01..03 and
       INV-EGRESS-STALL-01.
-- [ ] `raxis/specs/v2/credential-proxy.md`: cross-reference this
+- [ ] [`raxis/specs/v2/credential-proxy.md`](credential-proxy.md): cross-reference this
       decision (the credential-proxy spec is unchanged but operators
       reading it should see the new defaults).
-- [ ] `raxis/guides/getting-started/04-troubleshooting.md`: add a
+- [ ] [`raxis/guides/getting-started/04-troubleshooting.md`](../../guides/getting-started/04-troubleshooting.md): add a
       "common gotcha" entry for `deny_provider` accidentally excluding
       the inference provider.
 - [ ] `raxis/live-e2e/src/slice_gateway_anthropic.rs`: drop the

@@ -12,7 +12,7 @@
 > - `specs/v2/token-limit.md` — budget lanes; per-model pricing; budget reservation arithmetic
 > - `specs/v2/extensibility-traits.md §7` — `InferenceRouter` trait, of which the kernel↔gateway HTTPS dispatch described in this spec is the V2 default impl (`HttpsGatewayRouter`); local-vLLM, on-prem TGI, and in-cluster gRPC routers are alternative impls that satisfy the same conformance contract.
 
-> **Trait boundary (V2):** Everything in this spec — circuit breakers, retry policy, attempt audit, budget reconciliation, atomic streaming — is **kernel-side** logic that runs *before* `InferenceRouter::complete(...)` is called and *after* it returns. The router itself is the seam at which the actual inference call leaves the kernel. The V2 default `HttpsGatewayRouter` (`crates/raxis-inference-router-https/`, see `extensibility-traits.md §7.2`) wraps the existing kernel↔gateway UDS dispatch. Future routers — `LocalVllmRouter` for trading deployments running on-host GPUs, `LocalTgiRouter` for HuggingFace TGI, `KubernetesInferenceRouter` for in-cluster gRPC inference — plug in here without changing any provider-failure-handling logic in this spec. The kernel still does worst-case budget reservation, attempt-by-attempt audit, circuit-breaker state, and atomic streaming reassembly; the router only does dispatch.
+> **Trait boundary (V2):** Everything in this spec — circuit breakers, retry policy, attempt audit, budget reconciliation, atomic streaming — is **kernel-side** logic that runs *before* `InferenceRouter::complete(...)` is called and *after* it returns. The router itself is the seam at which the actual inference call leaves the kernel. The V2 default `HttpsGatewayRouter` (`crates/raxis-inference-router-https/`, see [`extensibility-traits.md §7.2`](extensibility-traits.md)) wraps the existing kernel↔gateway UDS dispatch. Future routers — `LocalVllmRouter` for trading deployments running on-host GPUs, `LocalTgiRouter` for HuggingFace TGI, `KubernetesInferenceRouter` for in-cluster gRPC inference — plug in here without changing any provider-failure-handling logic in this spec. The kernel still does worst-case budget reservation, attempt-by-attempt audit, circuit-breaker state, and atomic streaming reassembly; the router only does dispatch.
 
 ---
 
@@ -393,9 +393,9 @@ A model is considered **credentially authorized** when:
 
 1. The model's provider has at least one entry in `policy.toml [[providers.credentials]]`.
 2. The referenced `key_ref` resolves to a key in the immutable artifact store.
-3. The key's trust state is `Trusted` (per `key-revocation.md §3 key_trust_state` table).
+3. The key's trust state is `Trusted` (per [`key-revocation.md §3 key_trust_state`](key-revocation.md) table).
 
-If a credential is `Revoked` for `rotation`, in-flight sessions continue using stale credentials per `key-revocation.md §6`, but new alias resolutions skip that provider's models. If revoked for `compromise`, the session is immediately terminated per `INV-KEY-08` and never reaches alias resolution.
+If a credential is `Revoked` for `rotation`, in-flight sessions continue using stale credentials per [`key-revocation.md §6`](key-revocation.md), but new alias resolutions skip that provider's models. If revoked for `compromise`, the session is immediately terminated per `INV-KEY-08` and never reaches alias resolution.
 
 ### 4.3 Failure modes during resolution
 
@@ -409,7 +409,7 @@ When resolution returns a non-`UseModel` result:
 
 `FAIL_PROVIDER_AUTH_REVOKED` is fatal to the request but does NOT terminate the session. The planner's response is to escalate (`EscalationRequest { class: OperatorIntervention, reason: ProviderCredentialsRevoked }`) so the operator can rotate keys. The agent does not retry — there is no automatic recovery path for credential revocation; that's an operator action.
 
-`FAIL_PROVIDER_UNAVAILABLE_ALL_DEGRADED` is also fatal-to-request but recoverable: when at least one breaker transitions to `HalfOpen`, the next request from the planner will re-resolve and may succeed. The kernel emits `KernelPush::ProviderStatusChanged { provider, model, previous_state: Open, new_state: HalfOpen, reason: OpenWindowElapsed, observed_at_ms }` informationally to every active planner session that has at least one active alias whose chain references this `(provider, model)`; the planner can choose to retry the request or wait. The full push schema (including `previous_state`, `reason`, and `observed_at_ms`) is normative in `kernel-push-protocol.md §9`. (Per §12.1 / Alt L, V2 does NOT rely on this push for correctness — it's purely advisory; routing decisions are recomputed deterministically at the next alias-resolution call.)
+`FAIL_PROVIDER_UNAVAILABLE_ALL_DEGRADED` is also fatal-to-request but recoverable: when at least one breaker transitions to `HalfOpen`, the next request from the planner will re-resolve and may succeed. The kernel emits `KernelPush::ProviderStatusChanged { provider, model, previous_state: Open, new_state: HalfOpen, reason: OpenWindowElapsed, observed_at_ms }` informationally to every active planner session that has at least one active alias whose chain references this `(provider, model)`; the planner can choose to retry the request or wait. The full push schema (including `previous_state`, `reason`, and `observed_at_ms`) is normative in [`kernel-push-protocol.md §9`](kernel-push-protocol.md). (Per §12.1 / Alt L, V2 does NOT rely on this push for correctness — it's purely advisory; routing decisions are recomputed deterministically at the next alias-resolution call.)
 
 #### Emission point and recipient set
 
@@ -445,7 +445,7 @@ authoritative; the push delivery is best-effort advisory.
 
 ### 4.4 Wildcard and pattern matching: rejected
 
-The schema does NOT support wildcard models in alias chains (`anthropic:*`, `*:claude-*`). Every model in a chain must be explicitly enumerated. This mirrors the per-operator override rule in `host-capacity.md §15.5`: explicit enumeration forces the operator to reason about every routing decision and prevents a single typo from silently downgrading a workload to a non-preferred model. See §12.1 for the design rationale.
+The schema does NOT support wildcard models in alias chains (`anthropic:*`, `*:claude-*`). Every model in a chain must be explicitly enumerated. This mirrors the per-operator override rule in [`host-capacity.md §15.5`](host-capacity.md): explicit enumeration forces the operator to reason about every routing decision and prevents a single typo from silently downgrading a workload to a non-preferred model. See §12.1 for the design rationale.
 
 ---
 
@@ -501,7 +501,7 @@ The `BodyKind::PromptTooLong` and `BodyKind::ContentFilterBlocked` parsers are p
 
 When the Gateway cannot confidently categorize an error, it defaults to `Malformed` (no retry, fatal to request). This is deliberate: the alternative — defaulting to `Unavailable` (retry-eligible) — would burn budget on permanent errors whenever a provider's API drifts. We prefer to break loudly and force a Gateway translation update over silently retrying.
 
-This matches the `halt_admit` philosophy from `host-capacity.md §15.1`: predictability over apparent self-healing.
+This matches the `halt_admit` philosophy from [`host-capacity.md §15.1`](host-capacity.md): predictability over apparent self-healing.
 
 ---
 
@@ -842,7 +842,7 @@ pub async fn half_close_invocations_using(
 }
 ```
 
-The function is invoked by `key-revocation.md §5.2 step 4` (live
+The function is invoked by [`key-revocation.md §5.2 step 4`](key-revocation.md) (live
 compromise) and `§5.3 step 4d` (startup reconciliation) immediately
 after the parent `sessions` table is updated. It is best-effort: the
 authoritative containment boundary is still the
@@ -868,14 +868,14 @@ receives and uses to filter its in-flight requests. The
    connection. With half-close, the worker just reacts to its read
    EOF — no table, no session-id awareness in the worker.
 3. **1:1 connection semantics make it sufficient.** Per
-   `credential-proxy.md §1b` and §9.1 above, every `GatewayInvoke`
+   [`credential-proxy.md §1b`](credential-proxy.md) and §9.1 above, every `GatewayInvoke`
    gets its own UDS connection. Closing one FD is O(1) and affects
    exactly one in-flight invocation. Multiplexed transports would
    require a broadcast, but RAXIS's gateway pool is intentionally
    not multiplexed.
 
 If a future router transport (e.g., gRPC over a shared HTTP/2
-connection per `extensibility-traits.md §7`) DOES multiplex multiple
+connection per [`extensibility-traits.md §7`](extensibility-traits.md)) DOES multiplex multiple
 attempts on one stream, the `IsolatedSession`-style trait method
 `abort_invocation(attempt_id, reason)` is the right substitute. The
 V2 `HttpsGatewayRouter` keeps half-close as its in-flight-revocation
@@ -883,7 +883,7 @@ primitive.
 
 #### Error-categorization extension
 
-`provider-failure-handling.md §5` (error categories) is extended:
+[`provider-failure-handling.md §5`](provider-failure-handling.md) (error categories) is extended:
 
 | Category | Provider classification | Retriable? | Cross-provider? | Public failure code | Description |
 |---|---|---|---|---|---|
@@ -1193,12 +1193,12 @@ The Kernel uses heartbeats only to distinguish "worker is alive but slow" from "
 When buffered bytes exceed `max_response_buffer_mb` (default 64), the Gateway spills to `spill_disk_root` (default `/var/lib/raxis/gateway-spill/`). Spill files are:
 
 - Named by `attempt_id` for traceability.
-- Capped at `worker_invoke_timeout_ms × max_response_bytes_per_second` total disk usage per worker (computed by the Kernel and enforced as a quota subdir per `host-capacity.md §6.4` semantics).
+- Capped at `worker_invoke_timeout_ms × max_response_bytes_per_second` total disk usage per worker (computed by the Kernel and enforced as a quota subdir per [`host-capacity.md §6.4`](host-capacity.md) semantics).
 - Deleted when the attempt completes (success or failure).
 - Cleaned by the Gateway supervisor at startup (any leftover spill from previous worker crashes is garbage).
 
 If `min_free_disk_mb` is breached during spilling (per
-`host-capacity.md §7`), the Gateway worker aborts the in-flight
+[`host-capacity.md §7`](host-capacity.md)), the Gateway worker aborts the in-flight
 read, returns a `GatewayInvokeResult::AbortedByDiskPressure`
 variant carrying the bytes-received-so-far counter and the
 gateway-side input-token estimate, and the Kernel applies retry
@@ -1209,7 +1209,7 @@ disk budget — the retry uses the same buffer/spill caps.
 
 The kernel writes an `InferenceAttemptAborted` audit event before
 the retry-loop iteration continues. The write goes against the
-**audit reserve** (`host-capacity.md §7.5`,
+**audit reserve** ([`host-capacity.md §7.5`](host-capacity.md),
 `audit_reserved_mb = 1024` by default), so it succeeds even when
 the rest of the system is in `DiskFullHalt`:
 
@@ -1269,7 +1269,7 @@ correct under `INV-PROVIDER-06` (every attempt that consumed
 provider tokens MUST be debited).
 
 The audit-reserve write path is the standard
-`AuditSink::emit_within_reserve` per `host-capacity.md §7.5`; if
+`AuditSink::emit_within_reserve` per [`host-capacity.md §7.5`](host-capacity.md); if
 that path is unable to write (i.e., the audit reserve itself is
 exhausted), the kernel transitions to `AuditWriteImpossible` per
 §7.6 and halts. The retry-loop continuation never observes a
@@ -1483,7 +1483,7 @@ Each worker is constrained:
 
 - `max_concurrent_attempts_per_worker = 8` (default)
 - Worker process memory: 512 MiB cgroup cap (enforced by supervisor)
-- Worker disk: spill quota under `spill_disk_root` per worker (per `host-capacity.md §6.4`)
+- Worker disk: spill quota under `spill_disk_root` per worker (per [`host-capacity.md §6.4`](host-capacity.md))
 
 If a worker exceeds memory cap, the kernel cgroup OOM-killer terminates it; the supervisor restarts. The kernel observes UDS disconnects on all in-flight attempts on that worker and treats them as `WorkerUdsDisconnected`.
 
@@ -1592,7 +1592,7 @@ Errors categorized as `ContextExhausted`, `ContentFilter`, `ProviderAuth`, `Mode
 ### INV-PROVIDER-10 — Provider-credential compromise interrupts in-flight invocations
 
 When the kernel observes a compromise revocation against a provider
-credential (per `key-revocation.md §5.2`/`§5.3`), the kernel:
+credential (per [`key-revocation.md §5.2`](key-revocation.md)/`§5.3`), the kernel:
 
 1. Performs a synchronous `key_trust_state` re-check immediately
    before every `GatewayInvoke` dispatch, inside `BEGIN IMMEDIATE`,
@@ -1617,7 +1617,7 @@ window to approximately one worker-side EOF-detection latency
 (milliseconds), regardless of the in-flight call's natural duration.
 
 **Where:** §6.1 retry-loop synchronous re-check; §6.1.1 half-close
-mechanics; `key-revocation.md §5.2` / `§5.3` (the revocation paths
+mechanics; [`key-revocation.md §5.2`](key-revocation.md) / `§5.3` (the revocation paths
 that invoke `half_close_invocations_using`).
 
 **Scenario it prevents:** Operator pushes a compromise revocation on
@@ -1638,7 +1638,7 @@ window: well under one second.
 
 ## 11. Implementation Checklist
 
-### 11.0 Trait-boundary refactor (V2 prerequisite, per `extensibility-traits.md §7`)
+### 11.0 Trait-boundary refactor (V2 prerequisite, per [`extensibility-traits.md §7`](extensibility-traits.md))
 
 - [ ] **`crates/raxis-inference-router/`** (NEW) — defines `trait InferenceRouter`, `ResolvedInferenceRequest`, `InferenceResponse`, `InferenceStream`, `InferenceError`, `ProviderHealth`. Plus the conformance kit at `tests/conformance.rs`.
 - [ ] **`crates/raxis-inference-router-https/`** (NEW; the V2 default) — `HttpsGatewayRouter` wrapping the existing kernel↔gateway UDS dispatch this spec describes. The retry loop, circuit breaker, attempt audit, and worst-case-reservation logic in §6 / §8 stay in the kernel and run *around* `HttpsGatewayRouter::complete(...)`; the router's job is only the dispatch hop to the gateway worker.
@@ -1749,7 +1749,7 @@ After this phase, the rest of this checklist still describes the V2 default `Htt
 - [ ] Worker crash loop: kill worker 4 times in 60s; verify supervisor stops restarting after 3 crashes; verify `OperatorAttentionRequired { GatewayWorkerCrashLooping }`
 - [ ] All workers dead: kill all workers; verify next request returns `FAIL_GATEWAY_UNREACHABLE` immediately; verify `OperatorAttentionRequired { GatewayPoolExhausted }`
 - [ ] Per-attempt audit immediacy: kill kernel mid-retry-loop after attempt 2's audit but before attempt 3's dispatch; restart; verify `inference_attempts` has rows for attempts 1 and 2; verify retry resumes correctly
-- [ ] Cross-provider credential revocation (rotation): mid-flight policy push revokes Anthropic credential for `rotation`; new resolutions skip Anthropic models; in-flight session continues with stale credential per `key-revocation.md §6`
+- [ ] Cross-provider credential revocation (rotation): mid-flight policy push revokes Anthropic credential for `rotation`; new resolutions skip Anthropic models; in-flight session continues with stale credential per [`key-revocation.md §6`](key-revocation.md)
 - [ ] Cross-provider credential revocation (compromise): policy push revokes Anthropic credential for `compromise`; in-flight session terminated immediately per `INV-KEY-08`
 - [ ] Operator manual breaker reset: breaker for opus in Open; `raxis providers reset` → Closed; verify audit `BreakerManuallyReset`; verify next request resolves to opus
 - [ ] Policy push changes alias mid-flight: in-flight session has `alias:architect = [opus, sonnet]`; policy push changes to `[sonnet]`; next request from session uses new chain
@@ -1844,7 +1844,7 @@ Worst-case reservation is pessimistic — it holds budget that may never be spen
 
 Defaulting to `Malformed` makes the error visible immediately. The first request hitting the new shape returns `FAIL_REQUEST_MALFORMED` to the planner; the operator notices via `OperatorAttentionRequired` audit events and updates the Gateway translation table. The cost of the misclassification is one failed request per affected session, not a multi-hour retry storm.
 
-This matches the `halt_admit` philosophy from `host-capacity.md §15.1`: predictability and loud failure beat silent best-effort recovery for unknowable conditions.
+This matches the `halt_admit` philosophy from [`host-capacity.md §15.1`](host-capacity.md): predictability and loud failure beat silent best-effort recovery for unknowable conditions.
 
 **Scenario it prevents.** Anthropic introduces a new error type `quota_per_organization_exceeded` (HTTP 400 with body `{"error": {"type": "quota_per_organization_exceeded"}}`). The Gateway's translator doesn't recognize the new type and falls through to default. With default-to-Unavailable, every active session retries 6 times against opus, then 6 against sonnet, all returning the same error — burning 12 wasted attempts each, all charged by Anthropic for the input tokens. With default-to-Malformed, the first request fails immediately, the operator updates `translate/anthropic.rs` to map `quota_per_organization_exceeded → ProviderRateLimited` with a long backoff, and the cost of the drift is one failed request per session instead of dozens.
 

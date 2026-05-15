@@ -126,7 +126,7 @@ suite-wide rot.
   declared credential, (d) the agent's process environment contains
   the loopback URL placeholder, never the secret value.
 * **Status:** In flight on `worker/secrets-model-realignment`.
-  Spec landing as `raxis/specs/v2/secrets-model.md` (not yet present
+  Spec landing as [`raxis/specs/v2/secrets-model.md`](secrets-model.md) (not yet present
   on `origin/main` as of this audit). This worker explicitly avoids
   any change in the affected files to prevent a merge collision.
 
@@ -200,7 +200,7 @@ suite-wide rot.
   declares allowed_services X; TProxy denies any TLS handshake to
   a sigv4 endpoint not in X") has no end-to-end test. V3 will
   rewrite this to a SigV4-aware proxy (per
-  `credential-proxy.md §V3`), so the gap closes naturally — but
+  [`credential-proxy.md §V3`](credential-proxy.md)), so the gap closes naturally — but
   until V3 lands, an integration test that wires a real
   `CredentialProxyAws` + a real `TProxy` and exercises both an
   allowed and a denied service would catch a regression where
@@ -225,7 +225,7 @@ suite-wide rot.
 * **Recommended remediation:** Match on
   `tp::ProxyAdmissionResponse::Deny { reason, .. }` and assert
   `reason == "host_not_allowed"` (or whatever the canonical
-  identifier is per `vm-network-isolation.md`).
+  identifier is per [`vm-network-isolation.md`](vm-network-isolation.md)).
 * **Recommended fix priority:** Low.
 
 ---
@@ -311,7 +311,7 @@ For a follow-up worker focused on closing this ledger:
 |---|---|---|
 | C-1 (egress (c) plain-HTTP) | 0.5–1 day | Either delete or add scheme-aware policy; latter requires `policy_view` + audit event. |
 | C-2 (postgres-proxy denial slice) | 1 day | Add denial-path variant; replicate to MySQL + MSSQL slices for parity (~+1 day each). |
-| C-3 (AWS V2.3 cross-cutting) | Defer to V3 | Tracked in `credential-proxy.md §V3`. |
+| C-3 (AWS V2.3 cross-cutting) | Defer to V3 | Tracked in [`credential-proxy.md §V3`](credential-proxy.md). |
 | C-4 (admission deny `reason`) | 0.25 day | Single-site assertion tightening. |
 
 Total in-scope (C-1, C-2, C-4): ~3 person-days for a single worker.

@@ -224,7 +224,7 @@ The planner's `last_acked_push_id` is the highest `push_id` whose handler has ru
 
 If the Kernel restarts while the planner is running, the planner's existing VSock connection drops (the Kernel's listening socket is gone). The planner detects this on its next `read()` and reconnects.
 
-The Kernel, on restart, runs `kernel/src/startup.rs` reconciliation (see `v2-deep-spec.md` Group 2) which:
+The Kernel, on restart, runs `kernel/src/startup.rs` reconciliation (see [`v2-deep-spec.md`](v2-deep-spec.md) Group 2) which:
 1. Reads `sessions WHERE state IN ('Active', 'Paused', 'AwaitingEscalation')` and `vsock_cid IS NOT NULL`.
 2. For each, verifies the VM is still running (PID liveness check).
 3. Re-binds the VSock listener on the session's port.
@@ -412,7 +412,7 @@ For RAXIS's push types this is structurally guaranteed by the form of the push h
 | `SessionRevoked` | Same | Same |
 | `HostCapacityFreed` | Append to context for Orchestrator | Re-appending harmless |
 | `QueuePressure` | Update KSB `queue_depth_pct` overwrite; surface advisory line in next prompt | Idempotent overwrite (current/cap/severity is the latest snapshot — overwriting with an older duplicate yields the same observable state once the next push catches up) |
-| `ProviderStatusChanged` | Update KSB `provider_status[(provider, model)] = new_state` (overwrite); optionally append a one-line note ("opus: HalfOpen → Closed (probe succeeded)") to LLM context | Idempotent overwrite — the (provider, model) keypair has at most one active state in the planner's local cache; re-applying the same `new_state` is a no-op. The advisory log line is append-only but the planner SHOULD deduplicate by `(provider, model, new_state, observed_at_ms)` to avoid re-narrating identical changes after reconnect-replay. **Critically: this push has NO routing effect.** Per `provider-failure-handling.md §12.1 / Alt L`, the planner MUST NOT use this push to decide which model to call — alias resolution at the next inference is the canonical routing decision. |
+| `ProviderStatusChanged` | Update KSB `provider_status[(provider, model)] = new_state` (overwrite); optionally append a one-line note ("opus: HalfOpen → Closed (probe succeeded)") to LLM context | Idempotent overwrite — the (provider, model) keypair has at most one active state in the planner's local cache; re-applying the same `new_state` is a no-op. The advisory log line is append-only but the planner SHOULD deduplicate by `(provider, model, new_state, observed_at_ms)` to avoid re-narrating identical changes after reconnect-replay. **Critically: this push has NO routing effect.** Per [`provider-failure-handling.md §12.1 / Alt L`](provider-failure-handling.md), the planner MUST NOT use this push to decide which model to call — alias resolution at the next inference is the canonical routing decision. |
 | `InitiativeCancelPending` | Set Orchestrator/Executor session local flag `wind_down: true` (scheduler suppresses new sub-task admission); append "operator cancelled initiative `<id>` — wind down by `<deadline>`" to LLM context | Idempotent overwrite — `wind_down` is a sticky boolean (once true, stays true until session terminal). Re-receiving the push (same `initiative_id`, same `grace_deadline_ms`) is a no-op. If the kernel reissues the push with a *later* `grace_deadline_ms` (operator extended grace via re-issuing cancel — currently NOT supported per `cli-ceremony.md` idempotency rule, but reserved for future), the planner takes `max(existing, new)`. |
 
 **Rule:** every `KernelPush` variant added in the future MUST document its idempotency mechanism in this table. The table is documentation; **enforcement is in `tests/push_idempotency.rs`**, a property-based test that enumerates every variant of the `KernelPush` enum and, for each, verifies:
@@ -571,7 +571,7 @@ Plans expecting larger bursts may declare `[orchestrator] expected_push_burst = 
 
 When `pending_pushes` for a session reaches **50% of cap**, the Kernel enqueues `KernelPush::QueuePressure { current, cap, severity: Warning }` to that same session (counted against the session's own cap, but it always fits because the threshold check happens before enqueue). At **75% of cap**, severity escalates to `Critical`.
 
-The push is itself idempotent — re-delivering Warning or Critical just re-appends a notice to the planner's context. The KSB (`kernel-mechanics-prompt.md §2`) also surfaces `queue_depth_pct` so the LLM sees the pressure on its next inference even without processing the push.
+The push is itself idempotent — re-delivering Warning or Critical just re-appends a notice to the planner's context. The KSB ([`kernel-mechanics-prompt.md §2`](kernel-mechanics-prompt.md)) also surfaces `queue_depth_pct` so the LLM sees the pressure on its next inference even without processing the push.
 
 The intent is to give the recipient session — typically an Orchestrator behind a long inference call — visibility that it must drain or face termination. The planner's prompt logic SHOULD interpret QueuePressure as a signal to abort the current inference loop, drain pending pushes, and only then resume planning.
 
@@ -589,7 +589,7 @@ In both paths, the producer's state advances. The push is either delivered or ca
 
 Post-commit (outside transaction):
 - SIGTERM the recipient's VM, then SIGKILL after 5s.
-- If the failed session was an Orchestrator, cascade-terminate all descendant sub-tasks with `reason: ParentSessionRevoked` (per `key-revocation.md §7.3` cascade rules, reused here; signal-handling category inherits from the parent's reason — `PushQueueOverflow` is Graceful, so children get SIGTERM grace).
+- If the failed session was an Orchestrator, cascade-terminate all descendant sub-tasks with `reason: ParentSessionRevoked` (per [`key-revocation.md §7.3`](key-revocation.md) cascade rules, reused here; signal-handling category inherits from the parent's reason — `PushQueueOverflow` is Graceful, so children get SIGTERM grace).
 - The initiative as a whole transitions to `state = 'Blocked'` and an `OperatorAttentionRequired` audit event is emitted. The operator must manually intervene (e.g., spawn a replacement Orchestrator under a new plan extension that picks up where the failed one left off).
 
 ### 10.4 Why terminate the recipient and not the producer
@@ -659,7 +659,7 @@ There is no scenario where the producer's state advances without one of these tw
 
 **Scenario it prevents:** A valid Executor commit is rolled back because the Orchestrator's queue is full. INV-PUSH-01 (revised from V2-draft) preserves the commit and instead fails the slow recipient. The producer always wins; the recipient survives or fails based on its own queue health.
 
-**Crash recovery:** If the kernel crashes between transaction commit and post-commit teardown (SIGTERM of the failed recipient), restart reconciliation per `key-revocation.md §5.3` re-runs SIGTERM on any session in `state = Failed` whose VM PID is still alive. The atomicity guarantee is preserved across crashes.
+**Crash recovery:** If the kernel crashes between transaction commit and post-commit teardown (SIGTERM of the failed recipient), restart reconciliation per [`key-revocation.md §5.3`](key-revocation.md) re-runs SIGTERM on any session in `state = Failed` whose VM PID is still alive. The atomicity guarantee is preserved across crashes.
 
 ### INV-PUSH-02 — At-least-once delivery, idempotent processing, ACK-deadline-bounded
 
@@ -720,7 +720,7 @@ The fix lifts the audit emit to a paired-write contract:
 
 **Witness:** `kernel/src/initiatives/task_transitions.rs::tests::inv_dashboard_push_fsm_completeness_01_admitted_to_running_emits_audit` drives a seeded task through `transition_task_with_audit` and asserts the `FakeAuditSink` captured exactly one `TaskStateChanged` event with `(task_id, "Admitted" → "Running", actor=kernel, policy_epoch=1)`. Sibling tests pin the actor wire string and assert that an illegal transition (`Cancelled → Running`) short-circuits BEFORE the audit emit so a forbidden FSM edge never produces a misleading audit row.
 
-**Cross-reference:** `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` (FE-side companion — every state has a unique (tone, glyph, label) treatment so the operator can SEE the freshly-pushed transition); `audit-paired-writes.md §4` (paired-write ordering — audit emit always post-commit); `dashboard-hardening.md §5.11.1` (FE state visibility contract).
+**Cross-reference:** `INV-DASHBOARD-FSM-STATE-VISIBILITY-01` (FE-side companion — every state has a unique (tone, glyph, label) treatment so the operator can SEE the freshly-pushed transition); [`audit-paired-writes.md §4`](audit-paired-writes.md) (paired-write ordering — audit emit always post-commit); [`dashboard-hardening.md §5.11.1`](dashboard-hardening.md) (FE state visibility contract).
 
 ---
 
@@ -732,7 +732,7 @@ The fix lifts the audit emit to a paired-write contract:
 - [ ] Create partial index `idx_pending_pushes_session_unsent` on `(session_id, push_id) WHERE acked_at IS NULL AND first_delivered_at IS NULL`
 - [ ] Create partial index `idx_pending_pushes_inflight_deadline` on `(ack_deadline_at) WHERE acked_at IS NULL AND first_delivered_at IS NOT NULL`
 - [ ] Add columns to `sessions`: `last_handshake_nonce BLOB`, `connection_closed_at INTEGER`, `last_planner_frame_at INTEGER`, `push_queue_cap INTEGER NOT NULL DEFAULT 100`, `push_window_size INTEGER NOT NULL DEFAULT 64`, `push_ack_timeout_seconds INTEGER NOT NULL DEFAULT 300`
-- [ ] Add `failure_reason TEXT` to `sessions` (shared with `key-revocation.md`; declare once)
+- [ ] Add `failure_reason TEXT` to `sessions` (shared with [`key-revocation.md`](key-revocation.md); declare once)
 
 ### Wire types
 

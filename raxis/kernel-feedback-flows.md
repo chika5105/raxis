@@ -74,7 +74,7 @@ The agent's options:
 
 **A)** Use already-fetched context, local files, or an allowed URL.
 
-**B)** Stop and surface the need for a **signed policy update** (`egress.domain_allowlist` / fetch quotas in `policy.toml`), authority re-signs, operator stages the new artifact under `<data_dir>/policy/`, then runs **`raxis-cli epoch advance --policy <path> --sig <path>`** (both arguments required; see `specs/v1/cli-ceremony.md`) — no fictional `EgressException` IPC.
+**B)** Stop and surface the need for a **signed policy update** (`egress.domain_allowlist` / fetch quotas in `policy.toml`), authority re-signs, operator stages the new artifact under `<data_dir>/policy/`, then runs **`raxis-cli epoch advance --policy <path> --sig <path>`** (both arguments required; see [`specs/v1/cli-ceremony.md`](specs/v1/cli-ceremony.md)) — no fictional `EgressException` IPC.
 
 **C)** **`ReportFailure`** or operator-directed pause if the task cannot proceed without that fetch.
 

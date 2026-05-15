@@ -338,7 +338,7 @@ $ raxis kernel logs --since "10 minutes ago"
 $ raxis kernel logs --grep "IntegrationMerge"
 ```
 
-The kernel's audit log (per `host-capacity.md §6.3`) is separate and unaffected — it lives in `RAXIS_HOME/audit/` regardless of mode. journald-side logs are operational telemetry (info, warnings, errors, status); the audit log is the cryptographic record of state changes.
+The kernel's audit log (per [`host-capacity.md §6.3`](host-capacity.md)) is separate and unaffected — it lives in `RAXIS_HOME/audit/` regardless of mode. journald-side logs are operational telemetry (info, warnings, errors, status); the audit log is the cryptographic record of state changes.
 
 ---
 
@@ -540,9 +540,9 @@ The kernel handles signals consistently across modes; the difference is who send
 - Foreground: SIGINT from terminal (^C) or SIGTERM from the operator's `kill` command.
 - Daemon: SIGTERM from the supervisor on `raxis kernel stop` or system shutdown.
 
-### 7.1 Signal categories (cross-reference: `key-revocation.md §7`)
+### 7.1 Signal categories (cross-reference: [`key-revocation.md §7`](key-revocation.md))
 
-The kernel itself is always terminated `Graceful`. Per `key-revocation.md §7.2`, the `Immediate` (hypervisor-stop, no SIGTERM grace) signal class applies only to microVMs being terminated for security reasons (`KeyCompromised`, `EmergencyKeyCompromised`, `CidDriftDetected`). The kernel host is never the subject of an `Immediate` termination — operators do not "compromise" their own kernel.
+The kernel itself is always terminated `Graceful`. Per [`key-revocation.md §7.2`](key-revocation.md), the `Immediate` (hypervisor-stop, no SIGTERM grace) signal class applies only to microVMs being terminated for security reasons (`KeyCompromised`, `EmergencyKeyCompromised`, `CidDriftDetected`). The kernel host is never the subject of an `Immediate` termination — operators do not "compromise" their own kernel.
 
 `Graceful` shutdown for the kernel:
 
@@ -601,9 +601,9 @@ cgroup.kill and synthesized as a `crashed` witness for its task.
 
 `raxis kernel reload` sends SIGHUP to the running kernel:
 
-1. Kernel re-reads `policy.toml` (and emergency revocations file per `key-revocation.md §6`).
+1. Kernel re-reads `policy.toml` (and emergency revocations file per [`key-revocation.md §6`](key-revocation.md)).
 2. Validates new policy against current state; if invalid, emits `PolicyReloadFailed` audit event and continues with old policy.
-3. If valid: advances policy epoch per `policy-epoch-diffing.md`; emits `PolicyReloaded` audit event.
+3. If valid: advances policy epoch per [`policy-epoch-diffing.md`](policy-epoch-diffing.md); emits `PolicyReloaded` audit event.
 4. In-flight intents continue with the policy active at their admission; new intents use the reloaded policy.
 
 This is a non-disruptive reload — no IPC connections drop, no in-flight work is interrupted.
@@ -613,7 +613,7 @@ This is a non-disruptive reload — no IPC connections drop, no in-flight work i
 If the kernel crashes (panic, SIGKILL, OOM, etc.):
 
 - **Foreground mode:** the operator sees the crash in their terminal; the shell prompt returns; nothing auto-restarts. The operator must manually re-invoke `raxis kernel start` (or the kernel may have already done damage that requires investigation first).
-- **Daemon mode:** the supervisor detects the exit; emits a platform-specific log entry; waits `RestartSec` (systemd) or `ThrottleInterval` (launchd); restarts the kernel. The new instance runs startup recovery (`integration-merge.md §11.3`, etc.) to reconcile any partial state.
+- **Daemon mode:** the supervisor detects the exit; emits a platform-specific log entry; waits `RestartSec` (systemd) or `ThrottleInterval` (launchd); restarts the kernel. The new instance runs startup recovery ([`integration-merge.md §11.3`](integration-merge.md), etc.) to reconcile any partial state.
 
 ### 7.4 Crash-loop detection
 
@@ -820,12 +820,12 @@ synchronously on the request path:
 
 - **Git orphan objects** in `main_repo` and orchestrator clones,
   produced when pre-`IntegrationMerge` verifiers fail and the kernel
-  discards the candidate merge tree (`verifier-processes.md §16.5`,
-  `integration-merge.md §11.10`).
+  discards the candidate merge tree ([`verifier-processes.md §16.5`](verifier-processes.md),
+  [`integration-merge.md §11.10`](integration-merge.md)).
 - **`plan_bundle_nonces_seen` rows** older than the freshness window
-  plus retention grace (`plan-bundle-sealing.md §8.4`).
+  plus retention grace ([`plan-bundle-sealing.md §8.4`](plan-bundle-sealing.md)).
 - **Verifier-VM cgroups** orphaned by an earlier crash mid-teardown
-  (`verifier-processes.md §4.4` references).
+  ([`verifier-processes.md §4.4`](verifier-processes.md) references).
 - **Audit-segment rotation** (V3 audit-retention; called out here for
   forward-compatibility — V2 retains indefinitely).
 
@@ -893,11 +893,11 @@ may register additional ones following the §10.5.1 trait.
 
 | Name | Cadence | Trigger | Owner spec |
 |---|---|---|---|
-| `plan_bundle_nonce_sweep` | 1 h | always | `plan-bundle-sealing.md §8.4` |
+| `plan_bundle_nonce_sweep` | 1 h | always | [`plan-bundle-sealing.md §8.4`](plan-bundle-sealing.md) |
 | `git_maintenance_main` | 6 h, OR opportunistic on `disk_pressure ≥ Warning` | `active_merges == 0 && active_sessions == 0` (or 6h elapsed regardless) | this spec §10.5.3 |
 | `git_maintenance_orchestrator_clones` | 1 h | `active_merges == 0` | this spec §10.5.4 |
-| `verifier_cgroup_orphan_sweep` | 5 min | always | `verifier-processes.md §4.4` |
-| `lane_reservation_orphan_sweep` | 5 min | always | `token-limit-enforcement.md §10.5` |
+| `verifier_cgroup_orphan_sweep` | 5 min | always | [`verifier-processes.md §4.4`](verifier-processes.md) |
+| `lane_reservation_orphan_sweep` | 5 min | always | [`token-limit-enforcement.md §10.5`](token-limit-enforcement.md) |
 
 The cadence values are configurable via
 `policy.toml [kernel_lifecycle]`:
@@ -937,7 +937,7 @@ Drives `git gc --prune=<retention>` against `<data_dir>/main_repo`.
 ```
 
 Pre-`IntegrationMerge` verifier failures produce orphan candidate
-merge commits in main_repo (`verifier-processes.md §16.5`); this
+merge commits in main_repo ([`verifier-processes.md §16.5`](verifier-processes.md)); this
 job is the canonical reaper for those orphans. The cadence is
 deliberately conservative (6 h) to amortize the GC cost; the
 opportunistic-on-disk-pressure trigger covers the case where many
@@ -949,7 +949,7 @@ faster than 6h would tolerate.
 The Orchestrator's per-merge clones at
 `<data_dir>/candidate_merges/<integration_merge_id>/` are removed
 synchronously by `discard_candidate_merge_tree`
-(`integration-merge.md §11.10`), which now also runs
+([`integration-merge.md §11.10`](integration-merge.md)), which now also runs
 `git gc --prune=now` *on the orchestrator clone* in the same call —
 collapsing the orphan window for that specific candidate to the
 duration of one `git gc` invocation (typically <1 s on a small clone).
@@ -965,7 +965,7 @@ that's actively running.
 
 ### 10.5.5 `verifier_cgroup_orphan_sweep`
 
-Cross-references `verifier-processes.md §4.4` (Verifier-VM teardown).
+Cross-references [`verifier-processes.md §4.4`](verifier-processes.md) (Verifier-VM teardown).
 Walks `/sys/fs/cgroup/raxis-verifier-*` (Linux) and removes any
 cgroup whose `cgroup.procs` is empty AND whose corresponding
 `verifier_runs` row has `state IN ('Completed', 'Failed', 'Aborted')`.
@@ -975,7 +975,7 @@ and are cheap to detect.
 
 ### 10.5.6 `lane_reservation_orphan_sweep`
 
-Cross-references `token-limit-enforcement.md §10.5` (atomic
+Cross-references [`token-limit-enforcement.md §10.5`](token-limit-enforcement.md) (atomic
 admit_inference). Reclaims `lane_reservations` rows whose owning
 session has terminated without the post-completion reconciliation
 running:
@@ -993,7 +993,7 @@ A reservation orphan exists for one of two reasons:
 - The kernel crashed between the reservation INSERT (admit-time
   BEGIN IMMEDIATE) and the post-completion DELETE-and-debit
   (post-completion BEGIN IMMEDIATE). Recovery is by-session: the
-  session terminates (per `kernel-lifecycle.md §7` recovery), and
+  session terminates (per [`kernel-lifecycle.md §7`](kernel-lifecycle.md) recovery), and
   this sweeper releases its reservations.
 - The post-completion reconciliation hit a SQLite error and the
   request returned an internal error. In that case the session may
@@ -1010,7 +1010,7 @@ same lane.
 
 ### 10.5.6a `notification_dispatch_gc` (V2)
 
-Cross-references `email-and-notification-channels.md §6.2`. Prunes
+Cross-references [`email-and-notification-channels.md §6.2`](email-and-notification-channels.md). Prunes
 `notification_dispatch` rows older than the operator-configured
 retention window (`policy.toml [notifications].retention_days`,
 default 90 days):
@@ -1253,9 +1253,9 @@ V2 daemonization uses `systemd` (Linux) or `launchd` (macOS). The kernel does no
 
 ### INV-LIFECYCLE-04 — Graceful shutdown on SIGTERM with bounded grace period
 
-On SIGTERM, the kernel runs the §7.1 graceful-shutdown protocol within `TimeoutStopSec` (default 30s). After the grace period, the supervisor sends SIGKILL; the kernel's startup recovery on next start handles any uncommitted state per `integration-merge.md §11.3`.
+On SIGTERM, the kernel runs the §7.1 graceful-shutdown protocol within `TimeoutStopSec` (default 30s). After the grace period, the supervisor sends SIGKILL; the kernel's startup recovery on next start handles any uncommitted state per [`integration-merge.md §11.3`](integration-merge.md).
 
-**Where:** §7.1 graceful shutdown; cross-references `key-revocation.md §7.2` for `Graceful` semantics.
+**Where:** §7.1 graceful shutdown; cross-references [`key-revocation.md §7.2`](key-revocation.md) for `Graceful` semantics.
 
 **Scenario it prevents:** A SIGKILL on the kernel mid-write to SQLite or mid-finalization of an audit segment could leave inconsistent state. The bounded grace period gives the kernel a chance to flush all in-flight work cleanly. The recovery protocol handles the worst case (SIGKILL during shutdown), so operators are never stuck with unrecoverable state — but the grace period minimizes how often recovery is needed.
 
@@ -1312,7 +1312,7 @@ Every service install, uninstall, start, stop, reload, and crash recovery emits 
 - [ ] `kernel/src/lifecycle/instance_lock.rs`: SQLite-backed single-instance lock per §8.1; PID file per §8.2; mismatch detection
 - [ ] `kernel/src/lifecycle/shutdown.rs`: graceful-shutdown protocol per §7.1; bounded by configurable timeout (default 30s, capped by supervisor's `TimeoutStopSec`)
 - [ ] `kernel/src/lifecycle/recovery.rs`: startup recovery logic that detects "this is a restart after crash" and emits `KernelCrashRecovered` audit event
-- [ ] `kernel/src/lifecycle/sighup.rs`: SIGHUP handler that re-reads policy.toml; coordinates with `policy-epoch-diffing.md` for atomic epoch advance
+- [ ] `kernel/src/lifecycle/sighup.rs`: SIGHUP handler that re-reads policy.toml; coordinates with [`policy-epoch-diffing.md`](policy-epoch-diffing.md) for atomic epoch advance
 
 ### Audit events (in `crates/audit/src/event.rs`)
 
@@ -1433,7 +1433,7 @@ The chosen approach (user-default + opt-in system) gives both: low-friction firs
 
 **Rejected because.** Adds significant complexity for a feature that's already well-served by platform supervisors plus the operator's existing log shipper (vector, fluentd, etc.). The `raxis kernel logs` command is a thin wrapper that delegates to the platform tool; operators who want centralized aggregation point their existing log shipper at the platform's log destination.
 
-The kernel's audit log (the cryptographic record of state changes) is separately specified in `host-capacity.md §6.3` and `audit-retention` (V3) and is unaffected by this choice — audit logs always go to `RAXIS_HOME/audit/` regardless of operational log destination.
+The kernel's audit log (the cryptographic record of state changes) is separately specified in [`host-capacity.md §6.3`](host-capacity.md) and `audit-retention` (V3) and is unaffected by this choice — audit logs always go to `RAXIS_HOME/audit/` regardless of operational log destination.
 
 **Scenario it prevents.** An operator runs `journalctl -u raxis-kernel` on their Linux production host and sees "No entries." With custom log destinations, they would have to look up the RAXIS-specific path. With journald integration, the kernel "just works" with the operator's existing observability tooling.
 
@@ -1476,7 +1476,7 @@ The chosen dual-mechanism approach gives both: cryptographic-grade single-instan
 
 **Rejected because.** journald rotates on a configurable schedule (typically days); operational log files can be lost, rotated, or deleted by operators. The audit log persists per `audit-retention` semantics (months to years, with archive). When investigating a six-month-old incident, the operator wants to know "did the kernel restart at 14:32 that day?" — that question is unanswerable from rotated journald entries but trivially answered from the audit log.
 
-The "coupling lifecycle to audit-write availability" concern is real but bounded: if the audit log is unwritable (`AuditWriteImpossible` per `host-capacity.md §7.6`), the kernel halts entirely anyway. So the lifecycle audit events follow the same fate as every other state change — they go in or the kernel stops.
+The "coupling lifecycle to audit-write availability" concern is real but bounded: if the audit log is unwritable (`AuditWriteImpossible` per [`host-capacity.md §7.6`](host-capacity.md)), the kernel halts entirely anyway. So the lifecycle audit events follow the same fate as every other state change — they go in or the kernel stops.
 
 The trade-off is correctly weighted: a small additional write per lifecycle transition (negligible cost) for forensic reconstructability that lasts as long as the audit retention policy.
 

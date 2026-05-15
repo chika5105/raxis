@@ -219,7 +219,7 @@ concern, not a production-operator concern (see
 
 ## Related
 
-- [INV-HOST-HYGIENE-01] — `raxis/specs/invariants.md §11.11`
+- [INV-HOST-HYGIENE-01] — [`raxis/specs/invariants.md §11.11`](../../specs/invariants.md)
 - [INV-CAPACITY-02] — disk-full halt-admit, the watchdog this sweep is preventing from tripping
 - [`host-capacity.md`] — the kernel's own disk-pressure watchdog (data-dir scope, distinct from the host-wide hygiene scope here)
 - [`dashboard-hardening.md §5.7`] — out-of-scope rationale for the operator dashboard

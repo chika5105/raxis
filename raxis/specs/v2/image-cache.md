@@ -8,19 +8,19 @@
 >
 > **Cross-references:**
 >
-> - `v2-deep-spec.md §17` (Step 17 — `approve_plan` shift-left
+> - [`v2-deep-spec.md §17`](v2-deep-spec.md) (Step 17 — `approve_plan` shift-left
 >   validation) — `[[vm_images]]` admit-list handling, `oci_digest`
 >   recording on the initiative row, kernel provisioning flow at
 >   session activation (the seed text for §3 below).
-> - `planner-harness.md §10.4–§10.7` — the three RAXIS-canonical
+> - [`planner-harness.md §10.4–§10.7`](planner-harness.md) — the three RAXIS-canonical
 >   images that bypass this resolver (they are kernel-version-locked
 >   on-disk artefacts, never pulled).
-> - `policy-plan-authority.md §4` — `[[vm_images]] role_restriction`
+> - [`policy-plan-authority.md §4`](policy-plan-authority.md) — `[[vm_images]] role_restriction`
 >   admit list and `oci_digest` field semantics.
-> - `release-and-distribution.md §10` — operator-published images
+> - [`release-and-distribution.md §10`](release-and-distribution.md) — operator-published images
 >   are out of scope for the RAXIS release pipeline; they are
 >   exclusively this resolver's concern.
-> - `system-requirements.md §1` — install-dir layout that this spec
+> - [`system-requirements.md §1`](system-requirements.md) — install-dir layout that this spec
 >   extends with an `oci-cache/` subdirectory.
 
 ---
@@ -78,7 +78,7 @@ Out of scope:
 
 - The three RAXIS-canonical images (`raxis-reviewer-core`,
   `raxis-orchestrator-core`, `raxis-executor-starter`). Those are
-  delivered by the release pipeline (`release-and-distribution.md`)
+  delivered by the release pipeline ([`release-and-distribution.md`](release-and-distribution.md))
   to a kernel-version-locked path under `$RAXIS_INSTALL_DIR/images/`
   and are NOT routed through this resolver.
 - The OCI image-builder side (operators use their own toolchain —
@@ -92,9 +92,9 @@ Out of scope:
 
 ---
 
-## §3 — The seed text from `v2-deep-spec.md`
+## §3 — The seed text from [`v2-deep-spec.md`](v2-deep-spec.md)
 
-`v2-deep-spec.md §Distribution` already specifies the high-level
+[`v2-deep-spec.md §Distribution`](v2-deep-spec.md) already specifies the high-level
 flow at session activation:
 
 ```text
@@ -344,7 +344,7 @@ proxy_type  = "static-bearer"
 ```
 
 The credential mechanism reuses the operator-policy credential
-plane already specified in `credential-proxy.md`: an OCI-pull is
+plane already specified in [`credential-proxy.md`](credential-proxy.md): an OCI-pull is
 just an HTTP request, and `static-bearer` is a degenerate
 credential type with no proxy-side rewriting.
 
@@ -374,7 +374,7 @@ in the same policy generation; this is shift-left of a runtime
 | `raxis/kernel/src/session_spawn_orchestrator.rs`      | MODIFY  | DEFERRED | Replace direct `image_path` resolution with a call to `ctx.image_resolver.resolve(...)`                  |
 | `raxis/kernel/src/ipc/context.rs`                     | MODIFY  | LANDED   | `image_resolver: Arc<dyn ImageResolver>` field + `with_image_resolver` swap; default = `PrePopulatedResolver` rooted at `<data_dir>/oci-cache/` |
 | `raxis/cli/src/commands/doctor.rs`                    | MODIFY  | LANDED   | `raxis doctor cache prune [--dry-run] [--json]` subcommand exercising `prune_unreferenced` (§8 foreground) |
-| `raxis/specs/v2/image-cache.md`                       | THIS    | LANDED   | (you are here)                                                                                           |
+| [`raxis/specs/v2/image-cache.md`](image-cache.md)                       | THIS    | LANDED   | (you are here)                                                                                           |
 
 The crate now ships the full V2 surface (LANDED rows): trait + on-disk
 layout + failure-mode taxonomy + `PrePopulatedResolver` (offline /

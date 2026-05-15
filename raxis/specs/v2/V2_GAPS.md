@@ -58,25 +58,25 @@ audit integration is complete.
 
 | # | Spec document | Key crates / files | Lines |
 |---|---|---|---|
-| A1 | `audit-paired-writes.md` | `crates/audit/`, `crates/audit-tools/` | 4,277 |
-| A2 | `credential-proxy.md` (wire path) | 11 proxy crates + manager | 14,151 |
-| A3 | `extensibility-traits.md` (trait surface) | `crates/isolation/`, `crates/domain/`, `crates/gateway-substrate/` | ~2,200 |
-| A4 | `plan-bundle-sealing.md` | `crates/store/src/plan_bundles.rs` | ~500 |
-| A5 | `integration-merge.md` (admission) | `kernel/src/handlers/intent.rs`, `integration_merge_attribution.rs` | ~2,000 |
-| A6 | `agent-disagreement.md` | `kernel/src/handlers/escalation.rs` | 1,012 |
-| A7 | `vm-network-isolation.md` | `tproxy/`, `crates/tproxy-protocol/`, `crates/egress-admission/` | 1,587 |
-| A8 | `verifier-processes.md` (dispatch) | `kernel/src/gates/verifier_runner.rs`, `handlers/witness.rs` | ~2,200 |
-| A9 | `release-and-distribution.md` | `.github/workflows/release.yml`, `build-images.yml` | ~540 |
-| A10 | `image-cache.md` | `crates/image-cache/` | 2,165 |
-| A11 | `kernel-mediated-egress.md` | `crates/egress-admission/`, session-spawn env injection | ~1,300 |
-| A12 | `planner-harness.md` (boot contract) | `crates/planner-core/`, 3 planner binaries | 750 |
-| A13 | `policy-plan-authority.md` (admission) | `crates/policy/`, `kernel/src/initiatives/` | ~6,000 |
-| A14 | `kernel-lifecycle.md` (boot + shutdown) | `kernel/src/main.rs`, `bootstrap.rs`, `recovery.rs` | ~3,000 |
-| A15 | `kernel-lifecycle.md` (heartbeat) | `kernel/src/runtime/heartbeat.rs`, wired in `main.rs:532` | 271 |
-| A16 | `kernel-lifecycle.md` (gateway supervisor) | `kernel/src/gateway/supervisor.rs` | 715 |
-| A17 | `policy-epoch-diffing.md` | `cli/src/commands/policy_diff.rs` | 649 |
+| A1 | [`audit-paired-writes.md`](audit-paired-writes.md) | `crates/audit/`, `crates/audit-tools/` | 4,277 |
+| A2 | [`credential-proxy.md`](credential-proxy.md) (wire path) | 11 proxy crates + manager | 14,151 |
+| A3 | [`extensibility-traits.md`](extensibility-traits.md) (trait surface) | `crates/isolation/`, `crates/domain/`, `crates/gateway-substrate/` | ~2,200 |
+| A4 | [`plan-bundle-sealing.md`](plan-bundle-sealing.md) | `crates/store/src/plan_bundles.rs` | ~500 |
+| A5 | [`integration-merge.md`](integration-merge.md) (admission) | `kernel/src/handlers/intent.rs`, `integration_merge_attribution.rs` | ~2,000 |
+| A6 | [`agent-disagreement.md`](agent-disagreement.md) | `kernel/src/handlers/escalation.rs` | 1,012 |
+| A7 | [`vm-network-isolation.md`](vm-network-isolation.md) | `tproxy/`, `crates/tproxy-protocol/`, `crates/egress-admission/` | 1,587 |
+| A8 | [`verifier-processes.md`](verifier-processes.md) (dispatch) | `kernel/src/gates/verifier_runner.rs`, `handlers/witness.rs` | ~2,200 |
+| A9 | [`release-and-distribution.md`](release-and-distribution.md) | `.github/workflows/release.yml`, `build-images.yml` | ~540 |
+| A10 | [`image-cache.md`](image-cache.md) | `crates/image-cache/` | 2,165 |
+| A11 | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | `crates/egress-admission/`, session-spawn env injection | ~1,300 |
+| A12 | [`planner-harness.md`](planner-harness.md) (boot contract) | `crates/planner-core/`, 3 planner binaries | 750 |
+| A13 | [`policy-plan-authority.md`](policy-plan-authority.md) (admission) | `crates/policy/`, `kernel/src/initiatives/` | ~6,000 |
+| A14 | [`kernel-lifecycle.md`](kernel-lifecycle.md) (boot + shutdown) | `kernel/src/main.rs`, `bootstrap.rs`, `recovery.rs` | ~3,000 |
+| A15 | [`kernel-lifecycle.md`](kernel-lifecycle.md) (heartbeat) | `kernel/src/runtime/heartbeat.rs`, wired in `main.rs:532` | 271 |
+| A16 | [`kernel-lifecycle.md`](kernel-lifecycle.md) (gateway supervisor) | `kernel/src/gateway/supervisor.rs` | 715 |
+| A17 | [`policy-epoch-diffing.md`](policy-epoch-diffing.md) | `cli/src/commands/policy_diff.rs` | 649 |
 
-**Cross-check correction:** `policy-epoch-diffing.md` was previously
+**Cross-check correction:** [`policy-epoch-diffing.md`](policy-epoch-diffing.md) was previously
 listed as Tier C (zero code). The CLI already ships `raxis policy diff`
 at 649 lines. Moved to Tier A.
 
@@ -86,7 +86,7 @@ at 649 lines. Moved to Tier A.
 
 ### B1: Planner Agent Loop ✅ CLOSED (V2.3)
 
-**Spec:** `planner-harness.md §3, §10, §14`
+**Spec:** [`planner-harness.md §3, §10, §14`](planner-harness.md)
 **Estimate:** ~2,600 lines (delivered ~2,500 across `raxis-planner-core`)
 
 The three planner binaries (orchestrator, executor, reviewer) now have
@@ -120,11 +120,11 @@ lint forbids the legacy `std::env::set_var` approach).
 | KSB renderer (`[RAXIS:KERNEL_STATE … :KERNEL_STATE_END]`) | ✅ | `crates/ksb/src/lib.rs` |
 | Custom-tool loader + subprocess executor | ✅ | `planner-core/src/custom_tools.rs` |
 
-**Invariant gap:** `planner-harness.md` defines 89 `INV-` invariants.
+**Invariant gap:** [`planner-harness.md`](planner-harness.md) defines 89 `INV-` invariants.
 INV-PLANNER-HARNESS-04 (reviewer write-tool ban), INV-PLANNER-04
 (monotonic per-session sequence_number), and INV-KSB-01 (close-delim
 injection refusal) are now enforced in code. The remaining INV
-coverage gap is tracked in `V2_GAPS.md §13 — INV-Coverage`.
+coverage gap is tracked in [`V2_GAPS.md §13 — INV-Coverage`](V2_GAPS.md).
 
 **Test coverage:** 87 unit tests across the 8 modules (`cargo test
 -p raxis-planner-core --lib`); the live e2e harness exercises the
@@ -132,7 +132,7 @@ full loop end-to-end via `live-e2e/`.
 
 ### B2: Custom Tools — CLOSED (V2.3, MVP)
 
-**Spec:** `custom-tools.md` (55KB)
+**Spec:** [`custom-tools.md`](custom-tools.md) (55KB)
 **Status:** Kernel-side validation + planner-side loader/executor done.
 **Depends on:** B1
 
@@ -192,7 +192,7 @@ V3 (deferred):
 
 ### B3: Real Database Proxy Forwarding — CLOSED (V2.3)
 
-**Spec:** `credential-proxy.md §14`
+**Spec:** [`credential-proxy.md §14`](credential-proxy.md)
 **Delivered:** ~3,500 lines across 6 `upstream.rs` modules
 
 Five of 6 database proxies (Postgres, MySQL, MSSQL, Redis, SMTP)
@@ -233,13 +233,13 @@ features were shipped. The implementations live in:
   boundary (`crates/credential-proxy-mongodb/src/wire.rs` +
   `restriction.rs`) so the upstream never sees blocked
   collections / commands. Spec mirror:
-  `v2_extended_gaps.md §2.2`.
+  [`v2_extended_gaps.md §2.2`](v2_extended_gaps.md).
 * `crates/credential-proxy-mysql/src/upstream.rs` — both the
   `caching_sha2_password` fast-auth (`AuthSwitchRequest` with
   the cached scramble) and full-auth (RSA-OAEP-encrypted
   password exchange) paths, alongside the original
   `mysql_native_password` happy path. Spec mirror:
-  `v2_extended_gaps.md §2.3`.
+  [`v2_extended_gaps.md §2.3`](v2_extended_gaps.md).
 
 The V3-deferral fail-fast paths (the `UpstreamError::Handshake(
 "… deferred to V3 …")` strings) are removed. The integration
@@ -370,7 +370,7 @@ operator cannot pre-bake into the bytes, V3 adds
 declared cloud-proxy gap WITHOUT that lift, and the spec stays
 honest about the deferral.
 
-The `extensibility-traits.md §4` spec for `CredentialBackend` is
+The [`extensibility-traits.md §4`](extensibility-traits.md) spec for `CredentialBackend` is
 already correct as written for V2.3 — no edits needed for this
 gap. See §12.10 for the broader list of spec files that **other**
 Phase 2 patches must touch when they land (independent of this
@@ -382,12 +382,12 @@ trait decision).
 
 ### C1: Token Limit Enforcement — CLOSED (V2.3, MVP — coarse)
 
-**Spec:** `token-limit-enforcement.md` (52KB) — full surface
+**Spec:** [`token-limit-enforcement.md`](token-limit-enforcement.md) (52KB) — full surface
 **Status:** **CLOSED for V2 — coarse per-session ceilings only.**
 **Delivered:** ~210 lines (planner-core dispatch + tests)
 
 V2.3 lands the coarse per-session-cumulative leg of the
-`token-limit-enforcement.md §2 Coarse table`: every dispatch loop
+[`token-limit-enforcement.md §2 Coarse table`](token-limit-enforcement.md): every dispatch loop
 folds the Anthropic `Usage` counters into running totals and
 terminates with a structured outcome the moment a configured
 ceiling is crossed. Pre-admission char-proxy enforcement, the
@@ -436,7 +436,7 @@ deferred to V3.
 
 ### C2: Provider Failure Handling — CLOSED (V2.3, MVP)
 
-**Spec:** `provider-failure-handling.md` (130KB) — full surface
+**Spec:** [`provider-failure-handling.md`](provider-failure-handling.md) (130KB) — full surface
 **Status:** **CLOSED for V2 — retry shell + fallback chain.**
 **Delivered:** ~280 lines (planner-core retry + tests)
 
@@ -483,7 +483,7 @@ piece is the planner-side wire-shape translation.
 
 > **PREREQUISITE: spec before code.** Before implementing any
 > `ModelClient`, a dedicated subsection MUST be added to
-> `provider-model-selection.md` (or a new
+> [`provider-model-selection.md`](provider-model-selection.md) (or a new
 > `specs/v2/provider-client-impls.md`) covering, for each provider:
 >
 > 1. **Wire shape** — exact HTTP method, URL path, required headers,
@@ -521,7 +521,7 @@ piece is the planner-side wire-shape translation.
   non-streaming, so a mid-response failure can only surface as a
   full-call retry (the entire request body is replayed). Streaming
   recovery is deferred alongside the streaming dispatch shape
-  itself (see §38 of `provider-failure-handling.md`).
+  itself (see §38 of [`provider-failure-handling.md`](provider-failure-handling.md)).
 * **No `ProviderExhausted` typed escalation.** A budget-exhausted
   retry surfaces as the last `ModelError`; the role binary
   converts that into a `ReportFailure` IPC intent. Promoting
@@ -573,11 +573,11 @@ back to primary on the next dispatch.
 
 ### C3: Provider Model Selection — CLOSED (V2.3, MVP)
 
-**Spec:** `provider-model-selection.md` (51KB) — full surface
+**Spec:** [`provider-model-selection.md`](provider-model-selection.md) (51KB) — full surface
 **Status:** **CLOSED for V2 — env-stamped model id with registry validation.**
 **Delivered:** ~330 lines (planner-core provider_model + tests)
 
-V2.3 lands the wire-shape leg of `provider-model-selection.md` so a
+V2.3 lands the wire-shape leg of [`provider-model-selection.md`](provider-model-selection.md) so a
 planner-role binary at boot:
 
 1. Reads `RAXIS_MODEL_ID` from the kernel-stamped environment, with
@@ -629,7 +629,7 @@ shape to/from the upstream's wire format.
 | **Google Gemini** | ✅ 2 entries | ✅ `GeminiClient` (`src/gemini_client.rs`, ~470 lines incl. tests) | ✅ via gateway query-string / `Authorization` injection | ✅ V2.4 |
 | **AWS Bedrock** | ✅ 2 entries (Anthropic-on-Bedrock) | ✅ `BedrockClient` (`src/bedrock_client.rs`, ~270 lines incl. tests) | 🟡 SigV4 gateway leg required (planner emits unsigned body; gateway signs at egress) | ✅ V2.4 |
 
-**Spec reference:** `provider-client-impls.md` (the canonical
+**Spec reference:** [`provider-client-impls.md`](provider-client-impls.md) (the canonical
 translation table for each provider).
 
 **Test coverage:** 20 new unit tests
@@ -640,7 +640,7 @@ function-call translation, finish-reason, happy-path; 4 Bedrock:
 URL-path model routing, `anthropic_version` body field,
 local-server happy-path, 4xx classification).
 
-**Deployment tiers** (from `provider-model-selection.md §4`) —
+**Deployment tiers** (from [`provider-model-selection.md §4`](provider-model-selection.md)) —
 all three tiers are V2 targets:
 
 - **§4.1** — Single-provider (Anthropic only): works today.
@@ -664,7 +664,7 @@ are V2).**
 
 ### C5: Third-Party Provider Integration (HTTP Sidecar) — **CLOSED (V2.4, MVP)**
 
-**Spec:** `extensibility-traits.md §9A`
+**Spec:** [`extensibility-traits.md §9A`](extensibility-traits.md)
 **Status:** ✅ Implemented as a `ModelClient` impl rather than a
 new `InferenceRouter` variant — see "Architectural decision" below.
 **Severity (closed):** previously blocked operators who wanted
@@ -674,7 +674,7 @@ non-built-in providers; the sidecar path is now general-purpose.
 new `HttpSidecarRouter` impl alongside `HttpsGatewayRouter`. The
 real V2 codebase routes inference through `Arc<dyn ModelClient>`
 (see `crates/planner-core/src/model.rs`) rather than the `InferenceRouter`
-trait described in `extensibility-traits.md §9`. Introducing a
+trait described in [`extensibility-traits.md §9`](extensibility-traits.md). Introducing a
 parallel router-trait surface in V2 would be a duplicative
 refactor. We chose instead to land **`SidecarModelClient`** as a
 peer of `AnthropicClient` / `OpenAiClient` / `GeminiClient` /
@@ -690,7 +690,7 @@ entry point.
 - `crates/planner-core/src/sidecar_client.rs` — ~520 lines,
   `SidecarModelClient` (the V2 successor to `HttpSidecarRouter`),
   HMAC-SHA256 request/response signing per
-  `extensibility-traits.md §9A.7A`, 30 s replay window, custom
+  [`extensibility-traits.md §9A.7A`](extensibility-traits.md), 30 s replay window, custom
   `Debug` redacts the secret. 16 unit tests including a local
   mock-server happy path and HMAC-tampering reject path.
 - `crates/policy/src/bundle.rs` — `ProviderEntry` extended with
@@ -723,7 +723,7 @@ entry point.
   is V3 ergonomics only and does not block operators.
 - Boot-time challenge-response handshake. Per-request HMAC plus
   the `Replay-Window` invariant (`30 s`) is sufficient for the
-  loopback threat model (`extensibility-traits.md §9A.6`); the
+  loopback threat model ([`extensibility-traits.md §9A.6`](extensibility-traits.md)); the
   bidirectional handshake is a defence-in-depth refinement.
 - `InferenceRouterKind::HttpSidecar` variant. Subsumed by the
   `ModelClient` chain decision above.
@@ -732,7 +732,7 @@ entry point.
 sidecar is downstream of admission, upstream of audit, in a
 separate process with zero access to kernel internals. Malformed
 sidecar responses → `InferenceError::MalformedResponse` →
-fail-closed (R-3). See `extensibility-traits.md §9A.6` for the
+fail-closed (R-3). See [`extensibility-traits.md §9A.6`](extensibility-traits.md) for the
 full invariant analysis.
 
 **Integration with existing provider infrastructure:**
@@ -787,11 +787,11 @@ built-in providers. The role binary's `main()` constructs the
 **Rejected alternative:** `.so`/`.dylib` plugin loading. A native
 plugin runs in kernel address space with full memory access — no
 conformance check can prevent memory corruption or invariant
-bypass. See `extensibility-traits.md §9A.2`.
+bypass. See [`extensibility-traits.md §9A.2`](extensibility-traits.md).
 
 ### C4: Email & Notification Channels ✅ CLOSED (V2.4)
 
-**Spec:** `email-and-notification-channels.md` (61KB)
+**Spec:** [`email-and-notification-channels.md`](email-and-notification-channels.md) (61KB)
 **Delivered:** ~1,000 lines (handler crates + tests + sidecar +
 NotificationDelivered audit event)
 **V2.5 update:** Forward-only consolidation — the legacy in-kernel
@@ -1065,11 +1065,11 @@ spec-graph consistency:
 
 | Spec file | What changes |
 |---|---|
-| `email-and-notification-channels.md` | **Major update.** Remove the `Webhook` channel kind from the kernel-implemented set. Add `Sidecar` channel kind with `endpoint`, `events`, and retry semantics. Update the channel-kind table, wire shapes, and failure taxonomy. Add the `NotificationPayload` JSON schema. |
-| `policy-plan-authority.md` | Add `kind = "Sidecar"` to `[[notification_channels]]` validation. Add `events` field validation (must be known event kinds). Add admission failure code `FAIL_NOTIFICATION_UNKNOWN_EVENT_KIND`. |
-| `audit-paired-writes.md §4` | Classify `NotificationDelivered` and `NotificationDeliveryFailed` for sidecar channels (same shape as existing webhook audit events, with `channel_kind = "Sidecar"` and `endpoint` added). |
-| `extensibility-traits.md` | Remove `OperatorNotificationChannel` trait extraction from V3 roadmap — the sidecar pattern replaces trait-based extensibility for notifications. The kernel's notification surface is now: Email (built-in) + Sidecar (HTTP contract). |
-| `operator-ergonomics.md` | Update `raxis doctor` to include a `notifications` check category that verifies sidecar endpoints are reachable (HTTP GET health check). |
+| [`email-and-notification-channels.md`](email-and-notification-channels.md) | **Major update.** Remove the `Webhook` channel kind from the kernel-implemented set. Add `Sidecar` channel kind with `endpoint`, `events`, and retry semantics. Update the channel-kind table, wire shapes, and failure taxonomy. Add the `NotificationPayload` JSON schema. |
+| [`policy-plan-authority.md`](policy-plan-authority.md) | Add `kind = "Sidecar"` to `[[notification_channels]]` validation. Add `events` field validation (must be known event kinds). Add admission failure code `FAIL_NOTIFICATION_UNKNOWN_EVENT_KIND`. |
+| [`audit-paired-writes.md §4`](audit-paired-writes.md) | Classify `NotificationDelivered` and `NotificationDeliveryFailed` for sidecar channels (same shape as existing webhook audit events, with `channel_kind = "Sidecar"` and `endpoint` added). |
+| [`extensibility-traits.md`](extensibility-traits.md) | Remove `OperatorNotificationChannel` trait extraction from V3 roadmap — the sidecar pattern replaces trait-based extensibility for notifications. The kernel's notification surface is now: Email (built-in) + Sidecar (HTTP contract). |
+| [`operator-ergonomics.md`](operator-ergonomics.md) | Update `raxis doctor` to include a `notifications` check category that verifies sidecar endpoints are reachable (HTTP GET health check). |
 | `invariants.md` | Add `INV-NOTIFY-07`: "Notification dispatch failures MUST NOT block, crash, delay, or roll back any kernel operation. Notification delivery is fire-and-forget with audit." |
 
 **Sidecar boilerplate examples.**
@@ -1173,10 +1173,10 @@ app.listen(9201, () => console.log("PagerDuty sidecar on :9201"));
 | **Timeout** | Sidecar must respond within 5 seconds per attempt. |
 
 **Proposed extensions to the `NotificationDelivered` audit event
-(defined in `email-and-notification-channels.md`):**
+(defined in [`email-and-notification-channels.md`](email-and-notification-channels.md)):**
 
 The following fields are added to the existing event shape for
-sidecar channels. See `email-and-notification-channels.md` for
+sidecar channels. See [`email-and-notification-channels.md`](email-and-notification-channels.md) for
 the authoritative definition.
 
 | Field | Type | Description |
@@ -1192,7 +1192,7 @@ the authoritative definition.
 
 ### C5: Immutable Artifact Store — CLOSED (V2.4, kernel wiring shipped)
 
-**Spec:** `immutable-artifact-store.md` (25KB) — full surface
+**Spec:** [`immutable-artifact-store.md`](immutable-artifact-store.md) (25KB) — full surface
 **Status:** **Primitive + kernel wiring delivered.** Boot-time backfill,
 policy-push, plan-approve, and operator-pubkey paths all write to
 the store.
@@ -1263,7 +1263,7 @@ Tests pinning the wiring:
 
 ### C6: Kernel Push Protocol — CLOSED (V2.3, MVP)
 
-**Spec:** `kernel-push-protocol.md` (63KB) — full surface
+**Spec:** [`kernel-push-protocol.md`](kernel-push-protocol.md) (63KB) — full surface
 **Status:** **CLOSED for V2 — minimum-viable auto-push only.**
 **Delivered:** ~250 lines
 
@@ -1287,7 +1287,7 @@ follow-up.
 * **No kernel-side credential injection.** The kernel invokes
   `git push` and lets the host's git credential helpers / SSH
   config supply auth. This keeps the V2 push wire-shape identical
-  to `integration-merge.md §14`'s `git push origin main` example
+  to [`integration-merge.md §14`](integration-merge.md)'s `git push origin main` example
   and avoids opening a credential-proxy fan-in for what is
   effectively a host-administered remote.
 * **Refspec defaults to `<target_ref>:<target_ref>`.** Push
@@ -1313,7 +1313,7 @@ follow-up.
 
 ### C7: Credential CLI: `add`, `remove`, `show`, `verify`, `audit` — CLOSED (V2.3, MVP)
 
-**Spec:** `credential-proxy.md §12`
+**Spec:** [`credential-proxy.md §12`](credential-proxy.md)
 **Status:** Seven-command catalogue shipped (`list`, `rotate`, `add`,
 `show`, `remove`, `verify`, `audit`). Per-proxy-type validators and
 the live-network `verify` probe are V3.
@@ -1340,7 +1340,7 @@ Implementation:
     whose payload mentions `<name>`.
 - `crates/audit/src/event.rs`: three new audit-event variants —
   `CredentialRegistered`, `CredentialRemoved`, `CredentialVerified`
-  — with the wire shape called out in `credential-proxy.md §12.3`
+  — with the wire shape called out in [`credential-proxy.md §12.3`](credential-proxy.md)
   (extended with `actor_fingerprint` and `backend_kind` for
   consistency with `CredentialAccessed`/`CredentialRotated`).
 - `crates/policy/src/bundle.rs`: `KNOWN_AUDIT_EVENT_KINDS` extended
@@ -1402,8 +1402,8 @@ V3 (deferred):
 
 ### C8: Reserved Planner Tools — `WebFetch`, `WebSearch`, `StructuredOutput`, `Sleep` — CLOSED (V2.4, deferred to V3)
 
-**Spec:** `planner-harness.md §3` (tool surface table),
-`custom-tools.md §5` (reserved name list)
+**Spec:** [`planner-harness.md §3`](planner-harness.md) (tool surface table),
+[`custom-tools.md §5`](custom-tools.md) (reserved name list)
 **Status:** **CLOSED for V2 — all four names remain reserved;
 no implementation in V2.**
 
@@ -1454,7 +1454,7 @@ without a breaking change to the reserved-name list.
 
 ### C9: Streaming Dispatch (Planner ↔ Gateway) — **CLOSED (V2.4, MVP)**
 
-**Spec:** `provider-failure-handling.md §7` (streaming atomicity),
+**Spec:** [`provider-failure-handling.md §7`](provider-failure-handling.md) (streaming atomicity),
 `§7.2` (gateway-side stream buffering), `§7.5` (no resumable
 streams), `§12.4` (design rationale), `§12.7` (resumability
 deferral)
@@ -1746,7 +1746,7 @@ design constraint from the V2 BLOCKER entry below:
 > design notes below are preserved as the normative reference for
 > the remaining interactive flow.
 
-**Spec:** `operator-ergonomics.md §16`
+**Spec:** [`operator-ergonomics.md §16`](operator-ergonomics.md)
 **Status:** 🟡 V2.3 MVP (phases 2/6); phases 1/3/7/10 are V2.x
 candidates; phases 4/5/9 are V3.
 **Estimate:** ~800 lines (CLI interactive flow + phase orchestration)
@@ -1758,7 +1758,7 @@ commands in the correct order. This is an adoption barrier that
 V2 cannot ship with — operators who fail at setup never reach
 their first initiative.
 
-**The 10 phases (from `operator-ergonomics.md §16`):**
+**The 10 phases (from [`operator-ergonomics.md §16`](operator-ergonomics.md)):**
 
 | Phase | What it does | Depends on |
 |---|---|---|
@@ -1805,7 +1805,7 @@ their first initiative.
 
 ### D1: Key Revocation — **CLOSED (V2.3, MVP)**
 
-**Spec:** `key-revocation.md` (77KB)
+**Spec:** [`key-revocation.md`](key-revocation.md) (77KB)
 **Estimate:** ~400 lines (V2 MVP delivered ~600 lines incl. tests)
 
 V2.3 ships the **admission-time operator-certificate revocation MVP**:
@@ -1878,7 +1878,7 @@ V2.3 ships the **admission-time operator-certificate revocation MVP**:
 
 ### D2: Host Capacity Management — **CLOSED (V2.3, MVP)**
 
-**Spec:** `host-capacity.md` (79KB)
+**Spec:** [`host-capacity.md`](host-capacity.md) (79KB)
 **Estimate:** ~500 lines (V2 MVP delivered ~700 lines incl. tests)
 
 V2.3 ships the **cap-enforcement + watchdog MVP** of host capacity:
@@ -1976,7 +1976,7 @@ operational complexity of full queueing.
 
 ### E1: Environment Access Control — `CLOSED (V2.3, MVP)`
 
-**Spec:** `environment-access-control.md` (82KB)
+**Spec:** [`environment-access-control.md`](environment-access-control.md) (82KB)
 **Status:** V2.3 MVP — INV-ENV-01 credential limb enforced.
 
 V2.3 lands the structural invariant that prevents one VM from
@@ -1993,7 +1993,7 @@ algorithm with the URL-gate limb.
 | INV-ENV-01 per-task credential coherence | §11.3 step A / §11.7 | ✅ `validate_task_environment_consistency` runs at `approve_plan` BEFORE BEGIN TRANSACTION; rejects cross-env tasks with `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (`LifecycleError::PlanInvalid`). Inert when zero envs declared (§1.5.2 activation gate). |
 | Cross-env isolation (structural) | §6 | ✅ Already works (VMs are isolated). |
 | `[[environment_gates]]` in `policy.toml` | §5 / §11.3 step B | ❌ Deferred to V3 along with the URL-gate runtime path (`block_all`, `write_requires_approval`, `same_cluster_acknowledged` handler, `approval_match_mode`). |
-| Warning code from `environment-access-control.md §7` | §7 | ❌ Deferred to V3 (depends on URL-gate matching). |
+| Warning code from [`environment-access-control.md §7`](environment-access-control.md) | §7 | ❌ Deferred to V3 (depends on URL-gate matching). |
 | Reserved V2.x fields (`blast_radius`, `require_two_party_sign`) | §5b.4 | 🟡 Parsed but inert (no `WARN_ENVIRONMENT_RESERVED_FIELD_SET` audit yet — defer). |
 | `TaskEnvironmentBinding` audit attribution | §11.9 | ❌ Deferred to V3 (binding is computed during validation but not yet emitted as a distinct audit event). |
 
@@ -2029,7 +2029,7 @@ plans.
 
 ## §7 — CLI Subcommand Coverage
 
-Cross-check of CLI commands spec'd in `operator-ergonomics.md` vs
+Cross-check of CLI commands spec'd in [`operator-ergonomics.md`](operator-ergonomics.md) vs
 implemented in `cli/src/commands/`:
 
 | Command | Spec'd | Implemented | Lines | Notes |
@@ -2054,7 +2054,7 @@ implemented in `cli/src/commands/`:
 | `raxis sessions` | ✅ | ✅ | ~200 | Active session listing |
 | `raxis verifiers` | ✅ | ✅ | ~200 | Verifier status |
 | `raxis witnesses` | ✅ | ✅ | ~200 | Witness listing |
-| `raxis plan init` | ✅ | ✅ | ~250 | V2.3 MVP: 5 bundled templates (`feature`, `bugfix`, `dependency-upgrade`, `migration`, `experiment`) embedded in CLI binary; per `operator-ergonomics.md §6`. |
+| `raxis plan init` | ✅ | ✅ | ~250 | V2.3 MVP: 5 bundled templates (`feature`, `bugfix`, `dependency-upgrade`, `migration`, `experiment`) embedded in CLI binary; per [`operator-ergonomics.md §6`](operator-ergonomics.md). |
 | `raxis credential add` | ✅ | ✅ | ~340 | V2.3: per-type validators + atomic file write; `cli/src/commands/credential.rs::run_add`. |
 | `raxis credential remove` | ✅ | ✅ | ~150 | V2.3: orphan check via `--force` flag; `run_remove`. |
 | `raxis credential show` | ✅ | ✅ | ~110 | V2.3: respects `--json`; `run_show`. |
@@ -2284,7 +2284,7 @@ The proxy:
 | 12 | ~~**C3** — Provider model selection~~ — **CLOSED V2.3** | 400 | `KnownModel` registry + `resolve_model_from_env` + `ModelDeprecated` warnings shipped. |
 | 13 | ~~**C5** — Immutable artifact store~~ — **CLOSED V2.3** | 600 | `ArtifactStore` + `Category` + `IntegrityMismatch` / `BytesDiverge` shipped. |
 | 14 | ~~**E1** — Environment access control~~ — **CLOSED V2.3** | 200 | `INV-ENV-01` + `FAIL_TASK_ENVIRONMENT_INCONSISTENT` shipped. |
-| 15 | ~~`raxis init` project scaffolding~~ — `CLOSED (V2.3, MVP)` as `raxis plan init` per `operator-ergonomics.md §6`. | 250 | New-operator onboarding shipped. |
+| 15 | ~~`raxis init` project scaffolding~~ — `CLOSED (V2.3, MVP)` as `raxis plan init` per [`operator-ergonomics.md §6`](operator-ergonomics.md). | 250 | New-operator onboarding shipped. |
 | 16 | `INV-` invariant enforcement audit | 300 | See §13 — V2.3 ships ~45/120 cited; ~30 are "structurally enforced + un-annotated" (one-line annotation pass); ~40 ship with their parent feature; ~5 deprecated. The ~7 genuine gaps (CONVERGENCE liveness proofs) are V3. |
 | 17 | ~~Gateway binary integrity~~ — **CLOSED V2.3** | 90 | `embedded-gateway` feature flag shipped. |
 | 18 | ~~KernelPush transport~~ — **CLOSED V2.3 (in-memory MVP)** | 200 | `KernelPushDispatcher` shipped with audit mirroring; full session-addressed VSock/UDS transport is V3. |
@@ -2430,7 +2430,7 @@ Corrections made during cross-check passes:
 in-process `KernelPushDispatcher`:
 
 * **Per-session monotonic `push_id`** allocator (matches
-  `kernel-push-protocol.md §9` line 539).
+  [`kernel-push-protocol.md §9`](kernel-push-protocol.md) line 539).
 * **`tokio::sync::broadcast` fan-out** to all `Subscriber`s
   bound to a session_id. V3 will attach the per-session VSock
   delivery loop here without changing the publisher API.
@@ -2509,9 +2509,9 @@ emitter (gap §12.1, push transport) will read. Ahead of that
 transport landing, the aggregator's terminal verdicts are observable
 from the audit chain.
 
-**Spec updates.** `audit-paired-writes.md §4.3` (single-class
-roster), `verifier-processes.md §11` (audit-event table), and
-`v2-deep-spec.md §Step 25` ("aggregator IS wired today" subsection)
+**Spec updates.** [`audit-paired-writes.md §4.3`](audit-paired-writes.md) (single-class
+roster), [`verifier-processes.md §11`](verifier-processes.md) (audit-event table), and
+[`v2-deep-spec.md §Step 25`](v2-deep-spec.md) ("aggregator IS wired today" subsection)
 were updated in the same commit.
 
 **Tests.** Three new
@@ -2547,7 +2547,7 @@ No notification kind produces a runtime error at dispatch.
 
 ### 12.4 Operator-ergonomics IPC: 4 of 5 real handlers ✅ CLOSED (V2.4)
 
-The `operator-ergonomics.md` spec defines 5 new `OperatorRequest`
+The [`operator-ergonomics.md`](operator-ergonomics.md) spec defines 5 new `OperatorRequest`
 variants. V2.3 shipped the wire-shape stubs; V2.4 promotes four of
 the five to real read-only handlers backed by
 `kernel/src/ipc/operator_ergonomics.rs` (~675 lines incl. tests).
@@ -2561,12 +2561,12 @@ heuristic, plan parser, DAG validator, and read-only conn lookups.
 | `EstimateCost` | §11.3 | ✅ | ✅ Real | Parses `plan_toml`, applies a conservative 200k-tokens/task heuristic at $0.005/1k tokens, adds the policy's `max_cost_per_task` admission overhead, returns a per-task breakdown. |
 | `DryRunAdmit` | §12.3 | ✅ | ✅ Real | Parses the plan, validates `[workspace]` + `[[tasks]]`, runs DAG cohesion + acyclicity checks, resolves the would-be `target_ref` against `[git]` precedence, collects non-fatal warnings, and emits a single `DryRunAdmitted` audit event (registered in `KNOWN_AUDIT_EVENT_KINDS`). |
 | `DescribeInitiativePause` | §14.3 | ✅ | ✅ Real | `spawn_blocking` read-only `RoConn` open to query `initiatives`, `initiative_quarantines`, and pending escalations. Pause is union of `quarantine || terminal_state || pending_escalations`. |
-| `SubscribeInitiative` | §13.4 | ✅ | ✅ **Streaming runner V2.5** | The single-shot dispatcher returns `FAIL_NOT_YET_IMPLEMENTED` (kept as the canonical envelope for the unary path), but the operator socket detects this variant and forwards control to `operator_ergonomics::stream_subscribe_initiative`, which subscribes to the kernel's broadcast bus, fans out a `SubscribeInitiativeAttached` envelope followed by initiative-state / escalation / push-id frames, and tears down on receiver lag. See `v2_extended_gaps.md §2.1` for the full streaming spec. |
+| `SubscribeInitiative` | §13.4 | ✅ | ✅ **Streaming runner V2.5** | The single-shot dispatcher returns `FAIL_NOT_YET_IMPLEMENTED` (kept as the canonical envelope for the unary path), but the operator socket detects this variant and forwards control to `operator_ergonomics::stream_subscribe_initiative`, which subscribes to the kernel's broadcast bus, fans out a `SubscribeInitiativeAttached` envelope followed by initiative-state / escalation / push-id frames, and tears down on receiver lag. See [`v2_extended_gaps.md §2.1`](v2_extended_gaps.md) for the full streaming spec. |
 
 **INV-OPERATOR-ERG-01.** Every real handler above is **read-only**:
 no row inserts, no budget reservation, no state mutation. The
 single `DryRunAdmitted` audit event is the
-`operator-ergonomics.md §12.3` allowance for forensic traceability;
+[`operator-ergonomics.md §12.3`](operator-ergonomics.md) allowance for forensic traceability;
 all other handlers leave the kernel chain untouched.
 
 **`SubscribeInitiative` in V2.5: streaming over the operator UDS.**
@@ -2588,12 +2588,12 @@ and aborts the stream on receiver lag. The single-shot path
 still returns `FAIL_NOT_YET_IMPLEMENTED` because that envelope
 is the canonical reject for clients that try to call this
 variant through the unary path. See
-`v2_extended_gaps.md §2.1` for the wire framing spec and the
+[`v2_extended_gaps.md §2.1`](v2_extended_gaps.md) for the wire framing spec and the
 streaming integration tests in `operator_ergonomics.rs`.
 
 ### 12.5 `raxis doctor`: categories — `CLOSED (V2.3, MVP)`
 
-The spec (`operator-ergonomics.md §17`) defines 6 doctor categories:
+The spec ([`operator-ergonomics.md §17`](operator-ergonomics.md)) defines 6 doctor categories:
 `policy`, `providers`, `host`, `network`, `keys`, `bundles`. The CLI
 implements:
 
@@ -2621,7 +2621,7 @@ preflight unchanged.
 
 **Resolution.** Implemented as a non-interactive scaffolding
 flow in `cli/src/commands/setup.rs`. Covers the 10-phase
-catalog from `operator-ergonomics.md §16` by running phases 2
+catalog from [`operator-ergonomics.md §16`](operator-ergonomics.md) by running phases 2
 (`policy_authoring`) and 6 (`plan_template`) and printing
 explicit recipes for the remaining phases that V2 cannot
 automate (key ceremony, credential add, VM image picking,
@@ -2691,7 +2691,7 @@ the precedence chain documented in §12.9 below.
 * **Persistence.** The resolved value is recomputed from the plan
   bytes during recovery; persistence into a future
   `initiatives.target_ref` column is gated on the worktree-provision
-  + IntegrationMerge wiring deferred in `V2_STATUS.md §2.2` (which
+  + IntegrationMerge wiring deferred in [`V2_STATUS.md §2.2`](V2_STATUS.md) (which
   is the only consumer that needs the persisted value).
 * **Tests.** New cases pin every branch of the resolution chain:
   `parse_plan_workspace_target_ref_*` (3),
@@ -2701,9 +2701,9 @@ the precedence chain documented in §12.9 below.
   `commit_merge_to_target_ref_advances_pr_style_branch` (1).
   All 10 pass on a clean `cargo test`.
 
-**Spec updates.** `policy-plan-authority.md`,
-`integration-merge.md`, `v2-deep-spec.md §Step 8`, and
-`extensibility-traits.md §2.2.A` were updated in the same commit.
+**Spec updates.** [`policy-plan-authority.md`](policy-plan-authority.md),
+[`integration-merge.md`](integration-merge.md), [`v2-deep-spec.md §Step 8`](v2-deep-spec.md), and
+[`extensibility-traits.md §2.2.A`](extensibility-traits.md) were updated in the same commit.
 
 **Impact:** Repos using `master`, `develop`, `trunk`, or any
 non-`main` default branch cannot use RAXIS without renaming their
@@ -3118,7 +3118,7 @@ commit; this table is the canonical checklist for those PRs.
 
 Until Phase 2 begins, V2.3 ships in a consistent state: the
 credential-proxy crates implement exactly what
-`credential-proxy.md` describes (`AUTH <password>` for Redis,
+[`credential-proxy.md`](credential-proxy.md) describes (`AUTH <password>` for Redis,
 `mysql_native_password` for MySQL, x.509 client cert for
 Postgres / MSSQL). Spec drift will appear only when Phase 2
 patches start landing without updating these files.
@@ -3131,11 +3131,11 @@ proxy PR that does not include the matching spec edit.
 
 | Spec file | What changes |
 |---|---|
-| `credential-proxy.md §14` | Add per-proxy auth method documentation; update the upstream forwarding contract to cover SCRAM/ACL/TLS |
-| `credential-proxy.md §12` | Update `raxis credential add` schema to accept `username` field for Redis ACL, `tls = true` for Redis/MySQL TLS |
-| `extensibility-traits.md §4` | `CredentialBackend::resolve()` return type must carry optional `username` alongside the credential value |
-| `policy-plan-authority.md` | Add `upstream_tls` and `auth_method` to proxy declaration validation rules |
-| `audit-paired-writes.md §4` | Classify new audit events (`RedisUpstreamTlsNegotiated`, `MongoScramAuthCompleted`) as paired or single |
+| [`credential-proxy.md §14`](credential-proxy.md) | Add per-proxy auth method documentation; update the upstream forwarding contract to cover SCRAM/ACL/TLS |
+| [`credential-proxy.md §12`](credential-proxy.md) | Update `raxis credential add` schema to accept `username` field for Redis ACL, `tls = true` for Redis/MySQL TLS |
+| [`extensibility-traits.md §4`](extensibility-traits.md) | `CredentialBackend::resolve()` return type must carry optional `username` alongside the credential value |
+| [`policy-plan-authority.md`](policy-plan-authority.md) | Add `upstream_tls` and `auth_method` to proxy declaration validation rules |
+| [`audit-paired-writes.md §4`](audit-paired-writes.md) | Classify new audit events (`RedisUpstreamTlsNegotiated`, `MongoScramAuthCompleted`) as paired or single |
 
 **Why this matters:** The spec-graph lint (`cargo xtask spec-graph
 --strict`) will catch dangling section references, but it cannot
@@ -3222,8 +3222,8 @@ superseded. They no longer apply.
 
 | Invariant | Original spec | Why deprecated |
 |---|---|---|
-| `INV-EGRESS-01` | `kernel-mediated-egress.md` | Spec is DEPRECATED; no `egress.sock` exists under the V2 unified egress model (tproxy + credential proxy) |
-| `INV-EGRESS-INTENT-01` | `kernel-mediated-egress.md` | `IntentKind::EgressRequest` was removed; the `require_intent` field is vestigial |
+| `INV-EGRESS-01` | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | Spec is DEPRECATED; no `egress.sock` exists under the V2 unified egress model (tproxy + credential proxy) |
+| `INV-EGRESS-INTENT-01` | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | `IntentKind::EgressRequest` was removed; the `require_intent` field is vestigial |
 
 **Remediation:** None. These invariants should be marked
 `DEPRECATED` in `invariants.md` (if not already) and excluded
@@ -3249,7 +3249,7 @@ integration, and `raxis doctor vm-images` category.**
 | `INV-ENV-01` | ✅ **CLOSED V2.3** | `kernel/src/initiatives/lifecycle.rs::validate_task_environment_consistency` (commit `bd0a28c`). Walks `[[tasks.credentials]]` ∩ `[[permitted_credentials]]` per task, unions environment labels, fails closed on cardinality ≥ 2 with `FAIL_TASK_ENVIRONMENT_INCONSISTENT`. Activation-gated by non-empty `policy_environments`. Implements step A of the §11.3 binding algorithm; URL-gate limb (step B) still V3 per E1 disposition. |
 | `INV-CRED-KERNEL-01` | ✅ **CLOSED V2.2** | `kernel/src/initiatives/lifecycle.rs::validate_task_credentials` rejects every `ProxyDecl::Unknown` at `approve_plan` shift-left with `LifecycleError::PlanTaskCredentialsInvalid { rule: "unknown_proxy_type", … }` BEFORE `BEGIN TRANSACTION`. The defense-in-depth `Unknown` arm in the persistence helper surfaces an `Invariant` store error if the validator is ever bypassed, so the closure has a fail-safe. |
 | `INV-INIT-04` (shutdown sweep) | ✅ **CLOSED V1** | `kernel/src/recovery.rs::reconcile_tasks` runs at every kernel boot, transitions in-flight `Running` / `Admitted` / `GatesPending` tasks to `BlockedRecoveryPending` with `RecoveryPendingOperatorAction`, and propagates affected initiatives to `Blocked` via `evaluate_terminal_criteria`. The recovery sweep is the architectural answer; an additional shutdown-time sweep would be a redundant write that the next-boot reconcile would re-do anyway. The V2_GAPS row mislabel as `INV-INIT-06` (plan immutability) was a transcription error during the original audit; both the immutability limb (Plan Bundle Sealing, `kernel-store.md §2.5.8`) and the recovery limb (this row) are closed. |
-| `INV-PLAN-BUNDLE-FRESH` | ✅ **CLOSED V2.1** | `kernel/src/initiatives/v2_admission.rs` step 10a implements the freshness window verbatim from `plan-bundle-sealing.md §3.5`: `signed_at - now()` checked against `policy.plan_signing.max_clock_skew_secs` (future) and `policy.plan_signing.max_plan_bundle_age_secs` (past), surfacing `FAIL_PLAN_BUNDLE_EXPIRED` / `FAIL_PLAN_BUNDLE_FROM_FUTURE` with structured detail. Step 10b nonce dedupe via `pb_store::record_nonce` + `nonce_status_in_tx` closes the same-window replay path. |
+| `INV-PLAN-BUNDLE-FRESH` | ✅ **CLOSED V2.1** | `kernel/src/initiatives/v2_admission.rs` step 10a implements the freshness window verbatim from [`plan-bundle-sealing.md §3.5`](plan-bundle-sealing.md): `signed_at - now()` checked against `policy.plan_signing.max_clock_skew_secs` (future) and `policy.plan_signing.max_plan_bundle_age_secs` (past), surfacing `FAIL_PLAN_BUNDLE_EXPIRED` / `FAIL_PLAN_BUNDLE_FROM_FUTURE` with structured detail. Step 10b nonce dedupe via `pb_store::record_nonce` + `nonce_status_in_tx` closes the same-window replay path. |
 | `INV-CERT-01` (runtime expiry) | ✅ **CLOSED V1** | `kernel/src/authority/cert_check.rs::CertEnforcer::enforce` runs at every operator IPC request after `is_permitted` and before handler dispatch (see `kernel/src/ipc/operator.rs:148-170`). It calls `raxis_crypto::cert::cert_status_with_revocation(now_unix, cert, &revocations)` to compute the four-zone status fresh from `now_unix` per request — there is no caching or "validate at issuance" shortcut. `Active`/`AlwaysActiveEmergency` allow; `Expiring` allows + emits deduped warning; `Grace` allows recovery ops only; `Expired`/`NotYetValid`/`Revoked` deny. (Note: V2_GAPS row description was inaccurate; the spec's V1 INV-CERT-01 — "cert mandatory" — is also enforced.) |
 
 **Remediation realised:** 0 lines of new code for the 5 closed
@@ -3304,7 +3304,7 @@ the gap across seven sites:
 5. **`oci_digest` enforcement.** Byte-equality of the cached
    rootfs against the operator-declared digest is enforced inside
    `image-cache::ImageResolver::resolve`
-   (`image-cache.md §6`); a mismatch refuses to populate the
+   ([`image-cache.md §6`](image-cache.md)); a mismatch refuses to populate the
    cache and surfaces as `FAIL_POLICY_VIOLATION` at activation.
 6. **Kernel-version check.** The kernel trusts the operator-
    declared `linux_kernel_version_min` on the `[[vm_images]]`

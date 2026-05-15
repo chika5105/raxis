@@ -152,7 +152,7 @@ contains paths from all three modules **plus** the regenerated
 Executors' allowlists; `Cargo.lock` is covered by
 `cross_cutting_artifacts`. Admission passes.
 
-If the Orchestrator's merge touched, say, `README.md`, admission
+If the Orchestrator's merge touched, say, [`README.md`](../../../../README.md), admission
 would reject with `FAIL_PATH_OUTSIDE_ALLOWLIST { paths:
 ["README.md"] }` — adding a path to `cross_cutting_artifacts` is
 a plan-time decision; the Orchestrator cannot escalate at merge

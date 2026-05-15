@@ -85,7 +85,7 @@ export RAXIS_KERNEL_SIGNING_KEY_HEX="$(cat "$HOME/.config/raxis/keys/raxis-dev-s
 export RAXIS_IMAGE_SIGNING_KEY="$HOME/.config/raxis/keys/raxis-dev-signing.key.hex"
 ```
 
-Reference: `raxis/specs/v2/release-and-distribution.md §8`.
+Reference: [`raxis/specs/v2/release-and-distribution.md §8`](../specs/v2/release-and-distribution.md).
 
 ---
 
@@ -316,7 +316,7 @@ codesign --display --entitlements - target/release/raxis-kernel
 ```
 
 > Production builds use a Developer-ID identity and notarization (see
-> `raxis/specs/v2/release-and-distribution.md §6.3`). `dev-codesign`
+> [`raxis/specs/v2/release-and-distribution.md §6.3`](../specs/v2/release-and-distribution.md)). `dev-codesign`
 > is the dev-host shortcut.
 
 ---

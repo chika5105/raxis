@@ -2,30 +2,30 @@
 
 > **Status:** V2 Specified
 > **Cross-references:**
-> - `token-limit-enforcement.md §14` — Kernel State Block (origin of KSB design)
-> - `integration-merge.md §8` — Orchestrator merge workflow (verbatim in system prompt)
-> - `v2-deep-spec.md §Part 4` — Kernel Prompt Assembler
-> - `v2-deep-spec.md §Step 13` — Non-negotiable system prompt injection
-> - `planner-harness.md §3` — role-asymmetric tool surface (Reviewer NNSP §3.3 reflects
->   the Pure-Static Reviewer decision per `planner-harness.md §4.2`)
-> - `planner-harness.md §4.5` — canonical Reviewer image (`INV-PLANNER-HARNESS-02`);
+> - [`token-limit-enforcement.md §14`](token-limit-enforcement.md) — Kernel State Block (origin of KSB design)
+> - [`integration-merge.md §8`](integration-merge.md) — Orchestrator merge workflow (verbatim in system prompt)
+> - [`v2-deep-spec.md §Part 4`](v2-deep-spec.md) — Kernel Prompt Assembler
+> - [`v2-deep-spec.md §Step 13`](v2-deep-spec.md) — Non-negotiable system prompt injection
+> - [`planner-harness.md §3`](planner-harness.md) — role-asymmetric tool surface (Reviewer NNSP §3.3 reflects
+>   the Pure-Static Reviewer decision per [`planner-harness.md §4.2`](planner-harness.md))
+> - [`planner-harness.md §4.5`](planner-harness.md) — canonical Reviewer image (`INV-PLANNER-HARNESS-02`);
 >   the Reviewer NNSP intentionally references no shell/git/compile tools because the
 >   image lacks them
-> - `planner-harness.md §4.7` — canonical Orchestrator image
+> - [`planner-harness.md §4.7`](planner-harness.md) — canonical Orchestrator image
 >   (`INV-PLANNER-HARNESS-05`); the Orchestrator NNSP §3.2 is kernel-pinned
 >   bytes (`ORCHESTRATOR_NNSP_BYTES`) version-locked with the kernel binary
-> - `planner-harness.md §4.8` — Orchestrator not operator-configurable
+> - [`planner-harness.md §4.8`](planner-harness.md) — Orchestrator not operator-configurable
 >   (`INV-PLANNER-HARNESS-06`); operators do not declare Orchestrator
 >   profiles, NNSPs, or custom tools
-> - `planner-harness.md §5` — backgrounded shell execution (KSB `bg_*` fields and §4.5
+> - [`planner-harness.md §5`](planner-harness.md) — backgrounded shell execution (KSB `bg_*` fields and §4.5
 >   tool surface; Executor only)
-> - `planner-harness.md §7` — unified egress (Executor EGRESS PROTOCOL
+> - [`planner-harness.md §7`](planner-harness.md) — unified egress (Executor EGRESS PROTOCOL
 >   describes tproxy + Credential Proxy; no `EgressRequest` intent.
 >   Orchestrator has no NIC exposed.)
-> - `planner-harness.md §9` — KSB Alert Classes envelope (rendered in §4.4)
-> - `verifier-processes.md §8` — Reviewer KSB `verifier_witnesses` block schema
-> - `agent-disagreement.md` — Orchestrator's `SubEscalationResolution` escalation class
-> - `custom-tools.md` — operator-defined custom tools (Executor-only in
+> - [`planner-harness.md §9`](planner-harness.md) — KSB Alert Classes envelope (rendered in §4.4)
+> - [`verifier-processes.md §8`](verifier-processes.md) — Reviewer KSB `verifier_witnesses` block schema
+> - [`agent-disagreement.md`](agent-disagreement.md) — Orchestrator's `SubEscalationResolution` escalation class
+> - [`custom-tools.md`](custom-tools.md) — operator-defined custom tools (Executor-only in
 >   V2). Custom tools are appended verbatim to the JSON `tools` array in
 >   the model API request (alongside base tools like `read_file`, `bash`);
 >   they are indistinguishable to the LLM at the protocol layer. The
@@ -119,7 +119,7 @@ fn strip_ksb_delimiters(content: &str) -> String {
 
 ## 2. Kernel State Block — Extended Design
 
-The KSB from `token-limit-enforcement.md §14` is extended to cover all dynamic state
+The KSB from [`token-limit-enforcement.md §14`](token-limit-enforcement.md) is extended to cover all dynamic state
 dimensions, not just token limits.
 
 ### 2.1 — Full KSB Format
@@ -196,7 +196,7 @@ verifier_witnesses:
 | `escl` | All | Pending escalations: `<id>:<class>:<state>` per escalation |
 | `head` | Executor, Orchestrator | Current HEAD SHA of working tree |
 | `base` | Executor, Orchestrator | Base SHA session started from |
-| `bg_running` | Executor only | Count + summary of currently-running background processes spawned via `bash run --background`. Each summary entry: `bg_<n>:<name>:<runtime>`. Empty string omitted. Orchestrator harness build excludes the bg_* tools per `INV-PLANNER-HARNESS-06.5`, so this field is never rendered for Orchestrator sessions. See `planner-harness.md §5.2`. |
+| `bg_running` | Executor only | Count + summary of currently-running background processes spawned via `bash run --background`. Each summary entry: `bg_<n>:<name>:<runtime>`. Empty string omitted. Orchestrator harness build excludes the bg_* tools per `INV-PLANNER-HARNESS-06.5`, so this field is never rendered for Orchestrator sessions. See [`planner-harness.md §5.2`](planner-harness.md). |
 | `bg_recently_exited` | Executor only | Count + summary of background processes that have exited but whose exit has NOT been acknowledged via `bash bg_acknowledge`. Each entry: `bg_<n>:<name>:exit_<code>@T+<seconds> [unack]`. Renders alongside a `[ALERT: BackgroundProcessExited]` block (per §4.4) for the most recent unacknowledged exit. Empty string omitted. Orchestrator excluded — see `bg_running` above. |
 | `review` | Reviewer | Current attempt number and maximum allowed |
 | `verifier_witnesses:` | Reviewer | Block listing every V2 task verifier declared for this `task` (per `verifier-processes.md §3`). One row per verifier with name, `final_status`, runtime, and (for passed) artifact path or structured summary; (for failed_warn_only) a one-line interpretation hint. `block_review` failures NEVER appear here — those produce `FAIL_VERIFIER_BLOCKED` and prevent Reviewer activation. Empty block (with comment "no V2 verifiers declared") if the plan declared none. See §8 of `verifier-processes.md` for full rendering rules. |

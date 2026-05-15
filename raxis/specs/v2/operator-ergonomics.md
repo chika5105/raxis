@@ -2,11 +2,11 @@
 
 > **Status.** Normative for V2.
 > **Cross-references:**
-> - `plan-bundle-sealing.md` (atomic sign+submit; bundle bytes are post-prepare bytes)
-> - `planner-harness.md §10.6` (canonical Executor starter image; the defaulting target)
-> - `policy-plan-authority.md` ([token_policy_defaults], [default_protected_paths], [default_executor_image], [prepare] policy sections; FAIL_PLAN_REQUIRES_PREPARE)
-> - `custom-tools.md` (custom-tool defaulting is out of scope — operators declare their own custom tools explicitly)
-> - `system-requirements.md` (raxis-executor-starter image is a bundled artifact)
+> - [`plan-bundle-sealing.md`](plan-bundle-sealing.md) (atomic sign+submit; bundle bytes are post-prepare bytes)
+> - [`planner-harness.md §10.6`](planner-harness.md) (canonical Executor starter image; the defaulting target)
+> - [`policy-plan-authority.md`](policy-plan-authority.md) ([token_policy_defaults], [default_protected_paths], [default_executor_image], [prepare] policy sections; FAIL_PLAN_REQUIRES_PREPARE)
+> - [`custom-tools.md`](custom-tools.md) (custom-tool defaulting is out of scope — operators declare their own custom tools explicitly)
+> - [`system-requirements.md`](system-requirements.md) (raxis-executor-starter image is a bundled artifact)
 > - `v1/cli-ceremony.md` (V1 CLI surface; operator-ergonomics.md is the V2 supersession for the authoring lifecycle)
 
 ---
@@ -43,7 +43,7 @@ $ raxis-cli submit plan plan.toml --operator-key ~/raxis/op.key   # atomic sign 
 
 ### 1.3 The boundary trade-off (acknowledged explicitly)
 
-Defaults invert a small slice of the boundary we hardened in `custom-tools.md` and `plan-bundle-sealing.md`. "Everything inside the operator's VM image is the operator's responsibility" gets a footnote: *unless the operator opts into the kernel-canonical Executor starter image, in which case the kernel co-owns the bytes inside it.* "The operator signs every byte the kernel admits" remains literally true (the operator signs the prepared plan), but the operator's review workload includes "did I read the defaults the CLI wrote in?" alongside "did I read what I typed?"
+Defaults invert a small slice of the boundary we hardened in [`custom-tools.md`](custom-tools.md) and [`plan-bundle-sealing.md`](plan-bundle-sealing.md). "Everything inside the operator's VM image is the operator's responsibility" gets a footnote: *unless the operator opts into the kernel-canonical Executor starter image, in which case the kernel co-owns the bytes inside it.* "The operator signs every byte the kernel admits" remains literally true (the operator signs the prepared plan), but the operator's review workload includes "did I read the defaults the CLI wrote in?" alongside "did I read what I typed?"
 
 We accept this trade because:
 
@@ -68,8 +68,8 @@ If you want zero defaulting, write a fully-explicit plan and skip `plan prepare`
 
 ### Out of scope (explicit)
 
-- **Custom-tool defaulting.** Custom tools are operator-specific by definition; the kernel cannot default what scripts an operator wants to expose. `plan prepare` does not invent custom tools; it preserves the operator's `[[profiles.<name>.custom_tool]]` declarations verbatim. This is per `custom-tools.md` §3.
-- **Per-environment defaulting.** Environment-specific defaults (e.g., "all production tasks default to `require_review_signoff = true`") will land alongside the per-environment policy knobs reserved in `environment-access-control.md` follow-on work; V2 ergonomics does not anticipate the schema for this.
+- **Custom-tool defaulting.** Custom tools are operator-specific by definition; the kernel cannot default what scripts an operator wants to expose. `plan prepare` does not invent custom tools; it preserves the operator's `[[profiles.<name>.custom_tool]]` declarations verbatim. This is per [`custom-tools.md`](custom-tools.md) §3.
+- **Per-environment defaulting.** Environment-specific defaults (e.g., "all production tasks default to `require_review_signoff = true`") will land alongside the per-environment policy knobs reserved in [`environment-access-control.md`](environment-access-control.md) follow-on work; V2 ergonomics does not anticipate the schema for this.
 - **Multi-operator approval workflows for the prepared plan.** The prepared plan is signed by a single operator. Two-party approval flows (operator A prepares, operator B signs) are deferred to V3.
 - **Default Reviewer or Orchestrator configuration.** Reviewer and Orchestrator are kernel-canonical roles per `INV-PLANNER-HARNESS-02` and `INV-PLANNER-HARNESS-06`. They have no defaultable surface — the kernel manages them entirely. `plan prepare` never writes Reviewer or Orchestrator defaults into the operator's plan.
 
@@ -81,7 +81,7 @@ The decisions below are normative. Section labels (D1–D9) preserve cross-refer
 
 | # | Decision | Rationale |
 |---|----------|-----------|
-| **D1** | **The kernel ships an opt-in canonical Executor starter image.** `raxis-executor-starter` is a kernel-bundled image with general dev tooling (Node, Python, Rust, Go, common Unix). It is **opt-in**: an operator's task that omits `vm_image` gets this image filled in by `plan prepare`. Operators in production typically pin their own digest-pinned image and never use the starter. Manifest: `planner-harness.md §10.6`. | Eliminates the "I don't have an image yet" blocker for new operators while preserving the operator-pins-their-own-image path for production deployments. The starter image is parallel to the kernel-canonical Reviewer (`INV-PLANNER-HARNESS-02`) and Orchestrator (`INV-PLANNER-HARNESS-05`) images, but unlike them it is **not** a structural requirement — operators can ignore it entirely. |
+| **D1** | **The kernel ships an opt-in canonical Executor starter image.** `raxis-executor-starter` is a kernel-bundled image with general dev tooling (Node, Python, Rust, Go, common Unix). It is **opt-in**: an operator's task that omits `vm_image` gets this image filled in by `plan prepare`. Operators in production typically pin their own digest-pinned image and never use the starter. Manifest: [`planner-harness.md §10.6`](planner-harness.md). | Eliminates the "I don't have an image yet" blocker for new operators while preserving the operator-pins-their-own-image path for production deployments. The starter image is parallel to the kernel-canonical Reviewer (`INV-PLANNER-HARNESS-02`) and Orchestrator (`INV-PLANNER-HARNESS-05`) images, but unlike them it is **not** a structural requirement — operators can ignore it entirely. |
 | **D2** | **`raxis-cli plan prepare` is the canonical pre-submit step.** It reads the operator's plan, computes policy-resolved defaults via a read-only kernel IPC, writes the augmented plan back to disk in place, and exits. The operator reviews the augmented file, then signs and submits via `raxis-cli submit plan`. | Puts the operator squarely in the loop: defaults are visible before signing, never silently inserted at submission time. The kernel is consulted for policy-resolved defaults (so deployments with different policies get different defaults from the same raw plan), but performs no state-mutating work. |
 | **D3** | **`raxis-cli submit plan` fails loud on missing required-but-defaultable fields.** A plan that omits a defaultable field and is submitted **without** running `plan prepare` first is rejected at admission with `FAIL_PLAN_REQUIRES_PREPARE { missing_fields: [...] }`. The CLI does NOT silently auto-default during submit. | Authority chain integrity. The operator must consciously accept defaults by running `plan prepare` and signing the result. Auto-defaulting at submission would mean the operator signed a plan they did not see in its post-default form. |
 | **D4** | **The kernel has no concept of "defaulted vs operator-typed".** `plan prepare` writes `# @raxis-default v0.4.0` annotation comments next to defaulted fields as a courtesy for the operator (CLI re-run idempotency, human-readable diff). The kernel does NOT parse these annotations, does NOT store them specially, and does NOT surface them in audit events. From the kernel's perspective the operator signed the bytes; everything else is operator-side metadata. | The signed bundle is the audit-of-record; the bundle is bytes; bytes are bytes. Treating annotations as kernel-attested would invent a phantom authority distinction the audit chain cannot enforce. The operator's signature attests to the entire prepared plan, defaults included. |
@@ -135,25 +135,25 @@ This is the **complete** list of fields `plan prepare` will fill in. Adding a fi
 | `[plan.tasks.<id>] vm_image` (Executor tasks only) | `policy.toml [default_executor_image] alias` | The OCI digest of the policy-pinned canonical Executor starter image alias (typically `raxis-executor-starter@sha256:...`). |
 | `[plan.tasks.<id>] token_policy.input_tokens_per_session` | `policy.toml [token_policy_defaults.<role>] input_tokens_per_session` | Per-role default; e.g., 500_000 for Executor, 200_000 for Reviewer. |
 | `[plan.tasks.<id>] token_policy.output_tokens_per_session` | `policy.toml [token_policy_defaults.<role>] output_tokens_per_session` | Per-role default; e.g., 50_000 for Executor, 20_000 for Reviewer. |
-| `[provider_aliases.reviewer]` | `policy.toml [provider_aliases_defaults.reviewer]` | The role-canonical Reviewer alias chain. Filled when the operator's plan does not declare `[provider_aliases.reviewer]` AND policy declares `[provider_aliases_defaults.reviewer]`. Default chain shipped by `setup wizard` per `provider-model-selection.md §4`. |
-| `[provider_aliases.executor]` | `policy.toml [provider_aliases_defaults.executor]` | The role-canonical Executor alias chain. Same conditions as `reviewer`. Tasks whose profile declares its own `provider_alias` continue to use the profile-named alias and are unaffected by this default (per `provider-model-selection.md §7.4`). |
+| `[provider_aliases.reviewer]` | `policy.toml [provider_aliases_defaults.reviewer]` | The role-canonical Reviewer alias chain. Filled when the operator's plan does not declare `[provider_aliases.reviewer]` AND policy declares `[provider_aliases_defaults.reviewer]`. Default chain shipped by `setup wizard` per [`provider-model-selection.md §4`](provider-model-selection.md). |
+| `[provider_aliases.executor]` | `policy.toml [provider_aliases_defaults.executor]` | The role-canonical Executor alias chain. Same conditions as `reviewer`. Tasks whose profile declares its own `provider_alias` continue to use the profile-named alias and are unaffected by this default (per [`provider-model-selection.md §7.4`](provider-model-selection.md)). |
 | `[plan.tasks.<id>] acceptance_criteria` | hardcoded enum | `"all_verifiers_pass"` if the task declares ≥ 1 verifier; `"manual_completion"` if it declares zero verifiers. |
 | `[plan.protected_paths]` (initiative-level) | `policy.toml [default_protected_paths] paths` | Union of operator-declared paths and policy-declared defaults (e.g., `.git/`, `.raxis/`, `node_modules/`, lockfiles, `.env*`). |
 | `[plan.tasks.<id>] allowed_egress` | hardcoded | `[]` (empty allowlist; operators must explicitly add hosts; egress is **never** defaulted permissive). |
-| `[[plan.tasks.<id>.verifiers]]` symbol-index entry (Executor tasks only) | hardcoded structural injection — see "Symbol-index auto-injection" below | `name = "symbol_index"`, `image = "raxis-verifier-symbol-index"`, `command = "/usr/local/bin/raxis-symbol-index --workspace /workspace --out /raxis/symbol_index.json"`, `timeout = "60s"`, `on_failure = "warn_only"`, `artifact = "/raxis/symbol_index.json"`. Auto-injected into **every** Executor task whose touched paths include source files when `policy.toml [prepare] auto_inject_symbol_index = true` (default per `policy-plan-authority.md §4 [prepare]`) AND the task does not declare `[plan.tasks.<id>.review] symbol_index = "not_needed"`. The injected entry carries an extended annotation: `# @raxis-default v0.4.0 symbol-index-auto-inject` so operators can grep specifically for this auto-inject case. Removing the annotation locks the operator into the verifier explicitly; deleting the verifier entirely re-triggers auto-injection on next `plan prepare` unless the operator silences it via the `symbol_index = "not_needed"` knob. |
+| `[[plan.tasks.<id>.verifiers]]` symbol-index entry (Executor tasks only) | hardcoded structural injection — see "Symbol-index auto-injection" below | `name = "symbol_index"`, `image = "raxis-verifier-symbol-index"`, `command = "/usr/local/bin/raxis-symbol-index --workspace /workspace --out /raxis/symbol_index.json"`, `timeout = "60s"`, `on_failure = "warn_only"`, `artifact = "/raxis/symbol_index.json"`. Auto-injected into **every** Executor task whose touched paths include source files when `policy.toml [prepare] auto_inject_symbol_index = true` (default per [`policy-plan-authority.md §4 [prepare]`](policy-plan-authority.md)) AND the task does not declare `[plan.tasks.<id>.review] symbol_index = "not_needed"`. The injected entry carries an extended annotation: `# @raxis-default v0.4.0 symbol-index-auto-inject` so operators can grep specifically for this auto-inject case. Removing the annotation locks the operator into the verifier explicitly; deleting the verifier entirely re-triggers auto-injection on next `plan prepare` unless the operator silences it via the `symbol_index = "not_needed"` knob. |
 | `[[plan.tasks.<id>.verifiers]] image` shortcut resolution | `policy.toml [default_verifier_images].<lang>` | When a verifier declares `image = "@<language>"` (e.g., `image = "@rust"`), `plan prepare` substitutes the alias from `[default_verifier_images].<lang>`. The substitution writes the resolved alias verbatim into the file, with annotation `# @raxis-default v0.4.0 image-shortcut-resolved`. Operators wanting to lock the resolved alias permanently delete the annotation; subsequent runs leave the literal alias in place. Subject to the same drift logic as other annotated defaults per §4.4. |
 | `[[plan.integration_merge_verifiers]] image` shortcut resolution | `policy.toml [default_verifier_images].<lang>` | Same `@<language>` shortcut mechanism as per-task verifiers above; also resolved by `plan prepare` against `[default_verifier_images]`. |
 
 **Symbol-index auto-injection — design rationale.** The Pure-Static
 Reviewer is structurally dependent on a symbol-index witness (per
-`planner-harness.md §4.1` — `WARN_REVIEWER_MISSING_SYMBOL_INDEX`).
+[`planner-harness.md §4.1`](planner-harness.md) — `WARN_REVIEWER_MISSING_SYMBOL_INDEX`).
 Before this V2 amendment, every operator had to *remember* to declare
 a `symbol_index` verifier in every Executor task; the warning fired
 silently otherwise. Auto-injection inverts the default: by writing
 the verifier into the plan automatically (with a clear annotation),
 the operator's signed plan is structurally complete by default.
 Operators retain full control:
-- **Per-task suppression:** declare `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from `planner-harness.md §4.1`); `plan prepare` honors it and skips injection for that task.
+- **Per-task suppression:** declare `[plan.tasks.<id>.review] symbol_index = "not_needed"` (existing knob from [`planner-harness.md §4.1`](planner-harness.md)); `plan prepare` honors it and skips injection for that task.
 - **Per-task override:** declare a `symbol_index` verifier explicitly with custom `image`/`command`; `plan prepare` honors the existing entry and skips auto-injection.
 - **Deployment-wide opt-out:** set `policy.toml [prepare] auto_inject_symbol_index = false`; `plan prepare` skips injection globally and `WARN_REVIEWER_MISSING_SYMBOL_INDEX` reverts to its V1 behavior of silent warning per Reviewer activation.
 
@@ -247,8 +247,8 @@ The V2 explicit-required fields are listed in §4.5.1.
 
 | Path in `plan.toml` | Applies to | Acknowledgement annotation when intentionally empty | Canonical home of the FAIL |
 |---|---|---|---|
-| `[plan.tasks.<id>] path_allowlist` (Executor tasks; absent field) | Executor (and any non-Reviewer, non-Orchestrator role) | n/a — absent field is `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` regardless of annotation | `policy-plan-authority.md §3b FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` |
-| `[plan.tasks.<id>] path_allowlist = []` (Executor tasks; literal empty) | Executor | `# @raxis-explicit no-write-acknowledged` on the empty-array line OR the comment line immediately above it | `policy-plan-authority.md §3b FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED` |
+| `[plan.tasks.<id>] path_allowlist` (Executor tasks; absent field) | Executor (and any non-Reviewer, non-Orchestrator role) | n/a — absent field is `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST` regardless of annotation | [`policy-plan-authority.md §3b FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST`](policy-plan-authority.md) |
+| `[plan.tasks.<id>] path_allowlist = []` (Executor tasks; literal empty) | Executor | `# @raxis-explicit no-write-acknowledged` on the empty-array line OR the comment line immediately above it | [`policy-plan-authority.md §3b FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`](policy-plan-authority.md) |
 
 Future V2.x additions to this table follow the same pattern: a structural
 constraint that has no safe default, an acknowledgement annotation when an
@@ -340,9 +340,9 @@ path_allowlist  = []
 ```
 
 Both forms are accepted by the admission parser per
-`policy-plan-authority.md §5 step 3.b`. The annotation has no value and
+[`policy-plan-authority.md §5 step 3.b`](policy-plan-authority.md). The annotation has no value and
 no version stamp — it is a binary structural opt-in akin to
-`same_cluster_acknowledged = true` in `environment-access-control.md §11.4`.
+`same_cluster_acknowledged = true` in [`environment-access-control.md §11.4`](environment-access-control.md).
 
 `plan prepare` will NEVER auto-insert this annotation. Inserting it is
 the operator's affirmative acknowledgement that the no-write Executor is
@@ -359,7 +359,7 @@ opt-in in the audit chain.
 For tasks with `role = "Reviewer"`, declaring `path_allowlist` (any value,
 including `[]`) is rejected at `approve_plan` with
 `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED` per
-`policy-plan-authority.md §3b`. This mirrors the existing
+[`policy-plan-authority.md §3b`](policy-plan-authority.md). This mirrors the existing
 `FAIL_REVIEWER_VM_IMAGE_NOT_ALLOWED` and
 `FAIL_REVIEWER_CUSTOM_TOOL_NOT_ALLOWED` discipline: structural bans that
 the operator MUST resolve by deleting the offending field themselves.
@@ -463,7 +463,7 @@ There are two conceptually distinct git locations operators can confuse:
 | Location | Owned by | Purpose | Operator-configurable? |
 |---|---|---|---|
 | **Operator worktree** (e.g., `~/work/myproject/`) | Operator | Where the operator authors code, runs `raxis-cli`, and edits `plan.toml`. | Yes — the operator's filesystem; identified to the CLI via `$PWD` or `--suggest-from`. Bound to a session at session-creation time and validated against `policy.toml [sessions] allowed_worktree_roots`. |
-| **Kernel main_repos** (`<data_dir>/main_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/main` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `main_repo` in `integration-merge.md` and `kernel-store.md` are about this kernel-internal location. |
+| **Kernel main_repos** (`<data_dir>/main_repos/<initiative_id>/`) | Kernel | The kernel's internal SQLite-backed git store where it materializes `refs/heads/main` after each `IntegrationMerge`. | No — implementation detail; not an operator-facing config. References to `main_repo` in [`integration-merge.md`](integration-merge.md) and `kernel-store.md` are about this kernel-internal location. |
 
 The §4.5.6 suggestion mechanism reads from the **operator worktree**.
 The kernel's main_repos is never inspected by `plan prepare` (it would
@@ -575,7 +575,7 @@ admission decision needs to be made. Doing this work locally:
 - Preserves the property that `plan prepare` does useful work even when
   the kernel daemon is down (a partial-utility offline mode for
   operators editing on a laptop disconnected from their RAXIS host).
-- Avoids cross-spec coupling — `policy-plan-authority.md §4` doesn't
+- Avoids cross-spec coupling — [`policy-plan-authority.md §4`](policy-plan-authority.md) doesn't
   need a new kernel handler for path-allowlist concerns.
 
 ### 5.3 IPC contract: `OperatorRequest::ProposeDefaults`
@@ -870,21 +870,21 @@ raxis-cli plan validate <plan.toml> [--with-kernel] [--explain-environment]
 | Flag | Default | Effect |
 |---|---|---|
 | `--with-kernel` | off | Open the operator socket and run a full admission dry-run via `submit plan --dry-run` (§13). Catches policy-dependent issues that local validation cannot. Requires the operator key. |
-| `--explain-environment` | off | (Cross-reference: `environment-access-control.md` follow-on work.) Walks every task and prints its resolved environment binding (or "neutral"). Exits non-zero if any task has an inconsistent environment binding. |
+| `--explain-environment` | off | (Cross-reference: [`environment-access-control.md`](environment-access-control.md) follow-on work.) Walks every task and prints its resolved environment binding (or "neutral"). Exits non-zero if any task has an inconsistent environment binding. |
 
 ### 7.3 Validation surface
 
 Local-only (no `--with-kernel`) checks:
 
 - TOML parsing and schema conformance.
-- Profile inheritance graph: cycles, name collisions per `custom-tools.md §8.2`.
+- Profile inheritance graph: cycles, name collisions per [`custom-tools.md §8.2`](custom-tools.md).
 - Custom-tool reserved-name conflicts (the reserved-name list ships with the CLI and is mirrored from the kernel binary; minor drift between CLI and kernel is acceptable since the kernel re-validates at admission).
 - Per-task field consistency: e.g., a task declaring `[plan.tasks.<id>.review] symbol_index = "not_needed"` but no Reviewer in the DAG.
 - Bundle size pre-check against `policy.toml [plan_bundle_limits]` (CLI uses the most-recent locally-cached policy bundle if available; otherwise uses defaults).
 
 `--with-kernel` adds:
 
-- Policy-dependent admission checks per `policy-plan-authority.md §5`.
+- Policy-dependent admission checks per [`policy-plan-authority.md §5`](policy-plan-authority.md).
 - Kernel-resolved default proposals (informational; doesn't write to disk).
 - Bundle-size enforcement against the live policy.
 
@@ -938,7 +938,7 @@ Coverage shipped in V2:
 
 Deferred to follow-up landings:
 
-- Profile inheritance graph (`custom-tools.md §8.2`) — requires
+- Profile inheritance graph ([`custom-tools.md §8.2`](custom-tools.md)) — requires
   custom-tools profile resolver.
 - Custom-tool reserved-name conflicts — requires CLI-side mirror of
   the kernel's reserved-name list.
@@ -949,7 +949,7 @@ Deferred to follow-up landings:
   `ProposeDefaults` / `DryRunAdmit` IPCs, which are sequenced after
   the credential-proxy and egress-proxy landings).
 - `--explain-environment` (depends on
-  `environment-access-control.md` follow-on work).
+  [`environment-access-control.md`](environment-access-control.md) follow-on work).
 
 The kernel admission handler remains the single source of truth;
 anything `plan validate` misses is still rejected by `submit plan`,
@@ -957,7 +957,7 @@ so a clean `plan validate` is necessary-but-not-sufficient.
 
 ### 7.5 Failure modes
 
-`plan validate` exits non-zero on any `FAIL_PLAN_*` issue. The full failure code set is the union of `policy-plan-authority.md §3b` (admission failures) plus `plan-bundle-sealing.md §9` (bundle-format failures). With `--with-kernel`, the failure set additionally includes policy-dependent codes.
+`plan validate` exits non-zero on any `FAIL_PLAN_*` issue. The full failure code set is the union of [`policy-plan-authority.md §3b`](policy-plan-authority.md) (admission failures) plus [`plan-bundle-sealing.md §9`](plan-bundle-sealing.md) (bundle-format failures). With `--with-kernel`, the failure set additionally includes policy-dependent codes.
 
 ---
 
@@ -1104,7 +1104,7 @@ raxis-cli plan cost-estimate <plan.toml> [--scenario typical|worst-case]
 
 Calls a new IPC `OperatorRequest::EstimateCost { plan_bytes }`; the kernel:
 1. Parses the plan; resolves defaults per §4.
-2. For each task, projects the token cost using the same `tokenize` admin interface used by custom-tool budget projection (`custom-tools.md §9.2`).
+2. For each task, projects the token cost using the same `tokenize` admin interface used by custom-tool budget projection ([`custom-tools.md §9.2`](custom-tools.md)).
 3. Multiplies by the configured provider rates from `policy.toml [provider_rates.<provider>]`.
 4. Returns a per-task and per-initiative cost breakdown.
 
@@ -1134,7 +1134,7 @@ Run `submit plan --dry-run` to verify admission against current policy.
 
 ### 12.1 Purpose
 
-Run the full admission check chain (`plan-bundle-sealing.md §8.1` + `policy-plan-authority.md §5`) but do NOT seal anything to the store and do NOT create an initiative. Free iteration loop.
+Run the full admission check chain ([`plan-bundle-sealing.md §8.1`](plan-bundle-sealing.md) + [`policy-plan-authority.md §5`](policy-plan-authority.md)) but do NOT seal anything to the store and do NOT create an initiative. Free iteration loop.
 
 ### 12.2 Invocation
 
@@ -1142,7 +1142,7 @@ Run the full admission check chain (`plan-bundle-sealing.md §8.1` + `policy-pla
 raxis-cli submit plan <plan.toml> --dry-run [--initiative-id <id>]
 ```
 
-`--dry-run` is the differentiator. Without it, `submit plan` is the canonical Plan Bundle Sealing entry point per `plan-bundle-sealing.md §4`.
+`--dry-run` is the differentiator. Without it, `submit plan` is the canonical Plan Bundle Sealing entry point per [`plan-bundle-sealing.md §4`](plan-bundle-sealing.md).
 
 ### 12.3 Behavior
 
@@ -1505,7 +1505,7 @@ raxis-cli setup wizard [--non-interactive --config <path>]
 
 **Two-credential-system note.** Phase 3 above writes **provider
 credentials** (System 1 per `paradigm.md §5.1` and
-`provider-model-selection.md §8.1`) — the LLM API keys consumed by
+[`provider-model-selection.md §8.1`](provider-model-selection.md)) — the LLM API keys consumed by
 the gateway subprocess for inference. **Operator credentials**
 (System 2 — kubeconfig, AWS keys, registry tokens injected into
 agent VMs as env vars) are NOT touched by this wizard. They are
@@ -1525,7 +1525,7 @@ Re-running the wizard on an already-set-up deployment offers to skip phases that
 
 ### 17.1 Existing categories
 
-`raxis-cli doctor canonical-images` already exists per `system-requirements.md §11.1` and covers Reviewer + Orchestrator (and is extended in this spec to include the Executor starter image).
+`raxis-cli doctor canonical-images` already exists per [`system-requirements.md §11.1`](system-requirements.md) and covers Reviewer + Orchestrator (and is extended in this spec to include the Executor starter image).
 
 ### 17.2 New categories
 
@@ -1535,7 +1535,7 @@ Re-running the wizard on an already-set-up deployment offers to skip phases that
 | `providers` | Each configured provider in `policy.providers` is reachable; sends a one-token completion to verify credentials are valid. |
 | `host` | OS version, kernel version, cgroup v2 mounted at expected path, AVF/KVM availability, disk capacity in `data_dir`. |
 | `network` | Reachability of every distinct hostname in the policy's `[[egress_hosts]]` list (TCP connect; no actual HTTP). |
-| `keys` | Operator key trust state per `key-revocation.md`; lists each key's fingerprint, state (Active/Rotated/Compromised), and admission scope. |
+| `keys` | Operator key trust state per [`key-revocation.md`](key-revocation.md); lists each key's fingerprint, state (Active/Rotated/Compromised), and admission scope. |
 | `bundles` | Storage utilization of `plan_bundles` and `plan_bundle_artifacts` tables; flags any bundles approaching the SQLite blob ceiling. |
 
 ### 17.3 Invocation
@@ -1562,7 +1562,7 @@ Python starter (verifier): ⓘ not installed (policy does not reference [default
 Go starter (verifier):    ⓘ not installed (policy does not reference [default_verifier_images].go)
 ```
 
-A digest mismatch on any canonical image fails the category and surfaces the corresponding `FAIL_*_IMAGE_DIGEST_MISMATCH` from `policy-plan-authority.md §3b`. Canonical-image trust model differs by image:
+A digest mismatch on any canonical image fails the category and surfaces the corresponding `FAIL_*_IMAGE_DIGEST_MISMATCH` from [`policy-plan-authority.md §3b`](policy-plan-authority.md). Canonical-image trust model differs by image:
 
 - **Kernel-embedded** (Reviewer, Orchestrator, symbol-index verifier): kernel binary contains a compiled-in `EXPECTED_*_IMAGE_DIGEST`; mismatch is `FAIL_*_IMAGE_DIGEST_MISMATCH` and the corresponding role/verifier cannot run until resolved.
 - **Operator-pinned** (Executor starter, language verifier starters): kernel verifies against the policy's `[[vm_images]] oci_digest`; mismatch is `WARN_DEFAULT_*_IMAGE_DIGEST_DRIFT` (no in-flight session) or `FAIL_DEFAULT_*_IMAGE_DIGEST_MISMATCH` (in-flight session). Operators can rotate the policy to pin a new digest without reinstalling the kernel.
@@ -1571,7 +1571,7 @@ A digest mismatch on any canonical image fails the category and surfaces the cor
 
 ## §18 — Policy Schema Additions
 
-The following sections are added to `policy.toml` per `policy-plan-authority.md §4`. All are optional; absence means "no defaulting for that field."
+The following sections are added to `policy.toml` per [`policy-plan-authority.md §4`](policy-plan-authority.md). All are optional; absence means "no defaulting for that field."
 
 ### 18.1 `[default_executor_image]`
 
@@ -1737,30 +1737,30 @@ Both events are rate-limited per operator fingerprint to prevent DoS via repeate
 | `FAIL_COST_ESTIMATE_PROVIDER_RATE_MISSING { provider }` | `plan cost-estimate` IPC | Policy doesn't declare rates for a configured provider. |
 | `FAIL_INITIATIVE_NOT_PAUSED { state }` | `initiative resume` | Initiative is not in a paused state; nothing to resume. |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. Canonical home: `provider-model-selection.md §10`. |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a model not in `[providers] permitted_models`. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a provider with no `[[providers.credentials]]` entry. Canonical home: `provider-model-selection.md §10`. |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }` | Policy load (cross-reference) | A `[provider_aliases_defaults.<role>] chain` entry references a provider with no `[[providers.credentials]]` entry. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load (cross-reference) | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. Canonical home: `provider-model-selection.md §10`. |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load (cross-reference) | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load (cross-reference) | `fallback_behavior` is not `"attempt_in_order"`. Canonical home: `provider-model-selection.md §10`. |
+| `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load (cross-reference) | `fallback_behavior` is not `"attempt_in_order"`. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load (cross-reference) | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. Non-fatal. Canonical home: `provider-model-selection.md §10`. |
+| `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load (cross-reference) | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. Non-fatal. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load (cross-reference) | Single-element chain in a deployment with 2+ configured providers. Non-fatal. Canonical home: `provider-model-selection.md §10`. |
+| `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load (cross-reference) | Single-element chain in a deployment with 2+ configured providers. Non-fatal. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED { alias }` | Policy load (cross-reference) | V1 default name `"fast_low_cost"` still in use; recommends rename to `"orchestrator_default"`. Non-fatal V1→V2 migration aid. Canonical home: `provider-model-selection.md §10`. |
+| `WARN_ORCHESTRATOR_DEFAULT_ALIAS_RENAMED { alias }` | Policy load (cross-reference) | V1 default name `"fast_low_cost"` still in use; recommends rename to `"orchestrator_default"`. Non-fatal V1→V2 migration aid. Canonical home: [`provider-model-selection.md §10`](provider-model-selection.md). |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load (cross-reference) | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. Canonical home: `policy-plan-authority.md §3b`. |
+| `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE { language, alias }` | Policy load (cross-reference) | A `[default_verifier_images].<language>` value doesn't resolve to a `[[vm_images]]` entry whose `role_restriction` includes `"Verifier"`. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
 <!-- spec-graph:cross-ref-row -->
-| `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load (cross-reference) | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal. Canonical home: `policy-plan-authority.md §3b`. |
+| `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE { language }` | Policy load (cross-reference) | `[default_verifier_images].<language>` declares a language other than the V2 recognized set (`rust`, `node`, `python`, `go`). Non-fatal. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
 | `FAIL_PLAN_VERIFIER_IMAGE_SHORTCUT_UNRESOLVABLE { task_id, verifier_name, shortcut }` | `plan prepare` IPC | Plan declares `image = "@<lang>"` but `[default_verifier_images].<lang>` is not configured. Operator either sets the policy entry (typical fix) or replaces the shortcut with the literal alias. |
 <!-- spec-graph:cross-ref-row -->
-| `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load (cross-reference) | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). Reserved per `INV-VERIFIER-12`. Canonical home: `policy-plan-authority.md §3b`. |
-| `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED { task_id }` | `approve_plan` (cross-reference) | A Reviewer task declares `path_allowlist`. Reviewer's `/workspace` is RO and the harness has no commit-pathway intent; the field is structurally meaningless. `plan prepare` aborts with the §4.5.5 hard-refusal pre-signing. Canonical home: `policy-plan-authority.md §3b`. |
-| `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST { task_id }` | `approve_plan` (cross-reference) | An Executor task omits `path_allowlist` entirely. Run `plan prepare` to insert the §4.5.3 template; uncomment and customize. Canonical home: `policy-plan-authority.md §3b`. |
-| `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED { task_id }` | `approve_plan` (cross-reference) | An Executor task declares `path_allowlist = []` without the `# @raxis-explicit no-write-acknowledged` annotation. Either populate the array or add the annotation per §4.5.4. Canonical home: `policy-plan-authority.md §3b`. |
-| `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { task_id, entry, reason }` | `approve_plan` (cross-reference) | A `path_allowlist` entry violates the §6 table-4 syntax (glob characters, absolute path, `..`, missing trailing slash for known directory). Canonical home: `policy-plan-authority.md §3b`. `plan prepare` surfaces the same warning at phase 2.f pre-signing. |
+| `FAIL_POLICY_RESERVED_VM_IMAGE_NAME { name }` | Policy load (cross-reference) | A `[[vm_images]]` entry uses a reserved alias (`"raxis-verifier-symbol-index"`). Reserved per `INV-VERIFIER-12`. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
+| `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED { task_id }` | `approve_plan` (cross-reference) | A Reviewer task declares `path_allowlist`. Reviewer's `/workspace` is RO and the harness has no commit-pathway intent; the field is structurally meaningless. `plan prepare` aborts with the §4.5.5 hard-refusal pre-signing. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
+| `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST { task_id }` | `approve_plan` (cross-reference) | An Executor task omits `path_allowlist` entirely. Run `plan prepare` to insert the §4.5.3 template; uncomment and customize. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
+| `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED { task_id }` | `approve_plan` (cross-reference) | An Executor task declares `path_allowlist = []` without the `# @raxis-explicit no-write-acknowledged` annotation. Either populate the array or add the annotation per §4.5.4. Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). |
+| `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX { task_id, entry, reason }` | `approve_plan` (cross-reference) | A `path_allowlist` entry violates the §6 table-4 syntax (glob characters, absolute path, `..`, missing trailing slash for known directory). Canonical home: [`policy-plan-authority.md §3b`](policy-plan-authority.md). `plan prepare` surfaces the same warning at phase 2.f pre-signing. |
 
 `FAIL_PLAN_REQUIRES_PREPARE` is the only one that fires during `submit plan`. Its `missing_fields` array is populated with the §4.2 fields that the plan omitted; the operator runs `plan prepare` to fill them.
 
@@ -1774,21 +1774,21 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 
 | Spec | Change |
 |---|---|
-| `planner-harness.md` | New §10.6 "Canonical Executor Starter Image Manifest" parallel to the Reviewer/Orchestrator manifests. No new invariant — the starter image is a defaulting target, not a structural constraint (operators can omit it entirely by pinning their own image). |
-| `policy-plan-authority.md` | New `[default_executor_image]`, `[token_policy_defaults]`, `[default_protected_paths]`, `[prepare]`, `[provider_aliases_defaults]` sections in §4. New `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*`, `WARN_PROVIDER_ALIAS_*`, and related codes in §3b failure catalog. Admission check chain unchanged; the new check is one new pre-step that fires only if the policy declares any defaults. |
-| `provider-model-selection.md` | Canonical home for the model-selection guidance and the `[provider_aliases_defaults]` policy schema. The `[provider_aliases.<role>]` rows in §4.2 above are populated from this schema. The setup wizard phases 3-5 (this spec §16.3) implement the §9 wizard surface from `provider-model-selection.md`. |
-| `plan-bundle-sealing.md` | Adds `FAIL_PLAN_REQUIRES_PREPARE` to §9 failure catalog cross-reference (this spec is the canonical home). Bundle bytes are explicitly post-prepare bytes — the operator signs the prepared plan, not the pre-default plan. From the kernel's perspective there is no "pre-default" bytes; only what's signed in the bundle. |
-| `system-requirements.md` | `raxis-executor-starter-<kernel_version>.img` added to §8.1 bundled artifacts (strongly recommended). `raxis-verifier-symbol-index-<kernel_version>.img` added to §8.1 (kernel-canonical per `INV-VERIFIER-12`). Four `raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img` added to §8.1 (opt-in; trust is operator-pinned via `[[vm_images]] oci_digest`). `raxis doctor canonical-images` (§11) extended to cover all six new images. |
-| `verifier-processes.md` | This spec's §4.2 symbol-index auto-injection consumes the canonical `raxis-verifier-symbol-index` image specified there (§14). The `@<language>` shortcut in §4.2 resolves against `[default_verifier_images]` — verifier-processes.md §14.5 owns the tiered language starter image manifests. The setup wizard phase 6 (this spec §16.3) implements the verifier-processes.md §14.5 wizard surface. |
-| `policy-plan-authority.md` (further) | Adds `[default_verifier_images]` and `[prepare] auto_inject_symbol_index` knob to the policy schema. New `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`, `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE` codes registered there. |
-| `policy-plan-authority.md` (path-allowlist) | Adds the §3.b admission sub-checks for `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED`, `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST`, `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`, `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` per `policy-plan-authority.md §5 step 3.a/3.b`. The annotation parser must scan trailing comments on the value line AND the comment line immediately above (same logic as `# @raxis-default`). The kernel records `TaskWriteScope::NoWriteAcknowledged` in `InitiativeCreated` audit events for tasks admitted under the explicit acknowledgement annotation. |
-| `planner-harness.md` (path-allowlist) | `INV-PLANNER-HARNESS-01` extended in its statement to include the structural prohibition of `path_allowlist` on Reviewer tasks — Reviewer's RO `/workspace` and absent commit-pathway intent make the field structurally meaningless. §3 role table cross-references the new §4.5.5 rejection at `plan prepare`. |
-| `integration-merge.md` | Pre-merge verifier hook (Check 5d) is invisible to this spec — the wizard does not configure pre-merge verifiers (out of scope; operators add them later via direct policy edits or per-plan `[[plan.integration_merge_verifiers]]`). The wizard's smoke test does NOT exercise the pre-merge path. |
+| [`planner-harness.md`](planner-harness.md) | New §10.6 "Canonical Executor Starter Image Manifest" parallel to the Reviewer/Orchestrator manifests. No new invariant — the starter image is a defaulting target, not a structural constraint (operators can omit it entirely by pinning their own image). |
+| [`policy-plan-authority.md`](policy-plan-authority.md) | New `[default_executor_image]`, `[token_policy_defaults]`, `[default_protected_paths]`, `[prepare]`, `[provider_aliases_defaults]` sections in §4. New `FAIL_PLAN_REQUIRES_PREPARE`, `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*`, `WARN_PROVIDER_ALIAS_*`, and related codes in §3b failure catalog. Admission check chain unchanged; the new check is one new pre-step that fires only if the policy declares any defaults. |
+| [`provider-model-selection.md`](provider-model-selection.md) | Canonical home for the model-selection guidance and the `[provider_aliases_defaults]` policy schema. The `[provider_aliases.<role>]` rows in §4.2 above are populated from this schema. The setup wizard phases 3-5 (this spec §16.3) implement the §9 wizard surface from [`provider-model-selection.md`](provider-model-selection.md). |
+| [`plan-bundle-sealing.md`](plan-bundle-sealing.md) | Adds `FAIL_PLAN_REQUIRES_PREPARE` to §9 failure catalog cross-reference (this spec is the canonical home). Bundle bytes are explicitly post-prepare bytes — the operator signs the prepared plan, not the pre-default plan. From the kernel's perspective there is no "pre-default" bytes; only what's signed in the bundle. |
+| [`system-requirements.md`](system-requirements.md) | `raxis-executor-starter-<kernel_version>.img` added to §8.1 bundled artifacts (strongly recommended). `raxis-verifier-symbol-index-<kernel_version>.img` added to §8.1 (kernel-canonical per `INV-VERIFIER-12`). Four `raxis-verifier-{rust,node,python,go}-starter-<kernel_version>.img` added to §8.1 (opt-in; trust is operator-pinned via `[[vm_images]] oci_digest`). `raxis doctor canonical-images` (§11) extended to cover all six new images. |
+| [`verifier-processes.md`](verifier-processes.md) | This spec's §4.2 symbol-index auto-injection consumes the canonical `raxis-verifier-symbol-index` image specified there (§14). The `@<language>` shortcut in §4.2 resolves against `[default_verifier_images]` — verifier-processes.md §14.5 owns the tiered language starter image manifests. The setup wizard phase 6 (this spec §16.3) implements the verifier-processes.md §14.5 wizard surface. |
+| [`policy-plan-authority.md`](policy-plan-authority.md) (further) | Adds `[default_verifier_images]` and `[prepare] auto_inject_symbol_index` knob to the policy schema. New `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`, `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`, `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE` codes registered there. |
+| [`policy-plan-authority.md`](policy-plan-authority.md) (path-allowlist) | Adds the §3.b admission sub-checks for `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED`, `FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST`, `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`, `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX` per [`policy-plan-authority.md §5 step 3.a/3.b`](policy-plan-authority.md). The annotation parser must scan trailing comments on the value line AND the comment line immediately above (same logic as `# @raxis-default`). The kernel records `TaskWriteScope::NoWriteAcknowledged` in `InitiativeCreated` audit events for tasks admitted under the explicit acknowledgement annotation. |
+| [`planner-harness.md`](planner-harness.md) (path-allowlist) | `INV-PLANNER-HARNESS-01` extended in its statement to include the structural prohibition of `path_allowlist` on Reviewer tasks — Reviewer's RO `/workspace` and absent commit-pathway intent make the field structurally meaningless. §3 role table cross-references the new §4.5.5 rejection at `plan prepare`. |
+| [`integration-merge.md`](integration-merge.md) | Pre-merge verifier hook (Check 5d) is invisible to this spec — the wizard does not configure pre-merge verifiers (out of scope; operators add them later via direct policy edits or per-plan `[[plan.integration_merge_verifiers]]`). The wizard's smoke test does NOT exercise the pre-merge path. |
 | `v1/cli-ceremony.md` | V2 supersession notice points to this spec for the V2 authoring/lifecycle CLI surface. The V1 spec retains commands not in this spec's scope. |
-| `custom-tools.md` | No change. Custom tools are not defaulted (out of scope per §2). |
-| `kernel-mechanics-prompt.md` | No change. The KSB and NNSP rendering are based on the prepared plan bytes; defaulting is invisible to the runtime layer. |
-| `kernel-lifecycle.md` | The `setup wizard` CLI flow assumes the kernel daemon is already running; daemon startup is `kernel-lifecycle.md`'s concern. |
-| `v2-deep-spec.md` | The §6 table 4 path-allowlist syntax (trailing-slash discipline, no globs) is the canonical syntax. This spec's §4.5.6 suggestion mechanism honors it (suggestions always emit trailing slashes for directories). The new §4.5.5 hard refusal for Reviewer-path-allowlist is consistent with the §6 role-asymmetry framing. |
+| [`custom-tools.md`](custom-tools.md) | No change. Custom tools are not defaulted (out of scope per §2). |
+| [`kernel-mechanics-prompt.md`](kernel-mechanics-prompt.md) | No change. The KSB and NNSP rendering are based on the prepared plan bytes; defaulting is invisible to the runtime layer. |
+| [`kernel-lifecycle.md`](kernel-lifecycle.md) | The `setup wizard` CLI flow assumes the kernel daemon is already running; daemon startup is [`kernel-lifecycle.md`](kernel-lifecycle.md)'s concern. |
+| [`v2-deep-spec.md`](v2-deep-spec.md) | The §6 table 4 path-allowlist syntax (trailing-slash discipline, no globs) is the canonical syntax. This spec's §4.5.6 suggestion mechanism honors it (suggestions always emit trailing slashes for directories). The new §4.5.5 hard refusal for Reviewer-path-allowlist is consistent with the §6 role-asymmetry framing. |
 
 ---
 
@@ -1821,7 +1821,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `OperatorRequest::SubscribeInitiative` and `KernelPush::InitiativeEvent` per §13.
 - [ ] `OperatorRequest::DescribeInitiativePause` per §14.
 - [ ] `[default_executor_image]` policy section parsed and validated; `FAIL_POLICY_DEFAULT_EXECUTOR_IMAGE_UNRESOLVABLE` at policy load.
-- [ ] `[default_verifier_images]` policy section parsed and validated; `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`, `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE` at policy load (per `policy-plan-authority.md §4 [default_verifier_images]`).
+- [ ] `[default_verifier_images]` policy section parsed and validated; `FAIL_POLICY_DEFAULT_VERIFIER_IMAGE_UNRESOLVABLE`, `WARN_DEFAULT_VERIFIER_IMAGE_UNKNOWN_LANGUAGE` at policy load (per [`policy-plan-authority.md §4 [default_verifier_images]`](policy-plan-authority.md)).
 - [ ] `[token_policy_defaults.<role>]` policy section parsed.
 - [ ] `[default_protected_paths]` policy section parsed; defaults applied at `plan prepare` time.
 - [ ] `[prepare] auto_upgrade_defaults` policy knob respected.
@@ -1850,11 +1850,11 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 
 ### Kernel side (path-allowlist ergonomics — §4.5)
 
-- [ ] `approve_plan` admission step 3.a (per `policy-plan-authority.md §5`) extended to detect Reviewer-task `path_allowlist` and emit `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED`.
+- [ ] `approve_plan` admission step 3.a (per [`policy-plan-authority.md §5`](policy-plan-authority.md)) extended to detect Reviewer-task `path_allowlist` and emit `FAIL_REVIEWER_PATH_ALLOWLIST_NOT_ALLOWED`.
 - [ ] `approve_plan` admission step 3.b extended with the four new path-allowlist checks (`FAIL_PLAN_REQUIRES_EXPLICIT_PATH_ALLOWLIST`, `FAIL_EXECUTOR_EMPTY_PATH_ALLOWLIST_UNACKNOWLEDGED`, `FAIL_PATH_ALLOWLIST_INVALID_SYNTAX`).
 - [ ] Annotation parser kernel-side mirrors the CLI-side parser per §4.3 and §4.5.4: scans trailing comment on the value line AND the comment line immediately above; the `# @raxis-explicit no-write-acknowledged` annotation is the binary opt-in for empty-allowlist Executor tasks.
 - [ ] `InitiativeCreated` audit event extended with `task_write_scopes: Vec<TaskWriteScope>` where `TaskWriteScope` is `Bound { paths } | NoWriteAcknowledged | NotApplicable` (the third case for Reviewer/Orchestrator). Schema additive — V1 audit consumers reading the event ignore the new field.
-- [ ] All §20 path-allowlist FAIL codes registered in `raxis-types::PlannerErrorCode` (cross-reference `policy-plan-authority.md §3b` as the canonical home).
+- [ ] All §20 path-allowlist FAIL codes registered in `raxis-types::PlannerErrorCode` (cross-reference [`policy-plan-authority.md §3b`](policy-plan-authority.md) as the canonical home).
 
 ### Tests
 
@@ -1887,7 +1887,7 @@ The `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes fir
 - [ ] `plan prepare` symbol-index auto-injection: Executor task touching source files → verifier injected with the §4.2 canonical entry and annotation; re-running `plan prepare` is a no-op.
 - [ ] `plan prepare` symbol-index auto-injection: Executor task touching ONLY non-source files (e.g., docs-only diff) → no verifier injected.
 - [ ] `plan prepare` symbol-index auto-injection: task with `[plan.tasks.<id>.review] symbol_index = "not_needed"` → no verifier injected; subsequent `plan prepare` runs honor the suppression.
-- [ ] `plan prepare` symbol-index auto-injection: deployment with `policy.toml [prepare] auto_inject_symbol_index = false` → no verifier injected anywhere; `WARN_REVIEWER_MISSING_SYMBOL_INDEX` fires at Reviewer activation per `planner-harness.md §4.1`.
+- [ ] `plan prepare` symbol-index auto-injection: deployment with `policy.toml [prepare] auto_inject_symbol_index = false` → no verifier injected anywhere; `WARN_REVIEWER_MISSING_SYMBOL_INDEX` fires at Reviewer activation per [`planner-harness.md §4.1`](planner-harness.md).
 - [ ] `plan prepare` `@<language>` shortcut: `image = "@rust"` with `[default_verifier_images].rust = "raxis-verifier-rust-starter"` → expanded to literal alias with annotation; the bundle's plan bytes contain the literal alias (the kernel never sees `@rust`).
 - [ ] `plan prepare` `@<language>` shortcut: `image = "@unconfigured"` with no matching policy entry → `FAIL_PLAN_VERIFIER_IMAGE_SHORTCUT_UNRESOLVABLE`.
 - [ ] `doctor policy` detects an unsigned policy bundle.

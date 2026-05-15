@@ -123,7 +123,7 @@ the repo. This is enforced **three** ways:
    does it once per clone.)
 
 `INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01`
-(`raxis/specs/invariants.md §11.10`) is the formal statement of
+([`raxis/specs/invariants.md §11.10`](../../specs/invariants.md)) is the formal statement of
 the contract.
 
 ## Other credentials in this directory
@@ -147,7 +147,7 @@ They are explicitly OK to commit because:
    stack is hermetic-per-run; the same credentials never
    authenticate against any operator-managed database.
 
-This is consistent with `raxis/specs/v2/secrets-model.md §2.5`'s
+This is consistent with [`raxis/specs/v2/secrets-model.md §2.5`](../../specs/v2/secrets-model.md)'s
 operator-supplied-placeholder rule applied to the harness's own
 self-managed test fixtures.
 

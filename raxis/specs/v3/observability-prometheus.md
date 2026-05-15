@@ -278,13 +278,13 @@ during kernel boot. The flush cadence is operator-configurable:
 
 | Setting | Default | Range | Spec |
 |---|---|---|---|
-| `[observability.metrics] export_interval` | `15s` | `1s..=300s` | `otel-observability.md §6.1` |
+| `[observability.metrics] export_interval` | `15s` | `1s..=300s` | [`otel-observability.md §6.1`](otel-observability.md) |
 
 The task `select!`s the interval timer against the kernel shutdown
 notifier so a tear-down completes promptly. A flush failure is
 silent at the hub layer; the next-tier `raxis-otel-pusher` records
 its own retry / drop counters via `raxis.observability.dropped.total`.
-See `otel-observability.md §5.3` for the full silent-failure mode.
+See [`otel-observability.md §5.3`](otel-observability.md) for the full silent-failure mode.
 
 ### 3.14.2 Heartbeat tick
 

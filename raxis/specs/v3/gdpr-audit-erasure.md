@@ -1,7 +1,7 @@
 # RAXIS V3 — GDPR Audit Chain Erasure (Early Idea)
 
 > **Status:** Exploratory — needs significantly more thought before committing to an approach.
-> **Depends on:** `audit-retention.md` (V3 Merkle audit format)
+> **Depends on:** [`audit-retention.md`](audit-retention.md) (V3 Merkle audit format)
 > **R-invariant tension:** R-7 (Cryptographic Audit Chain) is append-only and hash-chained. GDPR Article 17 (right to erasure) requires deletion of personal data on request. These two properties are in direct conflict.
 
 ---

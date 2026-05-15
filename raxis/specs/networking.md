@@ -452,7 +452,7 @@ session_agent_type = "Executor"
 
 The full operator recipe (cargo / npm / pip / git host lists, the
 live-e2e harness that tests it) lives at
-`raxis/guides/operator/21-airgap-a3-egress-allowlist.md`. What
+[`raxis/guides/operator/21-airgap-a3-egress-allowlist.md`](../guides/operator/21-airgap-a3-egress-allowlist.md). What
 `credential_name` resolves to, where the bytes live
 (`~/.config/raxis/credentials/<name>.env`, `0600` by default), and
 how to swap in Vault / AWS Secrets Manager / HSM behind the

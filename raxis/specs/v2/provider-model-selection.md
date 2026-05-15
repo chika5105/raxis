@@ -6,22 +6,22 @@
 > chains.
 >
 > **Cross-references.**
-> - `provider-failure-handling.md` — alias-chain resolution, circuit
+> - [`provider-failure-handling.md`](provider-failure-handling.md) — alias-chain resolution, circuit
 >   breaker, retry policy, audit trail (the *mechanism*; this spec is
 >   the *guidance + defaulting layer* on top)
-> - `policy-plan-authority.md §4 [orchestrator]` — Orchestrator's
+> - [`policy-plan-authority.md §4 [orchestrator]`](policy-plan-authority.md) — Orchestrator's
 >   policy-pinned alias selection
-> - `policy-plan-authority.md §4 [provider_aliases_defaults]` — the
+> - [`policy-plan-authority.md §4 [provider_aliases_defaults]`](policy-plan-authority.md) — the
 >   defaultable per-role alias chains consumed by `plan prepare`
-> - `operator-ergonomics.md §5 plan prepare`, `§16 setup wizard` —
+> - [`operator-ergonomics.md §5 plan prepare`](operator-ergonomics.md), `§16 setup wizard` —
 >   integration points for ergonomic defaulting
 > - `v1/peripherals.md §3 raxis-gateway` — gateway as the credential
 >   boundary; `<data_dir>/providers/` storage location
-> - `environment-access-control.md §5b.4` — reserved
+> - [`environment-access-control.md §5b.4`](environment-access-control.md) — reserved
 >   `override_reviewer_alias` field for V2.x per-environment overrides
 > - `invariants.md INV-02A`, `INV-02B`, `INV-PROVIDER-01` — the
 >   mediation and credential-isolation guarantees this spec rests on
-> - `extensibility-traits.md §7` — `InferenceRouter` trait; the
+> - [`extensibility-traits.md §7`](extensibility-traits.md) — `InferenceRouter` trait; the
 >   resolved `(provider_id, model_id)` this spec produces is consumed
 >   by an `InferenceRouter` impl (V2 default = `HttpsGatewayRouter`).
 >   Operators on a `LocalVllmRouter` deployment configure
@@ -97,11 +97,11 @@ TOML, and the alias names that show up in their `plan.toml` after
 ### Out of scope (explicit)
 
 - **Alias resolution algorithm and circuit-breaker behavior.** Those
-  live in `provider-failure-handling.md` §4–§5 and are unchanged by
+  live in [`provider-failure-handling.md`](provider-failure-handling.md) §4–§5 and are unchanged by
   this spec.
 - **Per-environment Reviewer model overrides.** Reserved for V2.x via
   `[environments.<label>] override_reviewer_alias`
-  (`environment-access-control.md §5b.4`); this spec only documents
+  ([`environment-access-control.md §5b.4`](environment-access-control.md)); this spec only documents
   the trajectory.
 - **Custom provider plugins.** Adding a new provider to RAXIS (a
   hypothetical `[[providers]] kind = "custom"`) is gateway work
@@ -126,7 +126,7 @@ in §4 are derived from these profiles.
 | Property | Profile |
 |---|---|
 | **Token volume per initiative** | **Low.** The Orchestrator's NNSP (`ORCHESTRATOR_NNSP_BYTES`) is short and kernel-locked; per-burst reasoning is mostly DAG bookkeeping. Typical session: 100k–500k tokens for a 5-task initiative. |
-| **Burst frequency** | **Moderate.** One reasoning burst per sub-task transition, plus occasional semantic merge resolution per `kernel-mechanics-prompt.md §3.2`. |
+| **Burst frequency** | **Moderate.** One reasoning burst per sub-task transition, plus occasional semantic merge resolution per [`kernel-mechanics-prompt.md §3.2`](kernel-mechanics-prompt.md). |
 | **Hardest reasoning task** | Semantic merge conflict resolution (3-way merges where the ancestor and both branches disagree on the same lines), and escalation routing when multiple sub-tasks have escalations pending simultaneously. Both are short-context, judgment-heavy. |
 | **Failure cost** | **High and broad.** A wrong escalation routing decision sends a security-class escalation to the wrong queue. A bad merge sequencing decision strands every downstream task. The Orchestrator decides on behalf of the entire initiative. |
 | **Latency sensitivity** | **Noticeable.** Every task transition waits on the Orchestrator's burst. A 30-second Orchestrator turn × 20 task transitions = 10 minutes of pure latency overhead per initiative. |
@@ -230,7 +230,7 @@ Single-provider deployment means single-element chains — there is no
 fallback because there is no other provider to fall back to. If
 Anthropic has an outage, the initiative pauses with
 `InferenceFailureProviderUnavailable` per
-`provider-failure-handling.md §6.4`, and the operator gets an
+[`provider-failure-handling.md §6.4`](provider-failure-handling.md), and the operator gets an
 `InitiativePaused` push notification.
 
 ### 4.2 Two-provider deployment (Anthropic + OpenAI; recommended)
@@ -448,7 +448,7 @@ branches.
 **Action.** Drop Reviewer to a mid-tier model (e.g.,
 `anthropic:claude-4.6-sonnet-medium-thinking` instead of Opus-tier).
 Combine with `[plan.tasks.<id>.review] symbol_index = "not_needed"`
-per `planner-harness.md` to keep token volume small.
+per [`planner-harness.md`](planner-harness.md) to keep token volume small.
 
 **Don't drop the Orchestrator below mid-tier.** The cost saving is
 small and the failure mode (botched merge sequencing) is silent.
@@ -502,7 +502,7 @@ profile-level choice wins.
 ## §7 — `[provider_aliases_defaults]` policy schema
 
 The defaulting machinery for per-role aliases. Lives in `policy.toml`;
-consumed by `raxis-cli plan prepare` per `operator-ergonomics.md §4`.
+consumed by `raxis-cli plan prepare` per [`operator-ergonomics.md §4`](operator-ergonomics.md).
 
 ### 7.1 Schema
 
@@ -521,8 +521,8 @@ fallback_behavior = "attempt_in_order"
 | Field | Type | Default | Purpose |
 |---|---|---|---|
 | `[provider_aliases_defaults.<role>] chain` | `Vec<ProviderModelKey>` | (none; absence disables defaulting for that role) | The fallback chain `plan prepare` fills into `plan.toml [provider_aliases.<role>]` when the operator's plan omits the section. |
-| `[provider_aliases_defaults.<role>] fallback_behavior` | string | `"attempt_in_order"` | Same semantics as `plan.toml [provider_aliases.<name>] fallback_behavior` per `provider-failure-handling.md §3.2`. |
-| `[provider_aliases_defaults.<role>] session_affinity` | bool | `false` for `executor`, `true` for `reviewer` (rationale below) | Whether `plan prepare` adds `session_affinity = <value>` to the materialized `plan.toml [provider_aliases.<role>]`. See `provider-failure-handling.md §4.1.1` for cross-call pinning semantics. The Reviewer default is `true` because Reviewer sessions accumulate review history across rounds and benefit measurably from reasoning-style and prompt-prefix-cache stability; the Executor default is `false` because Executor work is typically a single short transcript per task and the modest per-call resolution preserves the §12.1 "no session-state in routing" property by default. Operators MAY override per-plan. |
+| `[provider_aliases_defaults.<role>] fallback_behavior` | string | `"attempt_in_order"` | Same semantics as `plan.toml [provider_aliases.<name>] fallback_behavior` per [`provider-failure-handling.md §3.2`](provider-failure-handling.md). |
+| `[provider_aliases_defaults.<role>] session_affinity` | bool | `false` for `executor`, `true` for `reviewer` (rationale below) | Whether `plan prepare` adds `session_affinity = <value>` to the materialized `plan.toml [provider_aliases.<role>]`. See [`provider-failure-handling.md §4.1.1`](provider-failure-handling.md) for cross-call pinning semantics. The Reviewer default is `true` because Reviewer sessions accumulate review history across rounds and benefit measurably from reasoning-style and prompt-prefix-cache stability; the Executor default is `false` because Executor work is typically a single short transcript per task and the modest per-call resolution preserves the §12.1 "no session-state in routing" property by default. Operators MAY override per-plan. |
 
 **Recognized roles.** V2 ships defaults for two role names:
 - `reviewer` — used by Reviewer-rooted profiles.
@@ -537,7 +537,7 @@ can remove the orphan section.
 The Orchestrator role is **NOT** in this schema because the
 Orchestrator's alias lives in `[orchestrator] provider_alias`
 (operator-pinned via policy, never via plan, per
-`policy-plan-authority.md §4 [orchestrator]`). It has its own
+[`policy-plan-authority.md §4 [orchestrator]`](policy-plan-authority.md)). It has its own
 authoring path; defaulting it through this mechanism would create
 two paths to the same target and invite drift.
 
@@ -547,7 +547,7 @@ For each `[provider_aliases_defaults.<role>]` declared:
 
 1. Every model in `chain` MUST appear in `policy.toml [providers]
    permitted_models` (per `INV-PROVIDER-01`,
-   `provider-failure-handling.md §10`).
+   [`provider-failure-handling.md §10`](provider-failure-handling.md)).
    - Otherwise: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_REFERENCES_NONPERMITTED_MODEL { role, missing_models }`.
 2. For every distinct provider referenced in `chain`, at least one
    `[[providers.credentials]]` entry MUST exist with that
@@ -555,7 +555,7 @@ For each `[provider_aliases_defaults.<role>]` declared:
    - Otherwise: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_MISSING_CREDENTIAL { role, missing_provider }`.
    - Rationale: a chain entry whose provider has no configured
      credential will never resolve at inference time
-     (`provider-failure-handling.md §4.1` `credentials_authorized`
+     ([`provider-failure-handling.md §4.1`](provider-failure-handling.md) `credentials_authorized`
      check); declaring it as a default just delays the failure to a
      confusing place.
 3. `chain` MUST be non-empty. Otherwise: `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN`.
@@ -568,7 +568,7 @@ reject at admission.
 
 ### 7.3 `plan prepare` consumption
 
-Per `operator-ergonomics.md §5`:
+Per [`operator-ergonomics.md §5`](operator-ergonomics.md):
 
 ```text
 For each [provider_aliases_defaults.<role>] in policy:
@@ -580,7 +580,7 @@ For each [provider_aliases_defaults.<role>] in policy:
                 fallback_behavior = "attempt_in_order"   # @raxis-default v0.4.0
 ```
 
-Idempotency rule (`operator-ergonomics.md §4.4`): a previously-defaulted
+Idempotency rule ([`operator-ergonomics.md §4.4`](operator-ergonomics.md)): a previously-defaulted
 alias whose policy default has not changed leaves the file untouched
 on re-prepare. A drifted default fails with
 `FAIL_PREPARE_DEFAULT_UPGRADE_REQUIRED` unless `--upgrade-defaults`
@@ -628,7 +628,7 @@ mechanically.
 | Declared in policy via | `[[providers.credentials]] provider_id key_ref` | `[[permitted_credentials]] name environment` |
 | Subject to environment binding (`INV-ENV-01`)? | No (these are kernel/gateway authority, not task-level authority) | Yes |
 | Subject to `INV-02A` (kernel-priced inference) | **Yes — these ARE the keys that pay providers** | No (no payment role) |
-| Rotation governed by | `key-revocation.md` provider-key path | `key-revocation.md` plan-signing-key path (different scope) |
+| Rotation governed by | [`key-revocation.md`](key-revocation.md) provider-key path | [`key-revocation.md`](key-revocation.md) plan-signing-key path (different scope) |
 | Held in process memory by | Gateway subprocess only | Kernel briefly at injection; agent VM for the lifetime of the task |
 
 Operators sometimes ask "why two systems?" — the threats they
@@ -731,10 +731,10 @@ Step 6 — Kernel decorates and returns to planner.
 |---|---|---|
 | Planner cannot bypass the kernel for inference | Step 2 (no IPC type for "raw provider call") | `INV-02A`, `paradigm.md` R-2 |
 | Planner cannot inject its own provider key | Step 5 (gateway is the only key holder) | `INV-02A`, this spec §8.1 |
-| Plan cannot reference an unpermitted model | Step 3a + earlier `approve_plan` check | `INV-PROVIDER-01`, `provider-failure-handling.md §10` |
-| Chain element with no credential is silently skipped | Step 3b | `provider-failure-handling.md §4.1` |
-| Outage in one provider doesn't take down the initiative | Step 3c (circuit breaker) + chain fallback | `provider-failure-handling.md §5–§6` |
-| Audit chain records which concrete model answered | Step 6 | `INV-04`, `provider-failure-handling.md §3.1` |
+| Plan cannot reference an unpermitted model | Step 3a + earlier `approve_plan` check | `INV-PROVIDER-01`, [`provider-failure-handling.md §10`](provider-failure-handling.md) |
+| Chain element with no credential is silently skipped | Step 3b | [`provider-failure-handling.md §4.1`](provider-failure-handling.md) |
+| Outage in one provider doesn't take down the initiative | Step 3c (circuit breaker) + chain fallback | [`provider-failure-handling.md §5–§6`](provider-failure-handling.md) |
+| Audit chain records which concrete model answered | Step 6 | `INV-04`, [`provider-failure-handling.md §3.1`](provider-failure-handling.md) |
 
 The whole chain is mechanical and deterministic given inputs. The
 operator's only authoring decisions are which API keys to
@@ -746,7 +746,7 @@ and which alias chains to declare (§4 defaults handle most cases).
 
 ## §9 — `setup wizard` integration
 
-The `raxis-cli setup wizard` (`operator-ergonomics.md §16`) is the
+The `raxis-cli setup wizard` ([`operator-ergonomics.md §16`](operator-ergonomics.md)) is the
 canonical first-run path that gets all of this configured without
 the operator hand-authoring TOML. This section specifies the
 provider-and-model phases of the wizard.
@@ -872,7 +872,7 @@ writes the resulting chains to `policy.toml`.
 ```
 
 The operator can press through with `N` and proceed to the smoke
-test (phase 5 / `operator-ergonomics.md §16.3`). The whole sequence
+test (phase 5 / [`operator-ergonomics.md §16.3`](operator-ergonomics.md)). The whole sequence
 takes under two minutes for an operator who already has API keys in
 hand.
 
@@ -928,7 +928,7 @@ operator's existing customizations (manually-edited
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_EMPTY_CHAIN { role }` | Policy load | A declared `[provider_aliases_defaults.<role>]` has an empty `chain`. Equivalent to "no defaulting for this role" but expressed in a way that's almost certainly an authoring mistake. |
 | `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_UNKNOWN_FALLBACK_BEHAVIOR { role, value }` | Policy load | `fallback_behavior` is not `"attempt_in_order"`. Reserved for future strategies; only one value is valid in V2. |
 | `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE { role }` | Policy load | `[provider_aliases_defaults.<role>]` declares a role name other than `executor` or `reviewer`. The default has no consumer in V2 and is silently ignored; the warning lets operators clean up orphan sections. |
-| `FAIL_POLICY_ORCHESTRATOR_PROVIDER_ALIAS_UNRESOLVED { alias }` | Policy load | (Existing — referenced here for completeness.) `[orchestrator] provider_alias` doesn't resolve to a `[provider_aliases.<alias>]` entry. The default name in V2 is `orchestrator_default` (renamed from the V1 `fast_low_cost`); see `policy-plan-authority.md §4 [orchestrator]`. |
+| `FAIL_POLICY_ORCHESTRATOR_PROVIDER_ALIAS_UNRESOLVED { alias }` | Policy load | (Existing — referenced here for completeness.) `[orchestrator] provider_alias` doesn't resolve to a `[provider_aliases.<alias>]` entry. The default name in V2 is `orchestrator_default` (renamed from the V1 `fast_low_cost`); see [`policy-plan-authority.md §4 [orchestrator]`](policy-plan-authority.md). |
 | `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER { alias }` | Policy load | An alias chain has length 1 in a deployment that has 2+ configured providers. Suggests the operator may have missed the diversification benefit; non-fatal; auditors can spot single-provider exposure. |
 
 All `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` codes prevent the policy
@@ -952,7 +952,7 @@ re-pushes.
       - `WARN_PROVIDER_ALIAS_DEFAULT_UNKNOWN_ROLE`
       - `WARN_PROVIDER_ALIAS_PRIMARY_NO_FAILOVER`
 - [ ] Rename the V1 `[orchestrator] provider_alias` default value from `"fast_low_cost"` to `"orchestrator_default"` (and update the policy migration path so V1 policies that use the old name still load with a deprecation warning).
-- [ ] Update `OperatorRequest::ProposeDefaults` handler (`operator-ergonomics.md §5.3`) to consume `[provider_aliases_defaults.<role>]` and fill `[provider_aliases.<role>]` entries into the augmented plan when absent, per §7.3.
+- [ ] Update `OperatorRequest::ProposeDefaults` handler ([`operator-ergonomics.md §5.3`](operator-ergonomics.md)) to consume `[provider_aliases_defaults.<role>]` and fill `[provider_aliases.<role>]` entries into the augmented plan when absent, per §7.3.
 - [ ] All §10 codes registered in `raxis-types::PlannerErrorCode`.
 
 ### CLI side
@@ -965,8 +965,8 @@ re-pushes.
       - Auto-generation of `[orchestrator] provider_alias` + chain and `[provider_aliases_defaults.{reviewer, executor}]` per §5.2 `auto_diversify`.
       - `--no-diversify` and `--reset-chains` flags per §5.3 / §9.5.
 - [ ] `raxis-cli setup wizard --add-provider <id>` re-runs phases 2 + 4 only.
-- [ ] `raxis-cli plan prepare` consumes `[provider_aliases_defaults]` per §7.3; idempotent re-runs per `operator-ergonomics.md §4.4`.
-- [ ] `raxis-cli plan explain` (`operator-ergonomics.md §9`) renders per-task resolved alias and the alias's chain (so operators can see "task X uses chain Y" in plain English).
+- [ ] `raxis-cli plan prepare` consumes `[provider_aliases_defaults]` per §7.3; idempotent re-runs per [`operator-ergonomics.md §4.4`](operator-ergonomics.md).
+- [ ] `raxis-cli plan explain` ([`operator-ergonomics.md §9`](operator-ergonomics.md)) renders per-task resolved alias and the alias's chain (so operators can see "task X uses chain Y" in plain English).
 
 ### Tests
 
@@ -994,11 +994,11 @@ re-pushes.
 
 | Spec | Change |
 |---|---|
-| `policy-plan-authority.md` | New `[provider_aliases_defaults]` section in §4. Rename `[orchestrator] provider_alias` default value from `"fast_low_cost"` to `"orchestrator_default"`; update recommended chain. New `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes in §3b failure catalog. |
-| `operator-ergonomics.md` | `§4.2` defaultable-fields table gains `[provider_aliases.reviewer]` and `[provider_aliases.executor]`. `§16.3` setup wizard rewritten to incorporate phases 2–4 per this spec's §9. `§20` failure catalog cross-references the new codes. |
-| `provider-failure-handling.md` | No structural change. `§3.2` (plan declares aliases) gains a brief cross-reference noting that the typical authoring path now goes through `plan prepare` defaulting from `policy.toml [provider_aliases_defaults]`. |
-| `environment-access-control.md` | `§5b.4` reserved-fields list gains `override_reviewer_alias` for V2.x per-environment Reviewer model overrides. |
+| [`policy-plan-authority.md`](policy-plan-authority.md) | New `[provider_aliases_defaults]` section in §4. Rename `[orchestrator] provider_alias` default value from `"fast_low_cost"` to `"orchestrator_default"`; update recommended chain. New `FAIL_POLICY_PROVIDER_ALIAS_DEFAULT_*` and `WARN_PROVIDER_ALIAS_*` codes in §3b failure catalog. |
+| [`operator-ergonomics.md`](operator-ergonomics.md) | `§4.2` defaultable-fields table gains `[provider_aliases.reviewer]` and `[provider_aliases.executor]`. `§16.3` setup wizard rewritten to incorporate phases 2–4 per this spec's §9. `§20` failure catalog cross-references the new codes. |
+| [`provider-failure-handling.md`](provider-failure-handling.md) | No structural change. `§3.2` (plan declares aliases) gains a brief cross-reference noting that the typical authoring path now goes through `plan prepare` defaulting from `policy.toml [provider_aliases_defaults]`. |
+| [`environment-access-control.md`](environment-access-control.md) | `§5b.4` reserved-fields list gains `override_reviewer_alias` for V2.x per-environment Reviewer model overrides. |
 | `paradigm.md` | `§5.1` gains a brief paragraph documenting the two-credential-system architectural property as an implementation pattern that satisfies R-2. |
 | `v1/peripherals.md` | No change. The `<data_dir>/providers/` storage convention is already canonical there; this spec just cross-references it. |
-| `key-revocation.md` | No change. Provider-key rotation already covered there; this spec's chains are the consumers. |
-| `setup-wizard` (within `operator-ergonomics.md`) | Existing phases 1–6 reorganized to insert the §9 provider/model phases; downstream tests unchanged. |
+| [`key-revocation.md`](key-revocation.md) | No change. Provider-key rotation already covered there; this spec's chains are the consumers. |
+| `setup-wizard` (within [`operator-ergonomics.md`](operator-ergonomics.md)) | Existing phases 1–6 reorganized to insert the §9 provider/model phases; downstream tests unchanged. |

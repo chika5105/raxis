@@ -56,7 +56,7 @@ for the defect; do NOT modify any other file.
 
 * Your `path_allowlist` is `rust-crate/`, `ts-pkg/`, `py-pkg/`
   ONLY. Same allowlist as the cross-file refactor task; you MUST
-  NOT touch `scripts/`, `fixtures/`, `.gitignore`, or `README.md`.
+  NOT touch `scripts/`, `fixtures/`, `.gitignore`, or [`README.md`](../../../../../README.md).
 * Do NOT run `scripts/check.sh` before committing — the WHOLE
   point of this task is to land a diff that the reviewer's
   subsequent `check.sh` run will reject. Running it locally and

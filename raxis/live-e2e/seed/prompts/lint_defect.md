@@ -63,7 +63,7 @@ that legitimately edits `greet.py` to remove the defect).
 * Your `path_allowlist` is `py-pkg/` ONLY (narrowed from the
   three-tree allowlist in pre-iter55 versions of this prompt).
   You MUST NOT touch `rust-crate/`, `ts-pkg/`, `scripts/`,
-  `fixtures/`, `.gitignore`, or `README.md`.
+  `fixtures/`, `.gitignore`, or [`README.md`](../../../../README.md).
 * Do NOT run `scripts/check.sh` (or `python -m ruff check`)
   before committing — the WHOLE point of this task is to land a
   diff that the downstream `lint-runner-python` capture +

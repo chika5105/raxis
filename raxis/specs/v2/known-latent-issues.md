@@ -68,7 +68,7 @@ is `rg(1)` (BurntSushi/ripgrep).
 making it *available* to the Reviewer LLM. But every iter-1 through
 iter-12 trace shows the Reviewer LLM invoking only `submit_review` and
 `read_file` — never `grep_search`. The current Reviewer system prompt
-(`raxis/specs/v2/planner-harness.md §Reviewer prompt template`) does
+([`raxis/specs/v2/planner-harness.md §Reviewer prompt template`](planner-harness.md)) does
 not mention `grep_search`; the LLM consequently never reaches for it.
 
 A future Reviewer-prompt revision that *did* surface `grep_search`

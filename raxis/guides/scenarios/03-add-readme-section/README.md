@@ -2,7 +2,7 @@
 
 > **Complexity:** ⭐ Beginner | **Wall clock:** ~6 min | **Provider:** Anthropic
 
-The Executor adds a single new section to the repo's `README.md`
+The Executor adds a single new section to the repo's [`README.md`](README.md)
 under a strict `path_allowlist`. After this scenario you understand
 how V2 entry-shape rules turn `path_allowlist = ["README.md"]` into a
 hard exact-match constraint and what `FAIL_PATH_POLICY_VIOLATION`
@@ -66,7 +66,7 @@ raxis initiative show "$INIT_ID" --with-tasks
 
 ## What "success" looks like
 
-- `README.md` gains a new top-level section titled "Quickstart" or
+- [`README.md`](README.md) gains a new top-level section titled "Quickstart" or
   similar.
 - `git log` shows one new commit by the Executor.
 - `raxis initiative show` reports `documenter: Completed`.

@@ -34,13 +34,13 @@
 > that motivated the eventual unification. Any cross-reference from another
 > spec to this file should be treated as a pointer to design history, not to
 > normative behavior. New PRs MUST NOT add normative cross-references to
-> this file; cite `vm-network-isolation.md` or `credential-proxy.md` instead.
+> this file; cite [`vm-network-isolation.md`](vm-network-isolation.md) or [`credential-proxy.md`](credential-proxy.md) instead.
 
 > **Original status:** V2 Specified
 > **Original cross-references:**
-> - `v2-deep-spec.md §1.3` — Credential isolation / INV-02B
+> - [`v2-deep-spec.md §1.3`](v2-deep-spec.md) — Credential isolation / INV-02B
 > - `security/raxis-security-model.md §INV-GATEWAY-01` — Gateway trust boundary pattern
-> - `v2-deep-spec.md §Part 7` — `RaxisToolExecutor` integration point
+> - [`v2-deep-spec.md §Part 7`](v2-deep-spec.md) — `RaxisToolExecutor` integration point
 
 ---
 

@@ -73,7 +73,7 @@ Both containers bind to **`127.0.0.1`** on the host via the `ports`
 mapping. The RAXIS kernel and its credential proxies also bind to
 `127.0.0.1:0`. All connections stay on loopback — no bridge
 networking, no DNS resolution. This mirrors the production
-`credential-proxy.md §6` locality invariant.
+[`credential-proxy.md §6`](credential-proxy.md) locality invariant.
 
 ```text
 Host loopback (127.0.0.1)
@@ -116,7 +116,7 @@ The test creates them programmatically before plan submission.
 postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e
 ```
 
-**Credential format is normative per `credential-proxy.md §3`**:
+**Credential format is normative per [`credential-proxy.md §3`](credential-proxy.md)**:
 the resolved credential value MUST be a libpq URL (RFC 3986). The
 file suffix `.env` is purely the on-disk path convention
 (`<data_dir>/credentials/<name>.env`); the file contents are the
@@ -136,7 +136,7 @@ agent-side connection uses dummy credentials (the proxy intercepts
 mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e?authSource=admin
 ```
 
-**Credential format is normative per `credential-proxy.md §3`**:
+**Credential format is normative per [`credential-proxy.md §3`](credential-proxy.md)**:
 the resolved credential value MUST be a plaintext `mongodb://`
 URI. `mongodb+srv://` is rejected for the V2 MVP. The MongoDB
 proxy's upstream parser is
@@ -204,7 +204,7 @@ below matches the kernel's actual plan parser
 > bootstrapped policy.toml in `enable_gateway_in_policy`. The
 > `[workspace] lane_id` field is REQUIRED by
 > `validate_single_lane_propagation`; every `[[tasks]]` block must
-> declare a non-empty `description` per `v2_extended_gaps.md §1.1`.
+> declare a non-empty `description` per [`v2_extended_gaps.md §1.1`](v2_extended_gaps.md).
 
 ```toml
 [plan.initiative]
@@ -767,7 +767,7 @@ raxis verify-chain --data-dir <data_dir>
 ### §7.10 — Integration Merge
 
 Orchestrator submits `IntegrationMerge` intent. Kernel runs
-checks 1–5c from `integration-merge.md`:
+checks 1–5c from [`integration-merge.md`](integration-merge.md):
 
 1. All tasks in `Approved` state
 2. All verifier witnesses present and passed

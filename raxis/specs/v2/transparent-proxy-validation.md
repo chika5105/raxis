@@ -9,7 +9,7 @@
 > **Test surface:**
 > - Witness module: `raxis/kernel/tests/extended_e2e_support/transparent_proxy_evidence.rs`.
 > - Driver call site: `raxis/kernel/tests/extended_e2e_realistic_scenario.rs` (after `service-evidence` passes).
-> - Operator-realistic prompt: `raxis/live-e2e/seed/prompts/transparent_proxy_real_scripts.md`.
+> - Operator-realistic prompt: [`raxis/live-e2e/seed/prompts/transparent_proxy_real_scripts.md`](../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md).
 > - Stock-Python script set: `raxis/live-e2e/seed/scripts/transparent_proxy/`.
 
 ---
@@ -61,7 +61,7 @@ conn = psycopg2.connect("postgresql://real_user:real_pass@prod-db.company.com:54
 
 would succeed against the upstream and produce canonical output bytes — passing the *service-evidence* witness — while completely bypassing the credential proxy. The proxy would never be in the data path, the upstream credentials would round-trip into the in-VM environment, and the transparency contract would be silently violated.
 
-The Tier-1 egress admission layer (`vm-network-isolation.md`) denies any non-proxy upstream from inside an Executor VM and emits `TransparentProxyDenied { reason: "proxy_target_bypass", host_or_sni, original_dst_ip, original_dst_port, protocol }`. The witness asserts:
+The Tier-1 egress admission layer ([`vm-network-isolation.md`](vm-network-isolation.md)) denies any non-proxy upstream from inside an Executor VM and emits `TransparentProxyDenied { reason: "proxy_target_bypass", host_or_sni, original_dst_ip, original_dst_port, protocol }`. The witness asserts:
 
 - `CredentialProxyStarted` is present in the executor's session for the expected `proxy_type`.
 - *No* `TransparentProxyDenied { reason: "proxy_target_bypass" }` is present for the same session.
@@ -93,7 +93,7 @@ A pinned `requirements.txt` and a `run_all_services.sh` wrapper sit next to the 
 
 ## 6. Operator-realistic executor prompt
 
-The prompt at `raxis/live-e2e/seed/prompts/transparent_proxy_real_scripts.md` reads like a normal task assignment a human would give a teammate:
+The prompt at [`raxis/live-e2e/seed/prompts/transparent_proxy_real_scripts.md`](../../live-e2e/seed/prompts/transparent_proxy_real_scripts.md) reads like a normal task assignment a human would give a teammate:
 
 > We have a small collection of Python scripts in `scripts/` that connect to our backing services and dump per-service data into text files for the daily integrity check…
 
@@ -142,7 +142,7 @@ The harness aggregates failures (`collect_active_witness_failures`) and renders 
 
 ## 10. Cross-references
 
-- The proxy-bypass denial signature and Tier-1 admission flow: `vm-network-isolation.md`.
-- The credential-proxy manager and `loopback_env()`: `raxis/crates/credential-proxy-manager/src/lib.rs`, spec §2 in `credential-proxy.md`.
+- The proxy-bypass denial signature and Tier-1 admission flow: [`vm-network-isolation.md`](vm-network-isolation.md).
+- The credential-proxy manager and `loopback_env()`: `raxis/crates/credential-proxy-manager/src/lib.rs`, spec §2 in [`credential-proxy.md`](credential-proxy.md).
 - The realism e2e driver and the rich-multilang seed: `extended_e2e_realistic_scenario.rs`, `rich-multilang-001/`.
 - Per-service canonical bytes (the single source of truth used by both witnesses): `service_evidence.rs`.

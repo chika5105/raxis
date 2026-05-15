@@ -216,7 +216,7 @@ variant requires an explicit row here.
 | `SpawnFailed("image_digest_mismatch")` | Permanent | The on-disk canonical image bytes do not match the signed manifest — operator must re-install. |
 | `SpawnFailed("policy_violation: ...")` | Permanent | Spawn rejected by an admission gate; retrying yields the same rejection. |
 | `SpawnFailed("config_invalid: ...")` | Permanent | `VmSpec` failed substrate translate (e.g. memory below substrate floor); retrying yields the same translate failure. |
-| `SpawnFailed("out_of_disk_space: ...")` | Permanent | The disk-watchdog tripped (per `host-capacity.md §7`); retrying makes the disk pressure worse. |
+| `SpawnFailed("out_of_disk_space: ...")` | Permanent | The disk-watchdog tripped (per [`host-capacity.md §7`](host-capacity.md)); retrying makes the disk pressure worse. |
 | `SignatureMismatch` | Permanent | Same as image-digest mismatch; substrate's defence-in-depth check tripped. |
 | `BackendInternal("kernel_module_unloaded: ...")` | Permanent | Operator must restore the substrate; retry would loop indefinitely. |
 | `BackendInternal(_)` (other) | Permanent | Default for unknown backend-internal failures — fail closed. |
@@ -277,7 +277,7 @@ spawn_executor_for_task(...)
 
 `SessionVmFailedFinal` is emitted exactly once per activation; it
 pairs with a `SessionVmSpawned` only on the rare success-after-retry
-path. The `audit-paired-writes.md §4.1` linter is updated to treat
+path. The [`audit-paired-writes.md §4.1`](audit-paired-writes.md) linter is updated to treat
 `SessionVmFailedFinal` as a terminal-class event that does NOT
 require a `SessionVmExited` partner (the VM never reached the
 "booted" milestone).
@@ -547,7 +547,7 @@ capacity scaling at the substrate boundary. Everything else
 ```
 
 `SessionVmScaleDeferred` is a single-class observability event (no
-SQL row mutates), listed in the `audit-paired-writes.md §4.3`
+SQL row mutates), listed in the [`audit-paired-writes.md §4.3`](audit-paired-writes.md)
 single-class roster.
 
 ---
@@ -591,7 +591,7 @@ single-class roster.
   support hot-add of vCPUs / memory in principle, but the kernel's
   per-session state (worktree anchor, KSB sidecar, audit-paired-
   writes pending row) is bound to the original VM lifetime by the
-  `audit-paired-writes.md §4.1` contract. A respawn cleanly
+  [`audit-paired-writes.md §4.1`](audit-paired-writes.md) contract. A respawn cleanly
   traverses the `SessionVmExited` → `SessionVmScaleEvent` →
   `SessionVmSpawned` triple, keeping the audit chain monotonic.
 * **Con.** A respawn drops the in-flight model context. **Mitigation:**

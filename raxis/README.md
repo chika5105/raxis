@@ -285,9 +285,9 @@ about which commands actually exist. Spec'd in
 
 Structural enforcement beats ad-hoc model steering. That said, **v1 does define prompt-related contracts**:
 
-- **`specs/v1/peripherals.md`** §3.1: the kernel’s **`prompt::assemble`** path builds a **system-prompt scaffold** from **kernel-owned** facts—policy epoch, session identity (including bounded **`worktree_root`**), delegation summary, initiative context—not from free‑form prose the planner chooses. Inference traffic still flows **planner → kernel → gateway** under **`INV-02A`**.
+- **[`specs/v1/peripherals.md`](specs/v1/peripherals.md)** §3.1: the kernel’s **`prompt::assemble`** path builds a **system-prompt scaffold** from **kernel-owned** facts—policy epoch, session identity (including bounded **`worktree_root`**), delegation summary, initiative context—not from free‑form prose the planner chooses. Inference traffic still flows **planner → kernel → gateway** under **`INV-02A`**.
 
-- **`specs/v1/planner-api.md`**: operators (or tooling) **inject this file verbatim** into the planner system prompt as the machine-readable IPC contract—intent shapes, **`PlannerErrorCode`** remediation, escalation summary, budgets, and “must not” rules—so retries and failures stay aligned with **opaque kernel rejections** (see **`INV-08`** and the planner-feedback model in [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md)).
+- **[`specs/v1/planner-api.md`](specs/v1/planner-api.md)**: operators (or tooling) **inject this file verbatim** into the planner system prompt as the machine-readable IPC contract—intent shapes, **`PlannerErrorCode`** remediation, escalation summary, budgets, and “must not” rules—so retries and failures stay aligned with **opaque kernel rejections** (see **`INV-08`** and the planner-feedback model in [`specs/v1/kernel-store.md`](specs/v1/kernel-store.md)).
 
 So “prompt engineering” in RAXIS v1 means **curated scaffold + verbatim API spec**, not unstructured instructions that substitute for verifier-backed gates.
 
