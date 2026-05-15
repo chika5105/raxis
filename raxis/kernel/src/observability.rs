@@ -376,6 +376,123 @@ pub fn record_planner_inference(
     );
 }
 
+/// iter62 — `raxis.planner.cache.creation_tokens.total` counter.
+///
+/// Bumped once per accepted `IntentRequest` carrying a non-zero
+/// `tokens_used.cache_creation_tokens` delta. The recorded value
+/// is the **delta** (newly-cached tokens this turn), NOT the
+/// cumulative running total — the counter is itself cumulative
+/// across turns by the OTel-pusher contract, so passing the delta
+/// keeps the per-emit observation small and the counter
+/// monotone-increasing.
+///
+/// Labels — `task_id` / `session_id` / `model` / `role` — match the
+/// matching SQL bump in
+/// `kernel/src/handlers/intent.rs::pre_gate_evaluate_for_envelope`
+/// so the dashboard can join `tasks.cumulative_cache_creation_tokens`
+/// against `sum_over_time(raxis_planner_cache_creation_tokens_total
+/// {task_id="…"}[1h])` and observe the SQL ledger and the metric
+/// ledger agreeing.
+///
+/// Spec: `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`.
+pub fn record_planner_cache_creation_tokens(
+    hub: &ObservabilityHub,
+    task_id: &str,
+    session_id: &str,
+    model: &str,
+    role: &str,
+    delta_tokens: u64,
+) {
+    if !hub.enabled() || delta_tokens == 0 {
+        return;
+    }
+    let labels = redact::attrs([
+        ("task_id", task_id),
+        ("session_id", session_id),
+        ("model", model),
+        ("role", role),
+    ]);
+    hub.record_counter(MetricName::PlannerCacheCreationTokens, labels, delta_tokens as f64);
+}
+
+/// iter62 — `raxis.planner.cache.read_tokens.total` counter.
+///
+/// Same emit shape as
+/// [`record_planner_cache_creation_tokens`]; bumped on accepted
+/// intents carrying a non-zero `tokens_used.cache_read_tokens`
+/// delta (the cache-HIT counter that pairs with the creation
+/// counter). See sibling helper for the labels contract.
+pub fn record_planner_cache_read_tokens(
+    hub: &ObservabilityHub,
+    task_id: &str,
+    session_id: &str,
+    model: &str,
+    role: &str,
+    delta_tokens: u64,
+) {
+    if !hub.enabled() || delta_tokens == 0 {
+        return;
+    }
+    let labels = redact::attrs([
+        ("task_id", task_id),
+        ("session_id", session_id),
+        ("model", model),
+        ("role", role),
+    ]);
+    hub.record_counter(MetricName::PlannerCacheReadTokens, labels, delta_tokens as f64);
+}
+
+/// iter62 — `raxis.planner.cache.hit_ratio` histogram.
+///
+/// Records ONE observation per accepted intent of the per-turn
+/// cache-hit ratio
+/// `cache_read / (cache_read + cache_creation + uncached_input)`
+/// clamped to `[0.0, 1.0]`. The denominator is the planner-
+/// reported per-turn input-token total; division by zero (a
+/// zero-token turn — should not happen for a well-formed
+/// inference) is silently skipped, NOT recorded as 0 (a "no
+/// usage" turn is not a "100% cache miss").
+///
+/// Buckets `[0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0]` align
+/// the dashboard's Anthropic prompt-cache rendering with the
+/// provider's published cache-economics curve — operators can
+/// see the per-task hit-ratio distribution at a glance and rank
+/// tasks by cache effectiveness without joining the two
+/// counters at query time.
+///
+/// Spec: `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`.
+pub fn record_planner_cache_hit_ratio(
+    hub: &ObservabilityHub,
+    task_id: &str,
+    session_id: &str,
+    model: &str,
+    role: &str,
+    cache_read: u64,
+    cache_creation: u64,
+    uncached_input: u64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let denom = cache_read + cache_creation + uncached_input;
+    if denom == 0 {
+        return;
+    }
+    let ratio = (cache_read as f64 / denom as f64).clamp(0.0, 1.0);
+    let labels = redact::attrs([
+        ("task_id", task_id),
+        ("session_id", session_id),
+        ("model", model),
+        ("role", role),
+    ]);
+    hub.record_histogram_with_buckets(
+        MetricName::PlannerCacheHitRatio,
+        labels,
+        ratio,
+        vec![0.0, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95, 1.0],
+    );
+}
+
 /// `raxis.planner.dispatch.turn.total` — counter for every planner
 /// dispatch turn that completes (success / failure / cancel).
 pub fn record_planner_dispatch_turn(hub: &ObservabilityHub, agent_type: &str, outcome: &str) {

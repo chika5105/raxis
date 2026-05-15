@@ -763,23 +763,85 @@ fn run_phase_a(
     // the *next* intent's gate sees a stale (under-) cost — the
     // current intent still proceeds with the correct admission
     // decision.
+    //
+    // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`. The
+    // SQL UPDATE folds the planner-reported cache_* token deltas
+    // into the new `cumulative_cache_creation_tokens` /
+    // `cumulative_cache_read_tokens` columns alongside the
+    // existing input / output / cost columns so the per-task
+    // ledger surface stays consistent — operators querying
+    // `tasks` see ALL four token channels in lock-step.
     if new_token_cost_micros != task.cumulative_token_cost_micros {
         let conn = store.lock_sync();
         if let Some(report) = req.tokens_used.as_ref() {
             let _ = conn.execute(
                 &format!(
                     "UPDATE {TASKS} SET
-                       cumulative_input_tokens       = ?1,
-                       cumulative_output_tokens      = ?2,
-                       cumulative_token_cost_micros  = ?3
-                     WHERE task_id = ?4"
+                       cumulative_input_tokens          = ?1,
+                       cumulative_output_tokens         = ?2,
+                       cumulative_token_cost_micros     = ?3,
+                       cumulative_cache_creation_tokens = ?4,
+                       cumulative_cache_read_tokens     = ?5
+                     WHERE task_id = ?6"
                 ),
                 rusqlite::params![
                     report.input_tokens as i64,
                     report.output_tokens as i64,
                     new_token_cost_micros as i64,
+                    report.cache_creation_tokens as i64,
+                    report.cache_read_tokens as i64,
                     req.task_id.as_str(),
                 ],
+            );
+            drop(conn);
+
+            // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`
+            // metric emission. Use the planner's `provider_id` as
+            // the `model` label proxy (the kernel does not see the
+            // model id at this seam — the gateway has it, but the
+            // fetch round-trip is one process boundary deeper).
+            // `role` is the session's agent type
+            // (`executor` / `reviewer` / `orchestrator`); the
+            // helper is a no-op when the hub is disabled or the
+            // delta is zero.
+            let model_label = report.provider_id.as_str();
+            let role_label = session
+                .session_agent_type
+                .map(|a| a.as_sql_str().to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_owned());
+            crate::observability::record_planner_cache_creation_tokens(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_creation_tokens,
+            );
+            crate::observability::record_planner_cache_read_tokens(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_read_tokens,
+            );
+            crate::observability::record_planner_cache_hit_ratio(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_read_tokens,
+                report.cache_creation_tokens,
+                // `uncached_input` ≈ `input_tokens - cache_read -
+                // cache_creation` when the planner reported the
+                // input total; saturating subtraction guards
+                // against a planner that reports inconsistent
+                // sub-totals.
+                report
+                    .input_tokens
+                    .saturating_sub(report.cache_read_tokens)
+                    .saturating_sub(report.cache_creation_tokens),
             );
         }
     }

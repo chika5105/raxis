@@ -576,6 +576,51 @@ pub enum MetricName {
     /// roundtrip is disambiguable into serialise / wire /
     /// deserialise components.
     IpcFrameStageDuration,
+
+    // ── iter62: planner-cache token observability ─────────────────
+    //
+    // Three new metrics surfacing the Anthropic prompt-caching
+    // token channels the planner driver reports back through
+    // `TokensReport.cache_creation_tokens` /
+    // `cache_read_tokens` (`crates/types/src/intent.rs`). The
+    // counters mirror the existing `PlannerInferenceTokensTotal`
+    // shape (per-`(provider, model, role)` cumulative counts);
+    // the histogram surfaces the per-turn cache-hit ratio so the
+    // dashboard can rank tasks by cache effectiveness without
+    // re-deriving it from the two counters at query time.
+    //
+    // Spec: `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` (the
+    // sibling SQLite-side invariant in `crates/store/src/migration.rs`
+    // bumps the per-task `cumulative_cache_*_tokens` columns from
+    // the same `TokensReport` payload — kernel-side metrics +
+    // SQL-side ledger stay in lock-step).
+    //
+    /// `raxis.planner.cache.creation_tokens.total` — Counter (tokens).
+    /// Labels: `task_id`, `session_id`, `model`, `role`. Bumped
+    /// once per accepted `IntentRequest` carrying a non-zero
+    /// `tokens_used.cache_creation_tokens` delta. Cumulative-
+    /// monotonic per `(task_id, session_id)`; resets only on
+    /// kernel restart per `INV-OTEL-06`.
+    PlannerCacheCreationTokens,
+    /// `raxis.planner.cache.read_tokens.total` — Counter (tokens).
+    /// Same label / emit shape as
+    /// `PlannerCacheCreationTokens`. Bumped once per accepted
+    /// `IntentRequest` carrying a non-zero
+    /// `tokens_used.cache_read_tokens` delta — the cache-hit
+    /// counter that pairs with the creation counter.
+    PlannerCacheReadTokens,
+    /// `raxis.planner.cache.hit_ratio` — Histogram (ratio).
+    /// Labels: `task_id`, `session_id`, `model`, `role`. One
+    /// observation per accepted intent: the per-turn ratio
+    /// `cache_read_tokens / (cache_read_tokens +
+    /// cache_creation_tokens + uncached_input_tokens)`, clamped
+    /// to `[0.0, 1.0]`. Buckets `[0.0, 0.1, 0.25, 0.5, 0.75,
+    /// 0.9, 0.95, 1.0]` align the dashboard's Anthropic-cache
+    /// rendering with the provider's published cache-economics
+    /// curve. NaN / 0/0 (no token usage on this turn) is
+    /// skipped, NOT recorded as 0 — a "no usage" turn is not a
+    /// "cache miss".
+    PlannerCacheHitRatio,
 }
 
 impl MetricName {
@@ -685,6 +730,11 @@ impl MetricName {
             Self::GitWorktreeStageDuration => "raxis.git.worktree.stage.duration",
             Self::GatewayStageDuration => "raxis.gateway.stage.duration",
             Self::IpcFrameStageDuration => "raxis.kernel.substrate.ipc.frame.stage.duration",
+
+            // iter62 planner-cache token observability.
+            Self::PlannerCacheCreationTokens => "raxis.planner.cache.creation_tokens.total",
+            Self::PlannerCacheReadTokens => "raxis.planner.cache.read_tokens.total",
+            Self::PlannerCacheHitRatio => "raxis.planner.cache.hit_ratio",
         }
     }
 
@@ -724,7 +774,8 @@ impl MetricName {
             | Self::AuditChainStageDuration
             | Self::GitWorktreeStageDuration
             | Self::GatewayStageDuration
-            | Self::IpcFrameStageDuration => MetricType::Histogram,
+            | Self::IpcFrameStageDuration
+            | Self::PlannerCacheHitRatio => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
@@ -773,7 +824,9 @@ impl MetricName {
             | Self::KernelRespawnTotal
             | Self::SupervisorRefusedRestartTotal
             | Self::OperatorIpcTotal
-            | Self::KernelSubstrateIpcMessagesTotal => MetricType::Counter,
+            | Self::KernelSubstrateIpcMessagesTotal
+            | Self::PlannerCacheCreationTokens
+            | Self::PlannerCacheReadTokens => MetricType::Counter,
         }
     }
 
@@ -814,7 +867,10 @@ impl MetricName {
             | Self::GatewayStageDuration
             | Self::IpcFrameStageDuration => Unit::Milliseconds,
 
-            Self::TokensConsumed | Self::PlannerInferenceTokensTotal => Unit::Tokens,
+            Self::TokensConsumed
+            | Self::PlannerInferenceTokensTotal
+            | Self::PlannerCacheCreationTokens
+            | Self::PlannerCacheReadTokens => Unit::Tokens,
 
             Self::SessionsActive | Self::DashboardSseConnectionActive => Unit::Connections,
 
