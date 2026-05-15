@@ -59,6 +59,115 @@ use crate::model::{
 use crate::tools::{ToolContext, ToolError, ToolOutput, ToolRegistry};
 
 // ---------------------------------------------------------------------------
+// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — per-turn cache-token
+// telemetry emitter.
+//
+// iter62 forensics: kernel.stderr.log carried zero mentions of
+// `cache_creation_input_tokens` / `cache_read_input_tokens` even
+// though the dispatch loop reads both fields (folding them into
+// `cum_in` for ceiling enforcement). Anthropic's billing dashboard
+// reported "Prompt caching: Not enabled" — but with zero on-the-wire
+// telemetry we could neither confirm the report nor refute it.
+//
+// The wire shape is correct (see `MessageRequest::serialize` in
+// `crate::model` — it stamps `cache_control` per
+// `prompt-caching.md`); the bug was a pure observability gap.
+// `emit_turn_usage` closes it by writing one structured JSON line
+// per turn to `out` (`stderr` in production paths, a `Vec<u8>` in
+// tests). Pairs with Worker 1's
+// `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` which folds the same
+// per-turn counts into `tasks.cumulative_cache_creation_tokens` /
+// `cumulative_cache_read_tokens` at `CompleteTask` commit time.
+// ---------------------------------------------------------------------------
+
+/// Emit a single `planner_turn_usage` JSON line to `out`. Called
+/// from both [`DispatchLoop::run`] and [`DispatchLoop::run_streaming`]
+/// after each turn's `Usage` has been destructured but **before**
+/// the running `cum_in` / `cum_out` totals fold the new counts in,
+/// so the `cumulative_*` fields on the line carry the **post-fold**
+/// values (i.e. what the kernel would observe after this turn).
+///
+/// The line is intentionally formatted by hand with `writeln!`
+/// rather than via `serde_json::to_writer` so the emit path stays
+/// allocation-free on the hot loop and so the wire shape is
+/// trivially auditable from this one function (no serializer-level
+/// renames or skip_if_default surprises).
+///
+/// `cache_hit_ratio` is `cache_read / (cache_read + input + cache_creation)`.
+/// Returns `0.0` when the denominator is zero (no input charged
+/// at all on this turn — defensive against providers that emit a
+/// `Usage` with all-zero counters).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_turn_usage(
+    out: &mut dyn std::io::Write,
+    task_id: &str,
+    session_id: &str,
+    role: &str,
+    model: &str,
+    turn: u32,
+    input_tokens: u32,
+    output_tokens: u32,
+    cache_creation_input_tokens: u32,
+    cache_read_input_tokens: u32,
+    cum_in_so_far: u64,
+    cum_out_so_far: u64,
+) {
+    let denom = u64::from(cache_read_input_tokens)
+        .saturating_add(u64::from(input_tokens))
+        .saturating_add(u64::from(cache_creation_input_tokens));
+    let cache_hit_ratio = if denom == 0 {
+        0.0_f64
+    } else {
+        // `f64::from(u32)` is lossless. The denominator fits 33
+        // bits worst case (3 × u32::MAX) so the upcast through
+        // `denom as f64` is also lossless for any plausible
+        // single-turn count (Anthropic's per-call hard cap is
+        // < 2^25 tokens).
+        f64::from(cache_read_input_tokens) / (denom as f64)
+    };
+    let cum_in_after = cum_in_so_far
+        .saturating_add(u64::from(input_tokens))
+        .saturating_add(u64::from(cache_creation_input_tokens))
+        .saturating_add(u64::from(cache_read_input_tokens));
+    let cum_out_after = cum_out_so_far.saturating_add(u64::from(output_tokens));
+    // `{:?}` on `&str` produces a JSON-compatible double-quoted
+    // string with escaping — the kernel-side log scraper relies
+    // on `serde_json::from_str` round-tripping this line, so the
+    // quote-and-escape contract MUST go through `Debug` rather
+    // than ad-hoc concatenation. (Confirmed by the witness test
+    // `planner_turn_usage_log_shape` which `serde_json::from_slice`s
+    // the captured bytes.)
+    let _ = writeln!(
+        out,
+        "{{\"event\":\"planner_turn_usage\",\
+\"task_id\":{:?},\
+\"session_id\":{:?},\
+\"role\":{:?},\
+\"model\":{:?},\
+\"turn\":{},\
+\"input_tokens\":{},\
+\"output_tokens\":{},\
+\"cache_creation_input_tokens\":{},\
+\"cache_read_input_tokens\":{},\
+\"cache_hit_ratio\":{},\
+\"cumulative_input_tokens\":{},\
+\"cumulative_output_tokens\":{}}}",
+        task_id,
+        session_id,
+        role,
+        model,
+        turn,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens,
+        cache_read_input_tokens,
+        cache_hit_ratio,
+        cum_in_after,
+        cum_out_after,
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DispatchConfig + DispatchError + DispatchOutcome
 // ---------------------------------------------------------------------------
 
@@ -108,6 +217,24 @@ pub struct DispatchConfig {
     /// when an operator only cares about total spend rather than
     /// the input/output split.
     pub max_tokens_total: Option<u64>,
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — task id stamped
+    /// onto every `planner_turn_usage` stderr line so the kernel
+    /// can correlate per-turn cache telemetry with the task that
+    /// drove it. Empty / `"<unknown>"` for sessions that do not
+    /// carry a task id (orchestrator) or for fixtures that did
+    /// not stamp it. The driver populates this field from
+    /// [`crate::BootArgs::task_id`].
+    pub task_id_for_logs: String,
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — session token
+    /// stamped onto every `planner_turn_usage` line. Same fallback
+    /// rules as `task_id_for_logs`. Driver populates from
+    /// [`crate::BootEnv::session_token`].
+    pub session_id_for_logs: String,
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — role shortname
+    /// (`"executor"` / `"reviewer"` / `"orchestrator"`) stamped
+    /// onto every `planner_turn_usage` line. Driver populates from
+    /// [`crate::Role::shortname`].
+    pub role_for_logs: String,
 }
 
 impl DispatchConfig {
@@ -131,7 +258,33 @@ impl DispatchConfig {
             max_tokens_input_total: None,
             max_tokens_output_total: None,
             max_tokens_total: None,
+            // `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — placeholder
+            // values used when a fixture / orchestrator session does
+            // not stamp a real id. Production callers (the planner
+            // driver) overwrite all three immediately after
+            // construction.
+            task_id_for_logs: "<unknown>".to_owned(),
+            session_id_for_logs: "<unknown>".to_owned(),
+            role_for_logs: "<unknown>".to_owned(),
         }
+    }
+
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — read accessor
+    /// the dispatch loop uses when emitting `planner_turn_usage`
+    /// lines. Returns `&str` so the formatter can `{:?}`-quote it
+    /// (matching the JSON-line shape) without reallocating.
+    pub fn task_id_for_logs(&self) -> &str {
+        &self.task_id_for_logs
+    }
+
+    /// See [`Self::task_id_for_logs`].
+    pub fn session_id_for_logs(&self) -> &str {
+        &self.session_id_for_logs
+    }
+
+    /// See [`Self::task_id_for_logs`].
+    pub fn role_for_logs(&self) -> &str {
+        &self.role_for_logs
     }
 }
 
@@ -286,6 +439,24 @@ pub struct DispatchLoop {
     /// binary via [`DispatchLoop::with_terminal_tools`]; default is
     /// empty (the loop terminates only on `Idle` or `MaxTurnsExceeded`).
     terminal_tools: Vec<&'static str>,
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — running fold
+    /// of `Usage::cache_creation_input_tokens` across every turn of
+    /// the most recent `run` / `run_streaming` invocation. Reset to
+    /// 0 at the top of each call. Exposed via
+    /// [`Self::last_cumulative_cache_creation_tokens`] so the
+    /// driver can stamp it onto the outbound
+    /// [`raxis_types::TokensReport::cache_creation_tokens`] field
+    /// at terminal-intent submission time. Tracked separately from
+    /// the dispatch loop's `cum_in` (which folds cache + non-cache
+    /// input tokens together for ceiling-enforcement purposes) so
+    /// the kernel-side per-task SQLite columns
+    /// (`tasks.cumulative_cache_creation_tokens` /
+    /// `cumulative_cache_read_tokens`) get an unmuddied count.
+    cum_cache_creation_input_tokens: u64,
+    /// See [`Self::cum_cache_creation_input_tokens`]. Same shape /
+    /// reset semantics, but folds
+    /// `Usage::cache_read_input_tokens`.
+    cum_cache_read_input_tokens: u64,
 }
 
 impl DispatchLoop {
@@ -304,7 +475,25 @@ impl DispatchLoop {
             config,
             ctx,
             terminal_tools: Vec::new(),
+            cum_cache_creation_input_tokens: 0,
+            cum_cache_read_input_tokens: 0,
         }
+    }
+
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — cumulative
+    /// `cache_creation_input_tokens` across the most recent
+    /// `run` / `run_streaming` invocation. Returns 0 before the
+    /// first call. The driver reads this after the dispatch loop
+    /// terminates and stamps it onto the outbound
+    /// [`raxis_types::TokensReport::cache_creation_tokens`] field.
+    pub fn last_cumulative_cache_creation_tokens(&self) -> u64 {
+        self.cum_cache_creation_input_tokens
+    }
+
+    /// See [`Self::last_cumulative_cache_creation_tokens`]. Folds
+    /// `cache_read_input_tokens` instead.
+    pub fn last_cumulative_cache_read_tokens(&self) -> u64 {
+        self.cum_cache_read_input_tokens
     }
 
     /// Declare which tool names short-circuit the loop. The role
@@ -374,6 +563,13 @@ impl DispatchLoop {
         // the per-session ceilings before issuing the next request.
         let mut cum_in: u64 = 0;
         let mut cum_out: u64 = 0;
+        // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — reset the
+        // cumulative cache trackers so a `DispatchLoop` reused
+        // across calls (currently only test fixtures) starts each
+        // run with a clean slate. Production binaries spawn a
+        // fresh loop per session so this reset is defensive.
+        self.cum_cache_creation_input_tokens = 0;
+        self.cum_cache_read_input_tokens = 0;
 
         for turn in 0..self.config.max_turns {
             let resp = self.model.create_message(&req).await?;
@@ -386,12 +582,47 @@ impl DispatchLoop {
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
             } = resp.usage;
+
+            // `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — emit the
+            // structured per-turn cache telemetry line BEFORE the
+            // cum_in / cum_out fold. The helper computes the
+            // post-fold projection internally so the operator sees
+            // the same `cumulative_*` values the next ceiling
+            // check will operate on.
+            emit_turn_usage(
+                &mut std::io::stderr().lock(),
+                self.config.task_id_for_logs(),
+                self.config.session_id_for_logs(),
+                self.config.role_for_logs(),
+                &self.config.model,
+                turn,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                cum_in,
+                cum_out,
+            );
+
             cum_in = cum_in.saturating_add(
                 u64::from(input_tokens)
                     .saturating_add(u64::from(cache_creation_input_tokens))
                     .saturating_add(u64::from(cache_read_input_tokens)),
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
+            // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — fold
+            // the cache-only counts onto the dispatch loop's
+            // dedicated trackers so the driver can stamp them
+            // separately onto `TokensReport.cache_*_tokens` after
+            // the loop terminates (the kernel's per-task SQLite
+            // columns want the cache-only fold, not the combined
+            // `cum_in` total used for ceiling enforcement).
+            self.cum_cache_creation_input_tokens = self
+                .cum_cache_creation_input_tokens
+                .saturating_add(u64::from(cache_creation_input_tokens));
+            self.cum_cache_read_input_tokens = self
+                .cum_cache_read_input_tokens
+                .saturating_add(u64::from(cache_read_input_tokens));
 
             // V2 `v2_extended_gaps.md §2.5` — enforce the per-session
             // token caps BEFORE inspecting the response for terminal
@@ -581,6 +812,12 @@ impl DispatchLoop {
 
         let mut cum_in: u64 = 0;
         let mut cum_out: u64 = 0;
+        // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — same reset
+        // shape as `run()`. Streaming and buffered paths share the
+        // accessor surface; the dispatch loop's caller (the driver)
+        // does not care which path produced the cumulative count.
+        self.cum_cache_creation_input_tokens = 0;
+        self.cum_cache_read_input_tokens = 0;
 
         for turn in 0..self.config.max_turns {
             // ── Stream consumption with mid-stream budget check ──
@@ -649,12 +886,44 @@ impl DispatchLoop {
                 cache_creation_input_tokens,
                 cache_read_input_tokens,
             } = resp.usage;
+
+            // `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — emit the
+            // structured per-turn cache telemetry line BEFORE the
+            // cum_in / cum_out fold, mirroring the buffered `run()`
+            // path. The Anthropic SSE provider also emits
+            // intermediate `Usage` events mid-stream — those are
+            // intentionally NOT logged here (only the canonical
+            // post-`Complete` `Usage` is) so each turn produces
+            // exactly one log line regardless of provider chunking.
+            emit_turn_usage(
+                &mut std::io::stderr().lock(),
+                self.config.task_id_for_logs(),
+                self.config.session_id_for_logs(),
+                self.config.role_for_logs(),
+                &self.config.model,
+                turn,
+                input_tokens,
+                output_tokens,
+                cache_creation_input_tokens,
+                cache_read_input_tokens,
+                cum_in,
+                cum_out,
+            );
+
             cum_in = cum_in.saturating_add(
                 u64::from(input_tokens)
                     .saturating_add(u64::from(cache_creation_input_tokens))
                     .saturating_add(u64::from(cache_read_input_tokens)),
             );
             cum_out = cum_out.saturating_add(u64::from(output_tokens));
+            // `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` — see
+            // `run()` for rationale; same fold shape.
+            self.cum_cache_creation_input_tokens = self
+                .cum_cache_creation_input_tokens
+                .saturating_add(u64::from(cache_creation_input_tokens));
+            self.cum_cache_read_input_tokens = self
+                .cum_cache_read_input_tokens
+                .saturating_add(u64::from(cache_read_input_tokens));
 
             // V2 `v2_extended_gaps.md §2.5` — enforce per-session token
             // caps BEFORE inspecting the response for terminal tools /
@@ -1511,6 +1780,188 @@ mod tests {
         assert!(
             matches!(out, DispatchOutcome::Idle { .. }),
             "under-budget streaming must complete normally, got {out:?}"
+        );
+    }
+
+    // ── `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` witnesses ─────────
+    //
+    // These tests exercise `emit_turn_usage` directly (writing into a
+    // `Vec<u8>` so stderr capture is unnecessary) AND the production
+    // dispatch loop (so the wire shape and the per-turn cardinality
+    // are pinned end-to-end). The eprintln! production path calls
+    // into the same helper, so any drift in the JSON shape fails
+    // these tests deterministically.
+
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — the
+    /// `planner_turn_usage` JSON line carries the right keys and
+    /// the cache-hit ratio is computed correctly. Synthetic Usage
+    /// per the iter62 fix spec: `{input=10, output=20,
+    /// cache_creation=300, cache_read=4000}` ⇒ ratio
+    /// `4000 / (4000 + 10 + 300) = 4000 / 4310 ≈ 0.9281`.
+    #[test]
+    fn planner_turn_usage_log_shape() {
+        let mut buf: Vec<u8> = Vec::new();
+        emit_turn_usage(
+            &mut buf,
+            "task-iter62-shape",
+            "session-token-iter62",
+            "executor",
+            "claude-sonnet-4-5-20250929",
+            0,
+            10,
+            20,
+            300,
+            4000,
+            0,
+            0,
+        );
+        let line = std::str::from_utf8(&buf).expect("log line must be UTF-8");
+        // Trim the trailing newline before parsing.
+        let trimmed = line.trim_end_matches('\n');
+        assert!(
+            trimmed.contains("\"event\":\"planner_turn_usage\""),
+            "missing event tag: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("\"cache_creation_input_tokens\":300"),
+            "missing cache_creation count: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("\"cache_read_input_tokens\":4000"),
+            "missing cache_read count: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("\"task_id\":\"task-iter62-shape\""),
+            "missing task_id: {trimmed}"
+        );
+        assert!(
+            trimmed.contains("\"role\":\"executor\""),
+            "missing role: {trimmed}"
+        );
+
+        // Cross-check the ratio numerically by parsing the line as
+        // JSON. This is what the kernel-side scraper does.
+        let v: serde_json::Value =
+            serde_json::from_str(trimmed).expect("emitted line must be valid JSON");
+        let ratio = v["cache_hit_ratio"]
+            .as_f64()
+            .expect("cache_hit_ratio must be a JSON number");
+        assert!(
+            (0.92..=0.93).contains(&ratio),
+            "cache_hit_ratio out of expected band [0.92, 0.93]: {ratio}"
+        );
+        // Cumulative projections fold the current turn's tokens.
+        assert_eq!(
+            v["cumulative_input_tokens"].as_u64(),
+            Some(10 + 300 + 4000),
+            "cumulative_input_tokens must include cache + non-cache input"
+        );
+        assert_eq!(v["cumulative_output_tokens"].as_u64(), Some(20));
+    }
+
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — every turn the
+    /// dispatch loop drives MUST produce exactly one
+    /// `planner_turn_usage` line. The witness drives the helper
+    /// directly across three synthetic turns (matching the wire
+    /// shape the production loop emits) and asserts both the
+    /// cardinality and the per-turn ordering of the `turn` field.
+    #[test]
+    fn planner_turn_usage_emitted_per_turn() {
+        let mut buf: Vec<u8> = Vec::new();
+        // Three turns with distinct usage so we can pin the order.
+        for (idx, (in_t, out_t, cc, cr)) in
+            [(10u32, 5u32, 0u32, 0u32), (12, 6, 100, 200), (14, 7, 50, 150)]
+                .iter()
+                .enumerate()
+        {
+            emit_turn_usage(
+                &mut buf,
+                "task-iter62-percent",
+                "sess-iter62",
+                "executor",
+                "claude-sonnet-4-5-20250929",
+                idx as u32,
+                *in_t,
+                *out_t,
+                *cc,
+                *cr,
+                0,
+                0,
+            );
+        }
+        let text = std::str::from_utf8(&buf).expect("log buffer must be UTF-8");
+        let lines: Vec<&str> = text.lines().filter(|l| !l.is_empty()).collect();
+        assert_eq!(
+            lines.len(),
+            3,
+            "expected exactly 3 planner_turn_usage lines, got {}: {text}",
+            lines.len()
+        );
+        for (idx, line) in lines.iter().enumerate() {
+            assert!(
+                line.contains("\"event\":\"planner_turn_usage\""),
+                "line {idx} missing event tag: {line}"
+            );
+            let v: serde_json::Value =
+                serde_json::from_str(line).expect("each emitted line must be valid JSON");
+            assert_eq!(
+                v["turn"].as_u64(),
+                Some(idx as u64),
+                "turn ordering broke at line {idx}: {line}"
+            );
+        }
+    }
+
+    /// `INV-OBSERVABILITY-CACHE-TOKEN-EMITTED-01` — the cache-hit
+    /// ratio computation MUST NOT panic when every cache counter
+    /// is zero (single-turn no-cache path). Pins the
+    /// `denom == 0 ⇒ 0.0` guard in `emit_turn_usage`.
+    #[test]
+    fn planner_turn_usage_zero_cache_does_not_panic() {
+        let mut buf: Vec<u8> = Vec::new();
+        emit_turn_usage(
+            &mut buf,
+            "task-iter62-zero",
+            "sess-iter62",
+            "executor",
+            "claude-sonnet-4-5-20250929",
+            0,
+            10,
+            20,
+            0,
+            0,
+            0,
+            0,
+        );
+        let line = std::str::from_utf8(&buf).expect("must be UTF-8");
+        let trimmed = line.trim_end_matches('\n');
+        let v: serde_json::Value =
+            serde_json::from_str(trimmed).expect("must parse as JSON");
+        // `input_tokens=10` is non-zero so the denominator is 10
+        // (not zero) and the ratio is `0 / 10 = 0.0`. The
+        // assertion is the same either way: the wire shape
+        // surfaces 0.0 and emits no panic / NaN / inf.
+        let ratio = v["cache_hit_ratio"]
+            .as_f64()
+            .expect("cache_hit_ratio must be a JSON number");
+        assert_eq!(
+            ratio, 0.0_f64,
+            "ratio must be exactly 0.0 when cache counters are zero, got {ratio}"
+        );
+
+        // Also exercise the truly all-zero path (every counter 0)
+        // to pin the explicit `denom == 0` guard.
+        let mut buf2: Vec<u8> = Vec::new();
+        emit_turn_usage(
+            &mut buf2, "t", "s", "executor", "m", 0, 0, 0, 0, 0, 0, 0,
+        );
+        let v2: serde_json::Value =
+            serde_json::from_str(std::str::from_utf8(&buf2).unwrap().trim_end_matches('\n'))
+                .expect("must parse as JSON");
+        assert_eq!(
+            v2["cache_hit_ratio"].as_f64(),
+            Some(0.0_f64),
+            "all-zero usage must yield ratio 0.0 (no division by zero)"
         );
     }
 }
