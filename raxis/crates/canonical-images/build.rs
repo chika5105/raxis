@@ -27,14 +27,42 @@
 //!   32-byte raw file. Preferred for HSM-backed pipelines that
 //!   never materialise the bytes as a hex string.
 //!
-//! If neither is set, the constant defaults to the all-zero
-//! `UNPOPULATED_SIGNING_KEY_BYTES` placeholder — same compile-time
-//! shape as before this build script existed, so developer builds
-//! continue to work without ceremony. The boot-path verifier
-//! (`verify_canonical_image_via_manifest`) detects the placeholder
-//! and surfaces `CanonicalImageError::SigningKeyFpNotPopulated`,
-//! making "I forgot to set the env var" loud and obvious in
-//! production.
+//! ## Resolution chain (iter62, INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01)
+//!
+//! 1. `RAXIS_KERNEL_SIGNING_KEY_HEX` (highest priority — explicit
+//!    operator override; CI / release pipelines).
+//! 2. `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` (alt env var for
+//!    HSM-backed pipelines that hand a path rather than a hex
+//!    string).
+//! 3. `<workspace_root>/.git/info/raxis-signing-key/pk.hex`
+//!    (per-clone dev key — written by `cargo xtask images bake`
+//!    OR by this build script's dev-profile auto-mint, see step 4).
+//! 4. **Profile-dependent fallback.**
+//!    * Release builds (`PROFILE=release`): emit the all-zero
+//!      placeholder. The kernel boot's `assert_trust_anchor_present_or_panic`
+//!      then trips fail-loud at runtime — preserving the
+//!      `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` contract for production.
+//!    * Dev / test builds (any other `PROFILE`): mint a fresh
+//!      Ed25519 keypair from the OS RNG, persist it to
+//!      `.git/info/raxis-signing-key/{sk,pk}.hex` (modes `0600` /
+//!      `0644`, parent dir `0700`), and use the public half. The
+//!      same artefact the xtask's `ensure_dev_signing_keypair`
+//!      writes — both seams converge by routing through
+//!      `raxis_dev_signing_key::ensure_dev_signing_keypair`.
+//!
+//! Step 4's dev-mint exists to fix the iter60 regression where a
+//! bare `cargo test -p raxis-kernel` (which does NOT go through
+//! xtask) would build a kernel binary with the all-zero placeholder
+//! and panic at boot. The fail-loud guarantee was always about
+//! preventing a SILENT disablement of image integrity verification
+//! in production — it was never about making `cargo test` unusable.
+//! Release builds keep the fail-loud posture; dev / test builds
+//! materialise a per-clone key on first build and reuse it
+//! thereafter.
+//!
+//! Validation failure on a hex / path env var input is a hard
+//! build error so a mistyped value never silently degrades to the
+//! placeholder branch.
 //!
 //! ## Why we do NOT bake the secret half here
 //!
@@ -96,6 +124,61 @@ const TRUST_ANCHOR_LEN_BYTES: usize = 32;
 const TRUST_ANCHOR_LEN_HEX: usize = TRUST_ANCHOR_LEN_BYTES * 2;
 const TRUST_ANCHOR_OUT_FILE: &str = "trust_anchor.rs";
 
+/// Build profile classification used by the resolution chain.
+/// `Release` keeps the fail-loud posture (no auto-mint); `Dev`
+/// materialises a per-clone keypair on first build.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BuildProfile {
+    /// `PROFILE=release`. The kernel boot path's
+    /// `assert_trust_anchor_present_or_panic` is the only
+    /// fallback — the build script does NOT auto-mint.
+    Release,
+    /// Anything else (`debug`, custom profiles, `cargo test`, …).
+    /// Auto-mint the per-clone dev key on first build.
+    Dev,
+}
+
+impl BuildProfile {
+    fn from_env() -> Self {
+        // Cargo always sets `PROFILE` for build scripts. Treat the
+        // absence as `Dev` so an unusual cargo invocation that omits
+        // it (e.g. a bare `rustc` driver in a niche tooling test)
+        // takes the dev-mint path rather than baking placeholder
+        // bytes into a binary the developer plans to run.
+        match env::var("PROFILE").as_deref() {
+            Ok("release") => BuildProfile::Release,
+            _ => BuildProfile::Dev,
+        }
+    }
+}
+
+/// Source of the trust-anchor bytes — emitted on stderr at
+/// build-script time so a `cargo build -vv` log carries the
+/// resolution decision and integration witnesses can pin the
+/// branch taken.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum AnchorSource {
+    EnvHex,
+    EnvBytesPath,
+    DotGitInfoFile,
+    DevAutoMint,
+    PlaceholderRelease,
+    PlaceholderNoWorkspaceRoot,
+}
+
+impl AnchorSource {
+    fn as_str(self) -> &'static str {
+        match self {
+            AnchorSource::EnvHex => "env_RAXIS_KERNEL_SIGNING_KEY_HEX",
+            AnchorSource::EnvBytesPath => "env_RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH",
+            AnchorSource::DotGitInfoFile => "git_info_pk_hex",
+            AnchorSource::DevAutoMint => "dev_auto_mint",
+            AnchorSource::PlaceholderRelease => "placeholder_release_no_input",
+            AnchorSource::PlaceholderNoWorkspaceRoot => "placeholder_no_workspace_root",
+        }
+    }
+}
+
 fn main() {
     // Re-run the build script when any input variable changes.
     // Without this, `cargo` will cache the previous output even after
@@ -104,9 +187,20 @@ fn main() {
     println!("cargo:rerun-if-env-changed={TRUST_ANCHOR_PATH_VAR}");
     println!("cargo:rerun-if-env-changed={REVIEWER_DIGEST_HEX_VAR}");
     println!("cargo:rerun-if-env-changed={ORCHESTRATOR_DIGEST_HEX_VAR}");
+    println!("cargo:rerun-if-env-changed=PROFILE");
     println!("cargo:rerun-if-changed=build.rs");
 
-    let trust_anchor = resolve_trust_anchor_bytes();
+    let profile = BuildProfile::from_env();
+    let (trust_anchor, source) = resolve_trust_anchor_bytes(profile);
+
+    // Surface the resolution decision so a `cargo build -vv` reader
+    // and the iter62 integration witnesses can both observe which
+    // arm fired.
+    println!(
+        "cargo:warning=raxis-canonical-images: trust anchor source = {}",
+        source.as_str()
+    );
+
     let reviewer_digest = resolve_role_digest(REVIEWER_DIGEST_HEX_VAR);
     let orchestrator_digest = resolve_role_digest(ORCHESTRATOR_DIGEST_HEX_VAR);
 
@@ -124,13 +218,27 @@ fn main() {
     if let Ok(p) = env::var(TRUST_ANCHOR_PATH_VAR) {
         println!("cargo:rerun-if-changed={p}");
     }
+
+    // Also re-run when the dev-key file changes. Once `cargo xtask
+    // images bake` (or this build script's auto-mint) lands the file,
+    // a subsequent rotation (the operator deletes + re-runs bake)
+    // must propagate into the next kernel build.
+    if let Some(ws_root) = current_workspace_root() {
+        let pk = raxis_dev_signing_key::pk_path(&ws_root);
+        println!("cargo:rerun-if-changed={}", pk.display());
+    }
 }
 
 /// Read the trust-anchor source-of-truth in priority order:
 ///
 ///   1. `RAXIS_KERNEL_SIGNING_KEY_HEX`   (64 lowercase hex chars)
 ///   2. `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` (path to 32-byte raw file)
-///   3. fallback — all-zero placeholder
+///   3. `<workspace>/.git/info/raxis-signing-key/pk.hex` (per-clone
+///      dev key seam shared with `cargo xtask images bake`)
+///   4. Profile-dependent fallback: dev profiles auto-mint a fresh
+///      keypair to the same `.git/info/raxis-signing-key/` location;
+///      release profiles emit the all-zero placeholder so the
+///      kernel boot fails loud.
 ///
 /// Each input source is validated for length and (in the hex case)
 /// alphabet membership. Validation failure is a hard build error so
@@ -139,37 +247,101 @@ fn main() {
 /// in a build that the operator believed was signed.
 ///
 /// `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` (iter60) — the placeholder
-/// arm is the kernel-boot trip wire. The kernel's canonical-image
-/// registry init refuses to proceed when the embedded trust anchor
-/// is the all-zero placeholder; it panics with a clear, actionable
-/// message before the dashboard binds or the orchestrator can spawn
-/// a planner VM. See `kernel/src/canonical_images_preflight.rs` for
-/// the panic site and `specs/v3/canonical-image-trust-anchor.md` for
-/// the full operator workflow (TL;DR: run `cargo xtask images
-/// bake-all`, which auto-generates a dev keypair on first run and
-/// exports `RAXIS_KERNEL_SIGNING_KEY_HEX` into the kernel rebuild
-/// step).
-fn resolve_trust_anchor_bytes() -> [u8; TRUST_ANCHOR_LEN_BYTES] {
+/// arm under release profile is the kernel-boot trip wire.
+/// `INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01` (iter62) — the dev-profile
+/// auto-mint avoids the trip wire on local workflows by minting the
+/// per-clone key on first build, while keeping the file on the same
+/// disk path the xtask seam writes to. See the module-level doc
+/// comment + `specs/v3/canonical-image-trust-anchor.md` for the
+/// full operator workflow.
+fn resolve_trust_anchor_bytes(
+    profile: BuildProfile,
+) -> ([u8; TRUST_ANCHOR_LEN_BYTES], AnchorSource) {
     if let Ok(hex_input) = env::var(TRUST_ANCHOR_HEX_VAR) {
         let trimmed = hex_input.trim();
         if !trimmed.is_empty() {
-            return decode_hex(trimmed).unwrap_or_else(|e| panic!("{TRUST_ANCHOR_HEX_VAR}: {e}"));
+            let bytes =
+                decode_hex(trimmed).unwrap_or_else(|e| panic!("{TRUST_ANCHOR_HEX_VAR}: {e}"));
+            return (bytes, AnchorSource::EnvHex);
         }
     }
 
     if let Ok(path_input) = env::var(TRUST_ANCHOR_PATH_VAR) {
         let trimmed = path_input.trim();
         if !trimmed.is_empty() {
-            return read_raw_bytes(trimmed)
-                .unwrap_or_else(|e| panic!("{TRUST_ANCHOR_PATH_VAR}: {e}"));
+            let bytes =
+                read_raw_bytes(trimmed).unwrap_or_else(|e| panic!("{TRUST_ANCHOR_PATH_VAR}: {e}"));
+            return (bytes, AnchorSource::EnvBytesPath);
         }
     }
 
-    // Placeholder. lib.rs `EXPECTED_KERNEL_SIGNING_KEY_BYTES` doc
-    // explains how this is detected at runtime; the kernel boot
-    // path panics fail-loud (see `kernel/src/main.rs::main` →
-    // `canonical_images_preflight::assert_trust_anchor_present`).
-    [0u8; TRUST_ANCHOR_LEN_BYTES]
+    // Discover the workspace root — required for both the
+    // .git/info/raxis-signing-key/ seam and the dev auto-mint.
+    let workspace_root = match current_workspace_root() {
+        Some(p) => p,
+        None => {
+            // No workspace root visible (e.g. a `cargo publish`-staged
+            // tarball extracted under `~/.cargo/registry/`). The
+            // .git directory does not exist, so neither the file-read
+            // nor the auto-mint can succeed. Leave the placeholder;
+            // the kernel boot's fail-loud panic still fires for
+            // release builds and the operator's recovery is to set
+            // `RAXIS_KERNEL_SIGNING_KEY_HEX` explicitly.
+            return (
+                [0u8; TRUST_ANCHOR_LEN_BYTES],
+                AnchorSource::PlaceholderNoWorkspaceRoot,
+            );
+        }
+    };
+
+    // Step 3: read an existing pk.hex if present (the iter61 xtask
+    // seam, OR a prior dev-mint from this build script).
+    match raxis_dev_signing_key::read_existing_pk_bytes(&workspace_root) {
+        Ok(Some(bytes)) => return (bytes, AnchorSource::DotGitInfoFile),
+        Ok(None) => {}
+        Err(e) => panic!(
+            "raxis-canonical-images/build.rs: failed to read existing dev signing pk.hex: {e}"
+        ),
+    }
+
+    // Step 4: profile-dependent fallback.
+    match profile {
+        BuildProfile::Release => {
+            // RELEASE BUILD — never silently mint a key. The
+            // kernel boot's `assert_trust_anchor_present_or_panic`
+            // is the trip wire. INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01.
+            (
+                [0u8; TRUST_ANCHOR_LEN_BYTES],
+                AnchorSource::PlaceholderRelease,
+            )
+        }
+        BuildProfile::Dev => {
+            // DEV / TEST BUILD — auto-mint a per-clone keypair so
+            // `cargo test -p raxis-kernel` (and any other dev-loop
+            // cargo command) produces a kernel binary that boots
+            // without manual env-var ceremony. The same artefact
+            // shape `cargo xtask images bake` writes — both seams
+            // converge by routing through this single helper.
+            // INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01.
+            let kp = raxis_dev_signing_key::ensure_dev_signing_keypair(&workspace_root)
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "raxis-canonical-images/build.rs: failed to auto-mint dev signing keypair \
+                     at {} (set RAXIS_KERNEL_SIGNING_KEY_HEX explicitly to bypass the \
+                     auto-mint): {e}",
+                        raxis_dev_signing_key::git_info_signing_key_dir(&workspace_root).display(),
+                    )
+                });
+            // ensure_dev_signing_keypair guarantees pk_hex is 64
+            // lowercase hex chars; route through the same decoder
+            // used for the env-var arms so a malformed shape would
+            // surface with the same diagnostic.
+            let bytes = decode_hex(&kp.pk_hex).expect(
+                "ensure_dev_signing_keypair returns 64 lowercase hex chars by construction",
+            );
+            (bytes, AnchorSource::DevAutoMint)
+        }
+    }
 }
 
 /// Resolve a per-role image-digest env var. Hex-only input (the raw-
@@ -187,6 +359,17 @@ fn resolve_role_digest(env_var: &str) -> [u8; TRUST_ANCHOR_LEN_BYTES] {
         return [0u8; TRUST_ANCHOR_LEN_BYTES];
     }
     decode_hex(trimmed).unwrap_or_else(|e| panic!("{env_var}: {e}"))
+}
+
+/// Discover the workspace root from `CARGO_MANIFEST_DIR`. We use
+/// the cargo-supplied per-package manifest dir as the walk seed
+/// because the build script's `current_dir()` is also that path,
+/// but threading it through `CARGO_MANIFEST_DIR` makes the
+/// derivation explicit (and survives a future cargo flag that
+/// changes the build-script CWD).
+fn current_workspace_root() -> Option<PathBuf> {
+    let crate_dir = env::var_os("CARGO_MANIFEST_DIR").map(PathBuf::from)?;
+    raxis_dev_signing_key::find_workspace_root_from(&crate_dir)
 }
 
 fn decode_hex(input: &str) -> Result<[u8; TRUST_ANCHOR_LEN_BYTES], String> {

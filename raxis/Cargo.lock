@@ -3142,6 +3142,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "rand 0.8.6",
+ "raxis-dev-signing-key",
  "raxis-image-manifest",
  "sha2 0.10.9",
  "tempfile",
@@ -3516,6 +3517,16 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+]
+
+[[package]]
+name = "raxis-dev-signing-key"
+version = "0.1.0"
+dependencies = [
+ "ed25519-dalek",
+ "getrandom 0.2.17",
+ "hex",
+ "tempfile",
 ]
 
 [[package]]
@@ -5760,6 +5771,7 @@ dependencies = [
  "hex",
  "libc",
  "rand 0.8.6",
+ "raxis-dev-signing-key",
  "raxis-image-builder",
  "raxis-image-manifest",
  "raxis-initramfs-builder",

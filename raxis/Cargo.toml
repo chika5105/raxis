@@ -49,6 +49,7 @@ members = [
     "crates/domain-git",
     "crates/prompts",
     "crates/canonical-images",
+    "crates/dev-signing-key",
     "crates/image-manifest",
     "crates/image-builder",
     "crates/initramfs-builder",
@@ -250,6 +251,17 @@ raxis-domain            = { path = "crates/domain" }
 raxis-domain-git        = { path = "crates/domain-git" }
 raxis-prompts           = { path = "crates/prompts" }
 raxis-canonical-images  = { path = "crates/canonical-images" }
+# Per-clone dev signing keypair autogen + on-disk discovery for the
+# canonical-image trust anchor. Shared between the kernel-side
+# `crates/canonical-images/build.rs` (which bakes the public half
+# into the kernel binary at compile time and auto-mints the
+# keypair on dev builds when `RAXIS_KERNEL_SIGNING_KEY_HEX` is
+# unset) and `xtask::images::run_bake_inner` (which mints + persists
+# the keypair on the operator workflow side and exports the public
+# half into the cargo subprocess env). Both seams converge on the
+# same `<workspace>/.git/info/raxis-signing-key/{sk,pk}.hex`
+# artefact by routing through this crate.
+raxis-dev-signing-key   = { path = "crates/dev-signing-key" }
 raxis-image-manifest    = { path = "crates/image-manifest" }
 raxis-image-builder     = { path = "crates/image-builder" }
 raxis-initramfs-builder = { path = "crates/initramfs-builder" }

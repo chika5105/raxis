@@ -61,8 +61,8 @@ fn main() -> anyhow::Result<()> {
             // `cargo xtask images <subcommand> [args...]`
             let mut rest = args.into_iter().skip(1);
             let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
-                "missing images subcommand; available: bake, preflight, \
-                 dev-kernel, bake-rootfs, dev-stage, build-all"
+                "missing images subcommand; available: bake, bake-release, \
+                 preflight, dev-kernel, bake-rootfs, dev-stage, build-all"
             ))?;
             let tail: Vec<String> = rest.collect();
             match sub.as_str() {
@@ -70,20 +70,28 @@ fn main() -> anyhow::Result<()> {
                 // pipeline: preflight + bake-rootfs + dev-stage +
                 // build-all + vmlinux stage + per-role integrity
                 // manifest. See `xtask/src/images.rs::run_bake`.
-                "bake"        => images::run_bake(&tail).context("images bake"),
+                "bake"         => images::run_bake(&tail).context("images bake"),
+                // `cargo xtask images bake-release` is the
+                // CI / release-pipeline-targeted bake (iter62,
+                // INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01). It runs
+                // four refusal guards over the prod signing key and
+                // the kernel's compiled-in trust anchor BEFORE
+                // delegating to the inner bake logic, so a release
+                // can never be produced with the per-clone dev key.
+                "bake-release" => images::run_bake_release(&tail).context("images bake-release"),
                 // `cargo xtask images preflight` — read-only verifier
                 // of every input `bake` would need. Used by CI to
                 // surface missing-input failures before spending time
                 // on a bake that would later abort.
-                "preflight"   => images::run_preflight(&tail).context("images preflight"),
-                "dev-kernel"  => dev_kernel::run(&tail).context("images dev-kernel"),
-                "bake-rootfs" => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
-                "dev-stage"   => images::run_dev_stage(&tail).context("images dev-stage"),
-                "build-all"   => images::run_build_all(&tail).context("images build-all"),
-                other         => anyhow::bail!(
+                "preflight"    => images::run_preflight(&tail).context("images preflight"),
+                "dev-kernel"   => dev_kernel::run(&tail).context("images dev-kernel"),
+                "bake-rootfs"  => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
+                "dev-stage"    => images::run_dev_stage(&tail).context("images dev-stage"),
+                "build-all"    => images::run_build_all(&tail).context("images build-all"),
+                other          => anyhow::bail!(
                     "unknown images subcommand: {other:?}; \
-                     available: bake, preflight, dev-kernel, bake-rootfs, \
-                     dev-stage, build-all"
+                     available: bake, bake-release, preflight, dev-kernel, \
+                     bake-rootfs, dev-stage, build-all"
                 ),
             }
         }

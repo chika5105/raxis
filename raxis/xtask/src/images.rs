@@ -1184,168 +1184,316 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
 // removes the gitignore step entirely (git itself refuses to stage
 // anything under `.git/`).
 
-const GIT_INFO_KEY_DIR_REL: &[&str] = &[".git", "info", "raxis-signing-key"];
-const GIT_INFO_KEY_SK_FILENAME: &str = "sk.hex";
-const GIT_INFO_KEY_PK_FILENAME: &str = "pk.hex";
+// As of iter62 (`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`) the
+// keypair-mint logic lives in `crates/dev-signing-key/` so the
+// kernel-side `crates/canonical-images/build.rs` and this xtask
+// driver write the SAME `.git/info/raxis-signing-key/{sk,pk}.hex`
+// artefact. Both halves now land at mode 0600 (uniform, iter62
+// hardening); the parent dir is 0700.
+const GIT_INFO_KEY_SK_FILENAME: &str = raxis_dev_signing_key::SK_FILENAME;
+#[cfg_attr(not(test), allow(dead_code))]
+const GIT_INFO_KEY_PK_FILENAME: &str = raxis_dev_signing_key::PK_FILENAME;
 
-/// Compute the `.git/info/raxis-signing-key/` directory path under
-/// the supplied workspace root. Pure-data: no IO.
-pub(crate) fn git_info_signing_key_dir(workspace_root: &Path) -> PathBuf {
-    let mut p = workspace_root.to_path_buf();
-    for seg in GIT_INFO_KEY_DIR_REL {
-        p.push(seg);
-    }
-    p
-}
+pub(crate) use raxis_dev_signing_key::{ensure_dev_signing_keypair, git_info_signing_key_dir};
 
-/// Outcome of the autogen step. The `pk_hex` is the 64-lowercase-hex
-/// public-key string ready to drop into `RAXIS_KERNEL_SIGNING_KEY_HEX`.
+// ---------------------------------------------------------------------------
+// `cargo xtask images bake-release` — release-pipeline-targeted bake
+// (iter62, INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01)
+// ---------------------------------------------------------------------------
+//
+// The dev `bake` path defaults to the per-clone autogen keypair under
+// `<workspace>/.git/info/raxis-signing-key/sk.hex` (iter61). That is
+// the right default for `cargo test` and operator workflows, but it
+// is the WRONG default for a release/CI pipeline: a release whose
+// trust anchor and signature both come from the dev keypair would
+// pass every signature check on the maintainer's machine while being
+// completely uninstallable downstream (the dev keypair is not
+// distributed with the release artifacts; downstream kernels would
+// either reject the manifest or, worse, silently accept whatever
+// keypair the downstream operator happens to have lying around).
+//
+// `bake-release` is the seam future release-CI plugs into. It does
+// NOT yet ship a working release artifact end-to-end — that wiring
+// lives in a future iter — but it DOES enforce four refusal guards
+// that prevent the dev keypair from leaking into a release bake:
+//
+//   1. REQUIRE explicit `--prod-signing-key=<PATH>` OR
+//      `RAXIS_PROD_SIGNING_KEY_HEX` env var. No silent fall-through
+//      to the dev autogen path.
+//   2. REFUSE if the supplied path canonicalises to
+//      `<workspace>/.git/info/raxis-signing-key/sk.hex`.
+//   3. REFUSE if the supplied (env- or file-sourced) prod private-key
+//      bytes equal the bytes of `<workspace>/.git/info/raxis-signing-key/sk.hex`.
+//      (Trivially passes if the dev sk.hex does not exist.)
+//   4. REFUSE if the public-key trust anchor compiled into the kernel
+//      binary equals `<workspace>/.git/info/raxis-signing-key/pk.hex`.
+//      This is the strongest check: it catches the case where the
+//      operator passed a distinct prod key but forgot to rebuild the
+//      kernel against it (so the kernel still trusts the dev pk).
+//
+// On any guard tripping, exit with a fail-loud message that names
+// the exact env var / flag the operator must set, mirroring the
+// iter60 panic style. Once the guards pass, delegate to the existing
+// `BakeArgs::parse` / `run_bake_inner` pipeline with the prod
+// `signing_key` spliced in. (The delegate is OPTIONAL today; if the
+// caller passes `--guards-only`, `bake-release` exits 0 after the
+// guards pass without running the inner bake — useful for CI dry-runs
+// and for the witness suite.)
+
+// `prod_sk_bytes` and `kernel_pk_bytes` are read by the
+// `inv_image_release_bake_rejects_dev_key_01_succeeds_with_distinct_prod_key`
+// witness and will be consumed by the inner-bake delegate once the
+// vmlinux-symbol-extraction path lands in a future iter. The dead-code
+// lint fires under non-test builds because no production codepath
+// reads them yet; the `#[allow(dead_code)]` annotation pins the
+// "intentionally retained for the wired-up follow-on" contract.
+#[allow(dead_code)]
 #[derive(Debug, Clone)]
-pub(crate) struct DevSigningKeypair {
-    /// Absolute path to the private-half hex file. Read by the
-    /// `inv_image_dev_signing_key_autogen_01_*` witnesses to assert
-    /// the on-disk layout; production code reads it transitively
-    /// via `BakeArgs::signing_key` (which `BakeArgs::parse`
-    /// defaults to the same path) so the field looks dead from
-    /// the bin's point of view.
-    #[allow(dead_code)]
-    pub sk_path: PathBuf,
-    pub pk_path: PathBuf,
-    pub pk_hex: String,
-    /// `true` iff this run minted the keypair; `false` iff a prior
-    /// run had already laid it down. Drives the user-visible one-liner
-    /// the bake driver prints.
-    pub generated_now: bool,
+pub(crate) struct BakeReleaseArgs {
+    /// Resolved private-key bytes for the release bake. Either read
+    /// from the `--prod-signing-key=<PATH>` file or decoded from
+    /// `RAXIS_PROD_SIGNING_KEY_HEX`. 32 bytes (the Ed25519 seed).
+    pub prod_sk_bytes: [u8; 32],
+    /// Origin of the prod key, for the failure-mode diagnostics and
+    /// for the `bake-release_succeeds_with_distinct_prod_key`
+    /// witness.
+    pub prod_sk_source: ProdKeySource,
+    /// Bytes of the kernel binary's compiled-in trust anchor (the
+    /// public half). Read from `--kernel-pk-hex=<HEX>` or from
+    /// `<install_dir>/kernel/vmlinux`'s embedded
+    /// `EXPECTED_KERNEL_SIGNING_KEY_BYTES` symbol. Today the witnesses
+    /// pass the value explicitly via `--kernel-pk-hex`; the
+    /// vmlinux-symbol-extraction codepath is wired in a future iter.
+    pub kernel_pk_bytes: [u8; 32],
+    /// Workspace root, used to resolve the dev key location for the
+    /// four refusal guards.
+    pub workspace_root: PathBuf,
+    /// When true, exit 0 after the four guards pass without running
+    /// the inner bake. Used by `bake-release` witnesses and CI
+    /// dry-runs. Today this is the ONLY supported mode — the inner
+    /// bake delegate is wired in a future iter once the
+    /// vmlinux-symbol-extraction path lands.
+    pub guards_only: bool,
 }
 
-/// Ensure the per-clone dev signing keypair at
-/// `.git/info/raxis-signing-key/{sk.hex,pk.hex}` is present and
-/// readable. On first call the keypair is freshly minted from the OS
-/// RNG; on every subsequent call this is a stat + read fast path.
-///
-/// Side effects: creates the directory (mode 0700) and the two files
-/// (modes 0600 / 0644) on first call. No env-var mutation here — that
-/// is the umbrella bake driver's concern, so this helper stays
-/// safely callable from witness tests under a tempdir workspace.
-pub(crate) fn ensure_dev_signing_keypair(workspace_root: &Path) -> Result<DevSigningKeypair> {
-    use ed25519_dalek::SigningKey;
-    use rand::{rngs::OsRng, RngCore};
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ProdKeySource {
+    /// `--prod-signing-key=<PATH>` flag.
+    Path,
+    /// `RAXIS_PROD_SIGNING_KEY_HEX` env var.
+    Env,
+}
 
-    let dir = git_info_signing_key_dir(workspace_root);
-    let sk_path = dir.join(GIT_INFO_KEY_SK_FILENAME);
-    let pk_path = dir.join(GIT_INFO_KEY_PK_FILENAME);
+const PROD_SIGNING_KEY_ENV: &str = "RAXIS_PROD_SIGNING_KEY_HEX";
 
-    if sk_path.exists() && pk_path.exists() {
-        let pk_hex = fs::read_to_string(&pk_path)
-            .with_context(|| format!("read {}", pk_path.display()))?
-            .trim()
-            .to_owned();
-        validate_pk_hex(&pk_hex, &pk_path)?;
-        return Ok(DevSigningKeypair {
-            sk_path,
-            pk_path,
-            pk_hex,
-            generated_now: false,
-        });
+impl BakeReleaseArgs {
+    /// Parse the four required inputs and run the four refusal
+    /// guards. Returns the resolved args on success; bails with a
+    /// fail-loud message on any guard failure.
+    ///
+    /// The witness suite uses this directly (it bypasses the cargo
+    /// subcommand dispatch) so each refusal scenario can be pinned
+    /// without a subprocess.
+    pub(crate) fn parse_and_validate(argv: &[String]) -> Result<Self> {
+        let mut prod_signing_key_path: Option<PathBuf> = None;
+        let mut kernel_pk_hex: Option<String> = None;
+        let mut workspace_root_override: Option<PathBuf> = None;
+        let mut guards_only: bool = false;
+
+        let mut i = 0;
+        while i < argv.len() {
+            let a = &argv[i];
+            if let Some(rest) = a.strip_prefix("--prod-signing-key=") {
+                prod_signing_key_path = Some(PathBuf::from(rest));
+            } else if a == "--prod-signing-key" {
+                i += 1;
+                prod_signing_key_path = Some(PathBuf::from(
+                    argv.get(i).context("--prod-signing-key requires a path")?,
+                ));
+            } else if let Some(rest) = a.strip_prefix("--kernel-pk-hex=") {
+                kernel_pk_hex = Some(rest.to_owned());
+            } else if a == "--kernel-pk-hex" {
+                i += 1;
+                kernel_pk_hex = Some(
+                    argv.get(i)
+                        .context("--kernel-pk-hex requires a 64-char hex value")?
+                        .clone(),
+                );
+            } else if let Some(rest) = a.strip_prefix("--workspace-root=") {
+                workspace_root_override = Some(PathBuf::from(rest));
+            } else if a == "--workspace-root" {
+                i += 1;
+                workspace_root_override = Some(PathBuf::from(
+                    argv.get(i).context("--workspace-root requires a path")?,
+                ));
+            } else if a == "--guards-only" {
+                guards_only = true;
+            } else if a == "-h" || a == "--help" {
+                eprintln!(
+                    "usage: cargo xtask images bake-release \
+                     --prod-signing-key <PATH> | env RAXIS_PROD_SIGNING_KEY_HEX=<HEX> \
+                     --kernel-pk-hex <HEX> [--workspace-root <PATH>] [--guards-only]\n\n                     Refuses to run any release bake whose private-key or \
+                     kernel-trust-anchor matches the per-clone dev keypair \
+                     under <workspace>/.git/info/raxis-signing-key/. See \
+                     INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01.\n"
+                );
+                std::process::exit(0);
+            } else {
+                bail!("unknown bake-release arg: {a}");
+            }
+            i += 1;
+        }
+
+        let workspace_root = match workspace_root_override {
+            Some(p) => p,
+            None => workspace_root_from_cwd()?,
+        };
+
+        // ----- Guard 1: REQUIRE explicit prod key (path or env) -----
+        let env_hex = std::env::var(PROD_SIGNING_KEY_ENV).ok();
+        if prod_signing_key_path.is_none() && env_hex.is_none() {
+            bail!(
+                "INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 (guard 1): \
+                 release bake refuses to fall through to the dev keypair. \
+                 Set --prod-signing-key=<PATH> OR export {env}=<HEX>. \
+                 Neither was supplied.",
+                env = PROD_SIGNING_KEY_ENV,
+            );
+        }
+
+        // Resolve the prod key bytes + remember which source minted
+        // them, so the witness suite can pin both source codepaths.
+        let dev_sk_path = git_info_signing_key_dir(&workspace_root).join(GIT_INFO_KEY_SK_FILENAME);
+        let (prod_sk_bytes, prod_sk_source) = match (prod_signing_key_path, env_hex) {
+            (Some(path), _) => {
+                // ----- Guard 2: refuse path == dev sk.hex -----
+                let dev_canon = std::fs::canonicalize(&dev_sk_path).ok();
+                let prod_canon = std::fs::canonicalize(&path).ok();
+                if let (Some(dc), Some(pc)) = (&dev_canon, &prod_canon) {
+                    if dc == pc {
+                        bail!(
+                            "INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 (guard 2): \
+                             --prod-signing-key {} canonicalises to the per-clone \
+                             dev keypair at {}. Generate a separate release \
+                             signing key and re-run.",
+                            path.display(),
+                            dev_sk_path.display(),
+                        );
+                    }
+                }
+                let raw = std::fs::read_to_string(&path)
+                    .with_context(|| format!("read --prod-signing-key {}", path.display()))?;
+                let trimmed = raw.trim();
+                let bytes = parse_signing_key_hex(trimmed).with_context(|| {
+                    format!(
+                        "parse --prod-signing-key {} as 64 lowercase hex chars",
+                        path.display()
+                    )
+                })?;
+                (bytes, ProdKeySource::Path)
+            }
+            (None, Some(hex)) => {
+                let bytes = parse_signing_key_hex(hex.trim()).with_context(|| {
+                    format!(
+                        "parse env {} as 64 lowercase hex chars",
+                        PROD_SIGNING_KEY_ENV
+                    )
+                })?;
+                (bytes, ProdKeySource::Env)
+            }
+            (None, None) => unreachable!(),
+        };
+
+        // ----- Guard 3: refuse prod_sk == dev_sk file bytes -----
+        if dev_sk_path.exists() {
+            let dev_raw = std::fs::read_to_string(&dev_sk_path)
+                .with_context(|| format!("read dev sk.hex {}", dev_sk_path.display()))?;
+            if let Ok(dev_bytes) = parse_signing_key_hex(dev_raw.trim()) {
+                if dev_bytes == prod_sk_bytes {
+                    bail!(
+                        "INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 (guard 3): \
+                         the supplied prod signing key bytes equal the per-clone \
+                         dev keypair at {}. Generate a separate release signing \
+                         key (NOT a copy of the dev key) and re-run.",
+                        dev_sk_path.display(),
+                    );
+                }
+            }
+        }
+
+        // ----- Guard 4: refuse kernel pk == dev pk file -----
+        let kernel_pk_hex = kernel_pk_hex.context(
+            "INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 (guard 4 input): \
+             --kernel-pk-hex <HEX> is required so bake-release can verify \
+             the kernel binary's compiled-in trust anchor does not match \
+             the per-clone dev pk.hex. Pass the 64-char hex of the kernel's \
+             EXPECTED_KERNEL_SIGNING_KEY_BYTES symbol.",
+        )?;
+        let kernel_pk_bytes = parse_signing_key_hex(kernel_pk_hex.trim()).with_context(|| {
+            format!("parse --kernel-pk-hex {kernel_pk_hex} as 64 lowercase hex chars")
+        })?;
+        if let Some(dev_pk_bytes) = raxis_dev_signing_key::read_existing_pk_bytes(&workspace_root)
+            .ok()
+            .flatten()
+        {
+            if dev_pk_bytes == kernel_pk_bytes {
+                bail!(
+                    "INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 (guard 4): \
+                     the kernel binary's compiled-in trust anchor matches the \
+                     per-clone dev pk.hex at {}. The kernel was built against \
+                     the dev keypair, not the prod one — rebuild the kernel \
+                     with RAXIS_KERNEL_SIGNING_KEY_HEX set to the public half \
+                     of the prod signing key, then re-run bake-release.",
+                    git_info_signing_key_dir(&workspace_root)
+                        .join(GIT_INFO_KEY_PK_FILENAME)
+                        .display(),
+                );
+            }
+        }
+
+        Ok(Self {
+            prod_sk_bytes,
+            prod_sk_source,
+            kernel_pk_bytes,
+            workspace_root,
+            guards_only,
+        })
     }
-
-    fs::create_dir_all(&dir).with_context(|| format!("create {}", dir.display()))?;
-    set_dir_mode_0700_local(&dir)?;
-
-    let mut seed = [0u8; 32];
-    OsRng.fill_bytes(&mut seed);
-    let signing_key = SigningKey::from_bytes(&seed);
-    let pk_bytes = signing_key.verifying_key().to_bytes();
-    let sk_hex = hex::encode(signing_key.to_bytes());
-    let pk_hex = hex::encode(pk_bytes);
-
-    write_atomic_with_mode_local(&sk_path, &sk_hex, 0o600)?;
-    write_atomic_with_mode_local(&pk_path, &pk_hex, 0o644)?;
-
-    Ok(DevSigningKeypair {
-        sk_path,
-        pk_path,
-        pk_hex,
-        generated_now: true,
-    })
 }
 
-fn validate_pk_hex(pk_hex: &str, pk_path: &Path) -> Result<()> {
-    if pk_hex.len() != 64 {
+/// Decode a 64-lowercase-hex string into 32 raw bytes. Used by
+/// `bake-release` to compare prod vs dev signing-key bytes
+/// (`bytes`-equality is the right contract; comparing two `String`s
+/// could miss a trailing newline or case difference).
+fn parse_signing_key_hex(s: &str) -> Result<[u8; 32]> {
+    if s.len() != 64 {
         bail!(
-            "dev signing pk.hex at {} is {} chars; expected 64 lowercase hex \
-             (delete the file and re-run `cargo xtask images bake` to regenerate)",
-            pk_path.display(),
-            pk_hex.len(),
+            "expected 64 lowercase hex chars (Ed25519 seed); got {} chars",
+            s.len()
         );
     }
-    if !pk_hex
-        .bytes()
-        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
-    {
-        bail!(
-            "dev signing pk.hex at {} contains non-lowercase-hex bytes \
-             (delete the file and re-run to regenerate)",
-            pk_path.display(),
-        );
+    let mut out = [0u8; 32];
+    hex::decode_to_slice(s, &mut out).with_context(|| format!("decode {} as lowercase hex", s))?;
+    Ok(out)
+}
+
+/// `cargo xtask images bake-release` entry point.
+pub fn run_bake_release(argv: &[String]) -> Result<()> {
+    let args = BakeReleaseArgs::parse_and_validate(argv)?;
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"bake_release_guards_passed\",         \"prod_sk_source\":{:?},\"workspace_root\":{:?}}}",
+        args.prod_sk_source,
+        args.workspace_root.display().to_string(),
+    );
+    if args.guards_only {
+        return Ok(());
     }
-    Ok(())
-}
-
-#[cfg(unix)]
-fn set_dir_mode_0700_local(p: &Path) -> Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-    let mut perms = fs::metadata(p)
-        .with_context(|| format!("stat({})", p.display()))?
-        .permissions();
-    perms.set_mode(0o700);
-    fs::set_permissions(p, perms).with_context(|| format!("chmod 0700 {}", p.display()))
-}
-
-#[cfg(not(unix))]
-fn set_dir_mode_0700_local(_: &Path) -> Result<()> {
-    Ok(())
-}
-
-#[cfg(unix)]
-fn write_atomic_with_mode_local(path: &Path, contents: &str, mode: u32) -> Result<()> {
-    use std::io::Write;
-    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
-
-    let dir = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("path {} has no parent", path.display()))?;
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|d| d.as_nanos() as u64)
-        .unwrap_or(0);
-    let tmp = dir.join(format!(".{stamp}.tmp"));
-    {
-        let mut f = fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .mode(mode)
-            .open(&tmp)
-            .with_context(|| format!("create({})", tmp.display()))?;
-        f.write_all(contents.as_bytes())
-            .with_context(|| format!("write({})", tmp.display()))?;
-        f.write_all(b"\n")
-            .with_context(|| format!("write({})", tmp.display()))?;
-        f.sync_all()
-            .with_context(|| format!("fsync({})", tmp.display()))?;
-    }
-    fs::rename(&tmp, path)
-        .with_context(|| format!("rename({} -> {})", tmp.display(), path.display()))?;
-    let mut perms = fs::metadata(path)?.permissions();
-    perms.set_mode(mode);
-    fs::set_permissions(path, perms)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn write_atomic_with_mode_local(path: &Path, contents: &str, _mode: u32) -> Result<()> {
-    fs::write(path, format!("{contents}\n"))?;
-    Ok(())
+    bail!(
+        "bake-release: full release-pipeline delegate is not yet wired \
+         (iter62 lands the four refusal guards only; the vmlinux-symbol \
+         extraction + inner-bake splice is the next iter). Re-run with \
+         --guards-only to exit 0 after the guard checks."
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -4581,9 +4729,14 @@ mod tests {
             let sk_mode = std::fs::metadata(&kp.sk_path).unwrap().permissions().mode() & 0o777;
             let pk_mode = std::fs::metadata(&kp.pk_path).unwrap().permissions().mode() & 0o777;
             assert_eq!(sk_mode, 0o600, "sk.hex MUST be 0600 (private half)");
+            // iter62 hardening (uniform-perms): pk.hex is now 0600
+            // alongside sk.hex. INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01
+            // pins both halves at 0600 so a `chmod -R` audit on the
+            // dir sees one mode instead of two.
             assert_eq!(
-                pk_mode, 0o644,
-                "pk.hex MUST be 0644 (public half — readable by every                  cargo subprocess that exports RAXIS_KERNEL_SIGNING_KEY_HEX)",
+                pk_mode, 0o600,
+                "pk.hex MUST be 0600 (uniform with sk.hex per iter62; \
+                 widening it back to 0644 must update INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01)",
             );
             let dir_mode = std::fs::metadata(kp.sk_path.parent().unwrap())
                 .unwrap()
@@ -4645,7 +4798,7 @@ mod tests {
             "remediation MUST cite the file: {err}",
         );
         assert!(
-            err.contains("delete the file"),
+            err.contains("delete") && err.contains("re-run"),
             "remediation MUST tell the operator how to recover: {err}",
         );
     }
@@ -4663,6 +4816,243 @@ mod tests {
         assert_eq!(
             dir,
             std::path::PathBuf::from("/ws/.git/info/raxis-signing-key")
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 — release-bake
+    // refusal witnesses (iter62 hardening).
+    //
+    // Each witness invokes BakeReleaseArgs::parse_and_validate
+    // directly (bypassing the cargo subcommand dispatch) so each of
+    // the four guards can be pinned to its own assertion without a
+    // subprocess. The five tests cover:
+    //
+    //   1. neither flag nor env set                  → guard 1
+    //   2. --prod-signing-key path == dev sk.hex     → guard 2
+    //   3. env hex bytes == dev sk.hex bytes         → guard 3
+    //   4. --kernel-pk-hex == dev pk.hex bytes       → guard 4
+    //   5. happy path: distinct prod key, distinct kernel anchor
+    // -----------------------------------------------------------------
+
+    /// Helper: build a tempdir workspace whose `.git/info/raxis-signing-key/`
+    /// is pre-populated with a fresh dev keypair. Returns (tmp, sk_path,
+    /// pk_hex).
+    fn make_workspace_with_dev_key() -> (tempfile::TempDir, PathBuf, String) {
+        let tmp = make_workspace_with_git_info();
+        let kp = ensure_dev_signing_keypair(tmp.path()).expect("seed dev key");
+        let sk_path = tmp
+            .path()
+            .join(".git")
+            .join("info")
+            .join("raxis-signing-key")
+            .join("sk.hex");
+        (tmp, sk_path, kp.pk_hex)
+    }
+
+    /// Helper: synthesise a 64-char lowercase-hex string distinct
+    /// from the supplied `dev_pk_hex`. Used by the happy-path witness
+    /// to construct a prod key that cannot accidentally collide with
+    /// the dev key.
+    fn distinct_64hex(dev_pk_hex: &str) -> String {
+        let mut s: String = "11".repeat(32);
+        if s == dev_pk_hex {
+            s = "22".repeat(32);
+        }
+        s
+    }
+
+    /// Helper: clear PROD_SIGNING_KEY_ENV before invoking
+    /// parse_and_validate so a stray env in the test runner cannot
+    /// leak into the witness.
+    fn with_no_prod_env<F: FnOnce() -> R, R>(f: F) -> R {
+        // SAFETY (single-threaded test): we mutate the process env
+        // for the duration of the closure. The witnesses are
+        // serialised in `cargo test` through the unit-test harness;
+        // a parallel witness that also touches this env var would
+        // need to share this guard.
+        let prior = std::env::var_os(PROD_SIGNING_KEY_ENV);
+        std::env::remove_var(PROD_SIGNING_KEY_ENV);
+        let r = f();
+        if let Some(v) = prior {
+            std::env::set_var(PROD_SIGNING_KEY_ENV, v);
+        }
+        r
+    }
+
+    #[test]
+    fn inv_image_release_bake_rejects_dev_key_01_refuses_when_neither_flag_nor_env_set() {
+        let (tmp, _sk_path, pk_hex) = make_workspace_with_dev_key();
+        let pk_other = distinct_64hex(&pk_hex);
+        let argv = vec![
+            "--workspace-root".to_string(),
+            tmp.path().display().to_string(),
+            "--kernel-pk-hex".to_string(),
+            pk_other,
+            "--guards-only".to_string(),
+        ];
+        let err = with_no_prod_env(|| BakeReleaseArgs::parse_and_validate(&argv))
+            .expect_err("guard 1 must trip when neither flag nor env is set");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("guard 1"),
+            "fail-loud message must name the guard: {msg}",
+        );
+        assert!(
+            msg.contains("--prod-signing-key") && msg.contains(PROD_SIGNING_KEY_ENV),
+            "fail-loud message must name BOTH the flag and the env var: {msg}",
+        );
+    }
+
+    #[test]
+    fn inv_image_release_bake_rejects_dev_key_01_refuses_when_path_resolves_to_dev_key_file() {
+        let (tmp, sk_path, pk_hex) = make_workspace_with_dev_key();
+        let pk_other = distinct_64hex(&pk_hex);
+        let argv = vec![
+            "--workspace-root".to_string(),
+            tmp.path().display().to_string(),
+            "--prod-signing-key".to_string(),
+            sk_path.display().to_string(),
+            "--kernel-pk-hex".to_string(),
+            pk_other,
+            "--guards-only".to_string(),
+        ];
+        let err = with_no_prod_env(|| BakeReleaseArgs::parse_and_validate(&argv))
+            .expect_err("guard 2 must trip when --prod-signing-key path == dev sk.hex");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("guard 2"),
+            "fail-loud message must name guard 2: {msg}",
+        );
+        assert!(
+            msg.contains("dev keypair"),
+            "fail-loud message must explain WHY (dev keypair collision): {msg}",
+        );
+    }
+
+    #[test]
+    fn inv_image_release_bake_rejects_dev_key_01_refuses_when_env_bytes_match_dev_sk_file() {
+        let (tmp, sk_path, pk_hex) = make_workspace_with_dev_key();
+        let dev_sk_hex = std::fs::read_to_string(&sk_path).unwrap().trim().to_owned();
+        let pk_other = distinct_64hex(&pk_hex);
+        let argv = vec![
+            "--workspace-root".to_string(),
+            tmp.path().display().to_string(),
+            "--kernel-pk-hex".to_string(),
+            pk_other,
+            "--guards-only".to_string(),
+        ];
+        let err = with_no_prod_env(|| {
+            std::env::set_var(PROD_SIGNING_KEY_ENV, &dev_sk_hex);
+            let r = BakeReleaseArgs::parse_and_validate(&argv);
+            std::env::remove_var(PROD_SIGNING_KEY_ENV);
+            r
+        })
+        .expect_err("guard 3 must trip when env bytes match dev sk.hex bytes");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("guard 3"),
+            "fail-loud message must name guard 3: {msg}",
+        );
+        assert!(
+            msg.contains("dev keypair") || msg.contains("equal"),
+            "fail-loud message must explain WHY (byte-for-byte match): {msg}",
+        );
+    }
+
+    #[test]
+    fn inv_image_release_bake_rejects_dev_key_01_refuses_when_kernel_pk_matches_dev_pk_file() {
+        let (tmp, _sk_path, dev_pk_hex) = make_workspace_with_dev_key();
+        // Use a distinct prod key (so guards 1-3 pass) but pass the
+        // dev pk.hex as the kernel trust anchor — guard 4 must trip.
+        let prod_sk_hex: String = "33".repeat(32);
+        let argv = vec![
+            "--workspace-root".to_string(),
+            tmp.path().display().to_string(),
+            "--kernel-pk-hex".to_string(),
+            dev_pk_hex.trim().to_owned(),
+            "--guards-only".to_string(),
+        ];
+        let err = with_no_prod_env(|| {
+            std::env::set_var(PROD_SIGNING_KEY_ENV, &prod_sk_hex);
+            let r = BakeReleaseArgs::parse_and_validate(&argv);
+            std::env::remove_var(PROD_SIGNING_KEY_ENV);
+            r
+        })
+        .expect_err("guard 4 must trip when kernel pk == dev pk.hex");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("guard 4"),
+            "fail-loud message must name guard 4: {msg}",
+        );
+        assert!(
+            msg.contains("trust anchor") || msg.contains("rebuild the kernel"),
+            "fail-loud message must explain WHY + remediation: {msg}",
+        );
+    }
+
+    #[test]
+    fn inv_image_release_bake_rejects_dev_key_01_succeeds_with_distinct_prod_key() {
+        let (tmp, _sk_path, dev_pk_hex) = make_workspace_with_dev_key();
+        // A prod key that is NOT the dev sk.hex (guards 1-3 pass) and
+        // a kernel trust anchor that is NOT the dev pk.hex (guard 4
+        // passes). All four guards should clear; the resulting
+        // BakeReleaseArgs must record `prod_sk_source = Env`.
+        let prod_sk_hex: String = "44".repeat(32);
+        let kernel_pk_hex: String = distinct_64hex(&dev_pk_hex);
+        let argv = vec![
+            "--workspace-root".to_string(),
+            tmp.path().display().to_string(),
+            "--kernel-pk-hex".to_string(),
+            kernel_pk_hex.clone(),
+            "--guards-only".to_string(),
+        ];
+        let args = with_no_prod_env(|| {
+            std::env::set_var(PROD_SIGNING_KEY_ENV, &prod_sk_hex);
+            let r = BakeReleaseArgs::parse_and_validate(&argv);
+            std::env::remove_var(PROD_SIGNING_KEY_ENV);
+            r
+        })
+        .expect("all four guards must pass on a distinct prod key + distinct kernel anchor");
+        assert_eq!(args.prod_sk_source, ProdKeySource::Env);
+        assert_eq!(
+            hex::encode(args.prod_sk_bytes),
+            prod_sk_hex,
+            "prod_sk_bytes must round-trip through the env var",
+        );
+        assert_eq!(
+            hex::encode(args.kernel_pk_bytes),
+            kernel_pk_hex,
+            "kernel_pk_bytes must round-trip through --kernel-pk-hex",
+        );
+        assert!(
+            args.guards_only,
+            "--guards-only must propagate so run_bake_release exits 0 \
+             without invoking the (not-yet-wired) inner bake delegate",
+        );
+    }
+
+    /// Iter62 chmod-at-write witness for the xtask seam. Pairs with
+    /// the equivalent witness inside `crates/dev-signing-key`'s test
+    /// module. INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 pins both write
+    /// sites at 0600 for both halves.
+    #[cfg(unix)]
+    #[test]
+    fn inv_image_dev_signing_key_autogen_01_xtask_seam_chmod_lands_at_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = make_workspace_with_git_info();
+        let kp = ensure_dev_signing_keypair(tmp.path()).expect("first run");
+        let sk_meta = std::fs::metadata(&kp.sk_path).expect("sk.hex on disk");
+        let pk_meta = std::fs::metadata(&kp.pk_path).expect("pk.hex on disk");
+        assert_eq!(
+            sk_meta.permissions().mode() & 0o777,
+            0o600,
+            "sk.hex MUST be 0600 at the xtask write site (iter62)",
+        );
+        assert_eq!(
+            pk_meta.permissions().mode() & 0o777,
+            0o600,
+            "pk.hex MUST be 0600 at the xtask write site (iter62, uniform-perms hardening)",
         );
     }
 }

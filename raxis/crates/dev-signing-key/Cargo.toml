@@ -1,0 +1,19 @@
+[package]
+name        = "raxis-dev-signing-key"
+version     = { workspace = true }
+edition     = { workspace = true }
+license     = { workspace = true }
+authors     = { workspace = true }
+repository  = { workspace = true }
+description = "RAXIS — per-clone dev signing key autogen + on-disk discovery for the canonical-image trust anchor. Shared between `crates/canonical-images/build.rs` (the kernel-side seam that bakes the public half into the kernel binary) and `xtask::images::run_bake_inner` (the operator-facing seam that mints the keypair and re-invokes cargo with RAXIS_KERNEL_SIGNING_KEY_HEX exported)."
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+ed25519-dalek = { workspace = true }
+hex           = { workspace = true }
+getrandom     = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

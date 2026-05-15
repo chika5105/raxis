@@ -35,6 +35,14 @@ sha2          = { workspace = true }
 raxis-image-builder      = { workspace = true }
 raxis-image-manifest     = { workspace = true }
 raxis-initramfs-builder  = { workspace = true }
+# Shared with `crates/canonical-images/build.rs` (the kernel-side
+# trust-anchor seam). Both seams write the same per-clone
+# `<workspace>/.git/info/raxis-signing-key/{sk,pk}.hex` artefact;
+# routing both through this crate guarantees byte-identical
+# encoding, mode bits, and validation. INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01
+# (xtask seam) and INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01
+# (build.rs seam) both pin this crate as the SOLE writer.
+raxis-dev-signing-key    = { workspace = true }
 
 # Used by `cargo xtask linux-prereqs` to call `getgroups(2)` directly
 # rather than dragging in `nix` / `users` for a single syscall. The

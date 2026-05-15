@@ -13,6 +13,16 @@ raxis-image-manifest = { path = "../image-manifest" }
 sha2                 = { workspace = true }
 thiserror            = { workspace = true }
 
+# `crates/canonical-images/build.rs` (iter62 — INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01)
+# routes the trust-anchor resolution chain through this crate so the
+# kernel-side seam writes the same `.git/info/raxis-signing-key/`
+# artefact the xtask seam writes (xtask iter61 was the FIRST autogen
+# entry point; the kernel build script is the SECOND). The crate is
+# pure-Rust (`ed25519-dalek` + `getrandom` + `hex`) with no async or
+# tokio surface — safely loadable at build-script time.
+[build-dependencies]
+raxis-dev-signing-key = { path = "../dev-signing-key" }
+
 [dev-dependencies]
 hex      = { workspace = true }
 rand     = "0.8"

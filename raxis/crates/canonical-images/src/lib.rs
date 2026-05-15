@@ -905,12 +905,28 @@ mod tests {
     }
 
     /// `verify_canonical_image_via_manifest` (the boot-path entry
-    /// point) refuses while the kernel's
-    /// `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is the all-zero
-    /// placeholder. Pins the build-time-trust gate distinct from
-    /// the runtime tamper case.
+    /// point) refuses any manifest signed by a key that is NOT the
+    /// kernel's compile-time trust anchor.
+    ///
+    /// The exact error variant depends on whether the anchor was
+    /// resolved to the all-zero placeholder or to a real key:
+    ///
+    /// * Pre-iter62 (and release builds with no env-var input):
+    ///   anchor is the all-zero placeholder, so `signing_key_fp`
+    ///   never matches and the verifier short-circuits with
+    ///   `SigningKeyFpNotPopulated`.
+    /// * iter62 dev-fallback active (the default for `cargo test`):
+    ///   anchor is the per-clone auto-mint key, so the
+    ///   fixture-signed manifest's fingerprint disagrees and the
+    ///   verifier surfaces `SigningKeyFpMismatch`.
+    ///
+    /// Both variants represent the SAME contract — a wrong-key
+    /// manifest must be rejected before any session admission. The
+    /// test accepts both shapes so the build-script's profile-
+    /// dependent fallback (`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`)
+    /// does not turn this guard into a flaky witness.
     #[test]
-    fn verify_via_manifest_returns_signing_key_fp_unpopulated_while_constant_is_placeholder() {
+    fn verify_via_manifest_rejects_wrong_key_regardless_of_anchor_resolution() {
         let (sk, vk) = fixture_signing_key();
         let (img_file, img_sha) = write_image_blob(b"image");
         let manifest = assemble_signed_manifest(&sk, &vk, Role::Reviewer, "0.1.0", img_sha);
@@ -923,12 +939,27 @@ mod tests {
             "0.1.0",
         )
         .unwrap_err();
-        assert!(
-            matches!(err, CanonicalImageError::SigningKeyFpNotPopulated),
-            "while EXPECTED_KERNEL_SIGNING_KEY_BYTES is the placeholder, \
-             verify_canonical_image_via_manifest must surface SigningKeyFpNotPopulated; \
-             got {err:?}"
-        );
+        let placeholder = EXPECTED_KERNEL_SIGNING_KEY_BYTES == [0u8; 32];
+        if placeholder {
+            assert!(
+                matches!(err, CanonicalImageError::SigningKeyFpNotPopulated),
+                "anchor is the all-zero placeholder; verifier must surface \
+                 SigningKeyFpNotPopulated, got {err:?}",
+            );
+        } else {
+            assert!(
+                matches!(
+                    err,
+                    CanonicalImageError::Manifest {
+                        source: raxis_image_manifest::ManifestError::SigningKeyFpMismatch,
+                        ..
+                    },
+                ),
+                "anchor is set (iter62 dev-fallback); verifier must surface \
+                 ManifestError::SigningKeyFpMismatch on a fixture-signed manifest, \
+                 got {err:?}",
+            );
+        }
     }
 
     /// `compute_signing_key_fp` returns the SHA-256 of the trust

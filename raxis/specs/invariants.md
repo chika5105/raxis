@@ -99,10 +99,12 @@
 | Executor image lint-toolchain pre-bake — V3 (iter56) | INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01, INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01 | 2 |
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
-| Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
+| Canonical image trust anchor — V3 (iter60, release-only after iter62) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
 | Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06, INV-OBSERVABILITY-DATAPLANE-LATENCY-07, INV-OBSERVABILITY-DATAPLANE-LATENCY-08 | 6 |
-| Dev signing-key autogen — V3 (iter61) | INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 | 1 |
-| **Total** | | **144** |
+| Dev signing-key autogen — V3 (iter61, kernel build path added iter62) | INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 | 1 |
+| Trust anchor dev-profile fallback — V3 (iter62) | INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01 | 1 |
+| Release-bake rejects dev key — V3 (iter62) | INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 | 1 |
+| **Total** | | **146** |
 
 ---
 
@@ -10124,10 +10126,22 @@ spec path).
 
 The build-script resolution chain
 (`crates/canonical-images/build.rs::resolve_trust_anchor_bytes`)
-is exactly two priorities — `RAXIS_KERNEL_SIGNING_KEY_HEX` then
-`RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` — with no filesystem
-auto-discovery fallback. The placeholder arm is the kernel-boot
-trip wire, not a graceful degradation path.
+is layered (iter62, see
+`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01` for the full ordering).
+Under `PROFILE=release` the chain ends with the all-zero
+placeholder when no env-var or `.git/info/raxis-signing-key/`
+input is found — the placeholder arm IS the kernel-boot trip
+wire under release builds, and the fail-loud panic remains the
+sole production remediation. Under any other profile (dev,
+test, custom) the chain auto-mints a per-clone keypair
+(`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`) so `cargo test
+-p raxis-kernel` and similar dev-loop commands do not need
+manual env-var ceremony to boot the kernel binary they
+produced. The fail-loud invariant therefore narrows to release
+builds in iter62; INV-IMAGE-VERIFY-REJECT-MISMATCH-01's
+"valid key, but wrong key" semantics are unchanged across both
+profiles (a mismatched signature must still reject regardless
+of where the kernel's anchor came from).
 
 **Justification.** Pre-iter60 the kernel logged a persistent
 `PreflightOutcome::TrustAnchorUnpopulated` warning at every boot
@@ -10602,16 +10616,42 @@ progressive ceiling resolution); `v2/planner-harness.md`
 
 ### INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 — `cargo xtask images bake` mints + persists a per-clone dev signing keypair under `.git/info/raxis-signing-key/` and exports the public half into `RAXIS_KERNEL_SIGNING_KEY_HEX`
 
-**Statement.** `cargo xtask images bake` (the umbrella image-bake
-pipeline) MUST, on every invocation, ensure a per-clone Ed25519
-keypair exists at
+**Statement.** Two seams cooperate to ensure the per-clone
+Ed25519 keypair at
 `<workspace_root>/.git/info/raxis-signing-key/{sk.hex,pk.hex}`
-(file modes `0600` / `0644`, parent-dir mode `0700`). On first
-run the keypair is freshly minted from the OS RNG; on every
-subsequent run the helper short-circuits to a stat + read fast
-path. The helper is implemented as
-`xtask::images::ensure_dev_signing_keypair` and called from
-`run_bake_inner` BEFORE preflight.
+exists before any kernel binary that consults the trust anchor
+boots:
+
+1. `cargo xtask images bake` (the umbrella operator-facing
+   pipeline) MUST, on every invocation, mint-or-discover the
+   keypair and export the public half via
+   `RAXIS_KERNEL_SIGNING_KEY_HEX` for every cargo subprocess
+   it spawns. This is the FIRST autogen entry point (iter61).
+2. `crates/canonical-images/build.rs` (the kernel-side seam,
+   iter62) MUST, when no env-var input is present and the
+   build profile is NOT `release`, mint-or-discover the
+   keypair through the same helper. This is the SECOND autogen
+   entry point: it makes a bare `cargo test -p raxis-kernel`
+   (or any dev-loop cargo command that bypasses xtask) produce
+   a kernel binary whose compile-time anchor matches the
+   per-clone keypair without manual env-var ceremony. The
+   release-profile fail-loud posture is unchanged
+   (`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` still trips on a
+   release build with no key inputs); see
+   `INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01` for the dev-fallback
+   detail.
+
+Both seams call through the SAME implementation
+(`raxis_dev_signing_key::ensure_dev_signing_keypair`) so the
+on-disk artefact is byte-identical regardless of which path
+fired first. File modes are `0600` for BOTH `sk.hex` AND
+`pk.hex` (iter62 hardening — pre-iter62 the public half was
+`0644`; the uniform-perms tightening makes a future hand-edit
+that loosens one half without the other trip the per-write-site
+chmod witness in either crate). Parent-dir mode is `0700`. On
+first run the keypair is freshly minted from the OS RNG; on
+every subsequent run the helper short-circuits to a stat +
+read fast path.
 
 After the helper returns, `bake` MUST:
 
@@ -10686,9 +10726,185 @@ two halves of the keypair come from the same per-clone artefact.
 **Canonical home.** `xtask/src/images.rs` module-level doc
 comment for the `ensure_dev_signing_keypair` helper,
 `xtask/src/dev_keys.rs` header (the legacy seam, now positioned
-as the "shared-across-clones" alternative), and
+as the "shared-across-clones" alternative),
+`crates/dev-signing-key/src/lib.rs` (the iter62 shared-helper
+crate that both seams route through), and
 `specs/v3/canonical-image-trust-anchor.md` §4 (dev-host
 workflow, paired with `INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`).
+
+---
+
+### INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01 — Kernel build script (`crates/canonical-images/build.rs`) auto-mints a per-clone Ed25519 keypair under non-release profiles when no env-var or `.git/info/raxis-signing-key/pk.hex` input is present
+
+**Statement.** The build-script resolution chain
+(`crates/canonical-images/build.rs::resolve_trust_anchor_bytes`)
+MUST consult inputs in exactly this priority order on every
+build invocation:
+
+1. `RAXIS_KERNEL_SIGNING_KEY_HEX` env var (64 lowercase hex
+   chars; highest priority — explicit operator override; CI
+   and release pipelines).
+2. `RAXIS_KERNEL_SIGNING_KEY_BYTES_PATH` env var (path to a
+   32-byte raw file; HSM-backed pipelines).
+3. `<workspace_root>/.git/info/raxis-signing-key/pk.hex`
+   on disk (the per-clone artefact written by either
+   `cargo xtask images bake` (iter61, xtask seam) OR by a
+   prior dev-fallback build (iter62, this build script's
+   auto-mint).
+4. Profile-dependent fallback:
+   * `PROFILE=release` → emit the all-zero placeholder. The
+     kernel boot's `assert_trust_anchor_present_or_panic`
+     trips fail-loud at runtime
+     (`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01`).
+   * Any other profile (dev / test / custom) → mint a fresh
+     Ed25519 keypair from the OS RNG (`getrandom`), persist
+     both halves to
+     `<workspace_root>/.git/info/raxis-signing-key/{sk,pk}.hex`
+     at mode `0600` (parent dir `0700`), and use the public
+     half as the compile-time trust anchor.
+
+The auto-mint at step 4 routes through the SAME helper
+(`raxis_dev_signing_key::ensure_dev_signing_keypair`) the
+xtask seam uses (`INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`), so
+the on-disk artefact is byte-identical regardless of which
+seam fires first on a fresh clone. A subsequent
+`cargo xtask images bake` invocation finds the file already
+present, takes the read-fast-path, and signs manifests with
+the same keypair the kernel binary already trusts — the
+key-rotation-drift failure mode
+(`INV-IMAGE-VERIFY-REJECT-MISMATCH-01`) collapses to a
+single byte-for-byte comparison.
+
+The build script also honours
+`println!("cargo:rerun-if-changed=…/pk.hex")` and
+`println!("cargo:rerun-if-env-changed=PROFILE")` so a
+manual rotation (operator deletes
+`.git/info/raxis-signing-key/` and re-runs cargo) re-mints
+on the next build, AND a switch from dev to release profile
+re-evaluates the resolution chain (no stale dev anchor
+baked into a release binary).
+
+**Justification.** Pre-iter62 a bare `cargo test
+-p raxis-kernel` (which does NOT go through xtask) produced
+a kernel binary with the all-zero placeholder, and the
+fail-loud panic from
+`INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01` tripped at boot,
+breaking the kernel-integration test harness. The fail-loud
+guarantee was always about preventing SILENT disablement of
+image integrity verification in production — it was never
+about making `cargo test` unusable. iter62 narrows the
+fail-loud invariant to release profiles only and routes the
+dev profile through the same auto-mint helper the xtask
+seam already used. Release builds keep the trip wire; dev
+builds materialise a per-clone keypair on first build and
+reuse it thereafter. Failing to fold this in would have
+forced every dev-loop cargo command to manually export
+`RAXIS_KERNEL_SIGNING_KEY_HEX`, which is exactly the
+ergonomic regression iter61 set out to fix on the xtask
+side.
+
+**Witness.** Tests under
+`crates/dev-signing-key/src/lib.rs::tests::*` pin the
+shared helper's contract (first-run mint, second-run reuse,
+mode `0600` on both halves at every write site, corruption
+fail-loud). Build-script behaviour is covered by the
+existing `crates/canonical-images/build.rs` integration
+witnesses in `assert_trust_anchor_*` plus the
+xtask-seam witnesses
+`xtask/src/images.rs::tests::inv_image_dev_signing_key_autogen_01_xtask_seam_chmod_lands_at_0600`
+(iter62 0600 uniformity guard for the xtask write site).
+The three previously-failing kernel integration tests
+(`audit_chain_resumes_monotonically_across_restart`,
+`heartbeat_is_fresh_and_well_formed_after_boot`,
+`raxis_status_json_against_live_kernel_reports_running`)
+are the live witnesses that the dev-fallback boot path
+works end-to-end without operator ceremony.
+
+**Canonical home.** `crates/canonical-images/build.rs`
+module-level doc comment (the resolution chain spec),
+`crates/dev-signing-key/src/lib.rs` (the shared helper),
+and `specs/v3/canonical-image-trust-anchor.md` §4
+(dev-host workflow).
+
+---
+
+### INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 — `cargo xtask images bake-release` enforces four refusal guards that prevent the per-clone dev keypair from leaking into a release artefact
+
+**Statement.** The `cargo xtask images bake-release`
+subcommand MUST run all four refusal guards below BEFORE
+delegating to the inner bake pipeline. On any guard tripping,
+the command MUST exit non-zero with a fail-loud message naming
+both the guard number AND the specific operator-remediable
+input.
+
+1. **Guard 1 — explicit prod key required.** The caller MUST
+   supply EITHER `--prod-signing-key=<PATH>` OR the
+   `RAXIS_PROD_SIGNING_KEY_HEX` env var. The dev-bake's
+   silent fallback to the per-clone autogen keypair
+   (`INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`) MUST NOT apply on
+   the release path.
+2. **Guard 2 — refuse path == dev sk.hex.** When
+   `--prod-signing-key=<PATH>` is supplied, the path MUST NOT
+   canonicalise to
+   `<workspace_root>/.git/info/raxis-signing-key/sk.hex`.
+3. **Guard 3 — refuse env-bytes == dev sk.hex bytes.** The
+   prod private-key bytes (whether sourced from the flag-path
+   file or from the env var) MUST NOT byte-equal the contents
+   of `<workspace_root>/.git/info/raxis-signing-key/sk.hex`
+   when that file exists. This catches the "operator copied
+   the dev key into a separate file" mistake.
+4. **Guard 4 — refuse kernel pk == dev pk.hex.** The kernel
+   binary's compiled-in trust anchor (passed via
+   `--kernel-pk-hex=<HEX>` today; extracted from the
+   `vmlinux` symbol table in a future iter) MUST NOT
+   byte-equal the contents of
+   `<workspace_root>/.git/info/raxis-signing-key/pk.hex` when
+   that file exists. This catches "operator passed a distinct
+   prod key but forgot to rebuild the kernel against it" — the
+   kernel would still trust the dev pk and a downstream
+   operator's verifier would reject every manifest.
+
+The guards are implemented in
+`xtask::images::BakeReleaseArgs::parse_and_validate` and run
+as a pre-step inside `xtask::images::run_bake_release`. The
+`--guards-only` flag short-circuits after the guards pass
+without invoking the inner bake — useful for CI dry-runs that
+only verify the refusal contract. The full inner-bake delegate
+lands in a future iter once the vmlinux-symbol-extraction
+codepath is wired; iter62 ships the four guards on a stub
+delegate.
+
+**Justification.** The dev autogen seam
+(`INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01`,
+`INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01`) is the right default
+for `cargo test` and the operator's local bake workflow, but it
+is the WRONG default for a release / CI pipeline: a release
+artefact whose trust anchor and signature both come from the
+dev keypair would pass every check on the maintainer's machine
+while being uninstallable downstream (the dev keypair is
+per-clone — never distributed). Release CI thus needs a
+hard-fail seam that explicitly REFUSES every codepath where the
+dev key could leak in. The four guards exhaustively cover the
+four paths: missing key, path collision, byte collision in the
+private half, byte collision in the kernel-side public half.
+
+**Witness.** Five tests under
+`xtask/src/images.rs::tests::inv_image_release_bake_rejects_dev_key_01_*`:
+
+* `_refuses_when_neither_flag_nor_env_set` — guard 1.
+* `_refuses_when_path_resolves_to_dev_key_file` — guard 2.
+* `_refuses_when_env_bytes_match_dev_sk_file` — guard 3.
+* `_refuses_when_kernel_pk_matches_dev_pk_file` — guard 4.
+* `_succeeds_with_distinct_prod_key` — happy path: distinct
+  prod key + distinct kernel anchor; all four guards clear,
+  `BakeReleaseArgs` records `prod_sk_source = Env`,
+  `--guards-only` propagates so `run_bake_release` exits 0
+  without invoking the not-yet-wired inner-bake delegate.
+
+**Canonical home.** `xtask/src/images.rs` module-level
+`bake-release` block comment + the `BakeReleaseArgs` struct
+doc + `specs/v3/canonical-image-trust-anchor.md` §6 (release
+pipeline; future spec home).
 
 ---
 
