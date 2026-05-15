@@ -100,8 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06, INV-OBSERVABILITY-DATAPLANE-LATENCY-07 | 5 |
-| **Total** | | **142** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06, INV-OBSERVABILITY-DATAPLANE-LATENCY-07, INV-OBSERVABILITY-DATAPLANE-LATENCY-08 | 6 |
+| **Total** | | **143** |
 
 ---
 
@@ -10051,6 +10051,50 @@ lexemes uniformly (no duplicates, none exceed the redactor's
 **Canonical home.** `v3/otel-observability.md §8` row
 `StoreQueryDuration` + Prometheus inventory in
 `v3/observability-prometheus.md §3` (iter61 expansion).
+
+---
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-08 — Grafana dataplane-bottlenecks dashboard ships one panel per iter61 wire-site, p50 / p95 / p99
+
+**Statement.** The repository MUST ship a Grafana dashboard JSON
+at `observability/grafana/dashboards/95-dataplane-bottlenecks.json`
+with one timeseries panel per iter61 dataplane-bottleneck metric:
+
+* `raxis_audit_chain_stage_duration_milliseconds` — pivot on `stage`.
+* `raxis_store_query_duration_milliseconds` — top-N pivot on `query_class`.
+* `raxis_fsm_transition_duration_milliseconds` — pivot on `fsm_kind`.
+* `raxis_git_worktree_stage_duration_milliseconds` — pivot on `stage`.
+* `raxis_gateway_stage_duration_milliseconds` — pivot on `stage`.
+* `raxis_kernel_substrate_ipc_frame_stage_duration_milliseconds` —
+  pivot on `stage` (with `channel` + `direction` available for ad-hoc
+  drilldowns on the underlying samples).
+
+Each panel emits exactly three series — `histogram_quantile(0.5 |
+0.95 | 0.99, sum by (le, <pivot>) (rate(<metric>_bucket[5m])))` —
+so the operator's first-glance read separates the steady-state
+median from the tail without cross-panel arithmetic.
+
+**Justification.** The wire-side commits 03–07 add the histograms;
+without a dashboard the operator must hand-build PromQL in the
+explore tab to debug a slow refresh. Pinning the dashboard JSON
+into the repo (rather than into Grafana's runtime store) means a
+fresh `docker compose up` on the observability stack auto-
+provisions every iter61 panel via the existing dashboard-
+provisioning seam (`observability/grafana/provisioning/dashboards/`),
+mirroring how `15-ipc.json` and the earlier `00..90` dashboards
+ship.
+
+**Witness.** Repo-level: file existence at
+`observability/grafana/dashboards/95-dataplane-bottlenecks.json`,
+JSON-validates (the in-repo dashboard provisioner refuses
+malformed JSON at stack-up). Each panel cites the corresponding
+INV-…-NN in its description so a panel pruned in error trips a
+spec-vs-dashboard parity audit (the `ripgrep` query
+`INV-OBSERVABILITY-DATAPLANE-LATENCY-0[3-7]` MUST hit at least
+one description in the JSON file).
+
+**Canonical home.** `v3/observability-prometheus.md §3` (iter61
+panel inventory) + the dashboard JSON itself.
 
 ---
 

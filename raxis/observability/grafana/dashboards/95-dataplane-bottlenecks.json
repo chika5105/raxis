@@ -1,0 +1,105 @@
+{
+  "title": "raxis | 95 Dataplane bottlenecks (p50/p95/p99 across iter61 wire-sites)",
+  "uid": "raxis-95-dataplane-bottlenecks",
+  "tags": ["raxis", "dataplane", "iter61", "bottlenecks"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "version": 1,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "templating": { "list": [] },
+  "panels": [
+    {
+      "id": 1,
+      "type": "row",
+      "title": "iter61 dataplane bottleneck wire-sites — p50 / p95 / p99 per pivot",
+      "gridPos": { "x": 0, "y": 0, "w": 24, "h": 1 },
+      "collapsed": false,
+      "panels": []
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Audit chain stage duration (ms) — p50 / p95 / p99 by stage",
+      "description": "Per-stage walk-cost in the on-disk audit chain. Source: `AuditChainStageDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-02`). Pivots on `stage` ∈ {`load_segment`, `verify_segment`, `walk_chain`}. A regression in `verify_segment` = signature batching slowed; in `walk_chain` = the chain grew faster than the bounded ring expected.",
+      "gridPos": { "x": 0, "y": 1, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(raxis_audit_chain_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(raxis_audit_chain_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (stage, le) (rate(raxis_audit_chain_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 3,
+      "type": "timeseries",
+      "title": "Store SQL query duration (ms) — p50 / p95 / p99 by query_class (top-N)",
+      "description": "Per-query-class SQLite read latency on the dashboard read path. Source: `StoreQueryDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-01` + `-07`). The `query_class` lexicon is closed (`crates/store/src/observability.rs::QUERY_CLASSES`) so a sustained spike on one class localises a slow dashboard refresh to the underlying SQL — e.g. `audit_chain_walk` p99 climbing means the chain grew, `policy_snapshot` p99 climbing means the bundle projection grew with operator count.",
+      "gridPos": { "x": 12, "y": 1, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "topk(8, histogram_quantile(0.5, sum by (query_class, le) (rate(raxis_store_query_duration_milliseconds_bucket[5m]))))", "legendFormat": "{{query_class}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "topk(8, histogram_quantile(0.95, sum by (query_class, le) (rate(raxis_store_query_duration_milliseconds_bucket[5m]))))", "legendFormat": "{{query_class}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "topk(8, histogram_quantile(0.99, sum by (query_class, le) (rate(raxis_store_query_duration_milliseconds_bucket[5m]))))", "legendFormat": "{{query_class}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 4,
+      "type": "timeseries",
+      "title": "FSM event→commit duration (ms) — p50 / p95 / p99 by fsm_kind",
+      "description": "Wall-clock from FSM event-emit to audit-sink commit, pivoted on `fsm_kind` ∈ {`session`, `initiative`, `task`}. Source: `FsmTransitionDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-03`), wired in `kernel/src/notifications/sink.rs::bridge_audit_to_metric`. A regression localises a slow lifecycle to the FSM that owns the transition rather than the generic audit-append path. `from_state`/`to_state` labels are also present on the underlying samples — pivot on them in ad-hoc queries when one fsm_kind shows a tail spike.",
+      "gridPos": { "x": 0, "y": 9, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (fsm_kind, le) (rate(raxis_fsm_transition_duration_milliseconds_bucket[5m])))", "legendFormat": "{{fsm_kind}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (fsm_kind, le) (rate(raxis_fsm_transition_duration_milliseconds_bucket[5m])))", "legendFormat": "{{fsm_kind}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (fsm_kind, le) (rate(raxis_fsm_transition_duration_milliseconds_bucket[5m])))", "legendFormat": "{{fsm_kind}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 5,
+      "type": "timeseries",
+      "title": "Git worktree stage duration (ms) — p50 / p95 / p99 by stage",
+      "description": "Host-side git provisioning sub-stage timings. Source: `GitWorktreeStageDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-04`), wired in `crates/worktree-provision/src/lib.rs`. Pivots on `stage` ∈ {`clone`, `fetch`, `checkout`, `verify`}. Both success AND error paths emit (the bottleneck signal is the error-path histogram, not just the happy path) — pivot on `outcome` in ad-hoc queries to separate slow-clones from fail-fast clones.",
+      "gridPos": { "x": 12, "y": 9, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(raxis_git_worktree_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(raxis_git_worktree_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (stage, le) (rate(raxis_git_worktree_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 6,
+      "type": "timeseries",
+      "title": "Gateway stage duration (ms) — p50 / p95 / p99 by stage",
+      "description": "Per-stage gateway-internal timing. Source: `GatewayStageDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-06`). This iter61 commit wires `tproxy_admit` (transparent-proxy admission verdict in `crates/egress-admission/src/lib.rs`); the spec has slots for `dns`, `tls`, and `first_byte` which are deferred to a follow-up because `reqwest`'s public surface does not currently expose hooks at those sub-stages. Pivot on `outcome` in ad-hoc queries to split `ok` vs `denied` (the `denied` series is the rate-limit / policy-deny signal).",
+      "gridPos": { "x": 0, "y": 17, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(raxis_gateway_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(raxis_gateway_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (stage, le) (rate(raxis_gateway_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    },
+    {
+      "id": 7,
+      "type": "timeseries",
+      "title": "IPC frame stage duration (ms) — p50 / p95 / p99 by stage / channel / direction",
+      "description": "Per-stage bincode-frame timing across the kernel ↔ substrate vsock chokepoint. Source: `IpcFrameStageDuration` histogram (iter61 / `INV-OBSERVABILITY-DATAPLANE-LATENCY-05`), wired in `crates/ipc/src/frame.rs`. Pivots on `stage` ∈ {`encode`, `write`, `read`, `decode`}. A regression in `encode`/`decode` = bincode work grew (e.g. larger payload variants); in `write`/`read` = vsock back-pressure or the peer's drain stalled. Pivot on `direction` (`tx`/`rx`) and `channel` (`intent`/`ksb`/`audit`/`notify`) in ad-hoc queries when one stage shows a spike.",
+      "gridPos": { "x": 12, "y": 17, "w": 12, "h": 8 },
+      "targets": [
+        { "expr": "histogram_quantile(0.5, sum by (stage, le) (rate(raxis_kernel_substrate_ipc_frame_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p50", "refId": "A", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.95, sum by (stage, le) (rate(raxis_kernel_substrate_ipc_frame_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p95", "refId": "B", "datasource": { "type": "prometheus", "uid": "prometheus" } },
+        { "expr": "histogram_quantile(0.99, sum by (stage, le) (rate(raxis_kernel_substrate_ipc_frame_stage_duration_milliseconds_bucket[5m])))", "legendFormat": "{{stage}} p99", "refId": "C", "datasource": { "type": "prometheus", "uid": "prometheus" } }
+      ],
+      "fieldConfig": { "defaults": { "unit": "ms" }, "overrides": [] },
+      "options": { "legend": { "displayMode": "list", "placement": "bottom", "showLegend": true } }
+    }
+  ]
+}
