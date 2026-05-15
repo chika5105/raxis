@@ -40,11 +40,11 @@ use sha2::{Digest, Sha256};
 // `extended_e2e_realistic_scenario.rs`, …) declares at its root.
 // Both test binaries that pull this module in must `mod common;`
 // alongside `mod extended_e2e_support;`.
-use crate::common::kernel_harness::{build_and_locate_kernel, KernelInstance};
 use super::witnesses::typed;
+use crate::common::kernel_harness::{build_and_locate_kernel, KernelInstance};
 
-pub const LIVE_E2E_GATE:    &str     = "RAXIS_LIVE_E2E";
-pub const READY_DEADLINE:   Duration = Duration::from_secs(15);
+pub const LIVE_E2E_GATE: &str = "RAXIS_LIVE_E2E";
+pub const READY_DEADLINE: Duration = Duration::from_secs(15);
 pub const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(60);
 
 /// Distinct seed from the extended scenario's `[0xCE; 32]` so
@@ -61,7 +61,9 @@ pub fn require_tcp_reachable(host_port: &str, what: &str) {
     if std::net::TcpStream::connect_timeout(
         &host_port.parse().expect("static literal parses"),
         Duration::from_millis(500),
-    ).is_err() {
+    )
+    .is_err()
+    {
         panic!(
             "{what} not reachable at {host_port}. Run:\n  \
              docker compose -f live-e2e/docker-compose.extended.e2e.yml up -d --wait",
@@ -71,15 +73,16 @@ pub fn require_tcp_reachable(host_port: &str, what: &str) {
 
 pub fn require_anthropic_dev_key() {
     let env_path = workspace_dotenv_path();
-    let body = std::fs::read_to_string(&env_path).unwrap_or_else(|e| panic!(
-        "{} is required for the live LLM round-trip but read failed: {e}\n\
+    let body = std::fs::read_to_string(&env_path).unwrap_or_else(|e| {
+        panic!(
+            "{} is required for the live LLM round-trip but read failed: {e}\n\
          Create it with one line:\n  ANTHROPIC-API-DEV-KEY=sk-ant-...",
-        env_path.display(),
-    ));
-    let has_key = body
-        .lines()
-        .any(|l| l.starts_with("ANTHROPIC-API-DEV-KEY=")
-            && l.len() > "ANTHROPIC-API-DEV-KEY=".len());
+            env_path.display(),
+        )
+    });
+    let has_key = body.lines().any(|l| {
+        l.starts_with("ANTHROPIC-API-DEV-KEY=") && l.len() > "ANTHROPIC-API-DEV-KEY=".len()
+    });
     assert!(
         has_key,
         "{} must contain a non-empty ANTHROPIC-API-DEV-KEY=... line",
@@ -90,7 +93,7 @@ pub fn require_anthropic_dev_key() {
 pub fn require_gcp_adc() {
     let adc = match dirs_home() {
         Some(h) => h.join(".config/gcloud/application_default_credentials.json"),
-        None    => panic!("HOME is unset; cannot locate gcloud ADC"),
+        None => panic!("HOME is unset; cannot locate gcloud ADC"),
     };
     assert!(
         adc.exists(),
@@ -101,13 +104,18 @@ pub fn require_gcp_adc() {
 }
 
 pub fn require_gateway_binary() -> PathBuf {
-    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| panic!(
-        "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
+    let raw = std::env::var("RAXIS_GATEWAY_BINARY").unwrap_or_else(|_| {
+        panic!(
+            "RAXIS_GATEWAY_BINARY env var is required; build the gateway and \
          export the path:\n  cargo build -p raxis-gateway --release\n  \
          export RAXIS_GATEWAY_BINARY=$(pwd)/target/release/raxis-gateway",
-    ));
+        )
+    });
     let p = PathBuf::from(&raw);
-    assert!(p.is_absolute(), "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}");
+    assert!(
+        p.is_absolute(),
+        "RAXIS_GATEWAY_BINARY must be absolute; got {raw:?}"
+    );
     assert!(p.exists(), "RAXIS_GATEWAY_BINARY={raw:?} does not exist");
     p
 }
@@ -313,7 +321,10 @@ mod hygiene_preflight_tests {
     /// envelope from the consumers without flagging this test.
     #[test]
     fn attention_kind_is_stable_for_envelope_consumers() {
-        assert_eq!(HostPreflightError::ATTENTION_KIND, "HostHygieneDiskPressure");
+        assert_eq!(
+            HostPreflightError::ATTENTION_KIND,
+            "HostHygieneDiskPressure"
+        );
     }
 
     /// The preflight returns silently when the host is clear; we
@@ -329,9 +340,8 @@ mod hygiene_preflight_tests {
 }
 
 pub fn require_canonical_images() {
-    let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR").unwrap_or_else(|_| panic!(
-        "RAXIS_INSTALL_DIR env var is required",
-    ));
+    let install_dir_raw = std::env::var("RAXIS_INSTALL_DIR")
+        .unwrap_or_else(|_| panic!("RAXIS_INSTALL_DIR env var is required",));
     let install_dir = PathBuf::from(&install_dir_raw);
     let kernel_version = env!("CARGO_PKG_VERSION");
 
@@ -363,12 +373,18 @@ pub fn require_canonical_images() {
     }
 
     for role in &["orchestrator-core", "executor-starter", "reviewer-core"] {
-        let img = install_dir.join("images")
+        let img = install_dir
+            .join("images")
             .join(format!("raxis-{role}-{kernel_version}.img"));
-        let manifest = install_dir.join("images")
+        let manifest = install_dir
+            .join("images")
             .join(format!("raxis-{role}-{kernel_version}.manifest.toml"));
         assert!(img.exists(), "missing canonical image {}", img.display());
-        assert!(manifest.exists(), "missing canonical manifest {}", manifest.display());
+        assert!(
+            manifest.exists(),
+            "missing canonical manifest {}",
+            manifest.display()
+        );
 
         // ── Cpio content preflight ────────────────────────────────
         //
@@ -388,15 +404,16 @@ pub fn require_canonical_images() {
             // Orch + reviewer are intentionally binary-only today;
             // the planner binary is checked below.
         }
-        let entries = crate::common::cpio_inspect::list_initramfs_paths(&img)
-            .unwrap_or_else(|e| panic!(
+        let entries = crate::common::cpio_inspect::list_initramfs_paths(&img).unwrap_or_else(|e| {
+            panic!(
                 "failed to walk canonical image {}: {e}\n\
                  The cpio.gz may be corrupted; rebuild via:\n  \
                  cargo xtask images bake-rootfs --role {role}\n  \
                  cargo xtask images dev-stage    --role {role}\n  \
                  cargo xtask images build-all    --role {role}",
                 img.display(),
-            ));
+            )
+        });
         let missing: Vec<&&'static str> = required
             .iter()
             .filter(|bin| !entries.contains_key(**bin))
@@ -418,14 +435,14 @@ pub fn require_canonical_images() {
              cargo xtask images dev-stage    --role {role}\n  \
              cargo xtask images build-all    --role {role}\n\
              then re-run this test.",
-            n      = missing.len(),
+            n = missing.len(),
             plural = if missing.len() == 1 { "y" } else { "ies" },
-            img    = img.display(),
-            lines  = missing
-                         .iter()
-                         .map(|b| format!("  - {b}"))
-                         .collect::<Vec<_>>()
-                         .join("\n"),
+            img = img.display(),
+            lines = missing
+                .iter()
+                .map(|b| format!("  - {b}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
         );
     }
 }
@@ -472,15 +489,13 @@ fn required_binaries_for_canonical_role(role: &str) -> &'static [&'static str] {
         // PID-1 binary is required to ship in the canonical cpio.
         // Branch B follow-up will enrich orch / reviewer Containerfiles
         // and update this table in lockstep.
-        "orchestrator-core" => &[
-            "usr/local/bin/raxis-orchestrator",
-        ],
-        "reviewer-core" => &[
-            "usr/local/bin/raxis-reviewer",
-        ],
-        other => panic!("unknown canonical role {other:?}; \
+        "orchestrator-core" => &["usr/local/bin/raxis-orchestrator"],
+        "reviewer-core" => &["usr/local/bin/raxis-reviewer"],
+        other => panic!(
+            "unknown canonical role {other:?}; \
                          expected one of: orchestrator-core, \
-                         executor-starter, reviewer-core"),
+                         executor-starter, reviewer-core"
+        ),
     }
 }
 
@@ -560,7 +575,10 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         // produces, so no Containerfile bake is required.
         if role_needs_rootfs_bake(role) {
             run_xtask_or_panic(
-                &cargo, &workspace_root, role, "bake-rootfs",
+                &cargo,
+                &workspace_root,
+                role,
+                "bake-rootfs",
                 &["--role", xtask_role],
             );
         } else {
@@ -579,20 +597,25 @@ fn ensure_canonical_images_baked(install_dir: &Path, kernel_version: &str) {
         } else {
             vec!["--role", xtask_role, "--allow-stub"]
         };
-        run_xtask_or_panic(
-            &cargo, &workspace_root, role, "dev-stage",
-            &stage_args,
-        );
+        run_xtask_or_panic(&cargo, &workspace_root, role, "dev-stage", &stage_args);
 
         // ── 3. build-all ────────────────────────────────────────
         // Pack into the signed cpio.gz at <install_dir>/images/.
         run_xtask_or_panic(
-            &cargo, &workspace_root, role, "build-all",
+            &cargo,
+            &workspace_root,
+            role,
+            "build-all",
             &[
-                "--role",        xtask_role,
-                "--install-dir", install_dir.to_str().unwrap_or_else(|| panic!(
-                    "install_dir contains non-utf8 bytes: {}", install_dir.display(),
-                )),
+                "--role",
+                xtask_role,
+                "--install-dir",
+                install_dir.to_str().unwrap_or_else(|| {
+                    panic!(
+                        "install_dir contains non-utf8 bytes: {}",
+                        install_dir.display(),
+                    )
+                }),
             ],
         );
     }
@@ -639,7 +662,7 @@ fn ensure_canonical_kernel_binary_staged(install_dir: &Path) {
          cargo xtask images dev-kernel --from-file <path-to-vmlinux>\n\
          \n\
          (`INV-IMAGE-BAKE-VMLINUX-STAGED-01`)",
-        dest        = dest.display(),
+        dest = dest.display(),
         install_dir = install_dir.display(),
     );
 }
@@ -667,8 +690,8 @@ fn ensure_canonical_kernel_binary_staged(install_dir: &Path) {
 fn xtask_cli_role_for(image_subdir_role: &str) -> &'static str {
     match image_subdir_role {
         "orchestrator-core" => "orchestrator",
-        "reviewer-core"     => "reviewer",
-        "executor-starter"  => "executor-starter",
+        "reviewer-core" => "reviewer",
+        "executor-starter" => "executor-starter",
         other => panic!(
             "unknown canonical role {other:?}; \
              expected one of: orchestrator-core, executor-starter, reviewer-core"
@@ -688,9 +711,9 @@ fn xtask_cli_role_for(image_subdir_role: &str) -> &'static str {
 /// Containerfiles and flip the corresponding entries here.
 fn role_needs_rootfs_bake(image_subdir_role: &str) -> bool {
     match image_subdir_role {
-        "executor-starter"  => true,
+        "executor-starter" => true,
         "orchestrator-core" => false,
-        "reviewer-core"     => false,
+        "reviewer-core" => false,
         other => panic!(
             "unknown canonical role {other:?}; \
              expected one of: orchestrator-core, executor-starter, reviewer-core"
@@ -704,7 +727,7 @@ fn role_needs_rootfs_bake(image_subdir_role: &str) -> bool {
 /// preflight-failing so the auto-bake will rebuild them).
 fn cpio_passes_preflight(img: &Path, role: &str) -> bool {
     let entries = match crate::common::cpio_inspect::list_initramfs_paths(img) {
-        Ok(e)  => e,
+        Ok(e) => e,
         Err(_) => return false,
     };
     required_binaries_for_canonical_role(role)
@@ -738,26 +761,19 @@ fn workspace_root_from_manifest_dir() -> PathBuf {
     }
 }
 
-fn run_xtask_or_panic(
-    cargo:           &str,
-    workspace_root:  &Path,
-    role:            &str,
-    sub:             &str,
-    extra:           &[&str],
-) {
+fn run_xtask_or_panic(cargo: &str, workspace_root: &Path, role: &str, sub: &str, extra: &[&str]) {
     let mut argv: Vec<&str> = vec!["xtask", "images", sub];
     argv.extend(extra);
     eprintln!(
         "[live-e2e auto-bake] {role}: running {} {}",
-        cargo, argv.join(" "),
+        cargo,
+        argv.join(" "),
     );
     let status = Command::new(cargo)
         .current_dir(workspace_root)
         .args(&argv)
         .status()
-        .unwrap_or_else(|e| panic!(
-            "spawn `{cargo} {}`: {e}", argv.join(" "),
-        ));
+        .unwrap_or_else(|e| panic!("spawn `{cargo} {}`: {e}", argv.join(" "),));
     if !status.success() {
         panic!(
             "live-e2e auto-bake stage `{sub}` failed for role {role:?} \
@@ -785,9 +801,7 @@ pub fn build_operator_key(seed: &[u8; 32]) -> (SigningKey, OperatorFingerprint) 
 
 /// Bootstrap a fresh kernel under a tempdir-data-dir with a
 /// custom operator cert that grants the full lifecycle ops.
-pub fn bootstrap_with_custom_cert(
-    signing_key: &SigningKey,
-) -> (PathBuf, PathBuf) {
+pub fn bootstrap_with_custom_cert(signing_key: &SigningKey) -> (PathBuf, PathBuf) {
     let kernel_bin = build_and_locate_kernel();
 
     #[cfg(target_os = "macos")]
@@ -805,18 +819,21 @@ pub fn bootstrap_with_custom_cert(
     // (`crates/dashboard-kernel/src/lib.rs::roles_from_permitted_ops`)
     // when both `RotateEpoch` AND `OperatorCertInstall` appear in
     // `permitted_ops`.
-    let cert = ephemeral_cert_with_key(signing_key, CertOpts {
-        now_unix_secs,
-        permitted_ops: vec![
-            "CreateInitiative".to_owned(),
-            "ApprovePlan".to_owned(),
-            "AbortInitiative".to_owned(),
-            "RotateEpoch".to_owned(),
-            "OperatorCertInstall".to_owned(),
-        ],
-        display_name: "realism-e2e-operator".to_owned(),
-        ..CertOpts::default()
-    });
+    let cert = ephemeral_cert_with_key(
+        signing_key,
+        CertOpts {
+            now_unix_secs,
+            permitted_ops: vec![
+                "CreateInitiative".to_owned(),
+                "ApprovePlan".to_owned(),
+                "AbortInitiative".to_owned(),
+                "RotateEpoch".to_owned(),
+                "OperatorCertInstall".to_owned(),
+            ],
+            display_name: "realism-e2e-operator".to_owned(),
+            ..CertOpts::default()
+        },
+    );
 
     let data_dir: PathBuf = tempfile::tempdir()
         .expect("tempdir for kernel data dir")
@@ -861,7 +878,9 @@ pub fn spawn_kernel_normal(
     let stderr = child.stderr.take().expect("kernel stderr captured");
     let stderr_lines = Arc::new(Mutex::new(Vec::<String>::new()));
     let log_path = data_dir.join("kernel.stderr.log");
-    let log_handle = std::fs::File::create(&log_path).ok().map(|f| Arc::new(Mutex::new(f)));
+    let log_handle = std::fs::File::create(&log_path)
+        .ok()
+        .map(|f| Arc::new(Mutex::new(f)));
     {
         let lines = Arc::clone(&stderr_lines);
         let log_handle = log_handle.clone();
@@ -1013,20 +1032,30 @@ pub fn seed_main_repository(data_dir: &Path) {
     // commit's hash is reproducible across developer machines (no
     // `~/.gitconfig` dependency, no UID-derived defaults).
     let env: &[(&str, &str)] = &[
-        ("GIT_AUTHOR_NAME",     "raxis-e2e"),
-        ("GIT_AUTHOR_EMAIL",    "e2e@raxis.invalid"),
-        ("GIT_COMMITTER_NAME",  "raxis-e2e"),
+        ("GIT_AUTHOR_NAME", "raxis-e2e"),
+        ("GIT_AUTHOR_EMAIL", "e2e@raxis.invalid"),
+        ("GIT_COMMITTER_NAME", "raxis-e2e"),
         ("GIT_COMMITTER_EMAIL", "e2e@raxis.invalid"),
-        ("GIT_AUTHOR_DATE",     "2026-01-01T00:00:00Z"),
-        ("GIT_COMMITTER_DATE",  "2026-01-01T00:00:00Z"),
+        ("GIT_AUTHOR_DATE", "2026-01-01T00:00:00Z"),
+        ("GIT_COMMITTER_DATE", "2026-01-01T00:00:00Z"),
     ];
     let commit = Command::new("git")
         .current_dir(&main_repo)
         .envs(env.iter().copied())
-        .args(["commit", "-q", "--allow-empty", "-m", "raxis-e2e: seed repository"])
+        .args([
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "raxis-e2e: seed repository",
+        ])
         .status()
         .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
-    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+    assert!(
+        commit.success(),
+        "git commit failed in {}",
+        main_repo.display()
+    );
 
     let rev = Command::new("git")
         .current_dir(&main_repo)
@@ -1075,8 +1104,8 @@ pub fn seed_main_repository(data_dir: &Path) {
 /// (idempotent contract documented in the script header), then
 /// `git init` + 11 commits. After it returns we add the bait `.env`
 /// + proxy scripts at the worktree root and commit them with a
-/// pinned identity / date so HEAD is byte-stable across developer
-/// machines (no `~/.gitconfig` dependency).
+///   pinned identity / date so HEAD is byte-stable across developer
+///   machines (no `~/.gitconfig` dependency).
 ///
 /// **Replaces** `seed_main_repository` for the realistic-scenario
 /// driver. `seed_main_repository` (single empty commit) remains for
@@ -1096,14 +1125,13 @@ pub fn seed_realistic_main_repository(data_dir: &Path) {
     // unconditionally — the helper is single-purpose, the dir is
     // always under the per-test tempdir.
     if main_repo.exists() {
-        std::fs::remove_dir_all(&main_repo).unwrap_or_else(|e| {
-            panic!("wipe {}: {e}", main_repo.display())
-        });
+        std::fs::remove_dir_all(&main_repo)
+            .unwrap_or_else(|e| panic!("wipe {}: {e}", main_repo.display()));
     }
 
     let workspace_root = realism_workspace_root();
-    let seed_script = workspace_root
-        .join("live-e2e/seed/repo/rich-multilang-001/scripts/materialize_seed.sh");
+    let seed_script =
+        workspace_root.join("live-e2e/seed/repo/rich-multilang-001/scripts/materialize_seed.sh");
     assert!(
         seed_script.exists(),
         "rich-multilang seed script missing at {}; \
@@ -1125,22 +1153,23 @@ pub fn seed_realistic_main_repository(data_dir: &Path) {
     // credential-substitution-canary task's witness scans for) and
     // the stock-Python service-integrity scripts (the
     // transparent-proxy-realscripts task runs them).
-    crate::extended_e2e_support::credential_substitution_evidence
-        ::stage_fake_creds_env(&main_repo)
+    crate::extended_e2e_support::credential_substitution_evidence::stage_fake_creds_env(&main_repo)
         .unwrap_or_else(|e| panic!("stage_fake_creds_env in main repo: {e}"));
-    crate::extended_e2e_support::transparent_proxy_evidence
-        ::stage_scripts_into_worktree(&main_repo, &workspace_root)
-        .unwrap_or_else(|e| panic!("stage_scripts_into_worktree in main repo: {e}"));
+    crate::extended_e2e_support::transparent_proxy_evidence::stage_scripts_into_worktree(
+        &main_repo,
+        &workspace_root,
+    )
+    .unwrap_or_else(|e| panic!("stage_scripts_into_worktree in main repo: {e}"));
 
     // Commit the overlay as the 12th commit on `main`. Use a
     // pinned identity / date for byte-stable HEAD across machines.
     let env: &[(&str, &str)] = &[
-        ("GIT_AUTHOR_NAME",     "raxis-realistic-seed"),
-        ("GIT_AUTHOR_EMAIL",    "realistic@raxis.invalid"),
-        ("GIT_COMMITTER_NAME",  "raxis-realistic-seed"),
+        ("GIT_AUTHOR_NAME", "raxis-realistic-seed"),
+        ("GIT_AUTHOR_EMAIL", "realistic@raxis.invalid"),
+        ("GIT_COMMITTER_NAME", "raxis-realistic-seed"),
         ("GIT_COMMITTER_EMAIL", "realistic@raxis.invalid"),
-        ("GIT_AUTHOR_DATE",     "2026-01-02T00:00:00Z"),
-        ("GIT_COMMITTER_DATE",  "2026-01-02T00:00:00Z"),
+        ("GIT_AUTHOR_DATE", "2026-01-02T00:00:00Z"),
+        ("GIT_COMMITTER_DATE", "2026-01-02T00:00:00Z"),
     ];
     let add = Command::new("git")
         .current_dir(&main_repo)
@@ -1159,7 +1188,11 @@ pub fn seed_realistic_main_repository(data_dir: &Path) {
         ])
         .status()
         .unwrap_or_else(|e| panic!("spawn git commit: {e}"));
-    assert!(commit.success(), "git commit failed in {}", main_repo.display());
+    assert!(
+        commit.success(),
+        "git commit failed in {}",
+        main_repo.display()
+    );
 
     let rev = Command::new("git")
         .current_dir(&main_repo)
@@ -1295,10 +1328,7 @@ pub fn write_credentials(data_dir: &Path) {
     // accept + immediate close" which surfaces as
     // `redis.exceptions.ConnectionError: Connection closed by
     // server` (live-e2e iter34 root cause).
-    write_with_mode_0600(
-        &cred_dir.join("test-redis-dev.env"),
-        b"raxis_test_pass",
-    );
+    write_with_mode_0600(&cred_dir.join("test-redis-dev.env"), b"raxis_test_pass");
 
     // SMTP proxy expects raw upstream-relay password bytes per
     // `credential-proxy.md §3` (SMTP row). The wire driver
@@ -1342,8 +1372,7 @@ pub fn write_provider_credentials(data_dir: &Path) {
 }
 
 fn write_with_mode_0600(path: &Path, body: &[u8]) {
-    std::fs::write(path, body)
-        .unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    std::fs::write(path, body).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     use std::os::unix::fs::PermissionsExt;
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
         .unwrap_or_else(|e| panic!("chmod 0600 {}: {e}", path.display()));
@@ -1446,10 +1475,12 @@ ANTHROPIC_API_KEY=PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY
 /// `refresh_examples_writes_plan_and_credentials_under_env_gate`
 /// unit test (the test reads both sides and asserts they match
 /// byte-for-byte).
-pub const EXAMPLE_PG_CRED:    &str = "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg";
-pub const EXAMPLE_MONGO_CRED: &str = "mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e_mongo?authSource=admin";
+pub const EXAMPLE_PG_CRED: &str =
+    "postgresql://raxis_test:raxis_test_pass@127.0.0.1:54399/raxis_e2e_pg";
+pub const EXAMPLE_MONGO_CRED: &str =
+    "mongodb://raxis_test:raxis_test_pass@127.0.0.1:27399/raxis_e2e_mongo?authSource=admin";
 pub const EXAMPLE_REDIS_CRED: &str = "raxis_test_pass";
-pub const EXAMPLE_SMTP_CRED:  &str = "live-e2e-upstream-secret";
+pub const EXAMPLE_SMTP_CRED: &str = "live-e2e-upstream-secret";
 
 /// Pre-bundled prompt filenames the auto-refresh mirrors from
 /// `raxis/live-e2e/seed/prompts/` into `examples/seed/prompts/`.
@@ -1550,10 +1581,7 @@ pub fn maybe_refresh_examples(inputs: ExampleRefreshInputs<'_>) -> Option<PathBu
 /// side-effects across parallel tests are notoriously brittle).
 /// Pub-crate so the test can call it; the public API is
 /// [`maybe_refresh_examples`].
-pub(crate) fn refresh_examples_inner(
-    examples_dir: &Path,
-    inputs:       ExampleRefreshInputs<'_>,
-) {
+pub(crate) fn refresh_examples_inner(examples_dir: &Path, inputs: ExampleRefreshInputs<'_>) {
     // 1. policy.toml — copy verbatim from the kernel's live file.
     let dest_policy = examples_dir.join("policy.toml");
     let policy_body = std::fs::read(inputs.live_policy_toml).unwrap_or_else(|e| {
@@ -1577,27 +1605,26 @@ pub(crate) fn refresh_examples_inner(
         examples_dir.join("plan_primary.toml"),
         inputs.plan_primary_toml,
     )
-    .unwrap_or_else(|e| panic!(
-        "[realism-e2e] refresh_examples: write plan_primary.toml: {e}",
-    ));
+    .unwrap_or_else(|e| panic!("[realism-e2e] refresh_examples: write plan_primary.toml: {e}",));
     std::fs::write(
         examples_dir.join("plan_sibling.toml"),
         inputs.plan_sibling_toml,
     )
-    .unwrap_or_else(|e| panic!(
-        "[realism-e2e] refresh_examples: write plan_sibling.toml: {e}",
-    ));
+    .unwrap_or_else(|e| panic!("[realism-e2e] refresh_examples: write plan_sibling.toml: {e}",));
 
     // 3. credentials/*.env — mirror what `write_credentials` writes.
     let creds_dir = examples_dir.join("credentials");
     std::fs::create_dir_all(&creds_dir).unwrap_or_else(|e| {
-        panic!("[realism-e2e] refresh_examples: mkdir {}: {e}", creds_dir.display())
+        panic!(
+            "[realism-e2e] refresh_examples: mkdir {}: {e}",
+            creds_dir.display()
+        )
     });
     for (name, body) in [
-        ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+        ("test-pg-dev.env", EXAMPLE_PG_CRED),
         ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
         ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
-        ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+        ("test-smtp-dev.env", EXAMPLE_SMTP_CRED),
     ] {
         let p = creds_dir.join(name);
         std::fs::write(&p, body).unwrap_or_else(|e| {
@@ -1613,7 +1640,10 @@ pub(crate) fn refresh_examples_inner(
     // refresh path.
     let anth = creds_dir.join("anthropic.env.placeholder");
     std::fs::write(&anth, ANTHROPIC_PLACEHOLDER_BODY).unwrap_or_else(|e| {
-        panic!("[realism-e2e] refresh_examples: write {}: {e}", anth.display())
+        panic!(
+            "[realism-e2e] refresh_examples: write {}: {e}",
+            anth.display()
+        )
     });
 
     // 5. seed/prompts/* — verbatim copy of the canonical seed
@@ -1821,7 +1851,8 @@ impl OperatorIpc {
 
         let ack = read_json_blocking(&mut stream);
         assert_eq!(
-            ack["status"].as_str(), Some("Ok"),
+            ack["status"].as_str(),
+            Some("Ok"),
             "kernel rejected auth: {ack:#}",
         );
 
@@ -1854,7 +1885,8 @@ impl OperatorIpc {
         write_json_frame(&mut self.stream, &req).expect("write CreateInitiative");
         let resp = read_json_blocking(&mut self.stream);
         assert_eq!(
-            resp["status"].as_str(), Some("InitiativeCreated"),
+            resp["status"].as_str(),
+            Some("InitiativeCreated"),
             "CreateInitiative must succeed; got: {resp:#}",
         );
         let returned_id = resp["payload"]["initiative_id"]
@@ -1863,11 +1895,7 @@ impl OperatorIpc {
         assert_eq!(returned_id, initiative_id, "initiative id roundtrip");
     }
 
-    pub fn approve_plan(
-        &mut self,
-        initiative_id: &str,
-        _fingerprint: &OperatorFingerprint,
-    ) {
+    pub fn approve_plan(&mut self, initiative_id: &str, _fingerprint: &OperatorFingerprint) {
         let signing_key = SigningKey::from_bytes(&self.seed);
         let pubkey = signing_key.verifying_key().to_bytes();
         let approving_operator_32 = policy_fingerprint_32(&pubkey);
@@ -1881,7 +1909,8 @@ impl OperatorIpc {
         write_json_frame(&mut self.stream, &req).expect("write ApprovePlan");
         let resp = read_json_blocking(&mut self.stream);
         assert_eq!(
-            resp["status"].as_str(), Some("PlanApproved"),
+            resp["status"].as_str(),
+            Some("PlanApproved"),
             "ApprovePlan must succeed; got: {resp:#}",
         );
     }
@@ -1896,8 +1925,8 @@ fn build_plan_bundle(plan_toml: &str) -> PlanBundle {
     let plan_bytes = plan_toml.as_bytes().to_vec();
     let plan_sha = sha256_of_artifact_bytes(&plan_bytes);
     let artifacts = vec![BundleArtifact {
-        name:   "plan.toml".to_owned(),
-        bytes:  plan_bytes,
+        name: "plan.toml".to_owned(),
+        bytes: plan_bytes,
         sha256: plan_sha,
     }];
     let signed_at = std::time::SystemTime::now()
@@ -1925,32 +1954,44 @@ fn codesign_kernel_for_avf(kernel_bin: &Path) {
         let manifest = anchor.join("Cargo.toml");
         if manifest.exists() {
             if let Ok(s) = std::fs::read_to_string(&manifest) {
-                if s.contains("[workspace]") { break; }
+                if s.contains("[workspace]") {
+                    break;
+                }
             }
         }
         if !anchor.pop() {
-            eprintln!("[realism-e2e] codesign: workspace root not found from {}",
-                kernel_bin.display());
+            eprintln!(
+                "[realism-e2e] codesign: workspace root not found from {}",
+                kernel_bin.display()
+            );
             return;
         }
     }
     let entitlements = anchor.join("release/raxis.entitlements");
     if !entitlements.exists() {
-        eprintln!("[realism-e2e] codesign: entitlements missing at {}",
-            entitlements.display());
+        eprintln!(
+            "[realism-e2e] codesign: entitlements missing at {}",
+            entitlements.display()
+        );
         return;
     }
     let status = Command::new("codesign")
-        .arg("--sign").arg("-")
-        .arg("--entitlements").arg(&entitlements)
-        .arg("--options").arg("runtime")
+        .arg("--sign")
+        .arg("-")
+        .arg("--entitlements")
+        .arg(&entitlements)
+        .arg("--options")
+        .arg("runtime")
         .arg("--force")
         .arg(kernel_bin)
         .status()
         .expect("codesign required for AVF on macOS");
     if !status.success() {
-        panic!("codesign failed (exit {:?}) for {}",
-            status.code(), kernel_bin.display());
+        panic!(
+            "codesign failed (exit {:?}) for {}",
+            status.code(),
+            kernel_bin.display()
+        );
     }
 }
 
@@ -2097,11 +2138,7 @@ pub fn poll_for_dual_lifecycle_completion(
         // `RootfsErofs`) leaves the test waiting the full
         // [`realistic_lifecycle_deadline`] for an event that will
         // never arrive.
-        if let Some(failure) =
-            scan_stderr_for_terminal_spawn_failure(
-                &stderr_path,
-                &initiative_ids,
-            )
+        if let Some(failure) = scan_stderr_for_terminal_spawn_failure(&stderr_path, &initiative_ids)
         {
             let stderr_tail = std::fs::read_to_string(&stderr_path)
                 .ok()
@@ -2124,15 +2161,15 @@ pub fn poll_for_dual_lifecycle_completion(
                  kernel.hint:  {hint}\n\
                  \n\
                  ── kernel.stderr (tail) ──\n{stderr_tail}",
-                event          = failure.event,
+                event = failure.event,
                 bad_initiative = failure.initiative_id,
-                role_tail      = failure
+                role_tail = failure
                     .agent_kind
                     .as_deref()
                     .map(|k| format!(" (sub-task role={k})"))
                     .unwrap_or_default(),
-                error          = failure.error,
-                hint           = failure.hint,
+                error = failure.error,
+                hint = failure.hint,
             );
         }
 
@@ -2146,9 +2183,7 @@ pub fn poll_for_dual_lifecycle_completion(
         last_len = events.len();
 
         for e in &events {
-            if e.event_kind == "SecurityViolation"
-                || e.event_kind == "SecurityViolationDetected"
-            {
+            if e.event_kind == "SecurityViolation" || e.event_kind == "SecurityViolationDetected" {
                 panic!(
                     "SecurityViolation fired during realistic lifecycle: \
                      event_kind={}, payload={:#}",
@@ -2178,7 +2213,7 @@ pub fn poll_for_dual_lifecycle_completion(
             // ceiling fired after three no-progress respawn cycles.
             if e.event_kind == "OrchestratorRespawnCeilingExceeded" {
                 if let Some(bad_initiative) = e.initiative_id.as_deref() {
-                    if initiative_ids.iter().any(|w| *w == bad_initiative) {
+                    if initiative_ids.contains(&bad_initiative) {
                         let stderr_tail = std::fs::read_to_string(&stderr_path)
                             .ok()
                             .map(|s| {
@@ -2239,17 +2274,17 @@ struct TerminalSpawnFailure {
     /// `"orchestrator_spawn_failed"` or
     /// `"ActivateSubTaskSpawnFailed"` — verbatim from the JSON
     /// `event` field.
-    event:         String,
+    event: String,
     /// Watched initiative whose lifecycle is now blocked.
     initiative_id: String,
     /// Sub-task role (`Executor` / `Reviewer`) for
     /// `ActivateSubTaskSpawnFailed`; `None` for the orchestrator
     /// schema (whose role is implied).
-    agent_kind:    Option<String>,
+    agent_kind: Option<String>,
     /// Kernel's `error` field, surfaced verbatim.
-    error:         String,
+    error: String,
     /// Kernel's `hint` field, surfaced verbatim.
-    hint:          String,
+    hint: String,
 }
 
 /// Scan `kernel.stderr.log` for either of the kernel's terminal
@@ -2280,7 +2315,7 @@ struct TerminalSpawnFailure {
 /// `*_spawn_failed` / `*SpawnFailed` events are *terminal* for
 /// the boot path.
 fn scan_stderr_for_terminal_spawn_failure(
-    stderr_path:        &Path,
+    stderr_path: &Path,
     watched_initiatives: &[&str; 2],
 ) -> Option<TerminalSpawnFailure> {
     /// Token shared by both terminal-failure event names.
@@ -2290,7 +2325,9 @@ fn scan_stderr_for_terminal_spawn_failure(
 
     let bytes = std::fs::read(stderr_path).ok()?;
     for line in bytes.split(|&b| b == b'\n') {
-        if line.is_empty() { continue; }
+        if line.is_empty() {
+            continue;
+        }
         // Cheap pre-filter so we don't parse every line as JSON.
         // We accept either spelling because the two schemas differ
         // in case but share the "SpawnFailed" / "spawn_failed"
@@ -2302,26 +2339,29 @@ fn scan_stderr_for_terminal_spawn_failure(
             continue;
         }
         let value: serde_json::Value = match serde_json::from_slice(line) {
-            Ok(v)  => v,
+            Ok(v) => v,
             Err(_) => continue,
         };
         let event = match value.get("event").and_then(|e| e.as_str()) {
-            Some("orchestrator_spawn_failed")  => "orchestrator_spawn_failed",
+            Some("orchestrator_spawn_failed") => "orchestrator_spawn_failed",
             Some("ActivateSubTaskSpawnFailed") => "ActivateSubTaskSpawnFailed",
             _ => continue,
         };
-        let initiative_id = match value.get("initiative_id")
-            .and_then(|i| i.as_str()) {
+        let initiative_id = match value.get("initiative_id").and_then(|i| i.as_str()) {
             Some(s) => s.to_owned(),
-            None    => continue,
+            None => continue,
         };
         if !watched_initiatives.iter().any(|w| *w == initiative_id) {
             continue;
         }
-        let error = value.get("error").and_then(|e| e.as_str())
+        let error = value
+            .get("error")
+            .and_then(|e| e.as_str())
             .unwrap_or("<no `error` field on terminal spawn-failure event>")
             .to_owned();
-        let hint = value.get("hint").and_then(|h| h.as_str())
+        let hint = value
+            .get("hint")
+            .and_then(|h| h.as_str())
             .unwrap_or("<no `hint` field on terminal spawn-failure event>")
             .to_owned();
         let agent_kind = value
@@ -2349,14 +2389,18 @@ fn memmem(haystack: &[u8], needle: &[u8]) -> bool {
 }
 
 pub fn read_audit_chain(audit_dir: &Path) -> Result<Vec<AuditEvent>, ()> {
-    if !audit_dir.exists() { return Err(()); }
+    if !audit_dir.exists() {
+        return Err(());
+    }
     let mut events = Vec::new();
     for entry in std::fs::read_dir(audit_dir).map_err(|_| ())? {
         let entry = entry.map_err(|_| ())?;
         if entry.file_name().to_string_lossy().ends_with(".jsonl") {
             let bytes = std::fs::read(entry.path()).map_err(|_| ())?;
             for line in bytes.split(|&b| b == b'\n') {
-                if line.is_empty() { continue; }
+                if line.is_empty() {
+                    continue;
+                }
                 if let Ok(ev) = serde_json::from_slice::<AuditEvent>(line) {
                     events.push(ev);
                 }
@@ -2371,7 +2415,8 @@ pub fn summarize_chain_for_panic(audit_dir: &Path) -> String {
     match read_audit_chain(audit_dir) {
         Ok(events) => {
             let kinds: Vec<&str> = events.iter().map(|e| e.event_kind.as_str()).collect();
-            format!("seqs={}…{}, kinds={kinds:#?}",
+            format!(
+                "seqs={}…{}, kinds={kinds:#?}",
                 events.first().map(|e| e.seq).unwrap_or(0),
                 events.last().map(|e| e.seq).unwrap_or(0),
             )
@@ -2384,19 +2429,17 @@ pub fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
     let audit_dir = data_dir.join("audit");
     verify_chain_full(&audit_dir)
         .unwrap_or_else(|e| panic!("verify_chain_full({audit_dir:?}) failed: {e:?}"));
-    let reader = ChainReader::open(&audit_dir).unwrap_or_else(|e| {
-        panic!("ChainReader::open({audit_dir:?}) failed: {e:?}")
-    });
+    let reader = ChainReader::open(&audit_dir)
+        .unwrap_or_else(|e| panic!("ChainReader::open({audit_dir:?}) failed: {e:?}"));
     reader
         .records()
         .map(|r| {
             let row = r.unwrap_or_else(|e| panic!("chain record decode failed: {e:?}"));
-            let value = row.parsed_value.unwrap_or_else(|| panic!(
-                "chain row seq={} has no parsed_value", row.seq,
-            ));
-            serde_json::from_value::<AuditEvent>(value).unwrap_or_else(|e| {
-                panic!("decode AuditEvent from chain row {}: {e}", row.seq)
-            })
+            let value = row
+                .parsed_value
+                .unwrap_or_else(|| panic!("chain row seq={} has no parsed_value", row.seq,));
+            serde_json::from_value::<AuditEvent>(value)
+                .unwrap_or_else(|e| panic!("decode AuditEvent from chain row {}: {e}", row.seq))
         })
         .collect()
 }
@@ -2428,8 +2471,8 @@ pub fn walk_chain_or_panic(data_dir: &Path) -> Vec<AuditEvent> {
 /// fails.
 pub fn locate_executor_worktree_via_chain(
     data_dir: &Path,
-    chain:    &[AuditEvent],
-    task_id:  &str,
+    chain: &[AuditEvent],
+    task_id: &str,
 ) -> PathBuf {
     let session_id = locate_session_id_for_task(chain, task_id).unwrap_or_else(|| {
         panic!(
@@ -2461,14 +2504,13 @@ pub fn locate_executor_worktree_via_chain(
 /// historic `<data_dir>/worktrees/<initiative_id>/<task_id>/`
 /// layout for compatibility with non-realistic e2e drivers that
 /// have not yet migrated.
-pub fn locate_executor_worktree(
-    data_dir: &Path,
-    initiative_id: &str,
-    task_id: &str,
-) -> PathBuf {
+pub fn locate_executor_worktree(data_dir: &Path, initiative_id: &str, task_id: &str) -> PathBuf {
     let candidates = [
         data_dir.join("worktrees").join(initiative_id).join(task_id),
-        data_dir.join("workspaces").join(initiative_id).join(task_id),
+        data_dir
+            .join("workspaces")
+            .join(initiative_id)
+            .join(task_id),
         data_dir.join("sessions").join(initiative_id).join(task_id),
     ];
     for c in &candidates {
@@ -2501,13 +2543,12 @@ pub fn dirs_home() -> Option<PathBuf> {
 
 /// First `SessionVmSpawned.session_id` for `task_id` (used to
 /// thread per-task session ids into witnesses that key on them).
-pub fn locate_session_id_for_task(
-    chain: &[AuditEvent],
-    task_id: &str,
-) -> Option<String> {
+pub fn locate_session_id_for_task(chain: &[AuditEvent], task_id: &str) -> Option<String> {
     chain.iter().find_map(|ev| match typed(ev) {
         Some(AuditEventKind::SessionVmSpawned {
-            session_id, task_id: Some(t), ..
+            session_id,
+            task_id: Some(t),
+            ..
         }) if t == task_id => Some(session_id),
         _ => None,
     })
@@ -2556,13 +2597,17 @@ mod tests {
         let block = observability_policy_block();
 
         // 1. Document-level: must parse as TOML.
-        let doc: toml::Value = toml::from_str(&block).unwrap_or_else(|e| panic!(
-            "observability_policy_block did not parse as TOML: {e}\n\
+        let doc: toml::Value = toml::from_str(&block).unwrap_or_else(|e| {
+            panic!(
+                "observability_policy_block did not parse as TOML: {e}\n\
              ── block ──\n{block}",
-        ));
+            )
+        });
 
         // 2. Spec-level: every required field is present.
-        let obs = doc.get("observability").and_then(|v| v.as_table())
+        let obs = doc
+            .get("observability")
+            .and_then(|v| v.as_table())
             .expect("[observability] table present");
         assert_eq!(
             obs.get("enabled").and_then(|v| v.as_bool()),
@@ -2585,12 +2630,18 @@ mod tests {
         //    (`exporter`, `endpoint`, `resource_attributes`) which
         //    `RawPolicy` does not understand — those would parse as
         //    unknown fields the kernel rejects in strict mode.
-        assert!(!block.contains("\nexporter "),
-            "block must not include legacy `exporter = ...`");
-        assert!(!block.contains("\nendpoint "),
-            "block must not include legacy `endpoint = ...`");
-        assert!(!block.contains("resource_attributes"),
-            "block must not include legacy `resource_attributes = {{...}}`");
+        assert!(
+            !block.contains("\nexporter "),
+            "block must not include legacy `exporter = ...`"
+        );
+        assert!(
+            !block.contains("\nendpoint "),
+            "block must not include legacy `endpoint = ...`"
+        );
+        assert!(
+            !block.contains("resource_attributes"),
+            "block must not include legacy `resource_attributes = {{...}}`"
+        );
     }
 
     // ─── orchestrator_spawn_failed fast-fail watchdog ───────────────
@@ -2626,25 +2677,33 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &[initiative_a, initiative_b],
-        )
-        .expect("scanner must surface the matching line");
-        assert_eq!(hit.event, "orchestrator_spawn_failed",
-            "event field must propagate verbatim");
-        assert_eq!(hit.initiative_id, initiative_b,
-            "initiative_id of the matched line must surface verbatim");
+        let hit = scan_stderr_for_terminal_spawn_failure(&log, &[initiative_a, initiative_b])
+            .expect("scanner must surface the matching line");
+        assert_eq!(
+            hit.event, "orchestrator_spawn_failed",
+            "event field must propagate verbatim"
+        );
+        assert_eq!(
+            hit.initiative_id, initiative_b,
+            "initiative_id of the matched line must surface verbatim"
+        );
         assert!(
             hit.agent_kind.is_none(),
-            "orchestrator schema has no agent_kind (got: {:?})", hit.agent_kind,
+            "orchestrator schema has no agent_kind (got: {:?})",
+            hit.agent_kind,
         );
-        assert!(hit.error.contains("Invalid disk image"),
+        assert!(
+            hit.error.contains("Invalid disk image"),
             "kernel `error` field must propagate to the panic body \
-             (got: {})", hit.error);
-        assert!(hit.hint.contains("recovery::reconcile"),
+             (got: {})",
+            hit.error
+        );
+        assert!(
+            hit.hint.contains("recovery::reconcile"),
             "kernel `hint` field must propagate so the operator sees \
-             the kernel's own remediation hint (got: {})", hit.hint);
+             the kernel's own remediation hint (got: {})",
+            hit.hint
+        );
     }
 
     /// The sub-task schema (`ActivateSubTaskSpawnFailed`) is the
@@ -2679,13 +2738,12 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &[initiative_a, initiative_b],
-        )
-        .expect("scanner must surface the sub-task failure line");
-        assert_eq!(hit.event, "ActivateSubTaskSpawnFailed",
-            "event field must propagate verbatim");
+        let hit = scan_stderr_for_terminal_spawn_failure(&log, &[initiative_a, initiative_b])
+            .expect("scanner must surface the sub-task failure line");
+        assert_eq!(
+            hit.event, "ActivateSubTaskSpawnFailed",
+            "event field must propagate verbatim"
+        );
         assert_eq!(hit.initiative_id, initiative_a);
         assert_eq!(
             hit.agent_kind.as_deref(),
@@ -2693,10 +2751,16 @@ mod tests {
             "Executor / Reviewer role must surface in the panic body so \
              the operator knows which canonical image to inspect",
         );
-        assert!(hit.error.contains("vsock CONNECT 1024"),
-            "kernel `error` field must propagate (got: {})", hit.error);
-        assert!(hit.hint.contains("sub-task activation exhausted"),
-            "kernel `hint` field must propagate (got: {})", hit.hint);
+        assert!(
+            hit.error.contains("vsock CONNECT 1024"),
+            "kernel `error` field must propagate (got: {})",
+            hit.error
+        );
+        assert!(
+            hit.hint.contains("sub-task activation exhausted"),
+            "kernel `hint` field must propagate (got: {})",
+            hit.hint
+        );
     }
 
     /// Unrelated `*spawn_failed*` events (`gateway_spawn_failed`,
@@ -2720,10 +2784,8 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &[initiative_watched, initiative_watched],
-        );
+        let hit =
+            scan_stderr_for_terminal_spawn_failure(&log, &[initiative_watched, initiative_watched]);
         assert!(
             hit.is_none(),
             "unrelated spawn-failed events (gateway / respawn) must NOT \
@@ -2752,10 +2814,7 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &[initiative_a, initiative_b],
-        );
+        let hit = scan_stderr_for_terminal_spawn_failure(&log, &[initiative_a, initiative_b]);
         assert!(
             hit.is_none(),
             "transient retries must not trip the watchdog; got {hit:?}",
@@ -2770,7 +2829,7 @@ mod tests {
     fn scan_stderr_ignores_spawn_failed_for_unwatched_initiative() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("kernel.stderr.log");
-        let initiative_watched   = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
+        let initiative_watched = "019e20c9-e093-7052-a0d1-1c97ef8b0090";
         let initiative_unwatched = "019eFFFF-ffff-ffff-ffff-fffffffffff0";
         let body = format!(
             "{{\"level\":\"error\",\"event\":\"orchestrator_spawn_failed\",\
@@ -2780,10 +2839,8 @@ mod tests {
         );
         std::fs::write(&log, body).expect("write stderr fixture");
 
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &[initiative_watched, initiative_watched],
-        );
+        let hit =
+            scan_stderr_for_terminal_spawn_failure(&log, &[initiative_watched, initiative_watched]);
         assert!(
             hit.is_none(),
             "spawn_failed for unwatched initiative must be filtered; got {hit:?}",
@@ -2798,10 +2855,7 @@ mod tests {
     fn scan_stderr_missing_file_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let log = tmp.path().join("does-not-exist.log");
-        let hit = scan_stderr_for_terminal_spawn_failure(
-            &log,
-            &["a", "b"],
-        );
+        let hit = scan_stderr_for_terminal_spawn_failure(&log, &["a", "b"]);
         assert!(hit.is_none(), "missing-file must be a no-op, got {hit:?}");
     }
 
@@ -2824,8 +2878,8 @@ mod tests {
         let tmp = tempfile::tempdir().expect("fixture tempdir");
         let workspace = tmp.path().to_path_buf();
         let examples = workspace.join("live-e2e/examples");
-        let creds    = examples.join("credentials");
-        let prompts  = examples.join("seed/prompts");
+        let creds = examples.join("credentials");
+        let prompts = examples.join("seed/prompts");
         let src_prompts = workspace.join("live-e2e/seed/prompts");
         for d in [&examples, &creds, &prompts, &src_prompts] {
             std::fs::create_dir_all(d).expect("mkdir fixture subdir");
@@ -2836,7 +2890,8 @@ mod tests {
             std::fs::write(
                 src_prompts.join(name),
                 format!("# fixture prompt body for {name}\n"),
-            ).expect("write fixture prompt");
+            )
+            .expect("write fixture prompt");
         }
         (tmp, workspace)
     }
@@ -2852,22 +2907,24 @@ mod tests {
         // Live policy.toml — minimal but non-empty so we can
         // assert the copy is byte-for-byte.
         let live_policy = workspace.join("policy.toml");
-        std::fs::write(&live_policy, b"# live policy.toml fixture\n[meta]\nepoch = 1\n")
-            .expect("write fixture policy.toml");
+        std::fs::write(
+            &live_policy,
+            b"# live policy.toml fixture\n[meta]\nepoch = 1\n",
+        )
+        .expect("write fixture policy.toml");
 
         let inputs = ExampleRefreshInputs {
-            live_policy_toml:  &live_policy,
+            live_policy_toml: &live_policy,
             plan_primary_toml: "# primary plan fixture\n[plan.initiative]\n",
             plan_sibling_toml: "# sibling plan fixture\n[plan.initiative]\n",
-            workspace_root:    &workspace,
+            workspace_root: &workspace,
         };
         refresh_examples_inner(&examples, inputs);
 
         // policy.toml — byte-for-byte from the live source.
-        let copied_policy = std::fs::read(examples.join("policy.toml"))
-            .expect("read refreshed policy.toml");
-        let live_policy_body = std::fs::read(&live_policy)
-            .expect("read live policy.toml");
+        let copied_policy =
+            std::fs::read(examples.join("policy.toml")).expect("read refreshed policy.toml");
+        let live_policy_body = std::fs::read(&live_policy).expect("read live policy.toml");
         assert_eq!(
             copied_policy, live_policy_body,
             "refreshed policy.toml must be byte-for-byte from the live source",
@@ -2884,10 +2941,10 @@ mod tests {
         // Credentials — match the EXAMPLE_*_CRED constants verbatim.
         let creds = examples.join("credentials");
         for (name, want) in [
-            ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+            ("test-pg-dev.env", EXAMPLE_PG_CRED),
             ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
             ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
-            ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+            ("test-smtp-dev.env", EXAMPLE_SMTP_CRED),
         ] {
             let got = std::fs::read_to_string(creds.join(name))
                 .unwrap_or_else(|e| panic!("read {name}: {e}"));
@@ -2915,10 +2972,8 @@ mod tests {
         // Seed prompts mirror — every file in EXAMPLE_SEED_PROMPTS
         // copied verbatim from the source.
         for name in EXAMPLE_SEED_PROMPTS {
-            let got = std::fs::read_to_string(
-                examples.join("seed/prompts").join(name),
-            )
-            .unwrap_or_else(|e| panic!("read seed/prompts/{name}: {e}"));
+            let got = std::fs::read_to_string(examples.join("seed/prompts").join(name))
+                .unwrap_or_else(|e| panic!("read seed/prompts/{name}: {e}"));
             assert!(
                 got.contains(&format!("# fixture prompt body for {name}")),
                 "refreshed seed/prompts/{name} must be the verbatim source body",
@@ -2954,21 +3009,23 @@ mod tests {
         let prior = std::env::var(REFRESH_EXAMPLES_ENV).ok();
         std::env::set_var(REFRESH_EXAMPLES_ENV, "0");
         let result = maybe_refresh_examples(ExampleRefreshInputs {
-            live_policy_toml:  &live_policy,
+            live_policy_toml: &live_policy,
             plan_primary_toml: "primary",
             plan_sibling_toml: "sibling",
-            workspace_root:    &workspace,
+            workspace_root: &workspace,
         });
         match prior {
             Some(v) => std::env::set_var(REFRESH_EXAMPLES_ENV, v),
-            None    => std::env::remove_var(REFRESH_EXAMPLES_ENV),
+            None => std::env::remove_var(REFRESH_EXAMPLES_ENV),
         }
         assert!(result.is_none(), "no-op path must return None");
 
-        let sentinel = std::fs::read_to_string(examples.join("policy.toml"))
-            .expect("read sentinel back");
-        assert_eq!(sentinel, "SENTINEL_DO_NOT_OVERWRITE",
-            "default-off path must NOT touch the worktree");
+        let sentinel =
+            std::fs::read_to_string(examples.join("policy.toml")).expect("read sentinel back");
+        assert_eq!(
+            sentinel, "SENTINEL_DO_NOT_OVERWRITE",
+            "default-off path must NOT touch the worktree"
+        );
     }
 
     /// The witness must REJECT a credential file that contains a
@@ -2981,7 +3038,7 @@ mod tests {
     fn assert_no_real_anthropic_key_rejects_real_looking_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let examples = tmp.path().join("examples");
-        let creds    = examples.join("credentials");
+        let creds = examples.join("credentials");
         std::fs::create_dir_all(&creds).expect("mkdir credentials");
         // Synthetic 32-char body of `[A-Za-z0-9_-]` — enough to
         // satisfy the 20+ minimum length. The key does NOT come
@@ -2990,7 +3047,8 @@ mod tests {
         std::fs::write(
             creds.join("anthropic.env.placeholder"),
             b"ANTHROPIC_API_KEY=sk-ant-api03-AAAA1111BBBB2222CCCC3333DDDDEEEE\n",
-        ).expect("write fixture key");
+        )
+        .expect("write fixture key");
         assert_no_real_anthropic_key(&examples);
     }
 
@@ -3001,21 +3059,22 @@ mod tests {
     fn assert_no_real_anthropic_key_accepts_canonical_placeholder() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let examples = tmp.path().join("examples");
-        let creds    = examples.join("credentials");
+        let creds = examples.join("credentials");
         std::fs::create_dir_all(&creds).expect("mkdir credentials");
         std::fs::write(
             creds.join("anthropic.env.placeholder"),
             ANTHROPIC_PLACEHOLDER_BODY,
-        ).expect("write canonical placeholder");
+        )
+        .expect("write canonical placeholder");
         // The other credential files in the bundle are real test-
         // tenant secrets for the local docker-compose stack and
         // do not match the Anthropic regex. Stage them too so the
         // witness scans a realistic set.
         for (name, body) in [
-            ("test-pg-dev.env",    EXAMPLE_PG_CRED),
+            ("test-pg-dev.env", EXAMPLE_PG_CRED),
             ("test-mongo-dev.env", EXAMPLE_MONGO_CRED),
             ("test-redis-dev.env", EXAMPLE_REDIS_CRED),
-            ("test-smtp-dev.env",  EXAMPLE_SMTP_CRED),
+            ("test-smtp-dev.env", EXAMPLE_SMTP_CRED),
         ] {
             std::fs::write(creds.join(name), body).expect("write cred fixture");
         }
@@ -3032,21 +3091,13 @@ mod tests {
     #[test]
     fn find_real_anthropic_key_negative_cases() {
         // Single-digit version: regex requires `[0-9]{2}`.
-        assert!(find_real_anthropic_key(
-            b"sk-ant-api3-AAAA1111BBBB2222CCCC3333"
-        ).is_none());
+        assert!(find_real_anthropic_key(b"sk-ant-api3-AAAA1111BBBB2222CCCC3333").is_none());
         // Body too short: regex requires `{20,}`.
-        assert!(find_real_anthropic_key(
-            b"sk-ant-api03-tooshort"
-        ).is_none());
+        assert!(find_real_anthropic_key(b"sk-ant-api03-tooshort").is_none());
         // `sk-ant-` without the `api` infix.
-        assert!(find_real_anthropic_key(
-            b"sk-ant-other-AAAA1111BBBB2222CCCC3333"
-        ).is_none());
+        assert!(find_real_anthropic_key(b"sk-ant-other-AAAA1111BBBB2222CCCC3333").is_none());
         // The literal placeholder string.
-        assert!(find_real_anthropic_key(
-            b"PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY"
-        ).is_none());
+        assert!(find_real_anthropic_key(b"PLACEHOLDER_REPLACE_ME_WITH_REAL_KEY").is_none());
     }
 
     /// Positive sanity: a real-shape key buried in a longer body
@@ -3055,13 +3106,17 @@ mod tests {
     /// the panic message).
     #[test]
     fn find_real_anthropic_key_positive_case() {
-        let body = b"prefix junk\nANTHROPIC_API_KEY=sk-ant-api03-AAAA1111BBBB2222CCCC3333DDDDEEEE\nsuffix";
-        let hit = find_real_anthropic_key(body)
-            .expect("real-shape key must surface");
-        assert!(hit.starts_with("sk-ant-api03-"),
-            "hit must include the leading regex match: {hit}");
-        assert!(hit.len() >= "sk-ant-api03-".len() + 20,
-            "hit must include the full key body: {hit}");
+        let body =
+            b"prefix junk\nANTHROPIC_API_KEY=sk-ant-api03-AAAA1111BBBB2222CCCC3333DDDDEEEE\nsuffix";
+        let hit = find_real_anthropic_key(body).expect("real-shape key must surface");
+        assert!(
+            hit.starts_with("sk-ant-api03-"),
+            "hit must include the leading regex match: {hit}"
+        );
+        assert!(
+            hit.len() >= "sk-ant-api03-".len() + 20,
+            "hit must include the full key body: {hit}"
+        );
     }
 
     /// The refresh hook is intentionally pinned to a specific
@@ -3084,15 +3139,15 @@ mod tests {
         std::env::set_var(REFRESH_EXAMPLES_ENV, "1");
         let _capture = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             maybe_refresh_examples(ExampleRefreshInputs {
-                live_policy_toml:  &live_policy,
+                live_policy_toml: &live_policy,
                 plan_primary_toml: "primary",
                 plan_sibling_toml: "sibling",
-                workspace_root:    &workspace,
+                workspace_root: &workspace,
             });
         }));
         match prior {
             Some(v) => std::env::set_var(REFRESH_EXAMPLES_ENV, v),
-            None    => std::env::remove_var(REFRESH_EXAMPLES_ENV),
+            None => std::env::remove_var(REFRESH_EXAMPLES_ENV),
         }
         // Re-raise the captured panic with the expected message so
         // `#[should_panic(expected = "does not exist")]` matches.

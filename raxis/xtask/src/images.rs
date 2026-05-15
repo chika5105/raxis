@@ -99,8 +99,8 @@ impl Role {
 
     fn parse(s: &str) -> Result<Self> {
         match s {
-            "orchestrator"     => Ok(Role::Orchestrator),
-            "reviewer"         => Ok(Role::Reviewer),
+            "orchestrator" => Ok(Role::Orchestrator),
+            "reviewer" => Ok(Role::Reviewer),
             "executor-starter" => Ok(Role::ExecutorStarter),
             other => bail!(
                 "unsupported --role {other:?}; expected one of: \
@@ -115,8 +115,8 @@ impl Role {
 
     fn workspace_crate(self) -> &'static str {
         match self {
-            Role::Orchestrator    => "raxis-planner-orchestrator",
-            Role::Reviewer        => "raxis-planner-reviewer",
+            Role::Orchestrator => "raxis-planner-orchestrator",
+            Role::Reviewer => "raxis-planner-reviewer",
             Role::ExecutorStarter => "raxis-planner-executor",
         }
     }
@@ -125,16 +125,16 @@ impl Role {
     /// in each planner crate's Cargo.toml).
     fn binary_name(self) -> &'static str {
         match self {
-            Role::Orchestrator    => "raxis-orchestrator",
-            Role::Reviewer        => "raxis-reviewer",
+            Role::Orchestrator => "raxis-orchestrator",
+            Role::Reviewer => "raxis-reviewer",
             Role::ExecutorStarter => "raxis-executor",
         }
     }
 
     fn images_subdir(self) -> &'static str {
         match self {
-            Role::Orchestrator    => "orchestrator-core",
-            Role::Reviewer        => "reviewer-core",
+            Role::Orchestrator => "orchestrator-core",
+            Role::Reviewer => "reviewer-core",
             Role::ExecutorStarter => "executor-starter",
         }
     }
@@ -143,16 +143,16 @@ impl Role {
     /// blobs, matching `image-manifest::Role::artefact_stem`.
     fn artefact_stem(self) -> &'static str {
         match self {
-            Role::Orchestrator    => "raxis-orchestrator-core",
-            Role::Reviewer        => "raxis-reviewer-core",
+            Role::Orchestrator => "raxis-orchestrator-core",
+            Role::Reviewer => "raxis-reviewer-core",
             Role::ExecutorStarter => "raxis-executor-starter",
         }
     }
 
     fn manifest_role(self) -> raxis_image_manifest::Role {
         match self {
-            Role::Orchestrator    => raxis_image_manifest::Role::Orchestrator,
-            Role::Reviewer        => raxis_image_manifest::Role::Reviewer,
+            Role::Orchestrator => raxis_image_manifest::Role::Orchestrator,
+            Role::Reviewer => raxis_image_manifest::Role::Reviewer,
             Role::ExecutorStarter => raxis_image_manifest::Role::ExecutorStarter,
         }
     }
@@ -176,10 +176,10 @@ fn default_target_triple() -> &'static str {
 
 #[derive(Debug)]
 struct DevStageArgs {
-    role:           Role,
-    target:         String,
+    role: Role,
+    target: String,
     workspace_root: PathBuf,
-    cargo:          String,
+    cargo: String,
     /// When true, skip the post-stage stub-detection guard. Default
     /// `false`: dev-stage refuses to claim success when the role's
     /// staging tree is missing OS tooling that the canonical
@@ -187,14 +187,14 @@ struct DevStageArgs {
     /// Set this only when intentionally building a binary-only
     /// debug image (e.g. while iterating on planner-core without
     /// re-running the docker bake).
-    allow_stub:     bool,
+    allow_stub: bool,
 }
 
 impl DevStageArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut role:   Option<Role>     = None;
-        let mut target: Option<String>   = None;
-        let mut allow_stub:    bool      = false;
+        let mut role: Option<Role> = None;
+        let mut target: Option<String> = None;
+        let mut allow_stub: bool = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -238,7 +238,13 @@ impl DevStageArgs {
         let workspace_root = workspace_root_from_cwd()?;
         let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned());
 
-        Ok(Self { role, target, workspace_root, cargo, allow_stub })
+        Ok(Self {
+            role,
+            target,
+            workspace_root,
+            cargo,
+            allow_stub,
+        })
     }
 }
 
@@ -251,34 +257,24 @@ impl DevStageArgs {
 /// to a planner-tool spawn or runtime requirement that would ENOENT
 /// at the first invocation if absent.
 ///
-/// * `bin/bash`              — `BashTool` spawn (`tokio::process::
-///                             Command::new("bash")`).
-/// * `usr/bin/python3`       — required by the executor's
-///                             "LLM writes a `psycopg2` script and
-///                             pipes it through `bash -c 'python3 -c
-///                             "..."'`" canonical pattern. Without
-///                             python the credential-proxy round-trip
-///                             tests can never run.
-/// * `usr/bin/git`           — `GitCommitTool` spawn.
+/// * `bin/bash` — `BashTool` spawn (`tokio::process::Command::new("bash")`).
+/// * `usr/bin/python3` — required by the executor's "LLM writes a
+///   `psycopg2` script and pipes it through `bash -c 'python3 -c "..."'`"
+///   canonical pattern. Without python the credential-proxy round-trip
+///   tests can never run.
+/// * `usr/bin/git` — `GitCommitTool` spawn.
 ///
 /// Orchestrator and Reviewer are intentionally binary-only today
 /// (`INV-PLANNER-HARNESS-02 — minimalism`); their `required_binaries`
 /// list is empty so the guard always passes for those roles.
 fn required_os_binaries(role: Role) -> &'static [&'static str] {
     match role {
-        Role::ExecutorStarter => &[
-            "bin/bash",
-            "usr/bin/python3",
-            "usr/bin/git",
-        ],
+        Role::ExecutorStarter => &["bin/bash", "usr/bin/python3", "usr/bin/git"],
         Role::Orchestrator | Role::Reviewer => &[],
     }
 }
 
-fn assert_no_stub_after_stage(
-    role:         Role,
-    staging_root: &Path,
-) -> Result<()> {
+fn assert_no_stub_after_stage(role: Role, staging_root: &Path) -> Result<()> {
     let required = required_os_binaries(role);
     let missing: Vec<&str> = required
         .iter()
@@ -303,16 +299,16 @@ fn assert_no_stub_after_stage(
          cargo xtask images bake-rootfs --role {role_arg}\n\
          then re-run dev-stage. Pass --allow-stub to dev-stage if you are \
          intentionally building a binary-only debug image (NOT for live-e2e).",
-        role     = role.workspace_crate(),
-        staging  = staging_root.display(),
-        n        = missing.len(),
-        plural   = if missing.len() == 1 { "y" } else { "ies" },
+        role = role.workspace_crate(),
+        staging = staging_root.display(),
+        n = missing.len(),
+        plural = if missing.len() == 1 { "y" } else { "ies" },
         role_arg = role.images_subdir(),
-        lines    = missing
-                       .iter()
-                       .map(|m| format!("  - {m}"))
-                       .collect::<Vec<_>>()
-                       .join("\n"),
+        lines = missing
+            .iter()
+            .map(|m| format!("  - {m}"))
+            .collect::<Vec<_>>()
+            .join("\n"),
     )
 }
 
@@ -343,9 +339,7 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
             &args.target,
         ])
         .status()
-        .context(
-            "failed to spawn cargo for cross-compile; is the toolchain on $PATH?",
-        )?;
+        .context("failed to spawn cargo for cross-compile; is the toolchain on $PATH?")?;
     if !status.success() {
         bail!(
             "cross-compile failed (exit {}). Likely causes:\n  \
@@ -400,20 +394,17 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     let canonical_rel = format!("usr/local/bin/{}", args.role.binary_name());
     let canonical_abs = staging_root.join(&canonical_rel);
     if let Some(parent) = canonical_abs.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("create {}", parent.display()))?;
+        fs::create_dir_all(parent).with_context(|| format!("create {}", parent.display()))?;
     }
     // Replace the existing binary atomically: remove the stale file
     // (or symlink) first so `fs::copy` writes a fresh inode rather
     // than following a host-absolute symlink.
     if canonical_abs.exists() || canonical_abs.symlink_metadata().is_ok() {
-        fs::remove_file(&canonical_abs).with_context(|| {
-            format!("remove stale {}", canonical_abs.display())
-        })?;
+        fs::remove_file(&canonical_abs)
+            .with_context(|| format!("remove stale {}", canonical_abs.display()))?;
     }
-    fs::copy(&built, &canonical_abs).with_context(|| {
-        format!("copy {} -> {}", built.display(), canonical_abs.display())
-    })?;
+    fs::copy(&built, &canonical_abs)
+        .with_context(|| format!("copy {} -> {}", built.display(), canonical_abs.display()))?;
     let mut perms = fs::metadata(&canonical_abs)
         .with_context(|| format!("stat {}", canonical_abs.display()))?
         .permissions();
@@ -427,18 +418,12 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
     // of the canonical-layout binary.
     let init_link = staging_root.join("init");
     if init_link.exists() || init_link.symlink_metadata().is_ok() {
-        fs::remove_file(&init_link).with_context(|| {
-            format!("remove stale {}", init_link.display())
-        })?;
+        fs::remove_file(&init_link)
+            .with_context(|| format!("remove stale {}", init_link.display()))?;
     }
     let init_target = format!("/{canonical_rel}");
-    symlink(&init_target, &init_link).with_context(|| {
-        format!(
-            "symlink {} -> {}",
-            init_link.display(),
-            init_target,
-        )
-    })?;
+    symlink(&init_target, &init_link)
+        .with_context(|| format!("symlink {} -> {}", init_link.display(), init_target,))?;
     let dest = canonical_abs;
 
     // Stub guard — assert the staging tree contains the role's
@@ -499,22 +484,22 @@ fn dev_stage(args: &DevStageArgs) -> Result<()> {
 enum FreshnessVerdict {
     /// Staged binary's mtime ≥ newest source mtime.
     Fresh {
-        staged_mtime:   std::time::SystemTime,
-        source_mtime:   std::time::SystemTime,
-        staged_path:    PathBuf,
-        newest_source:  PathBuf,
+        staged_mtime: std::time::SystemTime,
+        source_mtime: std::time::SystemTime,
+        staged_path: PathBuf,
+        newest_source: PathBuf,
     },
     /// A source file is newer than the staged binary.
     Stale {
-        staged_mtime:   std::time::SystemTime,
-        source_mtime:   std::time::SystemTime,
-        staged_path:    PathBuf,
-        newest_source:  PathBuf,
+        staged_mtime: std::time::SystemTime,
+        source_mtime: std::time::SystemTime,
+        staged_path: PathBuf,
+        newest_source: PathBuf,
     },
     /// No staged binary file exists at the canonical staging path.
     Missing {
-        staged_path:    PathBuf,
-        newest_source:  Option<PathBuf>,
+        staged_path: PathBuf,
+        newest_source: Option<PathBuf>,
     },
 }
 
@@ -532,13 +517,16 @@ enum FreshnessVerdict {
 /// to consider", consistent with the iter54 baseline.
 fn planner_source_dirs(role: Role, workspace_root: &Path) -> [PathBuf; 2] {
     let role_dir = match role {
-        Role::Orchestrator    => "planner-orchestrator",
-        Role::Reviewer        => "planner-reviewer",
+        Role::Orchestrator => "planner-orchestrator",
+        Role::Reviewer => "planner-reviewer",
         Role::ExecutorStarter => "planner-executor",
     };
     [
         workspace_root.join("crates").join(role_dir).join("src"),
-        workspace_root.join("crates").join("planner-core").join("src"),
+        workspace_root
+            .join("crates")
+            .join("planner-core")
+            .join("src"),
     ]
 }
 
@@ -553,29 +541,21 @@ fn planner_source_dirs(role: Role, workspace_root: &Path) -> [PathBuf; 2] {
 /// during the walk (permission, broken symlink, …) are surfaced as
 /// `Err` so the freshness guard fail-closes rather than silently
 /// returning `Fresh` on an incomplete walk.
-fn newest_mtime_in_tree(
-    root: &Path,
-) -> Result<Option<(std::time::SystemTime, PathBuf)>> {
+fn newest_mtime_in_tree(root: &Path) -> Result<Option<(std::time::SystemTime, PathBuf)>> {
     if !root.exists() {
         return Ok(None);
     }
     let mut best: Option<(std::time::SystemTime, PathBuf)> = None;
     for entry in walkdir::WalkDir::new(root).follow_links(false) {
-        let entry = entry.with_context(|| {
-            format!("walk source tree under {}", root.display())
-        })?;
+        let entry = entry.with_context(|| format!("walk source tree under {}", root.display()))?;
         if !entry.file_type().is_file() {
             continue;
         }
         let m = entry
             .metadata()
-            .with_context(|| {
-                format!("stat {}", entry.path().display())
-            })?
+            .with_context(|| format!("stat {}", entry.path().display()))?
             .modified()
-            .with_context(|| {
-                format!("read mtime of {}", entry.path().display())
-            })?;
+            .with_context(|| format!("read mtime of {}", entry.path().display()))?;
         match best {
             None => best = Some((m, entry.path().to_owned())),
             Some((cur, _)) if m > cur => {
@@ -592,15 +572,14 @@ fn newest_mtime_in_tree(
 /// subprocess invocations. The caller (`handle_staged_binary_freshness`)
 /// turns the verdict into either an auto-rebake or a fail-closed
 /// remediation message.
-fn check_staged_binary_freshness(
-    role:           Role,
-    workspace_root: &Path,
-) -> Result<FreshnessVerdict> {
+fn check_staged_binary_freshness(role: Role, workspace_root: &Path) -> Result<FreshnessVerdict> {
     let staged_path = workspace_root
         .join(STAGING_PARENT)
         .join(role.images_subdir())
         .join("rootfs")
-        .join("usr").join("local").join("bin")
+        .join("usr")
+        .join("local")
+        .join("bin")
         .join(role.binary_name());
 
     let source_dirs = planner_source_dirs(role, workspace_root);
@@ -627,9 +606,7 @@ fn check_staged_binary_freshness(
     let staged_mtime = fs::metadata(&staged_path)
         .with_context(|| format!("stat {}", staged_path.display()))?
         .modified()
-        .with_context(|| {
-            format!("read mtime of {}", staged_path.display())
-        })?;
+        .with_context(|| format!("read mtime of {}", staged_path.display()))?;
 
     let (source_mtime, newest_source_path) = match newest_source {
         Some(pair) => pair,
@@ -669,14 +646,14 @@ fn check_staged_binary_freshness(
 /// when `--no-auto-stage` is set. Emits structured audit log lines on
 /// every branch so a build log replay always answers "did the guard
 /// fire on this role, and which way".
-fn handle_staged_binary_freshness(
-    role: Role,
-    args: &BuildAllArgs,
-) -> Result<()> {
+fn handle_staged_binary_freshness(role: Role, args: &BuildAllArgs) -> Result<()> {
     let verdict = check_staged_binary_freshness(role, &args.workspace_root)?;
     match &verdict {
         FreshnessVerdict::Fresh {
-            staged_mtime, source_mtime, staged_path, newest_source,
+            staged_mtime,
+            source_mtime,
+            staged_path,
+            newest_source,
         } => {
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"build_all_freshness_check_fresh\",\
@@ -691,7 +668,10 @@ fn handle_staged_binary_freshness(
             Ok(())
         }
         FreshnessVerdict::Stale {
-            staged_mtime, source_mtime, staged_path, newest_source,
+            staged_mtime,
+            source_mtime,
+            staged_path,
+            newest_source,
         } => {
             let reason = format!(
                 "staged planner binary {} (mtime {}) is older than source \
@@ -714,11 +694,11 @@ fn handle_staged_binary_freshness(
                      re-run this `build-all` invocation. \n\n\
                      Alternative: drop `--no-auto-stage` and let `build-all` \
                      auto-rebake the role for you (default behaviour).",
-                    role   = role,
-                    arg    = role.images_subdir(),
-                    krate  = role.workspace_crate(),
+                    role = role,
+                    arg = role.images_subdir(),
+                    krate = role.workspace_crate(),
                     subdir = role.images_subdir(),
-                    bin    = role.binary_name(),
+                    bin = role.binary_name(),
                 );
             }
             eprintln!(
@@ -735,7 +715,10 @@ fn handle_staged_binary_freshness(
             invoke_auto_stage(role, args)?;
             Ok(())
         }
-        FreshnessVerdict::Missing { staged_path, newest_source } => {
+        FreshnessVerdict::Missing {
+            staged_path,
+            newest_source,
+        } => {
             if args.no_auto_stage {
                 bail!(
                     "INV-IMAGE-BAKE-NO-STALE-CACHE-01 VIOLATED for role {role:?}: \
@@ -744,9 +727,9 @@ fn handle_staged_binary_freshness(
                      refuses to silently pack a rootfs missing the role's \
                      planner binary. Remediation: run \
                      `cargo xtask images dev-stage --role {arg}` first.",
-                    role  = role,
+                    role = role,
                     staged = staged_path.display(),
-                    arg   = role.images_subdir(),
+                    arg = role.images_subdir(),
                 );
             }
             eprintln!(
@@ -755,7 +738,8 @@ fn handle_staged_binary_freshness(
                  \"staged_path\":{:?},\"newest_source\":{:?}}}",
                 role.workspace_crate(),
                 staged_path.display().to_string(),
-                newest_source.as_ref()
+                newest_source
+                    .as_ref()
                     .map(|p| p.display().to_string())
                     .unwrap_or_else(|| "(none)".to_owned()),
             );
@@ -777,11 +761,10 @@ fn handle_staged_binary_freshness(
 fn invoke_auto_stage(role: Role, args: &BuildAllArgs) -> Result<()> {
     let dev_stage_args = DevStageArgs {
         role,
-        target:         default_target_triple().to_owned(),
+        target: default_target_triple().to_owned(),
         workspace_root: args.workspace_root.clone(),
-        cargo:          std::env::var("CARGO")
-                            .unwrap_or_else(|_| "cargo".to_owned()),
-        allow_stub:     false,
+        cargo: std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()),
+        allow_stub: false,
     };
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"build_all_auto_stage_begin\",\
@@ -822,15 +805,15 @@ fn mtime_to_unix(t: std::time::SystemTime) -> u64 {
 struct BuildAllArgs {
     /// `None` = build every role for which `images/<role>/rootfs/`
     /// is non-empty.
-    role:           Option<Role>,
-    install_dir:    PathBuf,
+    role: Option<Role>,
+    install_dir: PathBuf,
     workspace_root: PathBuf,
     /// Path to the Ed25519 signing-key hex file. Defaults to
     /// `$HOME/.config/raxis/keys/raxis-dev-signing.key.hex`
     /// (`release-and-distribution.md §8.1`). The build-all
     /// step requires this exists; mint one with
     /// `cargo xtask dev-keys init` if absent.
-    signing_key:    PathBuf,
+    signing_key: PathBuf,
     /// When true, skip the stale-cache auto-rebake guard. Default
     /// `false`: build-all auto-invokes `dev-stage` for any role
     /// whose staged planner binary is older than its `crates/
@@ -840,15 +823,15 @@ struct BuildAllArgs {
     /// staged binary is stale, telling the operator to run
     /// `dev-stage` manually. Reserved for hermetic CI lanes that
     /// already ran `dev-stage` as a separate audit-tracked step.
-    no_auto_stage:  bool,
+    no_auto_stage: bool,
 }
 
 impl BuildAllArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut role:        Option<Role>    = None;
+        let mut role: Option<Role> = None;
         let mut install_dir: Option<PathBuf> = None;
         let mut signing_key: Option<PathBuf> = None;
-        let mut no_auto_stage: bool          = false;
+        let mut no_auto_stage: bool = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -902,15 +885,23 @@ impl BuildAllArgs {
         let install_dir = install_dir
             .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
-        let signing_key = signing_key.or_else(default_signing_key_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "could not resolve --signing-key (HOME unset?). Pass --signing-key \
+        let signing_key = signing_key
+            .or_else(default_signing_key_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not resolve --signing-key (HOME unset?). Pass --signing-key \
                  <PATH> or run `cargo xtask dev-keys init` first."
-            )
-        })?;
+                )
+            })?;
         let workspace_root = workspace_root_from_cwd()?;
 
-        Ok(Self { role, install_dir, signing_key, workspace_root, no_auto_stage })
+        Ok(Self {
+            role,
+            install_dir,
+            signing_key,
+            workspace_root,
+            no_auto_stage,
+        })
     }
 }
 
@@ -970,8 +961,7 @@ fn build_all(args: &BuildAllArgs) -> Result<()> {
     }
 
     let images_dir = args.install_dir.join("images");
-    fs::create_dir_all(&images_dir)
-        .with_context(|| format!("create {}", images_dir.display()))?;
+    fs::create_dir_all(&images_dir).with_context(|| format!("create {}", images_dir.display()))?;
 
     for role in roles_to_build {
         build_one_role(role, args, &signing_key, &images_dir)?;
@@ -980,10 +970,10 @@ fn build_all(args: &BuildAllArgs) -> Result<()> {
 }
 
 fn build_one_role(
-    role:        Role,
-    args:        &BuildAllArgs,
+    role: Role,
+    args: &BuildAllArgs,
     signing_key: &ed25519_dalek::SigningKey,
-    images_dir:  &Path,
+    images_dir: &Path,
 ) -> Result<()> {
     use raxis_image_builder::{assemble_manifest, enumerate_rootfs, BuildInputs};
     use raxis_image_manifest::{fingerprint_signing_key, ImageFormat};
@@ -1016,8 +1006,8 @@ fn build_one_role(
     // them at signing time except for the canonical bundle_hash input.
     let inputs_toml = fs::read_to_string(&inputs_path)
         .with_context(|| format!("read {}", inputs_path.display()))?;
-    let mut inputs: BuildInputs = toml::from_str(&inputs_toml)
-        .with_context(|| format!("parse {}", inputs_path.display()))?;
+    let mut inputs: BuildInputs =
+        toml::from_str(&inputs_toml).with_context(|| format!("parse {}", inputs_path.display()))?;
     inputs.image_format = ImageFormat::RootfsInitramfsCpio;
 
     eprintln!(
@@ -1066,8 +1056,7 @@ fn build_one_role(
         stem = role.artefact_stem(),
         kver = inputs.kernel_version,
     ));
-    fs::write(&img_path, &cpio_gz)
-        .with_context(|| format!("write {}", img_path.display()))?;
+    fs::write(&img_path, &cpio_gz).with_context(|| format!("write {}", img_path.display()))?;
 
     // Compute the .img digest for the manifest.
     use sha2::Digest as _;
@@ -1121,16 +1110,14 @@ fn pack_initramfs(rootfs_dir: &Path, source_date_epoch: u64) -> Result<Vec<u8>> 
     let mut b = InitramfsBuilder::new().with_source_date_epoch(source_date_epoch);
     b.add_tree_from_disk(rootfs_dir, "")
         .with_context(|| format!("walk staging tree {}", rootfs_dir.display()))?;
-    let bytes = b.finalise_to_cpio_gz()
-        .context("finalise cpio.gz")?;
+    let bytes = b.finalise_to_cpio_gz().context("finalise cpio.gz")?;
     Ok(bytes)
 }
 
 fn load_signing_key(p: &Path) -> Result<ed25519_dalek::SigningKey> {
     use ed25519_dalek::SigningKey;
 
-    let s = fs::read_to_string(p)
-        .with_context(|| format!("read signing key {}", p.display()))?;
+    let s = fs::read_to_string(p).with_context(|| format!("read signing key {}", p.display()))?;
     let s = s.trim();
     if s.len() != 64 {
         bail!(
@@ -1140,9 +1127,8 @@ fn load_signing_key(p: &Path) -> Result<ed25519_dalek::SigningKey> {
         );
     }
     let mut bytes = [0u8; 32];
-    hex::decode_to_slice(s, &mut bytes).with_context(|| {
-        format!("hex-decode signing key at {}", p.display())
-    })?;
+    hex::decode_to_slice(s, &mut bytes)
+        .with_context(|| format!("hex-decode signing key at {}", p.display()))?;
     Ok(SigningKey::from_bytes(&bytes))
 }
 
@@ -1155,9 +1141,8 @@ fn workspace_root_from_cwd() -> Result<PathBuf> {
     loop {
         let candidate = cwd.join("Cargo.toml");
         if candidate.exists() {
-            let s = std::fs::read_to_string(&candidate).with_context(|| {
-                format!("read {}", candidate.display())
-            })?;
+            let s = std::fs::read_to_string(&candidate)
+                .with_context(|| format!("read {}", candidate.display()))?;
             if s.contains("[workspace]") {
                 return Ok(cwd);
             }
@@ -1205,10 +1190,10 @@ enum Builder {
 impl Builder {
     fn parse(s: &str) -> Result<Self> {
         match s {
-            "docker"  => Ok(Builder::Docker),
-            "podman"  => Ok(Builder::Podman),
+            "docker" => Ok(Builder::Docker),
+            "podman" => Ok(Builder::Podman),
             "buildah" => Ok(Builder::Buildah),
-            other     => bail!(
+            other => bail!(
                 "unsupported --builder {other:?}; expected one of: \
                  docker, podman, buildah"
             ),
@@ -1217,8 +1202,8 @@ impl Builder {
 
     fn binary(self) -> &'static str {
         match self {
-            Builder::Docker  => "docker",
-            Builder::Podman  => "podman",
+            Builder::Docker => "docker",
+            Builder::Podman => "podman",
             Builder::Buildah => "buildah",
         }
     }
@@ -1287,23 +1272,23 @@ fn oci_platform_for_target_triple(triple: &str) -> Result<&'static str> {
 
 #[derive(Debug)]
 struct BakeRootfsArgs {
-    role:           Role,
-    builder:        Option<Builder>,
-    platform:       Option<String>,
+    role: Role,
+    builder: Option<Builder>,
+    platform: Option<String>,
     workspace_root: PathBuf,
     /// When true, leave any existing `images/<role>/rootfs/` content
     /// in place and merge the bake result on top. Default behaviour is
     /// to remove the staging dir first so two consecutive bakes are
     /// byte-deterministic.
-    keep:           bool,
+    keep: bool,
 }
 
 impl BakeRootfsArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut role:     Option<Role>    = None;
-        let mut builder:  Option<Builder> = None;
-        let mut platform: Option<String>  = None;
-        let mut keep:     bool            = false;
+        let mut role: Option<Role> = None;
+        let mut builder: Option<Builder> = None;
+        let mut platform: Option<String> = None;
+        let mut keep: bool = false;
 
         let mut i = 0;
         while i < argv.len() {
@@ -1322,9 +1307,7 @@ impl BakeRootfsArgs {
                 }
                 "--platform" => {
                     i += 1;
-                    platform = Some(
-                        argv.get(i).context("--platform requires a value")?.clone(),
-                    );
+                    platform = Some(argv.get(i).context("--platform requires a value")?.clone());
                 }
                 "--keep" => {
                     keep = true;
@@ -1351,31 +1334,42 @@ impl BakeRootfsArgs {
 
         let role = role.context("--role is required")?;
         let workspace_root = workspace_root_from_cwd()?;
-        Ok(Self { role, builder, platform, workspace_root, keep })
+        Ok(Self {
+            role,
+            builder,
+            platform,
+            workspace_root,
+            keep,
+        })
     }
 }
 
 /// Entry point for `cargo xtask images bake-rootfs`.
 pub fn run_bake_rootfs(argv: &[String]) -> Result<()> {
-    let args    = BakeRootfsArgs::parse(argv)?;
+    let args = BakeRootfsArgs::parse(argv)?;
     let builder = match args.builder {
         Some(b) => b,
-        None    => Builder::auto_detect()?,
+        None => Builder::auto_detect()?,
     };
     let platform = match args.platform.as_deref() {
         Some(p) => p.to_owned(),
-        None    => oci_platform_for_target_triple(default_target_triple())?
-                       .to_owned(),
+        None => oci_platform_for_target_triple(default_target_triple())?.to_owned(),
     };
-    bake_one_role(args.role, builder, &platform, &args.workspace_root, args.keep)
+    bake_one_role(
+        args.role,
+        builder,
+        &platform,
+        &args.workspace_root,
+        args.keep,
+    )
 }
 
 fn bake_one_role(
-    role:           Role,
-    builder:        Builder,
-    platform:       &str,
+    role: Role,
+    builder: Builder,
+    platform: &str,
     workspace_root: &Path,
-    keep:           bool,
+    keep: bool,
 ) -> Result<()> {
     let images_subdir = workspace_root
         .join(STAGING_PARENT)
@@ -1413,17 +1407,22 @@ fn bake_one_role(
     let build_status = Command::new(builder.binary())
         .args([
             "build",
-            "--platform", platform,
+            "--platform",
+            platform,
             "--pull",
-            "-t", &tag,
-            "-f", &containerfile.display().to_string(),
+            "-t",
+            &tag,
+            "-f",
+            &containerfile.display().to_string(),
             &images_subdir.display().to_string(),
         ])
         .status()
-        .with_context(|| format!(
-            "spawn `{builder} build` for role {role:?}",
-            builder = builder.binary(),
-        ))?;
+        .with_context(|| {
+            format!(
+                "spawn `{builder} build` for role {role:?}",
+                builder = builder.binary(),
+            )
+        })?;
     if !build_status.success() {
         bail!(
             "{builder} build failed (exit {status}). Inspect the build log \
@@ -1433,7 +1432,7 @@ fn bake_one_role(
              --platform linux/$(uname -m | sed s/x86_64/amd64/ | sed \
              s/aarch64/arm64/)`).",
             builder = builder.binary(),
-            status  = build_status,
+            status = build_status,
         );
     }
 
@@ -1445,21 +1444,28 @@ fn bake_one_role(
     let create_out = Command::new(builder.binary())
         .args(["create", "--platform", platform, &tag])
         .output()
-        .with_context(|| format!(
-            "spawn `{builder} create` for tag {tag}",
-            builder = builder.binary(),
-        ))?;
+        .with_context(|| {
+            format!(
+                "spawn `{builder} create` for tag {tag}",
+                builder = builder.binary(),
+            )
+        })?;
     if !create_out.status.success() {
         bail!(
             "{builder} create failed (exit {status}):\n--- stderr ---\n{stderr}",
             builder = builder.binary(),
-            status  = create_out.status,
-            stderr  = String::from_utf8_lossy(&create_out.stderr),
+            status = create_out.status,
+            stderr = String::from_utf8_lossy(&create_out.stderr),
         );
     }
-    let container_id = String::from_utf8_lossy(&create_out.stdout).trim().to_owned();
+    let container_id = String::from_utf8_lossy(&create_out.stdout)
+        .trim()
+        .to_owned();
     if container_id.is_empty() {
-        bail!("{builder} create returned empty container id", builder = builder.binary());
+        bail!(
+            "{builder} create returned empty container id",
+            builder = builder.binary()
+        );
     }
 
     // ── Step 3: `<builder> export <container_id>` → tar stream → tar -x.
@@ -1477,14 +1483,9 @@ fn bake_one_role(
         fs::remove_dir_all(&rootfs_dir)
             .with_context(|| format!("clean stale {}", rootfs_dir.display()))?;
     }
-    fs::create_dir_all(&rootfs_dir)
-        .with_context(|| format!("create {}", rootfs_dir.display()))?;
+    fs::create_dir_all(&rootfs_dir).with_context(|| format!("create {}", rootfs_dir.display()))?;
 
-    let extract_result = run_export_pipeline(
-        builder,
-        &container_id,
-        &rootfs_dir,
-    );
+    let extract_result = run_export_pipeline(builder, &container_id, &rootfs_dir);
 
     // ── Step 4: always remove the throwaway container. We swallow
     //    rm errors so a successful extract is not masked by a failed
@@ -1510,11 +1511,7 @@ fn bake_one_role(
 /// without buffering a multi-GB tarball on disk. We use `Stdio::piped`
 /// on the builder side and feed the read end into tar's stdin; both
 /// children are reaped before we return.
-fn run_export_pipeline(
-    builder:      Builder,
-    container_id: &str,
-    rootfs_dir:   &Path,
-) -> Result<()> {
+fn run_export_pipeline(builder: Builder, container_id: &str, rootfs_dir: &Path) -> Result<()> {
     use std::process::Stdio;
 
     let mut export = Command::new(builder.binary())
@@ -1522,37 +1519,43 @@ fn run_export_pipeline(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .with_context(|| format!(
-            "spawn `{builder} export {container_id}`",
-            builder = builder.binary(),
-        ))?;
+        .with_context(|| {
+            format!(
+                "spawn `{builder} export {container_id}`",
+                builder = builder.binary(),
+            )
+        })?;
     let export_stdout = export.stdout.take().expect("export stdout piped");
 
     let mut tar = Command::new("tar")
         .args([
-            "-xf", "-",
+            "-xf",
+            "-",
             "--no-same-owner",
-            "-C", &rootfs_dir.display().to_string(),
+            "-C",
+            &rootfs_dir.display().to_string(),
         ])
         .stdin(Stdio::from(export_stdout))
         .stderr(Stdio::piped())
         .spawn()
         .context("spawn `tar -xf -`; tar(1) must be on $PATH")?;
 
-    let tar_status     = tar.wait().context("wait tar")?;
-    let export_output  = export.wait_with_output().context("wait export")?;
+    let tar_status = tar.wait().context("wait tar")?;
+    let export_output = export.wait_with_output().context("wait export")?;
 
     if !export_output.status.success() {
         bail!(
             "{builder} export failed (exit {status}):\n--- stderr ---\n{stderr}",
             builder = builder.binary(),
-            status  = export_output.status,
-            stderr  = String::from_utf8_lossy(&export_output.stderr),
+            status = export_output.status,
+            stderr = String::from_utf8_lossy(&export_output.stderr),
         );
     }
     if !tar_status.success() {
-        bail!("tar -x failed (exit {tar_status}); rootfs may be partially extracted at {}",
-              rootfs_dir.display());
+        bail!(
+            "tar -x failed (exit {tar_status}); rootfs may be partially extracted at {}",
+            rootfs_dir.display()
+        );
     }
     Ok(())
 }
@@ -1653,8 +1656,7 @@ fn inputs_manifest_path(workspace_root: &Path, role: Role) -> PathBuf {
 /// lowercase hex digest. Errors propagate the path so the caller
 /// can include "which file" in its diagnostic.
 fn sha256_file(path: &Path) -> Result<String> {
-    let bytes = std::fs::read(path)
-        .with_context(|| format!("read {}", path.display()))?;
+    let bytes = std::fs::read(path).with_context(|| format!("read {}", path.display()))?;
     let mut h = Sha256::new();
     h.update(&bytes);
     Ok(hex::encode(h.finalize()))
@@ -1676,27 +1678,27 @@ struct BakeInputs {
     /// `None` for binary-only roles where the file MAY be absent
     /// from a stripped checkout (though all three tracked roles
     /// currently ship one).
-    containerfile_sha256:    Option<String>,
+    containerfile_sha256: Option<String>,
     /// SHA-256 of the per-role `manifest.toml` (`BuildInputs`
     /// fixture: kernel_version, source_date_epoch, ...).
-    inputs_manifest_sha256:  String,
+    inputs_manifest_sha256: String,
     /// SHA-256 of the staged planner binary at
     /// `images/<role>/rootfs/usr/local/bin/<binary>`. `None` when
     /// no binary has been staged yet (i.e. dev-stage has not run);
     /// the bake driver always (re)stages before recording so this
     /// is `Some(...)` in every emitted manifest.
-    staged_binary_sha256:    Option<String>,
+    staged_binary_sha256: Option<String>,
     /// First 16 hex chars of the Ed25519 signing-key fingerprint.
     /// Recorded so a key rotation invalidates the cache (the
     /// downstream `.manifest.toml` carries the full fingerprint).
-    signing_key_fp_prefix:   String,
+    signing_key_fp_prefix: String,
     /// SHA-256 of `<install_dir>/kernel/vmlinux` (the canonical
     /// guest-kernel binary the substrate boots). `None` when
     /// vmlinux is absent — the preflight rejects that state before
     /// we reach the bake step, so a manifest with `vmlinux_sha256
     /// = None` should never appear on disk under the default
     /// invocation.
-    vmlinux_sha256:          Option<String>,
+    vmlinux_sha256: Option<String>,
 }
 
 /// Outputs covered by the per-role integrity manifest. Recorded in
@@ -1706,12 +1708,12 @@ struct BakeInputs {
 struct BakeOutputs {
     /// SHA-256 of the produced cpio.gz blob at
     /// `<install_dir>/images/<stem>-<kver>.img`.
-    img_sha256:               String,
+    img_sha256: String,
     /// On-disk size in bytes of the produced `.img` blob.
-    img_size_bytes:           u64,
+    img_size_bytes: u64,
     /// SHA-256 of the produced TOML-encoded image manifest at
     /// `<install_dir>/images/<stem>-<kver>.manifest.toml`.
-    manifest_toml_sha256:     String,
+    manifest_toml_sha256: String,
     /// On-disk size in bytes of the produced `.manifest.toml`.
     manifest_toml_size_bytes: u64,
 }
@@ -1724,11 +1726,11 @@ struct BakeOutputs {
 struct BakeHostInfo {
     /// `cfg!(target_os)` string when the bake ran ("macos" /
     /// "linux" / ...).
-    os:                String,
+    os: String,
     /// `cfg!(target_arch)` string ("aarch64" / "x86_64").
-    arch:              String,
+    arch: String,
     /// Cross-compile target triple the bake used.
-    target_triple:     String,
+    target_triple: String,
     /// Container builder used to bake the rootfs, when relevant
     /// (`docker` / `podman` / `buildah`). `None` for binary-only
     /// roles that don't invoke the OCI builder.
@@ -1749,16 +1751,16 @@ struct BakeHostInfo {
 /// bump.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct BakeManifest {
-    schema_version:   u32,
-    role:             String,
-    artefact_stem:    String,
-    kernel_version:   String,
+    schema_version: u32,
+    role: String,
+    artefact_stem: String,
+    kernel_version: String,
     /// UNIX seconds-since-epoch when the bake completed. Cosmetic;
     /// the no-op shortcut does not consult this.
-    built_at_unix:    u64,
-    host:             BakeHostInfo,
-    inputs:           BakeInputs,
-    outputs:          BakeOutputs,
+    built_at_unix: u64,
+    host: BakeHostInfo,
+    inputs: BakeInputs,
+    outputs: BakeOutputs,
 }
 
 impl BakeManifest {
@@ -1794,17 +1796,14 @@ impl BakeManifest {
     /// to be operator-readable, and `bake.json` files are small
     /// (under 1 KiB even with future field growth).
     fn write_atomic(&self, dest: &Path) -> Result<()> {
-        let mut bytes = serde_json::to_vec_pretty(self)
-            .context("encode bake manifest")?;
+        let mut bytes = serde_json::to_vec_pretty(self).context("encode bake manifest")?;
         bytes.push(b'\n');
         if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent).with_context(|| {
-                format!("create {} (for bake manifest)", parent.display())
-            })?;
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("create {} (for bake manifest)", parent.display()))?;
         }
         let tmp = dest.with_extension("json.tmp");
-        std::fs::write(&tmp, &bytes)
-            .with_context(|| format!("write {} (tmp)", tmp.display()))?;
+        std::fs::write(&tmp, &bytes).with_context(|| format!("write {} (tmp)", tmp.display()))?;
         std::fs::rename(&tmp, dest)
             .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
         Ok(())
@@ -1824,8 +1823,8 @@ fn read_kernel_version_for(workspace_root: &Path, role: Role) -> Result<String> 
             inputs_path.display(),
         )
     })?;
-    let parsed: raxis_image_builder::BuildInputs = toml::from_str(&s)
-        .with_context(|| format!("parse {}", inputs_path.display()))?;
+    let parsed: raxis_image_builder::BuildInputs =
+        toml::from_str(&s).with_context(|| format!("parse {}", inputs_path.display()))?;
     Ok(parsed.kernel_version)
 }
 
@@ -1842,9 +1841,9 @@ fn read_kernel_version_for(workspace_root: &Path, role: Role) -> Result<String> 
 /// so a final manifest never carries `staged_binary_sha256 =
 /// None`.
 fn compute_bake_inputs(
-    role:                  Role,
-    workspace_root:        &Path,
-    install_dir:           &Path,
+    role: Role,
+    workspace_root: &Path,
+    install_dir: &Path,
     signing_key_fp_prefix: &str,
 ) -> Result<BakeInputs> {
     let containerfile = containerfile_path(workspace_root, role);
@@ -1854,15 +1853,15 @@ fn compute_bake_inputs(
         None
     };
 
-    let inputs_manifest_sha256 = sha256_file(
-        &inputs_manifest_path(workspace_root, role),
-    )?;
+    let inputs_manifest_sha256 = sha256_file(&inputs_manifest_path(workspace_root, role))?;
 
     let staged_binary = workspace_root
         .join(STAGING_PARENT)
         .join(role.images_subdir())
         .join("rootfs")
-        .join("usr").join("local").join("bin")
+        .join("usr")
+        .join("local")
+        .join("bin")
         .join(role.binary_name());
     let staged_binary_sha256 = if staged_binary.exists() {
         Some(sha256_file(&staged_binary)?)
@@ -1904,8 +1903,8 @@ fn compute_bake_inputs(
 /// "partial" no-op — either every input is unchanged AND every
 /// output is intact, or we rebake.
 fn bake_should_skip(
-    install_dir:    &Path,
-    role:           Role,
+    install_dir: &Path,
+    role: Role,
     kernel_version: &str,
     current_inputs: &BakeInputs,
 ) -> Result<Option<BakeManifest>> {
@@ -2017,7 +2016,7 @@ fn check_containerfile_graph_acyclic(workspace_root: &Path) -> Result<()> {
             while operand.starts_with("--") {
                 operand = match tokens.next() {
                     Some(t) => t,
-                    None    => break,
+                    None => break,
                 };
             }
             if let Some(target) = from_token_names_in_tree_role(operand) {
@@ -2081,8 +2080,8 @@ enum VmlinuxResolution {
 }
 
 fn resolve_vmlinux_source(
-    install_dir:     &Path,
-    explicit_from:   Option<&Path>,
+    install_dir: &Path,
+    explicit_from: Option<&Path>,
     force_overwrite: bool,
 ) -> Result<VmlinuxResolution> {
     let staged = install_dir.join("kernel").join("vmlinux");
@@ -2091,11 +2090,8 @@ fn resolve_vmlinux_source(
     // already-staged file IFF `--force` is set; without force,
     // any in-place file takes precedence so a successful prior
     // `dev-kernel` run is not re-overwritten by a stale env var.
-    let explicit_env = std::env::var_os("RAXIS_DEV_KERNEL_SOURCE")
-        .map(PathBuf::from);
-    let override_source = explicit_from
-        .map(PathBuf::from)
-        .or(explicit_env);
+    let explicit_env = std::env::var_os("RAXIS_DEV_KERNEL_SOURCE").map(PathBuf::from);
+    let override_source = explicit_from.map(PathBuf::from).or(explicit_env);
 
     if let Some(src) = override_source.as_ref() {
         let src_meta = std::fs::metadata(src).with_context(|| {
@@ -2134,7 +2130,9 @@ fn resolve_vmlinux_source(
             // without a deliberate `--force`.
             return Ok(VmlinuxResolution::AlreadyStaged { path: staged });
         }
-        return Ok(VmlinuxResolution::CopyFrom { source: src.clone() });
+        return Ok(VmlinuxResolution::CopyFrom {
+            source: src.clone(),
+        });
     }
 
     // 3: already staged at the install dir (the common no-op case
@@ -2180,10 +2178,7 @@ fn resolve_vmlinux_source(
 /// integrity manifest without re-reading the file). Atomically
 /// stages via a temp-file rename so a partial copy never replaces
 /// a working kernel.
-fn apply_vmlinux_resolution(
-    install_dir: &Path,
-    resolution:  &VmlinuxResolution,
-) -> Result<String> {
+fn apply_vmlinux_resolution(install_dir: &Path, resolution: &VmlinuxResolution) -> Result<String> {
     match resolution {
         VmlinuxResolution::AlreadyStaged { path } => sha256_file(path),
         VmlinuxResolution::CopyFrom { source } => {
@@ -2191,20 +2186,12 @@ fn apply_vmlinux_resolution(
             std::fs::create_dir_all(&dest_dir)
                 .with_context(|| format!("create {}", dest_dir.display()))?;
             let dest = dest_dir.join("vmlinux");
-            let tmp  = dest_dir.join(".vmlinux.tmp");
+            let tmp = dest_dir.join(".vmlinux.tmp");
             std::fs::copy(source, &tmp).with_context(|| {
-                format!(
-                    "copy vmlinux: {} -> {}",
-                    source.display(),
-                    tmp.display(),
-                )
+                format!("copy vmlinux: {} -> {}", source.display(), tmp.display(),)
             })?;
             std::fs::rename(&tmp, &dest).with_context(|| {
-                format!(
-                    "atomic rename {} -> {}",
-                    tmp.display(),
-                    dest.display(),
-                )
+                format!("atomic rename {} -> {}", tmp.display(), dest.display(),)
             })?;
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"bake_vmlinux_staged\",\
@@ -2231,10 +2218,10 @@ struct PreflightOutcome {
     /// when the selected roles are all binary-only.
     container_builder: Option<Builder>,
     /// Cross-compile target triple all roles will build against.
-    target_triple:     String,
+    target_triple: String,
     /// Resolved vmlinux source (or "already staged"). The bake
     /// driver passes this to `apply_vmlinux_resolution`.
-    vmlinux:           VmlinuxResolution,
+    vmlinux: VmlinuxResolution,
     /// First 16 hex chars of the signing-key fingerprint, recorded
     /// in the integrity manifest.
     signing_key_fp_prefix: String,
@@ -2248,13 +2235,13 @@ struct PreflightOutcome {
 /// emit role-specific remediation (e.g., "container builder is
 /// only required because role `executor-starter` needs it").
 fn preflight_bake_inputs(
-    workspace_root:    &Path,
-    install_dir:       &Path,
-    signing_key:       &Path,
-    roles:             &[Role],
-    explicit_builder:  Option<Builder>,
-    explicit_kernel:   Option<&Path>,
-    force_overwrite:   bool,
+    workspace_root: &Path,
+    install_dir: &Path,
+    signing_key: &Path,
+    roles: &[Role],
+    explicit_builder: Option<Builder>,
+    explicit_kernel: Option<&Path>,
+    force_overwrite: bool,
 ) -> Result<PreflightOutcome> {
     // 1. Containerfile graph acyclicity — runs first because it's
     //    pure-read and a cycle means no bake can ever succeed.
@@ -2266,7 +2253,7 @@ fn preflight_bake_inputs(
     //    of a partial bake followed by a confusing per-role error.
     for r in roles {
         let containerfile = containerfile_path(workspace_root, *r);
-        let inputs        = inputs_manifest_path(workspace_root, *r);
+        let inputs = inputs_manifest_path(workspace_root, *r);
         if r.needs_rootfs_bake() && !containerfile.exists() {
             bail!(
                 "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: role {:?} \
@@ -2313,7 +2300,7 @@ fn preflight_bake_inputs(
     let container_builder = if any_needs_bake {
         let builder = match explicit_builder {
             Some(b) => b,
-            None    => Builder::auto_detect()?,
+            None => Builder::auto_detect()?,
         };
         verify_builder_daemon(builder)?;
         Some(builder)
@@ -2378,10 +2365,12 @@ fn verify_builder_daemon(builder: Builder) -> Result<()> {
             let out = std::process::Command::new(builder.binary())
                 .arg("info")
                 .output()
-                .with_context(|| format!(
-                    "spawn `{builder} info` (daemon probe)",
-                    builder = builder.binary(),
-                ))?;
+                .with_context(|| {
+                    format!(
+                        "spawn `{builder} info` (daemon probe)",
+                        builder = builder.binary(),
+                    )
+                })?;
             if out.status.success() {
                 return Ok(());
             }
@@ -2409,9 +2398,15 @@ fn verify_builder_daemon(builder: Builder) -> Result<()> {
                 out.status,
                 hint,
                 stderr.trim(),
-                stdout.lines().rev().take(4)
-                    .collect::<Vec<_>>().into_iter().rev()
-                    .collect::<Vec<_>>().join("\n"),
+                stdout
+                    .lines()
+                    .rev()
+                    .take(4)
+                    .collect::<Vec<_>>()
+                    .into_iter()
+                    .rev()
+                    .collect::<Vec<_>>()
+                    .join("\n"),
             );
         }
     }
@@ -2425,43 +2420,41 @@ fn verify_builder_daemon(builder: Builder) -> Result<()> {
 struct BakeArgs {
     /// Empty = bake every role. Non-empty = bake the named roles
     /// only.
-    roles:             Vec<Role>,
-    install_dir:       PathBuf,
-    signing_key:       PathBuf,
-    workspace_root:    PathBuf,
-    explicit_builder:  Option<Builder>,
-    explicit_kernel:   Option<PathBuf>,
+    roles: Vec<Role>,
+    install_dir: PathBuf,
+    signing_key: PathBuf,
+    workspace_root: PathBuf,
+    explicit_builder: Option<Builder>,
+    explicit_kernel: Option<PathBuf>,
     /// When true, overwrite an existing
     /// `<install_dir>/kernel/vmlinux` with the explicit-source
     /// kernel even if the staged copy already exists. The bake
     /// itself still uses the prior-manifest no-op shortcut for
     /// rootfs images; `--force` only flips the vmlinux replacement
     /// behaviour.
-    force:             bool,
+    force: bool,
     /// When true, bake refuses to short-circuit even when the prior
     /// `bake.json` says nothing changed. Used by CI to assert the
     /// pipeline reproduces from scratch.
-    no_cache:          bool,
+    no_cache: bool,
 }
 
 impl BakeArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut roles:            Vec<Role>        = Vec::new();
-        let mut install_dir:      Option<PathBuf>  = None;
-        let mut signing_key:      Option<PathBuf>  = None;
-        let mut explicit_builder: Option<Builder>  = None;
-        let mut explicit_kernel:  Option<PathBuf>  = None;
-        let mut force:            bool             = false;
-        let mut no_cache:         bool             = false;
+        let mut roles: Vec<Role> = Vec::new();
+        let mut install_dir: Option<PathBuf> = None;
+        let mut signing_key: Option<PathBuf> = None;
+        let mut explicit_builder: Option<Builder> = None;
+        let mut explicit_kernel: Option<PathBuf> = None;
+        let mut force: bool = false;
+        let mut no_cache: bool = false;
 
         let mut i = 0;
         while i < argv.len() {
             match argv[i].as_str() {
                 "--role" => {
                     i += 1;
-                    let r = Role::parse(
-                        argv.get(i).context("--role requires a value")?,
-                    )?;
+                    let r = Role::parse(argv.get(i).context("--role requires a value")?)?;
                     if !roles.contains(&r) {
                         roles.push(r);
                     }
@@ -2490,7 +2483,7 @@ impl BakeArgs {
                         argv.get(i).context("--kernel-from-file requires a path")?,
                     ));
                 }
-                "--force"    => force    = true,
+                "--force" => force = true,
                 "--no-cache" => no_cache = true,
                 "-h" | "--help" => {
                     print_bake_help();
@@ -2508,12 +2501,14 @@ impl BakeArgs {
         let install_dir = install_dir
             .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
-        let signing_key = signing_key.or_else(default_signing_key_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "could not resolve --signing-key (HOME unset?). Pass --signing-key \
+        let signing_key = signing_key
+            .or_else(default_signing_key_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not resolve --signing-key (HOME unset?). Pass --signing-key \
                  <PATH> or run `cargo xtask dev-keys init` first."
-            )
-        })?;
+                )
+            })?;
         let workspace_root = workspace_root_from_cwd()?;
 
         Ok(Self {
@@ -2573,11 +2568,7 @@ pub fn run_bake(argv: &[String]) -> Result<()> {
 }
 
 fn run_bake_inner(args: &BakeArgs) -> Result<()> {
-    let roles_json: Vec<&str> = args
-        .roles
-        .iter()
-        .map(|r| r.workspace_crate())
-        .collect();
+    let roles_json: Vec<&str> = args.roles.iter().map(|r| r.workspace_crate()).collect();
     let begin_payload = serde_json::json!({
         "level": "info",
         "event": "bake_begin",
@@ -2611,9 +2602,8 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     //    OCI-builder layer; doing this up front means a missing
     //    install-dir surfaces as a single, clean error).
     let images_dir = args.install_dir.join("images");
-    std::fs::create_dir_all(&images_dir).with_context(|| {
-        format!("create {} (per-role outputs)", images_dir.display())
-    })?;
+    std::fs::create_dir_all(&images_dir)
+        .with_context(|| format!("create {} (per-role outputs)", images_dir.display()))?;
 
     // The signing key is re-loaded by the per-role `build_all`
     // invocation from `args.signing_key` so we don't pass the
@@ -2622,19 +2612,10 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
 
     // 4. Per-role bake.
     for role in &args.roles {
-        bake_one_role_full(
-            *role,
-            args,
-            &outcome,
-            &vmlinux_sha,
-        )?;
+        bake_one_role_full(*role, args, &outcome, &vmlinux_sha)?;
     }
 
-    let roles_json: Vec<&str> = args
-        .roles
-        .iter()
-        .map(|r| r.workspace_crate())
-        .collect();
+    let roles_json: Vec<&str> = args.roles.iter().map(|r| r.workspace_crate()).collect();
     let payload = serde_json::json!({
         "level": "info",
         "event": "bake_ok",
@@ -2649,9 +2630,9 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
 /// `bake-rootfs → dev-stage → build-all` flow and emit a fresh
 /// integrity manifest.
 fn bake_one_role_full(
-    role:        Role,
-    args:        &BakeArgs,
-    outcome:     &PreflightOutcome,
+    role: Role,
+    args: &BakeArgs,
+    outcome: &PreflightOutcome,
     vmlinux_sha: &str,
 ) -> Result<()> {
     let kernel_version = read_kernel_version_for(&args.workspace_root, role)?;
@@ -2665,9 +2646,9 @@ fn bake_one_role_full(
 
     // No-op shortcut: prior manifest agrees AND outputs intact.
     if !args.no_cache {
-        if let Some(prior) = bake_should_skip(
-            &args.install_dir, role, &kernel_version, &inputs_now,
-        )? {
+        if let Some(prior) =
+            bake_should_skip(&args.install_dir, role, &kernel_version, &inputs_now)?
+        {
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"bake_role_no_op\",\
                  \"role\":{:?},\"reason\":\"inputs_unchanged_outputs_intact\",\
@@ -2692,8 +2673,7 @@ fn bake_one_role_full(
             "preflight ensures container_builder.is_some() whenever any \
              selected role needs a rootfs bake",
         );
-        let platform = oci_platform_for_target_triple(&outcome.target_triple)?
-            .to_owned();
+        let platform = oci_platform_for_target_triple(&outcome.target_triple)?.to_owned();
         bake_one_role(role, builder, &platform, &args.workspace_root, false)?;
     }
 
@@ -2702,23 +2682,21 @@ fn bake_one_role_full(
     //    is intentionally just the planner binary).
     let dev_stage_args = DevStageArgs {
         role,
-        target:         outcome.target_triple.clone(),
+        target: outcome.target_triple.clone(),
         workspace_root: args.workspace_root.clone(),
-        cargo:          std::env::var("CARGO")
-                            .unwrap_or_else(|_| "cargo".to_owned()),
-        allow_stub:     !role.needs_rootfs_bake(),
+        cargo: std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_owned()),
+        allow_stub: !role.needs_rootfs_bake(),
     };
-    dev_stage(&dev_stage_args).with_context(|| {
-        format!("dev-stage for role {role:?} (bake driver)")
-    })?;
+    dev_stage(&dev_stage_args)
+        .with_context(|| format!("dev-stage for role {role:?} (bake driver)"))?;
 
     // ── Step 3: build-all (pack + sign).
     let build_args = BuildAllArgs {
-        role:           Some(role),
-        install_dir:    args.install_dir.clone(),
+        role: Some(role),
+        install_dir: args.install_dir.clone(),
         workspace_root: args.workspace_root.clone(),
-        signing_key:    args.signing_key.clone(),
-        no_auto_stage:  true, // we already ran dev-stage above
+        signing_key: args.signing_key.clone(),
+        no_auto_stage: true, // we already ran dev-stage above
     };
     build_all(&build_args)?;
 
@@ -2741,24 +2719,24 @@ fn bake_one_role_full(
         stem = role.artefact_stem(),
         kver = kernel_version,
     ));
-    let img_sha          = sha256_file(&img_path)?;
-    let img_size         = std::fs::metadata(&img_path)?.len();
-    let mtoml_sha        = sha256_file(&manifest_toml_path)?;
-    let mtoml_size       = std::fs::metadata(&manifest_toml_path)?.len();
+    let img_sha = sha256_file(&img_path)?;
+    let img_size = std::fs::metadata(&img_path)?.len();
+    let mtoml_sha = sha256_file(&manifest_toml_path)?;
+    let mtoml_size = std::fs::metadata(&manifest_toml_path)?.len();
 
     let manifest = BakeManifest {
-        schema_version:   BAKE_MANIFEST_SCHEMA_VERSION,
-        role:             role.workspace_crate().to_owned(),
-        artefact_stem:    role.artefact_stem().to_owned(),
-        kernel_version:   kernel_version.clone(),
-        built_at_unix:    std::time::SystemTime::now()
+        schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
+        role: role.workspace_crate().to_owned(),
+        artefact_stem: role.artefact_stem().to_owned(),
+        kernel_version: kernel_version.clone(),
+        built_at_unix: std::time::SystemTime::now()
             .duration_since(std::time::SystemTime::UNIX_EPOCH)
             .map(|d| d.as_secs())
             .unwrap_or(0),
         host: BakeHostInfo {
-            os:                std::env::consts::OS.to_owned(),
-            arch:              std::env::consts::ARCH.to_owned(),
-            target_triple:     outcome.target_triple.clone(),
+            os: std::env::consts::OS.to_owned(),
+            arch: std::env::consts::ARCH.to_owned(),
+            target_triple: outcome.target_triple.clone(),
             container_builder: outcome.container_builder.map(|b| b.binary().to_owned()),
         },
         inputs: BakeInputs {
@@ -2766,9 +2744,9 @@ fn bake_one_role_full(
             ..inputs_after
         },
         outputs: BakeOutputs {
-            img_sha256:               img_sha.clone(),
-            img_size_bytes:           img_size,
-            manifest_toml_sha256:     mtoml_sha,
+            img_sha256: img_sha.clone(),
+            img_size_bytes: img_size,
+            manifest_toml_sha256: mtoml_sha,
             manifest_toml_size_bytes: mtoml_size,
         },
     };
@@ -2792,31 +2770,31 @@ fn bake_one_role_full(
 
 #[derive(Debug)]
 struct PreflightArgs {
-    roles:             Vec<Role>,
-    install_dir:       PathBuf,
-    signing_key:       PathBuf,
-    workspace_root:    PathBuf,
-    explicit_builder:  Option<Builder>,
-    explicit_kernel:   Option<PathBuf>,
+    roles: Vec<Role>,
+    install_dir: PathBuf,
+    signing_key: PathBuf,
+    workspace_root: PathBuf,
+    explicit_builder: Option<Builder>,
+    explicit_kernel: Option<PathBuf>,
 }
 
 impl PreflightArgs {
     fn parse(argv: &[String]) -> Result<Self> {
-        let mut roles:            Vec<Role>       = Vec::new();
-        let mut install_dir:      Option<PathBuf> = None;
-        let mut signing_key:      Option<PathBuf> = None;
+        let mut roles: Vec<Role> = Vec::new();
+        let mut install_dir: Option<PathBuf> = None;
+        let mut signing_key: Option<PathBuf> = None;
         let mut explicit_builder: Option<Builder> = None;
-        let mut explicit_kernel:  Option<PathBuf> = None;
+        let mut explicit_kernel: Option<PathBuf> = None;
 
         let mut i = 0;
         while i < argv.len() {
             match argv[i].as_str() {
                 "--role" => {
                     i += 1;
-                    let r = Role::parse(
-                        argv.get(i).context("--role requires a value")?,
-                    )?;
-                    if !roles.contains(&r) { roles.push(r); }
+                    let r = Role::parse(argv.get(i).context("--role requires a value")?)?;
+                    if !roles.contains(&r) {
+                        roles.push(r);
+                    }
                 }
                 "--install-dir" => {
                     i += 1;
@@ -2869,17 +2847,23 @@ impl PreflightArgs {
         let install_dir = install_dir
             .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
-        let signing_key = signing_key.or_else(default_signing_key_path).ok_or_else(|| {
-            anyhow::anyhow!(
-                "could not resolve --signing-key (HOME unset?). Pass --signing-key \
+        let signing_key = signing_key
+            .or_else(default_signing_key_path)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "could not resolve --signing-key (HOME unset?). Pass --signing-key \
                  <PATH> or run `cargo xtask dev-keys init` first."
-            )
-        })?;
+                )
+            })?;
         let workspace_root = workspace_root_from_cwd()?;
 
         Ok(Self {
-            roles, install_dir, signing_key, workspace_root,
-            explicit_builder, explicit_kernel,
+            roles,
+            install_dir,
+            signing_key,
+            workspace_root,
+            explicit_builder,
+            explicit_kernel,
         })
     }
 }
@@ -2896,11 +2880,7 @@ pub fn run_preflight(argv: &[String]) -> Result<()> {
         args.explicit_kernel.as_deref(),
         false,
     )?;
-    let roles_json: Vec<&str> = args
-        .roles
-        .iter()
-        .map(|r| r.workspace_crate())
-        .collect();
+    let roles_json: Vec<&str> = args.roles.iter().map(|r| r.workspace_crate()).collect();
     let vmlinux_token = match &outcome.vmlinux {
         VmlinuxResolution::AlreadyStaged { path } => {
             format!("already-staged:{}", path.display())
@@ -2941,9 +2921,12 @@ mod tests {
 
     #[test]
     fn role_parse_accepts_documented_aliases_and_rejects_unknown() {
-        assert_eq!(Role::parse("orchestrator").unwrap(),     Role::Orchestrator);
-        assert_eq!(Role::parse("reviewer").unwrap(),         Role::Reviewer);
-        assert_eq!(Role::parse("executor-starter").unwrap(), Role::ExecutorStarter);
+        assert_eq!(Role::parse("orchestrator").unwrap(), Role::Orchestrator);
+        assert_eq!(Role::parse("reviewer").unwrap(), Role::Reviewer);
+        assert_eq!(
+            Role::parse("executor-starter").unwrap(),
+            Role::ExecutorStarter
+        );
         assert!(Role::parse("Reviewer").is_err());
         assert!(Role::parse("orchestrators").is_err());
     }
@@ -2969,7 +2952,7 @@ mod tests {
     #[test]
     fn build_all_args_default_install_dir_is_documented_layout() {
         let prev_install = std::env::var_os("RAXIS_INSTALL_DIR");
-        let prev_home    = std::env::var_os("HOME");
+        let prev_home = std::env::var_os("HOME");
         // SAFETY: single-threaded test; restored at end.
         unsafe {
             std::env::remove_var("RAXIS_INSTALL_DIR");
@@ -2982,11 +2965,11 @@ mod tests {
         unsafe {
             match prev_install {
                 Some(v) => std::env::set_var("RAXIS_INSTALL_DIR", v),
-                None    => std::env::remove_var("RAXIS_INSTALL_DIR"),
+                None => std::env::remove_var("RAXIS_INSTALL_DIR"),
             }
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
-                None    => std::env::remove_var("HOME"),
+                None => std::env::remove_var("HOME"),
             }
         }
     }
@@ -3010,8 +2993,8 @@ mod tests {
 
     #[test]
     fn builder_parse_accepts_documented_aliases_only() {
-        assert_eq!(Builder::parse("docker").unwrap(),  Builder::Docker);
-        assert_eq!(Builder::parse("podman").unwrap(),  Builder::Podman);
+        assert_eq!(Builder::parse("docker").unwrap(), Builder::Docker);
+        assert_eq!(Builder::parse("podman").unwrap(), Builder::Podman);
         assert_eq!(Builder::parse("buildah").unwrap(), Builder::Buildah);
         assert!(Builder::parse("Docker").is_err());
         assert!(Builder::parse("kaniko").is_err());
@@ -3019,12 +3002,18 @@ mod tests {
 
     #[test]
     fn oci_platform_for_target_triple_covers_supported_arches() {
-        assert_eq!(oci_platform_for_target_triple("aarch64-unknown-linux-musl").unwrap(),
-                   "linux/arm64");
-        assert_eq!(oci_platform_for_target_triple("x86_64-unknown-linux-musl").unwrap(),
-                   "linux/amd64");
-        assert_eq!(oci_platform_for_target_triple("aarch64-apple-darwin").unwrap(),
-                   "linux/arm64");
+        assert_eq!(
+            oci_platform_for_target_triple("aarch64-unknown-linux-musl").unwrap(),
+            "linux/arm64"
+        );
+        assert_eq!(
+            oci_platform_for_target_triple("x86_64-unknown-linux-musl").unwrap(),
+            "linux/amd64"
+        );
+        assert_eq!(
+            oci_platform_for_target_triple("aarch64-apple-darwin").unwrap(),
+            "linux/arm64"
+        );
         assert!(oci_platform_for_target_triple("riscv64-unknown-linux-musl").is_err());
     }
 
@@ -3040,15 +3029,18 @@ mod tests {
         let prev = std::env::current_dir().unwrap();
         std::env::set_current_dir(env!("CARGO_MANIFEST_DIR")).unwrap();
         let argv = vec![
-            "--role".to_owned(),     "executor-starter".to_owned(),
-            "--builder".to_owned(),  "podman".to_owned(),
-            "--platform".to_owned(), "linux/arm64".to_owned(),
+            "--role".to_owned(),
+            "executor-starter".to_owned(),
+            "--builder".to_owned(),
+            "podman".to_owned(),
+            "--platform".to_owned(),
+            "linux/arm64".to_owned(),
             "--keep".to_owned(),
         ];
         let parsed = BakeRootfsArgs::parse(&argv).unwrap();
         std::env::set_current_dir(prev).unwrap();
-        assert_eq!(parsed.role,     Role::ExecutorStarter);
-        assert_eq!(parsed.builder,  Some(Builder::Podman));
+        assert_eq!(parsed.role, Role::ExecutorStarter);
+        assert_eq!(parsed.builder, Some(Builder::Podman));
         assert_eq!(parsed.platform.as_deref(), Some("linux/arm64"));
         assert!(parsed.keep);
     }
@@ -3062,7 +3054,7 @@ mod tests {
         // also amend the spec.
         let tmp = tempfile::tempdir().unwrap();
         assert!(assert_no_stub_after_stage(Role::Orchestrator, tmp.path()).is_ok());
-        assert!(assert_no_stub_after_stage(Role::Reviewer,     tmp.path()).is_ok());
+        assert!(assert_no_stub_after_stage(Role::Reviewer, tmp.path()).is_ok());
     }
 
     #[test]
@@ -3071,11 +3063,26 @@ mod tests {
         let err = assert_no_stub_after_stage(Role::ExecutorStarter, tmp.path())
             .unwrap_err()
             .to_string();
-        assert!(err.contains("bin/bash"),         "remediation must name bash:    {err}");
-        assert!(err.contains("usr/bin/python3"),  "remediation must name python3: {err}");
-        assert!(err.contains("usr/bin/git"),      "remediation must name git:     {err}");
-        assert!(err.contains("bake-rootfs"),      "remediation must point at bake: {err}");
-        assert!(err.contains("--allow-stub"),     "remediation must mention escape hatch: {err}");
+        assert!(
+            err.contains("bin/bash"),
+            "remediation must name bash:    {err}"
+        );
+        assert!(
+            err.contains("usr/bin/python3"),
+            "remediation must name python3: {err}"
+        );
+        assert!(
+            err.contains("usr/bin/git"),
+            "remediation must name git:     {err}"
+        );
+        assert!(
+            err.contains("bake-rootfs"),
+            "remediation must point at bake: {err}"
+        );
+        assert!(
+            err.contains("--allow-stub"),
+            "remediation must mention escape hatch: {err}"
+        );
     }
 
     #[test]
@@ -3114,7 +3121,8 @@ mod tests {
     #[test]
     fn dev_stage_args_allow_stub_flag_parses() {
         let argv = vec![
-            "--role".to_owned(),     "executor-starter".to_owned(),
+            "--role".to_owned(),
+            "executor-starter".to_owned(),
             "--allow-stub".to_owned(),
         ];
         let args = DevStageArgs::parse(&argv).expect("parse");
@@ -3127,7 +3135,7 @@ mod tests {
         // isn't, the test environment is too exotic to make claims about.
         match which("sh") {
             Some(p) => assert!(p.is_absolute(), "which(sh) returned {}", p.display()),
-            None    => eprintln!("skipped: no sh on $PATH (exotic test env)"),
+            None => eprintln!("skipped: no sh on $PATH (exotic test env)"),
         }
         // A binary that should never resolve.
         assert!(which("definitely-not-a-real-binary-xyz-9999").is_none());
@@ -3146,20 +3154,16 @@ mod tests {
     /// per-role source-file and staged-binary paths so individual
     /// witnesses can `touch` selected files to drive the mtime
     /// comparison without depending on the real workspace tree.
-    fn build_freshness_scaffold(
-        role: Role,
-    ) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+    fn build_freshness_scaffold(role: Role) -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let workspace = tmp.path();
         let role_subdir = match role {
-            Role::Orchestrator    => "planner-orchestrator",
-            Role::Reviewer        => "planner-reviewer",
+            Role::Orchestrator => "planner-orchestrator",
+            Role::Reviewer => "planner-reviewer",
             Role::ExecutorStarter => "planner-executor",
         };
-        let role_src = workspace
-            .join("crates").join(role_subdir).join("src");
-        let core_src = workspace
-            .join("crates").join("planner-core").join("src");
+        let role_src = workspace.join("crates").join(role_subdir).join("src");
+        let core_src = workspace.join("crates").join("planner-core").join("src");
         std::fs::create_dir_all(&role_src).unwrap();
         std::fs::create_dir_all(&core_src).unwrap();
         let role_main = role_src.join("main.rs");
@@ -3168,9 +3172,12 @@ mod tests {
         std::fs::write(&core_driver, b"// shared driver\n").unwrap();
 
         let staged = workspace
-            .join("images").join(role.images_subdir())
+            .join("images")
+            .join(role.images_subdir())
             .join("rootfs")
-            .join("usr").join("local").join("bin")
+            .join("usr")
+            .join("local")
+            .join("bin")
             .join(role.binary_name());
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
 
@@ -3199,18 +3206,24 @@ mod tests {
         let root = PathBuf::from("/ws");
         assert_eq!(
             planner_source_dirs(Role::Orchestrator, &root),
-            [root.join("crates/planner-orchestrator/src"),
-             root.join("crates/planner-core/src")],
+            [
+                root.join("crates/planner-orchestrator/src"),
+                root.join("crates/planner-core/src")
+            ],
         );
         assert_eq!(
             planner_source_dirs(Role::Reviewer, &root),
-            [root.join("crates/planner-reviewer/src"),
-             root.join("crates/planner-core/src")],
+            [
+                root.join("crates/planner-reviewer/src"),
+                root.join("crates/planner-core/src")
+            ],
         );
         assert_eq!(
             planner_source_dirs(Role::ExecutorStarter, &root),
-            [root.join("crates/planner-executor/src"),
-             root.join("crates/planner-core/src")],
+            [
+                root.join("crates/planner-executor/src"),
+                root.join("crates/planner-core/src")
+            ],
         );
     }
 
@@ -3220,12 +3233,12 @@ mod tests {
         let root = tmp.path();
         let nested = root.join("a").join("b").join("c");
         std::fs::create_dir_all(&nested).unwrap();
-        std::fs::write(root.join("top.rs"),       b"top\n").unwrap();
-        std::fs::write(root.join("a/mid.rs"),     b"mid\n").unwrap();
-        std::fs::write(nested.join("deep.rs"),    b"deep\n").unwrap();
-        set_mtime_secs_ago(&root.join("top.rs"),       1000);
-        set_mtime_secs_ago(&root.join("a/mid.rs"),     500);
-        set_mtime_secs_ago(&nested.join("deep.rs"),    10);
+        std::fs::write(root.join("top.rs"), b"top\n").unwrap();
+        std::fs::write(root.join("a/mid.rs"), b"mid\n").unwrap();
+        std::fs::write(nested.join("deep.rs"), b"deep\n").unwrap();
+        set_mtime_secs_ago(&root.join("top.rs"), 1000);
+        set_mtime_secs_ago(&root.join("a/mid.rs"), 500);
+        set_mtime_secs_ago(&nested.join("deep.rs"), 10);
 
         let (mtime, path) = newest_mtime_in_tree(root).unwrap().unwrap();
         assert_eq!(path, nested.join("deep.rs"));
@@ -3241,18 +3254,14 @@ mod tests {
 
     #[test]
     fn inv_image_bake_no_stale_cache_01_verdict_fresh_when_staged_newer_than_source() {
-        let (tmp, role_main, core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, role_main, core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         std::fs::write(&staged, b"fresh binary").unwrap();
         // Sources older than staged → Fresh.
-        set_mtime_secs_ago(&role_main,    1000);
-        set_mtime_secs_ago(&core_driver,  1500);
-        set_mtime_secs_ago(&staged,       10);
+        set_mtime_secs_ago(&role_main, 1000);
+        set_mtime_secs_ago(&core_driver, 1500);
+        set_mtime_secs_ago(&staged, 10);
 
-        let verdict = check_staged_binary_freshness(
-            Role::Reviewer,
-            tmp.path(),
-        ).unwrap();
+        let verdict = check_staged_binary_freshness(Role::Reviewer, tmp.path()).unwrap();
         match verdict {
             FreshnessVerdict::Fresh { .. } => {}
             other => panic!("expected Fresh, got {other:?}"),
@@ -3266,17 +3275,13 @@ mod tests {
         // RAXIS_PLANNER_TASK_PROMPT_PATH sidecar) that the guard
         // must detect even though planner-reviewer/src itself didn't
         // change.
-        let (tmp, role_main, core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, role_main, core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         std::fs::write(&staged, b"stale binary").unwrap();
-        set_mtime_secs_ago(&role_main,    1500);
-        set_mtime_secs_ago(&staged,       1000);
-        set_mtime_secs_ago(&core_driver,  10);
+        set_mtime_secs_ago(&role_main, 1500);
+        set_mtime_secs_ago(&staged, 1000);
+        set_mtime_secs_ago(&core_driver, 10);
 
-        let verdict = check_staged_binary_freshness(
-            Role::Reviewer,
-            tmp.path(),
-        ).unwrap();
+        let verdict = check_staged_binary_freshness(Role::Reviewer, tmp.path()).unwrap();
         match verdict {
             FreshnessVerdict::Stale { newest_source, .. } => {
                 assert_eq!(
@@ -3292,17 +3297,13 @@ mod tests {
 
     #[test]
     fn inv_image_bake_no_stale_cache_01_verdict_stale_when_role_src_newer() {
-        let (tmp, role_main, core_driver, staged) =
-            build_freshness_scaffold(Role::Orchestrator);
+        let (tmp, role_main, core_driver, staged) = build_freshness_scaffold(Role::Orchestrator);
         std::fs::write(&staged, b"stale orch binary").unwrap();
-        set_mtime_secs_ago(&core_driver,  1500);
-        set_mtime_secs_ago(&staged,       1000);
-        set_mtime_secs_ago(&role_main,    10);
+        set_mtime_secs_ago(&core_driver, 1500);
+        set_mtime_secs_ago(&staged, 1000);
+        set_mtime_secs_ago(&role_main, 10);
 
-        let verdict = check_staged_binary_freshness(
-            Role::Orchestrator,
-            tmp.path(),
-        ).unwrap();
+        let verdict = check_staged_binary_freshness(Role::Orchestrator, tmp.path()).unwrap();
         match verdict {
             FreshnessVerdict::Stale { newest_source, .. } => {
                 assert_eq!(newest_source, role_main);
@@ -3313,19 +3314,17 @@ mod tests {
 
     #[test]
     fn inv_image_bake_no_stale_cache_01_verdict_missing_when_no_staged_binary() {
-        let (tmp, _role_main, _core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, _role_main, _core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         // Do not create `staged` — the role's binary was never staged.
         assert!(!staged.exists());
 
-        let verdict = check_staged_binary_freshness(
-            Role::Reviewer,
-            tmp.path(),
-        ).unwrap();
+        let verdict = check_staged_binary_freshness(Role::Reviewer, tmp.path()).unwrap();
         match verdict {
             FreshnessVerdict::Missing { newest_source, .. } => {
-                assert!(newest_source.is_some(),
-                    "newest_source must surface even when staged is missing");
+                assert!(
+                    newest_source.is_some(),
+                    "newest_source must surface even when staged is missing"
+                );
             }
             other => panic!("expected Missing, got {other:?}"),
         }
@@ -3338,17 +3337,18 @@ mod tests {
         // trip the guard — there is nothing to compare against, so
         // packing is allowed. Pin this contract.
         let tmp = tempfile::tempdir().unwrap();
-        let staged = tmp.path()
-            .join("images").join(Role::Reviewer.images_subdir())
+        let staged = tmp
+            .path()
+            .join("images")
+            .join(Role::Reviewer.images_subdir())
             .join("rootfs")
-            .join("usr").join("local").join("bin")
+            .join("usr")
+            .join("local")
+            .join("bin")
             .join(Role::Reviewer.binary_name());
         std::fs::create_dir_all(staged.parent().unwrap()).unwrap();
         std::fs::write(&staged, b"binary").unwrap();
-        let verdict = check_staged_binary_freshness(
-            Role::Reviewer,
-            tmp.path(),
-        ).unwrap();
+        let verdict = check_staged_binary_freshness(Role::Reviewer, tmp.path()).unwrap();
         match verdict {
             FreshnessVerdict::Fresh { .. } => {}
             other => panic!("expected Fresh (no source tree), got {other:?}"),
@@ -3358,7 +3358,7 @@ mod tests {
     #[test]
     fn build_all_args_default_no_auto_stage_is_false() {
         let prev_install = std::env::var_os("RAXIS_INSTALL_DIR");
-        let prev_home    = std::env::var_os("HOME");
+        let prev_home = std::env::var_os("HOME");
         // SAFETY: single-threaded test; restored at end.
         unsafe {
             std::env::remove_var("RAXIS_INSTALL_DIR");
@@ -3366,17 +3366,19 @@ mod tests {
         }
         let argv = vec![];
         let args = BuildAllArgs::parse(&argv).expect("parse");
-        assert!(!args.no_auto_stage,
-            "default must be auto-stage = ON (iter53 reproduction shape)");
+        assert!(
+            !args.no_auto_stage,
+            "default must be auto-stage = ON (iter53 reproduction shape)"
+        );
         // SAFETY: see above.
         unsafe {
             match prev_install {
                 Some(v) => std::env::set_var("RAXIS_INSTALL_DIR", v),
-                None    => std::env::remove_var("RAXIS_INSTALL_DIR"),
+                None => std::env::remove_var("RAXIS_INSTALL_DIR"),
             }
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
-                None    => std::env::remove_var("HOME"),
+                None => std::env::remove_var("HOME"),
             }
         }
     }
@@ -3384,7 +3386,7 @@ mod tests {
     #[test]
     fn build_all_args_no_auto_stage_flag_parses() {
         let prev_install = std::env::var_os("RAXIS_INSTALL_DIR");
-        let prev_home    = std::env::var_os("HOME");
+        let prev_home = std::env::var_os("HOME");
         // SAFETY: single-threaded test; restored at end.
         unsafe {
             std::env::remove_var("RAXIS_INSTALL_DIR");
@@ -3397,29 +3399,28 @@ mod tests {
         unsafe {
             match prev_install {
                 Some(v) => std::env::set_var("RAXIS_INSTALL_DIR", v),
-                None    => std::env::remove_var("RAXIS_INSTALL_DIR"),
+                None => std::env::remove_var("RAXIS_INSTALL_DIR"),
             }
             match prev_home {
                 Some(v) => std::env::set_var("HOME", v),
-                None    => std::env::remove_var("HOME"),
+                None => std::env::remove_var("HOME"),
             }
         }
     }
 
     #[test]
     fn inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_stale_with_remediation() {
-        let (tmp, _role_main, core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, _role_main, core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         std::fs::write(&staged, b"stale").unwrap();
-        set_mtime_secs_ago(&staged,      1000);
+        set_mtime_secs_ago(&staged, 1000);
         set_mtime_secs_ago(&core_driver, 10);
 
         let args = BuildAllArgs {
-            role:           Some(Role::Reviewer),
-            install_dir:    tmp.path().join("install"),
+            role: Some(Role::Reviewer),
+            install_dir: tmp.path().join("install"),
             workspace_root: tmp.path().to_owned(),
-            signing_key:    tmp.path().join("key.hex"),
-            no_auto_stage:  true,
+            signing_key: tmp.path().join("key.hex"),
+            no_auto_stage: true,
         };
         let err = handle_staged_binary_freshness(Role::Reviewer, &args)
             .unwrap_err()
@@ -3440,16 +3441,15 @@ mod tests {
 
     #[test]
     fn inv_image_bake_no_stale_cache_01_no_auto_stage_bails_on_missing_with_remediation() {
-        let (tmp, _role_main, _core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, _role_main, _core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         assert!(!staged.exists());
 
         let args = BuildAllArgs {
-            role:           Some(Role::Reviewer),
-            install_dir:    tmp.path().join("install"),
+            role: Some(Role::Reviewer),
+            install_dir: tmp.path().join("install"),
             workspace_root: tmp.path().to_owned(),
-            signing_key:    tmp.path().join("key.hex"),
-            no_auto_stage:  true,
+            signing_key: tmp.path().join("key.hex"),
+            no_auto_stage: true,
         };
         let err = handle_staged_binary_freshness(Role::Reviewer, &args)
             .unwrap_err()
@@ -3471,22 +3471,20 @@ mod tests {
         // to `cargo build` and fail under a tempdir workspace). The
         // test asserts the function returns within milliseconds and
         // does not bail — a smoke test for the no-op happy path.
-        let (tmp, role_main, core_driver, staged) =
-            build_freshness_scaffold(Role::Reviewer);
+        let (tmp, role_main, core_driver, staged) = build_freshness_scaffold(Role::Reviewer);
         std::fs::write(&staged, b"fresh").unwrap();
-        set_mtime_secs_ago(&role_main,   2000);
+        set_mtime_secs_ago(&role_main, 2000);
         set_mtime_secs_ago(&core_driver, 1500);
-        set_mtime_secs_ago(&staged,      10);
+        set_mtime_secs_ago(&staged, 10);
 
         let args = BuildAllArgs {
-            role:           Some(Role::Reviewer),
-            install_dir:    tmp.path().join("install"),
+            role: Some(Role::Reviewer),
+            install_dir: tmp.path().join("install"),
             workspace_root: tmp.path().to_owned(),
-            signing_key:    tmp.path().join("key.hex"),
-            no_auto_stage:  false,
+            signing_key: tmp.path().join("key.hex"),
+            no_auto_stage: false,
         };
-        handle_staged_binary_freshness(Role::Reviewer, &args)
-            .expect("fresh binary must not error");
+        handle_staged_binary_freshness(Role::Reviewer, &args).expect("fresh binary must not error");
     }
 
     // -----------------------------------------------------------------
@@ -3503,14 +3501,13 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let workspace = tmp.path().to_owned();
         for (role, from_line) in per_role_from {
-            let dir = workspace
-                .join(STAGING_PARENT)
-                .join(role.images_subdir());
+            let dir = workspace.join(STAGING_PARENT).join(role.images_subdir());
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(
                 dir.join("Containerfile"),
                 format!("# scaffold\n{from_line}\nRUN true\n"),
-            ).unwrap();
+            )
+            .unwrap();
         }
         (tmp, workspace)
     }
@@ -3521,12 +3518,11 @@ mod tests {
         // image (`debian:bookworm-slim`, `scratch`). The acyclicity
         // check must accept those without complaint.
         let (_tmp, ws) = build_containerfile_graph_scaffold(&[
-            (Role::Orchestrator,    "FROM debian:bookworm-slim AS base"),
-            (Role::Reviewer,        "FROM scratch"),
+            (Role::Orchestrator, "FROM debian:bookworm-slim AS base"),
+            (Role::Reviewer, "FROM scratch"),
             (Role::ExecutorStarter, "FROM debian:bookworm-slim"),
         ]);
-        check_containerfile_graph_acyclic(&ws)
-            .expect("clean graph must pass");
+        check_containerfile_graph_acyclic(&ws).expect("clean graph must pass");
     }
 
     #[test]
@@ -3536,12 +3532,13 @@ mod tests {
         // another role's `FROM` base. The acyclicity check must
         // reject this with the invariant token + line number.
         let (_tmp, ws) = build_containerfile_graph_scaffold(&[
-            (Role::Orchestrator,    "FROM debian:bookworm-slim"),
-            (Role::Reviewer,        "FROM raxis-rootfs-orchestrator-core:dev"),
+            (Role::Orchestrator, "FROM debian:bookworm-slim"),
+            (Role::Reviewer, "FROM raxis-rootfs-orchestrator-core:dev"),
             (Role::ExecutorStarter, "FROM debian:bookworm-slim"),
         ]);
         let err = check_containerfile_graph_acyclic(&ws)
-            .unwrap_err().to_string();
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 VIOLATED"),
             "remediation must cite the invariant: {err}",
@@ -3562,7 +3559,7 @@ mod tests {
         // trip the check; an uppercase `FROM` directive MUST be
         // recognised (Containerfile grammar is case-insensitive).
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         let dir = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
@@ -3570,14 +3567,18 @@ mod tests {
             "# FROM raxis-rootfs-orchestrator-core:dev  (commented out)\n\
              from debian:bookworm-slim\n\
              RUN true\n",
-        ).unwrap();
+        )
+        .unwrap();
         check_containerfile_graph_acyclic(&ws).expect("comment must be ignored");
 
         std::fs::write(
             dir.join("Containerfile"),
             "FROM raxis-rootfs-orchestrator-core:dev\n",
-        ).unwrap();
-        let err = check_containerfile_graph_acyclic(&ws).unwrap_err().to_string();
+        )
+        .unwrap();
+        let err = check_containerfile_graph_acyclic(&ws)
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("VIOLATED"), "uppercase FROM must trip: {err}");
     }
 
@@ -3587,7 +3588,7 @@ mod tests {
         // MUST NOT trip the check for the other two roles. Pin
         // this contract.
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         let dir = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir());
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
@@ -3599,10 +3600,13 @@ mod tests {
         // `FROM --platform=$BUILDPLATFORM <image>` is a valid
         // grammar; the acyclicity check must skip the `--platform`
         // flag and inspect the actual operand.
-        let (_tmp, ws) = build_containerfile_graph_scaffold(&[
-            (Role::Orchestrator, "FROM --platform=linux/arm64 raxis-rootfs-reviewer-core:dev"),
-        ]);
-        let err = check_containerfile_graph_acyclic(&ws).unwrap_err().to_string();
+        let (_tmp, ws) = build_containerfile_graph_scaffold(&[(
+            Role::Orchestrator,
+            "FROM --platform=linux/arm64 raxis-rootfs-reviewer-core:dev",
+        )]);
+        let err = check_containerfile_graph_acyclic(&ws)
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("raxis-rootfs-reviewer-core:dev"),
             "remediation must surface the operand past --platform: {err}",
@@ -3628,9 +3632,9 @@ mod tests {
 
     #[test]
     fn inv_image_bake_vmlinux_staged_01_already_staged_when_in_place() {
-        let tmp     = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let install = tmp.path().to_owned();
-        let kdir    = install.join("kernel");
+        let kdir = install.join("kernel");
         std::fs::create_dir_all(&kdir).unwrap();
         std::fs::write(kdir.join("vmlinux"), b"STAGED").unwrap();
         let res = resolve_vmlinux_source(&install, None, false).unwrap();
@@ -3639,9 +3643,9 @@ mod tests {
 
     #[test]
     fn inv_image_bake_vmlinux_staged_01_explicit_does_not_overwrite_without_force() {
-        let tmp     = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let install = tmp.path().to_owned();
-        let kdir    = install.join("kernel");
+        let kdir = install.join("kernel");
         std::fs::create_dir_all(&kdir).unwrap();
         std::fs::write(kdir.join("vmlinux"), b"STAGED").unwrap();
         let src = tmp.path().join("explicit.bin");
@@ -3661,7 +3665,7 @@ mod tests {
         // No --kernel-from-file, no env, no canonical /usr/local,
         // no already-staged file. The bail message must cite the
         // invariant token AND the dev-kernel command.
-        let tmp     = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let install = tmp.path().join("install");
         // Clear env so the fallback to RAXIS_DEV_KERNEL_SOURCE
         // doesn't accidentally hit a path leaked in by the parent
@@ -3680,8 +3684,10 @@ mod tests {
         // reachable when both the install dir AND `/usr/local`
         // are empty.
         if PathBuf::from("/usr/local/lib/raxis/kernel/vmlinux").exists() {
-            assert!(matches!(res, Ok(VmlinuxResolution::CopyFrom { .. })),
-                "with canonical install present, must resolve to CopyFrom");
+            assert!(
+                matches!(res, Ok(VmlinuxResolution::CopyFrom { .. })),
+                "with canonical install present, must resolve to CopyFrom"
+            );
             return;
         }
         let err = res.unwrap_err().to_string();
@@ -3702,7 +3708,8 @@ mod tests {
         std::fs::write(&src, b"").unwrap();
         let install = tmp.path().join("install");
         let err = resolve_vmlinux_source(&install, Some(&src), false)
-            .unwrap_err().to_string();
+            .unwrap_err()
+            .to_string();
         assert!(
             err.contains("is not a non-empty file"),
             "empty source must be rejected: {err}",
@@ -3711,14 +3718,17 @@ mod tests {
 
     #[test]
     fn inv_image_bake_vmlinux_staged_01_apply_copy_writes_atomically() {
-        let tmp     = tempfile::tempdir().unwrap();
+        let tmp = tempfile::tempdir().unwrap();
         let install = tmp.path().join("install");
-        let src     = tmp.path().join("k.bin");
+        let src = tmp.path().join("k.bin");
         std::fs::write(&src, b"BYTES").unwrap();
         let sha = apply_vmlinux_resolution(
             &install,
-            &VmlinuxResolution::CopyFrom { source: src.clone() },
-        ).unwrap();
+            &VmlinuxResolution::CopyFrom {
+                source: src.clone(),
+            },
+        )
+        .unwrap();
         // SHA matches manual computation.
         assert_eq!(sha, sha256_file(&src).unwrap());
         // The dest exists and matches src bytes.
@@ -3736,11 +3746,11 @@ mod tests {
     /// consumes: `<workspace>/images/<subdir>/manifest.toml` and
     /// `<workspace>/images/<subdir>/rootfs/usr/local/bin/<binary>`.
     fn build_bake_inputs_scaffold(
-        role:           Role,
+        role: Role,
         kernel_version: &str,
     ) -> (tempfile::TempDir, PathBuf, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         let images_subdir = ws.join(STAGING_PARENT).join(role.images_subdir());
         std::fs::create_dir_all(&images_subdir).unwrap();
         let manifest_toml = format!(
@@ -3754,7 +3764,11 @@ mod tests {
             kver = kernel_version,
         );
         std::fs::write(images_subdir.join("manifest.toml"), manifest_toml).unwrap();
-        let bin_dir = images_subdir.join("rootfs").join("usr").join("local").join("bin");
+        let bin_dir = images_subdir
+            .join("rootfs")
+            .join("usr")
+            .join("local")
+            .join("bin");
         std::fs::create_dir_all(&bin_dir).unwrap();
         std::fs::write(bin_dir.join(role.binary_name()), b"PLANNER BINARY BYTES").unwrap();
         let install = ws.join("install");
@@ -3770,7 +3784,10 @@ mod tests {
         let inputs = compute_bake_inputs(Role::Reviewer, &ws, &install, fp).unwrap();
         assert_eq!(inputs.signing_key_fp_prefix, fp);
         assert!(inputs.vmlinux_sha256.is_some(), "vmlinux MUST be hashed");
-        assert!(inputs.staged_binary_sha256.is_some(), "staged binary MUST be hashed when present");
+        assert!(
+            inputs.staged_binary_sha256.is_some(),
+            "staged binary MUST be hashed when present"
+        );
         // The Containerfile is absent in this scaffold; the
         // optional field MUST be None.
         assert!(inputs.containerfile_sha256.is_none());
@@ -3780,14 +3797,18 @@ mod tests {
     fn inv_image_bake_manifest_integrity_01_compute_detects_planner_binary_change() {
         let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
         let before = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
-        let binary = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir())
-            .join("rootfs").join("usr").join("local").join("bin")
+        let binary = ws
+            .join(STAGING_PARENT)
+            .join(Role::Reviewer.images_subdir())
+            .join("rootfs")
+            .join("usr")
+            .join("local")
+            .join("bin")
             .join(Role::Reviewer.binary_name());
         std::fs::write(&binary, b"DIFFERENT PLANNER BINARY").unwrap();
         let after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
         assert_ne!(
-            before.staged_binary_sha256,
-            after.staged_binary_sha256,
+            before.staged_binary_sha256, after.staged_binary_sha256,
             "a binary rewrite MUST change the recorded SHA",
         );
     }
@@ -3799,7 +3820,8 @@ mod tests {
         std::fs::write(
             install.join("kernel").join("vmlinux"),
             b"DIFFERENT KERNEL BYTES",
-        ).unwrap();
+        )
+        .unwrap();
         let after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
         assert_ne!(before.vmlinux_sha256, after.vmlinux_sha256);
     }
@@ -3808,10 +3830,9 @@ mod tests {
     fn inv_image_bake_manifest_integrity_01_compute_detects_signing_key_rotation() {
         let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
         let before = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp-old").unwrap();
-        let after  = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp-new").unwrap();
+        let after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp-new").unwrap();
         assert_ne!(
-            before.signing_key_fp_prefix,
-            after.signing_key_fp_prefix,
+            before.signing_key_fp_prefix, after.signing_key_fp_prefix,
             "a key rotation MUST surface as a recorded-input change",
         );
     }
@@ -3835,41 +3856,48 @@ mod tests {
         std::fs::write(&img_path, b"IMG BYTES").unwrap();
         std::fs::write(&mtoml_path, b"MANIFEST BYTES").unwrap();
         let inputs_now = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
-        let img_sha   = sha256_file(&img_path).unwrap();
+        let img_sha = sha256_file(&img_path).unwrap();
         let mtoml_sha = sha256_file(&mtoml_path).unwrap();
         let manifest = BakeManifest {
             schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
-            role:           Role::Reviewer.workspace_crate().to_owned(),
-            artefact_stem:  Role::Reviewer.artefact_stem().to_owned(),
+            role: Role::Reviewer.workspace_crate().to_owned(),
+            artefact_stem: Role::Reviewer.artefact_stem().to_owned(),
             kernel_version: "0.1.0".to_owned(),
-            built_at_unix:  1,
+            built_at_unix: 1,
             host: BakeHostInfo {
-                os: "test".to_owned(), arch: "test".to_owned(),
-                target_triple: "test".to_owned(), container_builder: None,
+                os: "test".to_owned(),
+                arch: "test".to_owned(),
+                target_triple: "test".to_owned(),
+                container_builder: None,
             },
             inputs: inputs_now.clone(),
             outputs: BakeOutputs {
-                img_sha256:               img_sha.clone(),
-                img_size_bytes:           std::fs::metadata(&img_path).unwrap().len(),
-                manifest_toml_sha256:     mtoml_sha,
+                img_sha256: img_sha.clone(),
+                img_size_bytes: std::fs::metadata(&img_path).unwrap().len(),
+                manifest_toml_sha256: mtoml_sha,
                 manifest_toml_size_bytes: std::fs::metadata(&mtoml_path).unwrap().len(),
             },
         };
-        manifest.write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0")).unwrap();
+        manifest
+            .write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0"))
+            .unwrap();
 
         // Now the shortcut must fire (Some).
-        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now)
-            .unwrap();
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now).unwrap();
         assert!(verdict.is_some(), "unchanged tree MUST be a no-op");
 
         // Mutate the binary; the shortcut must bail.
-        let binary = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir())
-            .join("rootfs").join("usr").join("local").join("bin")
+        let binary = ws
+            .join(STAGING_PARENT)
+            .join(Role::Reviewer.images_subdir())
+            .join("rootfs")
+            .join("usr")
+            .join("local")
+            .join("bin")
             .join(Role::Reviewer.binary_name());
         std::fs::write(&binary, b"NEW PLANNER").unwrap();
         let inputs_after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
-        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_after)
-            .unwrap();
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_after).unwrap();
         assert!(verdict.is_none(), "binary change MUST invalidate the cache");
     }
 
@@ -3892,65 +3920,71 @@ mod tests {
         let inputs_now = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
         let manifest = BakeManifest {
             schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
-            role:           Role::Reviewer.workspace_crate().to_owned(),
-            artefact_stem:  Role::Reviewer.artefact_stem().to_owned(),
+            role: Role::Reviewer.workspace_crate().to_owned(),
+            artefact_stem: Role::Reviewer.artefact_stem().to_owned(),
             kernel_version: "0.1.0".to_owned(),
-            built_at_unix:  1,
+            built_at_unix: 1,
             host: BakeHostInfo {
-                os: "test".to_owned(), arch: "test".to_owned(),
-                target_triple: "test".to_owned(), container_builder: None,
+                os: "test".to_owned(),
+                arch: "test".to_owned(),
+                target_triple: "test".to_owned(),
+                container_builder: None,
             },
             inputs: inputs_now.clone(),
             outputs: BakeOutputs {
-                img_sha256:               sha256_file(&img_path).unwrap(),
-                img_size_bytes:           std::fs::metadata(&img_path).unwrap().len(),
-                manifest_toml_sha256:     sha256_file(&mtoml_path).unwrap(),
+                img_sha256: sha256_file(&img_path).unwrap(),
+                img_size_bytes: std::fs::metadata(&img_path).unwrap().len(),
+                manifest_toml_sha256: sha256_file(&mtoml_path).unwrap(),
                 manifest_toml_size_bytes: std::fs::metadata(&mtoml_path).unwrap().len(),
             },
         };
-        manifest.write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0")).unwrap();
+        manifest
+            .write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0"))
+            .unwrap();
 
         // Tamper the on-disk .img — the recorded SHA in the
         // bake.json now disagrees with disk. Shortcut MUST bail.
         std::fs::write(&img_path, b"TAMPERED").unwrap();
-        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now)
-            .unwrap();
-        assert!(verdict.is_none(),
-            "tampered .img must NOT pass the integrity check");
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now).unwrap();
+        assert!(
+            verdict.is_none(),
+            "tampered .img must NOT pass the integrity check"
+        );
     }
 
     #[test]
     fn inv_image_bake_manifest_integrity_01_manifest_round_trips_through_json() {
         let inputs = BakeInputs {
-            containerfile_sha256:   Some("aa".repeat(32)),
+            containerfile_sha256: Some("aa".repeat(32)),
             inputs_manifest_sha256: "bb".repeat(32),
-            staged_binary_sha256:   Some("cc".repeat(32)),
-            signing_key_fp_prefix:  "deadbeef00112233".to_owned(),
-            vmlinux_sha256:         Some("dd".repeat(32)),
+            staged_binary_sha256: Some("cc".repeat(32)),
+            signing_key_fp_prefix: "deadbeef00112233".to_owned(),
+            vmlinux_sha256: Some("dd".repeat(32)),
         };
         let outputs = BakeOutputs {
-            img_sha256:               "ee".repeat(32),
-            img_size_bytes:           42,
-            manifest_toml_sha256:     "ff".repeat(32),
+            img_sha256: "ee".repeat(32),
+            img_size_bytes: 42,
+            manifest_toml_sha256: "ff".repeat(32),
             manifest_toml_size_bytes: 7,
         };
         let manifest = BakeManifest {
             schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
-            role:           "raxis-planner-reviewer".to_owned(),
-            artefact_stem:  "raxis-reviewer-core".to_owned(),
+            role: "raxis-planner-reviewer".to_owned(),
+            artefact_stem: "raxis-reviewer-core".to_owned(),
             kernel_version: "0.1.0".to_owned(),
-            built_at_unix:  1_700_000_000,
+            built_at_unix: 1_700_000_000,
             host: BakeHostInfo {
-                os: "macos".to_owned(), arch: "aarch64".to_owned(),
+                os: "macos".to_owned(),
+                arch: "aarch64".to_owned(),
                 target_triple: "aarch64-unknown-linux-musl".to_owned(),
                 container_builder: Some("docker".to_owned()),
             },
-            inputs:  inputs.clone(),
+            inputs: inputs.clone(),
             outputs: outputs.clone(),
         };
         let json = serde_json::to_vec_pretty(&manifest).unwrap();
         let back: BakeManifest = serde_json::from_slice(&json).unwrap();
-        assert_eq!(back.inputs,  inputs);
+        assert_eq!(back.inputs, inputs);
         assert_eq!(back.outputs, outputs);
         assert_eq!(back.schema_version, BAKE_MANIFEST_SCHEMA_VERSION);
     }
@@ -3984,8 +4018,10 @@ mod tests {
             },
         });
         std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
-        assert!(BakeManifest::read_from(&path).is_none(),
-            "future schema version must read as None");
+        assert!(
+            BakeManifest::read_from(&path).is_none(),
+            "future schema version must read as None"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -3995,18 +4031,22 @@ mod tests {
     #[test]
     fn inv_image_bake_preflight_fail_closed_01_missing_signing_key_bails() {
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         // Make every per-role manifest.toml + Containerfile exist
         // so the preflight reaches the signing-key check.
         for r in Role::all() {
             let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("manifest.toml"), format!(
-                "role = {role:?}\nkernel_version=\"0.1.0\"\n\
+            std::fs::write(
+                dir.join("manifest.toml"),
+                format!(
+                    "role = {role:?}\nkernel_version=\"0.1.0\"\n\
                  source_date_epoch=0\nerofs_version=\"x\"\n\
                  tar_version=\"x\"\nzstd_version=\"x\"\n",
-                role = r.manifest_role(),
-            )).unwrap();
+                    role = r.manifest_role(),
+                ),
+            )
+            .unwrap();
             std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
         }
         let install = tmp.path().join("install");
@@ -4014,14 +4054,24 @@ mod tests {
         std::fs::write(install.join("kernel").join("vmlinux"), b"k").unwrap();
         let signing_key = tmp.path().join("nope.hex");
         let err = preflight_bake_inputs(
-            &ws, &install, &signing_key,
-            &[Role::Reviewer],   // binary-only avoids the daemon probe
-            None, None, false,
-        ).unwrap_err().to_string();
-        assert!(err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
-            "remediation must cite the invariant: {err}");
-        assert!(err.contains("dev-keys init"),
-            "remediation must mention dev-keys init: {err}");
+            &ws,
+            &install,
+            &signing_key,
+            &[Role::Reviewer], // binary-only avoids the daemon probe
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
+            "remediation must cite the invariant: {err}"
+        );
+        assert!(
+            err.contains("dev-keys init"),
+            "remediation must mention dev-keys init: {err}"
+        );
     }
 
     #[test]
@@ -4030,21 +4080,31 @@ mod tests {
         // per-role manifest.toml). The preflight must surface
         // the missing per-role fixture with the invariant token.
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         let install = tmp.path().join("install");
         std::fs::create_dir_all(install.join("kernel")).unwrap();
         std::fs::write(install.join("kernel").join("vmlinux"), b"k").unwrap();
         let key_hex = tmp.path().join("k.hex");
         std::fs::write(&key_hex, "11".repeat(32)).unwrap();
         let err = preflight_bake_inputs(
-            &ws, &install, &key_hex,
+            &ws,
+            &install,
+            &key_hex,
             &[Role::Reviewer],
-            None, None, false,
-        ).unwrap_err().to_string();
-        assert!(err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
-            "remediation must cite the invariant: {err}");
-        assert!(err.contains("manifest.toml"),
-            "remediation must name the missing fixture: {err}");
+            None,
+            None,
+            false,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
+            "remediation must cite the invariant: {err}"
+        );
+        assert!(
+            err.contains("manifest.toml"),
+            "remediation must name the missing fixture: {err}"
+        );
     }
 
     #[test]
@@ -4055,16 +4115,20 @@ mod tests {
         // dev box without docker/podman/buildah can still bake
         // the two canonical binary-only roles.
         let tmp = tempfile::tempdir().unwrap();
-        let ws  = tmp.path().to_owned();
+        let ws = tmp.path().to_owned();
         for r in &[Role::Reviewer, Role::Orchestrator] {
             let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
             std::fs::create_dir_all(&dir).unwrap();
-            std::fs::write(dir.join("manifest.toml"), format!(
-                "role = {role:?}\nkernel_version=\"0.1.0\"\n\
+            std::fs::write(
+                dir.join("manifest.toml"),
+                format!(
+                    "role = {role:?}\nkernel_version=\"0.1.0\"\n\
                  source_date_epoch=0\nerofs_version=\"x\"\n\
                  tar_version=\"x\"\nzstd_version=\"x\"\n",
-                role = r.manifest_role(),
-            )).unwrap();
+                    role = r.manifest_role(),
+                ),
+            )
+            .unwrap();
             std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
         }
         let install = tmp.path().join("install");
@@ -4073,12 +4137,19 @@ mod tests {
         let key_hex = tmp.path().join("k.hex");
         std::fs::write(&key_hex, "11".repeat(32)).unwrap();
         let outcome = preflight_bake_inputs(
-            &ws, &install, &key_hex,
+            &ws,
+            &install,
+            &key_hex,
             &[Role::Reviewer, Role::Orchestrator],
-            None, None, false,
-        ).expect("binary-only preflight must pass without a builder");
-        assert!(outcome.container_builder.is_none(),
-            "no role needs a builder; preflight must NOT resolve one");
+            None,
+            None,
+            false,
+        )
+        .expect("binary-only preflight must pass without a builder");
+        assert!(
+            outcome.container_builder.is_none(),
+            "no role needs a builder; preflight must NOT resolve one"
+        );
     }
 
     #[test]
@@ -4087,12 +4158,18 @@ mod tests {
         // this table MUST update the harness's
         // `role_needs_rootfs_bake` in lockstep — they MUST agree
         // because the harness auto-bake mirrors the bake driver.
-        assert!(!Role::Orchestrator.needs_rootfs_bake(),
-            "Orchestrator is binary-only by spec");
-        assert!(!Role::Reviewer.needs_rootfs_bake(),
-            "Reviewer is binary-only by spec");
-        assert!(Role::ExecutorStarter.needs_rootfs_bake(),
-            "ExecutorStarter needs OS tooling via Containerfile bake");
+        assert!(
+            !Role::Orchestrator.needs_rootfs_bake(),
+            "Orchestrator is binary-only by spec"
+        );
+        assert!(
+            !Role::Reviewer.needs_rootfs_bake(),
+            "Reviewer is binary-only by spec"
+        );
+        assert!(
+            Role::ExecutorStarter.needs_rootfs_bake(),
+            "ExecutorStarter needs OS tooling via Containerfile bake"
+        );
     }
 
     // -----------------------------------------------------------------
@@ -4117,13 +4194,15 @@ mod tests {
         use flate2::read::GzDecoder;
         use std::io::Read;
         let mut decoded = Vec::new();
-        GzDecoder::new(&cpio_gz[..]).read_to_end(&mut decoded).unwrap();
-        let trailer_count = decoded.windows(10)
-            .filter(|w| *w == b"TRAILER!!!")
-            .count();
-        assert_eq!(trailer_count, 1,
+        GzDecoder::new(&cpio_gz[..])
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let trailer_count = decoded.windows(10).filter(|w| *w == b"TRAILER!!!").count();
+        assert_eq!(
+            trailer_count, 1,
             "exactly one TRAILER!!! must appear in the cpio stream \
-             (multi-archive concatenation would emit more)");
+             (multi-archive concatenation would emit more)"
+        );
     }
 
     #[test]
@@ -4157,23 +4236,30 @@ mod tests {
         use std::io::Read;
         let mut decoded = Vec::new();
         MultiGzDecoder::new(&concatenated[..])
-            .read_to_end(&mut decoded).unwrap();
-        let trailer_count = decoded.windows(10)
-            .filter(|w| *w == b"TRAILER!!!")
-            .count();
-        assert_eq!(trailer_count, 2,
+            .read_to_end(&mut decoded)
+            .unwrap();
+        let trailer_count = decoded.windows(10).filter(|w| *w == b"TRAILER!!!").count();
+        assert_eq!(
+            trailer_count, 2,
             "concatenated multi-archive cpio MUST preserve BOTH \
              trailers byte-for-byte (the Linux kernel's initramfs \
-             unpacker reads them as separate archives)");
+             unpacker reads them as separate archives)"
+        );
 
         // Byte-level concat invariant: the prefix of the
         // concatenated stream MUST be exactly archive A's bytes
         // (no archive-B bytes leaked in, no archive-A bytes
         // truncated). This is what makes "multi-archive cpio
         // inputs survive the bake step byte-for-byte" mechanical.
-        assert_eq!(&concatenated[..a.len()], a.as_slice(),
-            "archive A bytes must survive the concat byte-for-byte");
-        assert_eq!(&concatenated[a.len()..], b.as_slice(),
-            "archive B bytes must survive the concat byte-for-byte");
+        assert_eq!(
+            &concatenated[..a.len()],
+            a.as_slice(),
+            "archive A bytes must survive the concat byte-for-byte"
+        );
+        assert_eq!(
+            &concatenated[a.len()..],
+            b.as_slice(),
+            "archive B bytes must survive the concat byte-for-byte"
+        );
     }
 }
