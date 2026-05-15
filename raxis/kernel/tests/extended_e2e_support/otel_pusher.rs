@@ -64,7 +64,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::harness_timeout::{run_command_output_timeout, BoundedWaitError};
+use super::harness_timeout::{
+    run_command_output_timeout, BoundedWaitError,
+};
+use crate::common::keep_alive::keep_running_after_exit_with_workdir;
 
 // ─── Operator-facing env-var contract ─────────────────────────────
 
@@ -423,6 +426,35 @@ impl OtelPusherSupervisor {
 
 impl Drop for OtelPusherSupervisor {
     fn drop(&mut self) {
+        // Keep-alive opt-out: when the operator opts into post-mortem
+        // inspection (env `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`, the
+        // `--keep-running-after-exit` CLI flag, or a `KEEP_RUNNING`
+        // touch file in `<data_dir>`), the supervisor MUST NOT
+        // SIGTERM/SIGKILL the pusher — Grafana panels stay live so
+        // the operator can keep watching metrics flow until they
+        // explicitly tear down. The default branch (no signal)
+        // preserves the legacy SIGTERM-then-SIGKILL contract per
+        // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`. The supervisor stores
+        // `log_path = <data_dir>/otel-pusher.stderr.log`, so the
+        // touch-file probe reads `log_path.parent()` for the work_dir.
+        // See `specs/v3/live-e2e-keep-alive.md`.
+        let work_dir = self.log_path.parent();
+        if keep_running_after_exit_with_workdir(work_dir) {
+            // Forget the child so its destructor does not SIGKILL it
+            // — the pusher process is intentionally left running as
+            // an orphan for the operator to inspect.
+            if let Some(child) = self.child.take() {
+                eprintln!(
+                    "[realism-e2e] observability: keep-alive flag on; \
+                     leaving raxis-otel-pusher pid={pid} running for \
+                     post-mortem (log: {log})",
+                    pid = self.pid,
+                    log = self.log_path.display(),
+                );
+                std::mem::forget(child);
+            }
+            return;
+        }
         if let Some(mut child) = self.child.take() {
             let pid = self.pid;
             // SIGTERM first — gives the pusher a brief grace

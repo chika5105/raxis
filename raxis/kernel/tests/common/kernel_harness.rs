@@ -49,6 +49,8 @@ use std::time::{Duration, Instant};
 use ed25519_dalek::SigningKey;
 use raxis_test_support::{ephemeral_cert_with_key, CertOpts};
 
+use super::keep_alive::keep_running_after_exit_with_workdir;
+
 // ---------------------------------------------------------------------------
 // File-scope serialisation
 // ---------------------------------------------------------------------------
@@ -398,6 +400,18 @@ impl KernelInstance {
 
 impl Drop for KernelInstance {
     fn drop(&mut self) {
+        // Keep-alive opt-out: when the operator opts into post-mortem
+        // inspection via `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`, a
+        // `KEEP_RUNNING` touch-file in `<data_dir>`, or the
+        // `--keep-running-after-exit` CLI flag, the harness MUST NOT
+        // SIGKILL the kernel — leaving the dashboard / SQLite / audit
+        // chain reachable for the operator to inspect. The default
+        // (no signal) preserves the legacy SIGKILL safety net per
+        // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`. See
+        // `specs/v3/live-e2e-keep-alive.md`.
+        if keep_running_after_exit_with_workdir(Some(&self.data_dir)) {
+            return;
+        }
         // If the test forgot to shutdown_with (or panicked on the way), the
         // child is still running. Kill -9 it so the test binary doesn't hang
         // waiting for the OS to reap an orphan. We do not try a graceful

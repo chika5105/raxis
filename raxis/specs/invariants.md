@@ -84,7 +84,7 @@
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03, INV-DASHBOARD-HEALTH-NO-CACHE-01, INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01, INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01, INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01, INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01, INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 | 24 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
-| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01, INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01 | 6 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
@@ -8377,6 +8377,128 @@ line, which the witness prevents). Pairs with
 `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01` whose enforcement
 mechanism makes the contradictory pair structurally
 impossible in the default path.
+
+---
+
+### INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01 — Keep-running-after-exit flag MUST default off; absent any signal, all teardown paths execute as before
+
+**Statement.** The live-e2e "keep running after exit" flag
+([`crate::common::keep_alive::keep_running_after_exit`] /
+[`keep_running_after_exit_with_workdir`]) MUST default to OFF.
+Absent every one of the three activation signals — env var
+`RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT` (truthy values: case-
+insensitive `1`, `true`, `yes`, `on`), the
+`--keep-running-after-exit` CLI flag exposed via
+[`set_cli_flag`], and the `<work_dir>/KEEP_RUNNING` touch
+file — every teardown path in the live-e2e harness MUST
+execute as it did before this flag was introduced:
+
+* `kernel.shutdown_with(libc::SIGTERM, …)` is sent and the
+  kernel-clean-exit assertion fires
+  (`extended_e2e_realistic_scenario.rs::realistic_session_lifecycle`,
+  `full_e2e_session_lifecycle.rs::run_full_e2e_lifecycle`).
+* `KernelInstance::Drop` SIGKILLs a still-alive kernel
+  (`kernel/tests/common/kernel_harness.rs`).
+* `OtelPusherSupervisor::Drop` SIGTERM-then-SIGKILLs the
+  pusher (`kernel/tests/extended_e2e_support/otel_pusher.rs`).
+* `Tier3Reporter::Drop`, when `RAXIS_E2E_KEEP=0` AND the
+  test succeeded, `remove_dir_all`s `<data_dir>`
+  (`kernel/tests/common/tier3_artifacts.rs`).
+* `ComposeStackGuard::Drop`, when configured with
+  `teardown_on_drop = true`, runs `docker compose -p
+  <project> -f <compose_file> down -v`
+  (`kernel/tests/extended_e2e_support/docker_stack.rs`).
+
+When ANY of the three signals is on, every site above
+becomes a no-op and the harness prints the keep-alive banner
+listing the dashboard / Grafana / Prometheus / OTel HTTP /
+SQLite / audit-chain / compose-stack inspection paths plus
+the operator's manual teardown commands. The test still
+exits with its actual verdict code; keep-alive only affects
+cleanup, never pass/fail signaling.
+
+**Justification.** Default-off is the only safe shape for an
+operator-ergonomics flag that leaves long-lived processes,
+container stacks, and on-disk state behind. A default-on
+(or even "default-on under failure") shape would silently
+waste host resources on every test run and bury an
+unrelated test failure under a wall of leftover services
+the operator never knew were still up. Default-off keeps
+the legacy CI-friendly teardown contract intact; activating
+keep-alive is a deliberate operator choice via env / CLI /
+touch-file. The three-surface activation tree exists so the
+flag composes naturally with the operator's actual workflow
+(env-var prefix in front of `cargo test`, mid-run touch from
+another shell, or future test-binary CLI), without making
+any one surface load-bearing.
+
+**Scenario.** Operator runs the realism-e2e scenario without
+setting any keep-alive signal: `cargo test --release -p
+raxis-kernel --test extended_e2e_realistic_scenario --
+--nocapture`. With this invariant in force, the harness
+sends SIGTERM, asserts the kernel exits cleanly, walks the
+audit chain, reports Tier-3 artifacts, optionally deletes
+`<data_dir>` (under `RAXIS_E2E_KEEP=0`), and the test
+process exits with its actual verdict — exactly as before
+the keep-alive flag landed. A future maintainer who flipped
+the default to "keep alive on a failed run" would trip the
+`harness_drop_skips_teardown_when_keep_running` mock-harness
+witness's "default branch MUST run teardown" assertion AND
+the compose-stack equivalent
+`compose_stack_drop_runs_teardown_when_no_keep_alive_signal`.
+
+**Witness.**
+[`crate::common::keep_alive::tests::keep_running_after_exit_default_is_false`](../kernel/tests/common/keep_alive.rs)
+(no signal → helper returns false);
+[`crate::common::keep_alive::tests::keep_running_after_exit_env_var_activates`](../kernel/tests/common/keep_alive.rs)
+(every truthy / falsy spelling pinned);
+[`crate::common::keep_alive::tests::parse_truthy_env_value_canonical_cases`](../kernel/tests/common/keep_alive.rs)
+(pure parser);
+[`crate::common::keep_alive::tests::keep_running_after_exit_touch_file_activates`](../kernel/tests/common/keep_alive.rs)
+(`<work_dir>/KEEP_RUNNING` activation);
+[`crate::common::keep_alive::tests::keep_running_after_exit_cli_flag_activates`](../kernel/tests/common/keep_alive.rs)
+(CLI bit OR'd with env / touch);
+[`crate::common::keep_alive::tests::cli_flag_name_pinned`](../kernel/tests/common/keep_alive.rs)
+(spellings of `--keep-running-after-exit` /
+`RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT` / `KEEP_RUNNING`);
+[`crate::common::keep_alive::tests::harness_drop_skips_teardown_when_keep_running`](../kernel/tests/common/keep_alive.rs)
+(mock harness with a tracked `Drop` exercising all four
+arms — default branch tears down; env / touch / CLI gate
+the teardown off);
+[`crate::common::keep_alive::tests::print_keep_alive_banner_never_panics`](../kernel/tests/common/keep_alive.rs)
+(banner emission is panic-free across every optional
+combination);
+[`extended_e2e_support::docker_stack::tests::compose_stack_drop_runs_teardown_when_no_keep_alive_signal`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(default-off branch: compose-stack teardown runs);
+[`extended_e2e_support::docker_stack::tests::compose_stack_drop_skips_down_when_keep_running`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(every signal gates `ComposeStackGuard::Drop`'s `docker
+compose down`);
+[`extended_e2e_support::docker_stack::tests::compose_stack_guard_default_teardown_disabled`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(constructor default `teardown_on_drop = false` preserves
+the current "leave the stack up" harness behaviour);
+[`extended_e2e_support::docker_stack::tests::compose_stack_guard_for_extended_stack_constants_pinned`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(realism-e2e canonical project + compose-file pair).
+
+**Canonical home.**
+`kernel/tests/common/keep_alive.rs` (single source of truth
+for the activation read; pure parser + helpers + RAII guard
+for the CLI bit);
+`kernel/tests/common/kernel_harness.rs::Drop for KernelInstance`
+(SIGKILL safety net gated by the helper);
+`kernel/tests/extended_e2e_support/otel_pusher.rs::Drop for OtelPusherSupervisor`
+(SIGTERM-then-SIGKILL gated by the helper, with the child
+forgotten on the keep-alive arm so no destructor fires);
+`kernel/tests/common/tier3_artifacts.rs::Tier3Reporter::emit_block`
+(the `RAXIS_E2E_KEEP=0` cleanup branch is gated by the
+helper);
+`kernel/tests/extended_e2e_support/docker_stack.rs::ComposeStackGuard::Drop`
+(forward-compatible `docker compose down` site gated by the
+helper AND the `teardown_on_drop` toggle);
+`kernel/tests/extended_e2e_realistic_scenario.rs` and
+`kernel/tests/full_e2e_session_lifecycle.rs` (the explicit
+`kernel.shutdown_with(libc::SIGTERM, …)` call sites; both
+gate the SIGTERM + post-mortem chain walk on the helper);
+`specs/v3/live-e2e-keep-alive.md` (operator-facing contract).
 
 ---
 

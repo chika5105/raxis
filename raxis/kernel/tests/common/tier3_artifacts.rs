@@ -41,6 +41,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::Duration;
 
+use super::keep_alive::keep_running_after_exit_with_workdir;
+
 // ── Observability URL constants (mirror compose) ─────────────────
 //
 // These mirror `live-e2e/docker-compose.e2e.yml` exactly. The
@@ -302,9 +304,27 @@ impl Tier3Reporter {
             label = self.test_label);
 
         let panicking = std::thread::panicking() || !self.succeeded;
+        // Keep-alive opt-out: when the operator opts into post-mortem
+        // inspection (env `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`,
+        // `--keep-running-after-exit` CLI flag, or a `KEEP_RUNNING`
+        // touch file in `<data_dir>`), the Tier-3 reporter MUST NOT
+        // delete `<data_dir>` even when `RAXIS_E2E_KEEP=0` — the
+        // operator needs the SQLite db, audit chain, and kernel
+        // stderr log to stay on disk so they can inspect at leisure.
+        // Default (no signal) preserves the legacy
+        // `RAXIS_E2E_KEEP=0`-on-success cleanup branch per
+        // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`. See
+        // `specs/v3/live-e2e-keep-alive.md`.
+        let keep_running = keep_running_after_exit_with_workdir(Some(&self.data_dir));
         if panicking {
             eprintln!(
                 "[{label}] keep-policy        : KEEPING (panic / explicit failure path)",
+                label = self.test_label
+            );
+        } else if keep_running {
+            eprintln!(
+                "[{label}] keep-policy        : KEEPING (keep-running-after-exit flag active; \
+                 RAXIS_E2E_KEEP=0 ignored)",
                 label = self.test_label
             );
         } else if std::env::var("RAXIS_E2E_KEEP").as_deref() == Ok("0") {

@@ -46,6 +46,7 @@ use std::process::Command;
 use super::harness_timeout::{
     run_command_output_timeout, BoundedWaitError, DOCKER_BRINGUP_TIMEOUT, DOCKER_PROBE_TIMEOUT,
 };
+use crate::common::keep_alive::keep_running_after_exit_with_workdir;
 
 /// docker-compose project namespace shared by both compose files
 /// (`docker-compose.e2e.yml` and `docker-compose.extended.e2e.yml`)
@@ -337,6 +338,237 @@ fn bring_stack_up(project: &str, compose_file: &std::path::Path) -> Result<(), D
     Ok(())
 }
 
+// ─── Compose-stack RAII guard (`ComposeStackGuard`) ───────────────
+//
+// The realism-e2e harness today brings the compose-backed stack
+// (postgres + mongo + redis + smtp + mysql + mssql + Grafana +
+// Prometheus + OTel collector) UP via [`ensure_extended_stack_up_or_panic`]
+// and never tears it down — the operator runs `cargo xtask
+// observability down` (or `docker compose -f <file> down -v`) by
+// hand. This RAII guard is the forward-compatible Drop site for
+// any future caller that DOES want the harness to issue
+// `docker compose down` itself: the guard's `Drop` honours the
+// keep-alive opt-out
+// ([`crate::common::keep_alive::keep_running_after_exit_with_workdir`])
+// so the operator's "leave services running for post-mortem"
+// intent transparently composes with the compose stack the same
+// way it composes with the kernel daemon, otel-pusher, AVF guests,
+// and `<data_dir>` retention.
+//
+// **Default behaviour.** [`ComposeStackGuard::new`] returns a guard
+// with `teardown_on_drop = false`, i.e. Drop is a no-op. The
+// guard exists primarily to (a) carry the compose project / file
+// metadata into the keep-alive banner so the operator sees the
+// `docker compose -f … ps` / `down -v` lines, and (b) provide a
+// testable Drop site for the
+// `compose_stack_drop_skips_down_when_keep_running` witness.
+// Callers that want active teardown opt in via
+// [`ComposeStackGuard::with_teardown_on_drop`].
+//
+// **Default-off invariant.** Per
+// `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`, the keep-running flag is
+// off-by-default; absent any of the three signals (env / CLI /
+// touch file) the Drop runs the configured teardown action. The
+// witness `compose_stack_drop_runs_teardown_when_no_keep_alive_signal`
+// pins that branch so a future maintainer flipping the default
+// trips the test.
+
+/// Pure decision: should the Drop perform compose teardown given
+/// the configured `teardown_on_drop` toggle and the keep-alive
+/// flag? Factored out so the witness coverage need not touch the
+/// FS to inspect the dispatch decision (the touch-file probe still
+/// reads the FS, but the rest of the decision is pure logic).
+pub fn should_run_compose_teardown(
+    teardown_on_drop: bool,
+    work_dir: Option<&std::path::Path>,
+) -> bool {
+    teardown_on_drop && !keep_running_after_exit_with_workdir(work_dir)
+}
+
+/// RAII guard for a docker-compose-managed service stack. Carries
+/// the `(project, compose_file)` pair so the keep-alive banner
+/// can render the canonical `docker compose -p <project> -f
+/// <compose_file> down -v` teardown command, and gates an
+/// optional Drop-side `docker compose down` behind both the
+/// `teardown_on_drop` toggle AND the keep-alive opt-out.
+///
+/// Constructed via [`ComposeStackGuard::new`] (no teardown by
+/// default) and tuned via the builder methods
+/// [`with_teardown_on_drop`](ComposeStackGuard::with_teardown_on_drop),
+/// [`with_work_dir`](ComposeStackGuard::with_work_dir).
+pub struct ComposeStackGuard {
+    project: String,
+    compose_file: PathBuf,
+    /// When set, the touch-file probe (`<work_dir>/KEEP_RUNNING`)
+    /// composes with the env / CLI signals in the Drop dispatch.
+    /// `None` skips that probe; env / CLI signals still apply.
+    work_dir: Option<PathBuf>,
+    /// When `false` (the default), Drop is a no-op even when the
+    /// keep-alive flag is off. Existing harness callers leave the
+    /// stack up after the test run (operator tears down manually
+    /// via `cargo xtask observability down` or
+    /// `docker compose down -v`).
+    teardown_on_drop: bool,
+    /// Drop-time bookkeeping so a witness test can pin "ran"
+    /// vs "skipped" without depending on the docker subprocess
+    /// being reachable. `Some(_)` means Drop fired the teardown
+    /// branch; `None` means the gate skipped it.
+    last_drop_decision: std::sync::Arc<std::sync::Mutex<Option<bool>>>,
+}
+
+impl ComposeStackGuard {
+    /// Build a guard that surfaces the `(project, compose_file)`
+    /// pair for the keep-alive banner. `teardown_on_drop` defaults
+    /// to `false` — current callers leave the stack up after a
+    /// test run.
+    pub fn new(project: impl Into<String>, compose_file: impl Into<PathBuf>) -> Self {
+        Self {
+            project: project.into(),
+            compose_file: compose_file.into(),
+            work_dir: None,
+            teardown_on_drop: false,
+            last_drop_decision: std::sync::Arc::new(std::sync::Mutex::new(None)),
+        }
+    }
+
+    /// Convenience constructor for the realism-e2e harness:
+    /// pins the canonical `(COMPOSE_PROJECT, extended_compose_file())`
+    /// pair so callers don't repeat themselves.
+    pub fn for_extended_stack() -> Self {
+        Self::new(COMPOSE_PROJECT, extended_compose_file())
+    }
+
+    /// Opt the guard into running `docker compose -p <project>
+    /// -f <compose_file> down -v` on Drop, gated by the keep-alive
+    /// opt-out. Builder; consumes self.
+    pub fn with_teardown_on_drop(mut self, on: bool) -> Self {
+        self.teardown_on_drop = on;
+        self
+    }
+
+    /// Wire the work_dir for the touch-file branch of the
+    /// keep-alive opt-out. Builder; consumes self.
+    pub fn with_work_dir(mut self, work_dir: impl Into<PathBuf>) -> Self {
+        self.work_dir = Some(work_dir.into());
+        self
+    }
+
+    pub fn project(&self) -> &str {
+        &self.project
+    }
+    pub fn compose_file(&self) -> &std::path::Path {
+        &self.compose_file
+    }
+    pub fn teardown_on_drop_enabled(&self) -> bool {
+        self.teardown_on_drop
+    }
+    pub fn work_dir(&self) -> Option<&std::path::Path> {
+        self.work_dir.as_deref()
+    }
+
+    /// Diagnostic for tests: did the most-recent Drop decide to
+    /// run the teardown branch? `None` if the guard has not been
+    /// dropped yet OR if the gate skipped the branch.
+    pub fn last_drop_ran_teardown(&self) -> Option<bool> {
+        *self
+            .last_drop_decision
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Run `docker compose -p <project> -f <compose_file> down -v`
+    /// with the standard bounded timeout. Public so a manual
+    /// teardown helper or a future operator-driven path can invoke
+    /// the same code as the Drop branch.
+    pub fn run_down(&self) -> Result<(), DockerStackError> {
+        let mut cmd = Command::new("docker");
+        cmd.arg("compose")
+            .arg("-p").arg(&self.project)
+            .arg("-f").arg(&self.compose_file)
+            .arg("down").arg("-v");
+        let out = match run_command_output_timeout(
+            &mut cmd, DOCKER_BRINGUP_TIMEOUT, "docker-compose-down",
+        ) {
+            Ok(o) => o,
+            Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
+                return Err(DockerStackError::DockerMissing { reason });
+            }
+            Err(e) => {
+                return Err(DockerStackError::BringupFailed {
+                    reason: format!("docker compose down: {e}"),
+                });
+            }
+        };
+        if !out.status.success() {
+            return Err(DockerStackError::BringupFailed {
+                reason: format!(
+                    "docker compose down exit {:?}: stderr={}",
+                    out.status.code(),
+                    String::from_utf8_lossy(&out.stderr).trim_end(),
+                ),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Drop for ComposeStackGuard {
+    fn drop(&mut self) {
+        // Pure-logic gate — keep-alive opt-out composes with the
+        // explicit `teardown_on_drop` toggle. See
+        // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` and the
+        // `compose_stack_drop_skips_down_when_keep_running`
+        // / `compose_stack_drop_runs_teardown_when_no_keep_alive_signal`
+        // witness pair.
+        let should_run = should_run_compose_teardown(
+            self.teardown_on_drop,
+            self.work_dir.as_deref(),
+        );
+        if !should_run {
+            // Poison-tolerant: Drop may run on the unwind path where a
+            // prior holder of the mutex panicked; the bookkeeping bit
+            // is purely diagnostic and we never want a second panic
+            // from inside a Drop.
+            if let Ok(mut g) = self
+                .last_drop_decision
+                .lock()
+                .or_else(|p| -> Result<_, std::sync::PoisonError<_>> { Ok(p.into_inner()) })
+            {
+                *g = Some(false);
+            }
+            return;
+        }
+        // Best-effort `docker compose down -v`; never panic from
+        // a Drop. A failed teardown is an operator-fix path
+        // (`docker compose -p <project> -f <compose_file> down -v`
+        // by hand), surfaced via the eprintln! line — the test's
+        // verdict has already been computed and we MUST NOT
+        // re-panic during unwind.
+        eprintln!(
+            "[live-e2e harness] ComposeStackGuard::Drop running \
+             `docker compose -p {project} -f {compose} down -v`",
+            project = self.project,
+            compose = self.compose_file.display(),
+        );
+        if let Err(e) = self.run_down() {
+            eprintln!(
+                "[live-e2e harness] ComposeStackGuard::Drop teardown \
+                 failed: {e}; rerun manually via \
+                 `docker compose -p {project} -f {compose} down -v`",
+                project = self.project,
+                compose = self.compose_file.display(),
+            );
+        }
+        if let Ok(mut g) = self
+            .last_drop_decision
+            .lock()
+            .or_else(|p| -> Result<_, std::sync::PoisonError<_>> { Ok(p.into_inner()) })
+        {
+            *g = Some(true);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -483,6 +715,11 @@ mod tests {
             std::env::set_var(key, value);
             Self { key, prior }
         }
+        fn unset(key: &'static str) -> Self {
+            let prior = std::env::var(key).ok();
+            std::env::remove_var(key);
+            Self { key, prior }
+        }
     }
 
     impl Drop for SetEnvGuard {
@@ -492,5 +729,143 @@ mod tests {
                 None => std::env::remove_var(self.key),
             }
         }
+    }
+
+    // ─── ComposeStackGuard witnesses ─────────────────────────────
+    //
+    // Pure-decision coverage for the Drop dispatcher
+    // ([`should_run_compose_teardown`]) plus a behavioural
+    // witness that drives the actual `Drop` impl through both
+    // arms of the keep-alive flag. Mirrors the existing
+    // `harness_drop_skips_teardown_when_keep_running` pattern in
+    // `kernel/tests/common/keep_alive.rs::tests`.
+
+    use std::sync::Mutex;
+
+    /// Serialise every witness that mutates the
+    /// `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT` env var so parallel
+    /// `cargo test` runs in the same binary cannot poison each
+    /// other.
+    static KEEP_ALIVE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    fn keep_alive_env_lock() -> std::sync::MutexGuard<'static, ()> {
+        KEEP_ALIVE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    const KEEP_RUNNING_ENV: &str = "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT";
+    const KEEP_RUNNING_TOUCH: &str = "KEEP_RUNNING";
+
+    /// `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01` (compose-stack arm) —
+    /// the `should_run_compose_teardown` dispatcher MUST return
+    /// `true` when teardown is enabled AND no keep-alive signal
+    /// is active. Pinning the default branch catches a future
+    /// maintainer who flipped the gate to "default to skipping
+    /// teardown".
+    #[test]
+    fn compose_stack_drop_runs_teardown_when_no_keep_alive_signal() {
+        let _g = keep_alive_env_lock();
+        let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // No env, no touch file, teardown_on_drop=true → run.
+        assert!(should_run_compose_teardown(true, Some(tmp.path())));
+        assert!(should_run_compose_teardown(true, None));
+        // teardown_on_drop=false → never run, regardless.
+        assert!(!should_run_compose_teardown(false, Some(tmp.path())));
+        assert!(!should_run_compose_teardown(false, None));
+    }
+
+    /// Witness for the keep-alive composition: with
+    /// `teardown_on_drop=true` AND the env-var signal active OR
+    /// the touch-file signal active OR the CLI-flag signal
+    /// active, the dispatcher MUST skip the teardown.
+    #[test]
+    fn compose_stack_drop_skips_down_when_keep_running() {
+        let _g = keep_alive_env_lock();
+
+        // Env-var arm.
+        let _env = SetEnvGuard::set(KEEP_RUNNING_ENV, "1");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !should_run_compose_teardown(true, Some(tmp.path())),
+            "env-var arm MUST gate teardown off",
+        );
+        assert!(
+            !should_run_compose_teardown(true, None),
+            "env-var arm MUST gate teardown off even without work_dir",
+        );
+        drop(_env);
+
+        // Touch-file arm.
+        let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH), b"")
+            .expect("write touch file");
+        assert!(
+            !should_run_compose_teardown(true, Some(tmp.path())),
+            "touch-file arm MUST gate teardown off",
+        );
+        drop(_env);
+
+        // CLI-flag arm. Hold the bit on for the duration of the
+        // assertion; the guard restores prior state on drop.
+        let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
+        let _cli = crate::common::keep_alive::CliFlagGuard::set(true);
+        let tmp = tempfile::tempdir().expect("tempdir");
+        assert!(
+            !should_run_compose_teardown(true, Some(tmp.path())),
+            "CLI-flag arm MUST gate teardown off",
+        );
+        drop(_cli);
+        drop(_env);
+
+        // Behavioural witness against the actual Drop impl: under
+        // env-var keep-alive, the guard's Drop MUST set its
+        // bookkeeping cell to `Some(false)` (i.e. teardown
+        // skipped). The actual `docker compose down` is never
+        // invoked because the gate fires before the subprocess
+        // spawn.
+        let _env = SetEnvGuard::set(KEEP_RUNNING_ENV, "1");
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let probe = {
+            let g = ComposeStackGuard::for_extended_stack()
+                .with_teardown_on_drop(true)
+                .with_work_dir(tmp.path());
+            g.last_drop_decision.clone()
+        };
+        // After the inner block ends, `g` is dropped. Inspect the
+        // shared cell to confirm the gate fired.
+        assert_eq!(
+            *probe.lock().unwrap(),
+            Some(false),
+            "ComposeStackGuard::Drop under keep-alive MUST record \
+             a skipped-teardown decision",
+        );
+    }
+
+    /// Default constructor MUST NOT enable teardown — the existing
+    /// harness behavior is "leave the stack up after the test".
+    /// Pin so a future refactor flipping the default trips here.
+    #[test]
+    fn compose_stack_guard_default_teardown_disabled() {
+        let g = ComposeStackGuard::new("project", PathBuf::from("/tmp/no-such.yml"));
+        assert!(!g.teardown_on_drop_enabled());
+        assert_eq!(g.project(), "project");
+        assert_eq!(g.compose_file(), std::path::Path::new("/tmp/no-such.yml"));
+        assert!(g.work_dir().is_none());
+        // Drop with teardown disabled MUST be a no-op (no docker
+        // subprocess spawned, decision recorded as Some(false)).
+        let probe = g.last_drop_decision.clone();
+        drop(g);
+        assert_eq!(*probe.lock().unwrap(), Some(false));
+    }
+
+    /// `for_extended_stack` is the realism-e2e convenience
+    /// constructor; it MUST pin the realism project name and the
+    /// extended compose file path. A typo in either would
+    /// mis-target the keep-alive banner's teardown command.
+    #[test]
+    fn compose_stack_guard_for_extended_stack_constants_pinned() {
+        let g = ComposeStackGuard::for_extended_stack();
+        assert_eq!(g.project(), COMPOSE_PROJECT);
+        assert_eq!(g.compose_file(), extended_compose_file());
     }
 }
