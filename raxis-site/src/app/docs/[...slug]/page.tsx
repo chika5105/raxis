@@ -1,11 +1,13 @@
 import type { Metadata } from "next";
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { codeToHtml } from "shiki";
 import { getAllDocs, getDocBySlug, getScenarioTomlFiles } from "@/lib/docs";
 import { renderMarkdown } from "@/lib/markdown";
 import { DocsSidebar } from "@/components/DocsSidebar";
 import { TomlFileViewer } from "@/components/TomlFileViewer";
 import { ResizableSidebar } from "@/components/ResizableSidebar";
+import { MermaidHydrator } from "@/components/MermaidHydrator";
 
 interface Params {
   params: Promise<{ slug: string[] }>;
@@ -28,6 +30,18 @@ export async function generateMetadata({ params }: Params): Promise<Metadata> {
   };
 }
 
+async function highlightToml(content: string): Promise<string> {
+  try {
+    return await codeToHtml(content, {
+      lang: "toml",
+      themes: { light: "github-light", dark: "github-dark" },
+      defaultColor: false,
+    });
+  } catch {
+    return "";
+  }
+}
+
 export default async function DocPage({ params }: Params) {
   const { slug } = await params;
   const found = await getDocBySlug(slug);
@@ -40,6 +54,16 @@ export default async function DocPage({ params }: Params) {
   const prev = idx > 0 ? all[idx - 1] : null;
   const next = idx >= 0 && idx < all.length - 1 ? all[idx + 1] : null;
 
+  // Server-side Shiki highlight for each TOML file
+  const tomlFilesHighlighted = await Promise.all(
+    tomlFiles.map(async (f) => ({
+      ...f,
+      highlightedHtml: await highlightToml(f.content),
+    }))
+  );
+
+  const hasMermaid = html.includes('data-language="mermaid"');
+
   return (
     <div className="w-full px-6 xl:px-12 py-10 lg:py-14 flex gap-8 xl:gap-12">
       <aside className="hidden lg:flex shrink-0">
@@ -51,51 +75,54 @@ export default async function DocPage({ params }: Params) {
       </aside>
 
       <div className="flex-1 min-w-0 flex gap-10">
-      <article className="flex-1 min-w-0">
-        <Breadcrumb meta={meta} />
-        <h1 className="font-display font-semibold tracking-[-0.02em] leading-[1.15] text-[2rem] sm:text-[2.4rem] mt-4">
-          {meta.title}
-        </h1>
-        <div className="mt-3 text-xs text-[var(--soft)] font-mono truncate">
-          {meta.relativePath}
-        </div>
+        <article className="flex-1 min-w-0">
+          <Breadcrumb meta={meta} />
+          <h1 className="font-display font-semibold tracking-[-0.02em] leading-[1.15] text-[2rem] sm:text-[2.4rem] mt-4">
+            {meta.title}
+          </h1>
+          <div className="mt-3 text-xs text-[var(--soft)] font-mono truncate">
+            {meta.relativePath}
+          </div>
 
-        <div
-          className="mt-10 doc-prose"
-          dangerouslySetInnerHTML={{ __html: html }}
-        />
+          <div
+            className="mt-10 doc-prose"
+            dangerouslySetInnerHTML={{ __html: html }}
+          />
 
-        {tomlFiles.length > 0 && (
-          <section className="mt-14">
-            <div className="flex items-center gap-3 mb-5 pb-3 border-b border-[var(--rule)]">
-              <h2 className="text-[1.1rem] font-semibold text-[var(--fg)] tracking-[-0.01em]">
-                Scenario files
-              </h2>
-              <span className="text-xs text-[var(--soft)] tabular-nums">
-                {tomlFiles.length} file{tomlFiles.length !== 1 ? "s" : ""}
-              </span>
-            </div>
-            <div className="space-y-2">
-              {tomlFiles.map((f, i) => (
-                <TomlFileViewer
-                  key={f.filename}
-                  filename={f.filename}
-                  content={f.content}
-                  defaultOpen={i === 0}
-                />
-              ))}
-            </div>
-          </section>
-        )}
+          {hasMermaid && <MermaidHydrator />}
 
-        <PrevNext prev={prev ?? undefined} next={next ?? undefined} />
-      </article>
+          {tomlFilesHighlighted.length > 0 && (
+            <section className="mt-14">
+              <div className="flex items-center gap-3 mb-5 pb-3 border-b border-[var(--rule)]">
+                <h2 className="text-[1.1rem] font-semibold text-[var(--fg)] tracking-[-0.01em]">
+                  Scenario files
+                </h2>
+                <span className="text-xs text-[var(--soft)] tabular-nums">
+                  {tomlFilesHighlighted.length} file{tomlFilesHighlighted.length !== 1 ? "s" : ""}
+                </span>
+              </div>
+              <div className="space-y-2">
+                {tomlFilesHighlighted.map((f, i) => (
+                  <TomlFileViewer
+                    key={f.filename}
+                    filename={f.filename}
+                    content={f.content}
+                    highlightedHtml={f.highlightedHtml || undefined}
+                    defaultOpen={i === 0}
+                  />
+                ))}
+              </div>
+            </section>
+          )}
 
-      <aside className="hidden xl:block shrink-0 w-[200px]">
-        <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto">
-          <OnThisPage headings={meta.headings} />
-        </div>
-      </aside>
+          <PrevNext prev={prev ?? undefined} next={next ?? undefined} />
+        </article>
+
+        <aside className="hidden xl:block shrink-0 w-[200px]">
+          <div className="sticky top-24 max-h-[calc(100dvh-7rem)] overflow-y-auto">
+            <OnThisPage headings={meta.headings} />
+          </div>
+        </aside>
       </div>
     </div>
   );

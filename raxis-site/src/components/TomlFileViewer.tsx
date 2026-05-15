@@ -5,6 +5,8 @@ import { useState } from "react";
 interface Props {
   filename: string;
   content: string;
+  /** Pre-rendered Shiki HTML — passed from the server component. */
+  highlightedHtml?: string;
   defaultOpen?: boolean;
 }
 
@@ -48,7 +50,7 @@ function ChevronIcon({ open }: { open: boolean }) {
   );
 }
 
-export function TomlFileViewer({ filename, content, defaultOpen = false }: Props) {
+export function TomlFileViewer({ filename, content, highlightedHtml, defaultOpen = false }: Props) {
   const [open, setOpen] = useState(defaultOpen);
 
   return (
@@ -75,16 +77,23 @@ export function TomlFileViewer({ filename, content, defaultOpen = false }: Props
         style={{ gridTemplateRows: open ? "1fr" : "0fr" }}
       >
         <div className="overflow-hidden">
-          <pre
-            className="overflow-x-auto m-0 p-4 text-[0.8125rem] leading-relaxed border-t border-[var(--rule)]"
-            style={{
-              background: "var(--code-bg)",
-              fontFamily: "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
-              color: "var(--fg)",
-            }}
-          >
-            <code>{content}</code>
-          </pre>
+          {highlightedHtml ? (
+            <div
+              className="toml-highlighted overflow-x-auto border-t border-[var(--rule)]"
+              dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+            />
+          ) : (
+            <pre
+              className="overflow-x-auto m-0 p-4 text-[0.8125rem] leading-relaxed border-t border-[var(--rule)]"
+              style={{
+                background: "var(--code-bg)",
+                fontFamily: "var(--font-mono), ui-monospace, SFMono-Regular, Menlo, monospace",
+                color: "var(--fg)",
+              }}
+            >
+              <code>{content}</code>
+            </pre>
+          )}
         </div>
       </div>
     </div>

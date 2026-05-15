@@ -369,3 +369,45 @@ section[id] {
 .doc-prose h4:hover .heading-anchor {
   opacity: 1;
 }
+
+/* ──────────────────────────────────────────────────────────
+ *  Shiki dual-theme — consume --shiki-light / --shiki-dark
+ *  CSS variables on spans for code blocks using multiple themes.
+ *  Applies to doc-prose code blocks AND the standalone TOML viewer.
+ * ────────────────────────────────────────────────────────── */
+
+/* Light mode: use --shiki-light value */
+.doc-prose [style*="--shiki-light"],
+.toml-highlighted [style*="--shiki-light"] {
+  color: var(--shiki-light) !important;
+}
+
+/* Dark mode: switch to --shiki-dark value */
+.dark .doc-prose [style*="--shiki-light"],
+.dark .toml-highlighted [style*="--shiki-light"] {
+  color: var(--shiki-dark) !important;
+}
+
+/* TOML viewer: style the Sh  line-height: 1.65;
+  overflow-x: auto;
+}
+
+/* ──────────────────────────────────────────────────────────
+ *  Mermaid rendered diagrams
+ * ────────────────────────────────────────────────────────── */
+
+.mermaid-diagram {
+  margin: 1.5em 0;
+  padding: 1.5em;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: var(--radius-md);
+  overflow-x: auto;
+  text-align: center;
+}
+
+.mermaid-diagram svg {
+  max-width: 100%;
+  height: auto;
+  font-family: var(--font-sans), sans-serif;
+}
