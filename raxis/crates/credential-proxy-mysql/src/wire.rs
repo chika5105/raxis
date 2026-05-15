@@ -80,11 +80,11 @@ pub mod cmd {
 /// * bit 12 — `CLIENT_IGNORE_SIGPIPE`
 /// * bit 13 — `CLIENT_TRANSACTIONS`
 /// * bit 15 — `CLIENT_SECURE_CONNECTION` (REQUIRED so client
-///            sends the 20-byte SHA-1 scramble layout)
+///   sends the 20-byte SHA-1 scramble layout)
 /// * bit 17 — `CLIENT_MULTI_RESULTS`
 /// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
 /// * bit 19 — `CLIENT_PLUGIN_AUTH` (REQUIRED for the plugin name
-///            field in the response)
+///   field in the response)
 ///
 /// We deliberately do NOT advertise:
 ///
@@ -96,8 +96,7 @@ pub mod cmd {
 ///
 /// Mirrors `upstream::CLIENT_CAPS`. See the upstream comment for
 /// the full V2.1 regression history.
-pub const CAPABILITIES: u32 = 0
-    | (1 <<  0)  // CLIENT_LONG_PASSWORD
+pub const CAPABILITIES: u32 = (1 <<  0)  // CLIENT_LONG_PASSWORD
     | (1 <<  1)  // CLIENT_FOUND_ROWS
     | (1 <<  2)  // CLIENT_LONG_FLAG
     | (1 <<  3)  // CLIENT_CONNECT_WITH_DB

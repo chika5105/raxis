@@ -772,7 +772,7 @@ impl Redactor {
 
     /// True iff the key is on the explicit denylist.
     pub fn is_deny_listed(&self, key: &str) -> bool {
-        DENY_LIST.iter().any(|k| *k == key)
+        DENY_LIST.contains(&key)
     }
 }
 
@@ -823,12 +823,12 @@ fn sanitise_attr_map(map: &mut AttrMap) -> Result<(), RedactError> {
         {
             // Defense-in-depth: never let a denylist key through even
             // if it (somehow) made it onto the allow-list.
-            if DENY_LIST.iter().any(|k| *k == key.as_str()) {
+            if DENY_LIST.contains(&key.as_str()) {
                 return Err(RedactError::DenyListed { key });
             }
             let val = map.get_mut(&key).expect("key was present in iteration");
             sanitise_value(&key, val, schema)?;
-        } else if DENY_LIST.iter().any(|k| *k == key.as_str()) {
+        } else if DENY_LIST.contains(&key.as_str()) {
             return Err(RedactError::DenyListed { key });
         } else {
             return Err(RedactError::UnknownAttribute { key });

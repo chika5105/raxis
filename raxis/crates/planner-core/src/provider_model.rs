@@ -329,9 +329,13 @@ pub fn emit_model_deprecation_warning(model: &str, replacement: &str) {
 mod tests {
     use super::*;
 
+    // Compile-time guard: deleting every entry from `KNOWN_MODELS`
+    // would otherwise silently pass `each_entry_unique` (vacuously
+    // true) and leave the registry empty.
+    const _: () = assert!(!KNOWN_MODELS.is_empty());
+
     #[test]
-    fn registry_is_non_empty_and_each_entry_unique() {
-        assert!(!KNOWN_MODELS.is_empty());
+    fn each_entry_unique() {
         for (i, m) in KNOWN_MODELS.iter().enumerate() {
             for n in &KNOWN_MODELS[(i + 1)..] {
                 assert_ne!(m.name, n.name, "duplicate registry row for {:?}", m.name);

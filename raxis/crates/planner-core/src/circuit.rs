@@ -82,16 +82,40 @@ use crate::retry::is_retryable;
 /// `provider-failure-handling.md §6.4`).
 #[derive(Debug, Clone)]
 pub struct CircuitRow {
+    /// Provider id (`anthropic`, `openai`, …) the row applies to.
     pub provider: String,
+    /// Model key under that provider (e.g. `claude-3-5-sonnet`).
     pub model: String,
+    /// Current circuit state (`Closed | Open | HalfOpen`).
     pub state: CircuitState,
+    /// Monotonic count of consecutive `record_failure` calls since
+    /// the last `record_success` (or row insert). Resets to `0` on
+    /// success.
     pub consecutive_failures: u64,
+    /// Stringified `failure_kind` of the most recent failure (e.g.
+    /// `transport`, `timeout`, `upstream:5xx`). `None` until the
+    /// first failure.
     pub last_failure_kind: Option<String>,
+    /// HTTP status code of the most recent failure when known
+    /// (only populated for `Upstream` failures). `None` for
+    /// transport/timeout failures.
     pub last_failure_http_code: Option<u16>,
+    /// Unix-millis timestamp at which the row last transitioned
+    /// from `Closed`/`HalfOpen` to `Open`. `None` while the row
+    /// is `Closed` and has never opened.
     pub opened_at_ms: Option<u64>,
+    /// Unix-millis timestamp at which the current `Open` window
+    /// expires (i.e. the next probe is admissible). `None` when
+    /// not in `Open`.
     pub open_expires_at_ms: Option<u64>,
+    /// `true` while a `HalfOpen` probe is in flight; blocks any
+    /// concurrent probe from racing.
     pub half_open_inflight: bool,
+    /// Unix-millis timestamp of the most recent `record_success`.
+    /// `None` until the first success.
     pub last_success_at_ms: Option<u64>,
+    /// Unix-millis timestamp of the most recent state transition,
+    /// regardless of direction. Used by observability snapshots.
     pub last_state_change_at_ms: u64,
 }
 
@@ -369,6 +393,12 @@ impl InMemoryEntry {
 ///   persistence is not required.
 pub struct InMemoryCircuitStore {
     entries: Mutex<HashMap<(String, String), Arc<InMemoryEntry>>>,
+}
+
+impl Default for InMemoryCircuitStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl InMemoryCircuitStore {
@@ -653,8 +683,7 @@ impl ModelClient for CircuitBreakerModelClient {
 
         match result {
             Ok(resp) => {
-                let row = self
-                    .store
+                self.store
                     .record_success(&self.provider, &self.model_key)
                     .await;
                 if row_before.state != CircuitState::Closed {

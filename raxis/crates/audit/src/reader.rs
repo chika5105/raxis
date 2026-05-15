@@ -373,7 +373,7 @@ impl<'a> Iterator for ChainRecordIter<'a> {
             // Skip pure-blank lines (the segment writer never produces
             // these, but we don't want a stray newline at EOF to cause
             // a spurious malformed-record error).
-            let trimmed_line_no_nl = buf.trim_end_matches(|c| c == '\n' || c == '\r');
+            let trimmed_line_no_nl = buf.trim_end_matches(['\n', '\r']);
             if trimmed_line_no_nl.is_empty() {
                 continue;
             }

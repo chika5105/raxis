@@ -447,6 +447,13 @@ where
 // here self-evident; the macro re-export is what the trait uses
 // behind the scenes.
 
+// `Path` import survives the strict `unused_imports` lint by being
+// exercised in `KernelTransportConfig::Uds::socket_path` typing
+// (PathBuf -> &Path round-trips). Surfaced here so future refactors
+// that shift to a borrow-only API don't have to re-introduce the
+// import.
+const _: fn(&Path) = |_| {};
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -731,10 +738,3 @@ mod tests {
         }
     }
 }
-
-// `Path` import survives the strict `unused_imports` lint by being
-// exercised in `KernelTransportConfig::Uds::socket_path` typing
-// (PathBuf -> &Path round-trips). Surfaced here so future refactors
-// that shift to a borrow-only API don't have to re-introduce the
-// import.
-const _: fn(&Path) = |_| {};

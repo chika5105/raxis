@@ -164,7 +164,7 @@ fn obs_config(endpoint: &str) -> ObservabilityConfig {
         enabled: true,
         ring: ObservabilityRingConfig {
             dir: String::new(),
-            segment_max_bytes: 1 * 1024 * 1024, // 1 MiB
+            segment_max_bytes: 1024 * 1024, // 1 MiB
             max_total_bytes: 16 * 1024 * 1024,
             max_queue_depth: 8192,
         },

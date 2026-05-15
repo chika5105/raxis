@@ -69,18 +69,16 @@ pub enum GenesisWriteError {
 /// no CSPRNG — both the timestamp and the nonce are passed in so tests
 /// can pin deterministic byte sequences):
 ///
-///   * `audit_dir`            — `<data_dir>/audit/` (must already exist).
-///   * `authority_pubkey`     — 32-byte Ed25519 public key bytes; the
-///                               SHA-256[:16] fingerprint becomes
-///                               `authority_pubkey_fingerprint` in the
-///                               record.
-///   * `nonce_bytes`          — 64 CSPRNG bytes. The kernel and the CLI
-///                               both mint these via
-///                               `raxis_crypto::token::try_random_array`
-///                               so a partial RNG failure aborts genesis
-///                               *before* this writer is invoked.
-///   * `emitted_at_unix_secs` — wall-clock timestamp recorded as
-///                               `emitted_at`. Caller controls the clock.
+/// * `audit_dir` — `<data_dir>/audit/` (must already exist).
+/// * `authority_pubkey` — 32-byte Ed25519 public key bytes; the
+///   SHA-256[:16] fingerprint becomes `authority_pubkey_fingerprint`
+///   in the record.
+/// * `nonce_bytes` — 64 CSPRNG bytes. The kernel and the CLI both
+///   mint these via `raxis_crypto::token::try_random_array` so a
+///   partial RNG failure aborts genesis *before* this writer is
+///   invoked.
+/// * `emitted_at_unix_secs` — wall-clock timestamp recorded as
+///   `emitted_at`. Caller controls the clock.
 ///
 /// File-open contract: `create+append`, NOT `create_new`. A future
 /// genesis variant that emits additional pre-IPC records (e.g. an

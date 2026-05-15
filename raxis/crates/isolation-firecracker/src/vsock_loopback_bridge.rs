@@ -95,8 +95,6 @@
 //! that bumps either side without the other surfaces as a test
 //! failure.
 
-#![cfg(unix)]
-
 use std::net::{Ipv4Addr, SocketAddrV4};
 use std::path::{Path, PathBuf};
 
@@ -220,10 +218,12 @@ impl Drop for LoopbackListenerHandle {
 ///
 /// **Fail-closed semantics.** Every error returns with no fd or
 /// path leakage:
-///   * `NoTokioRuntime` — nothing was created; trivially clean.
-///   * `Bind` — bind failed; nothing was bound.
-///   * `TokioHandover` — the std UDS listener was bound; we unlink
-///     the path before returning.
+///
+/// * `NoTokioRuntime` — nothing was created; trivially clean.
+/// * `Bind` — bind failed; nothing was bound.
+/// * `TokioHandover` — the std UDS listener was bound; we unlink
+///   the path before returning.
+///
 /// The caller is responsible for translating the typed error to
 /// `IsolationError` — see
 /// `FirecrackerSession::register_loopback_listener`.

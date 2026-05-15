@@ -7034,10 +7034,10 @@ mod tests {
         let result = finalize_integration_merge_completion(disk.store(), id, id)
             .expect("cascade should not return raw SQLite error on a clean fixture");
 
-        let (from_state, to_state) =
+        let outcome =
             result.expect("cascade should fire on Executing initiative + Running synthetic task");
-        assert_eq!(from_state, "Executing");
-        assert_eq!(to_state, "Completed");
+        assert_eq!(outcome.initiative_from, "Executing");
+        assert_eq!(outcome.initiative_to, "Completed");
 
         assert_eq!(
             read_initiative_state(&disk, id).as_deref(),

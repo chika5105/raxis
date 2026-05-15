@@ -29,7 +29,7 @@ pub enum StartupKind {
 /// Read the first message of a Postgres protocol session.
 pub async fn read_startup<R: tokio::io::AsyncRead + Unpin>(r: &mut R) -> io::Result<StartupKind> {
     let len = r.read_i32().await?;
-    if len < 8 || len > 1_000_000 {
+    if !(8..=1_000_000).contains(&len) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
             format!("startup length out of range: {len}"),
@@ -779,9 +779,7 @@ mod tests {
         assert_eq!(m2.kind, b'P');
         assert_eq!(m2.name, "portal_y");
 
-        let mut bad = Vec::new();
-        bad.push(b'X');
-        bad.push(0);
+        let bad = vec![b'X', 0];
         assert!(parse_describe_message(&bad).is_err());
     }
 

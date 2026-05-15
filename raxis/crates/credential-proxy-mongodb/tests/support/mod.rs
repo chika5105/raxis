@@ -55,6 +55,12 @@ pub enum FakeBsonValue {
     String(String),
 }
 
+/// Boxed `(command_name) -> Option<FakeResponse>` callback shared
+/// between the listener task and the per-connection handlers.
+/// Aliased to keep the struct/function signatures readable
+/// (`clippy::type_complexity`).
+pub type ResponderFn = Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>;
+
 /// Fake backend handle.
 pub struct FakeBackend {
     addr: std::net::SocketAddr,
@@ -62,22 +68,15 @@ pub struct FakeBackend {
 
 impl FakeBackend {
     /// Bind a fake-mongo listener on a random localhost port.
-    pub async fn start(
-        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-    ) -> std::io::Result<Self> {
+    pub async fn start(responses: ResponderFn) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let r = Arc::clone(&responses);
-                        tokio::spawn(async move {
-                            let _ = serve_one(stream, r).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let r = Arc::clone(&responses);
+                tokio::spawn(async move {
+                    let _ = serve_one(stream, r).await;
+                });
             }
         });
         Ok(Self { addr })
@@ -89,10 +88,7 @@ impl FakeBackend {
     }
 }
 
-async fn serve_one(
-    mut s: TcpStream,
-    responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-) -> std::io::Result<()> {
+async fn serve_one(mut s: TcpStream, responses: ResponderFn) -> std::io::Result<()> {
     loop {
         let mut header = [0u8; 16];
         if s.read_exact(&mut header).await.is_err() {
@@ -101,7 +97,7 @@ async fn serve_one(
         let total = i32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let request_id = i32::from_le_bytes([header[4], header[5], header[6], header[7]]);
         let op_code = i32::from_le_bytes([header[12], header[13], header[14], header[15]]);
-        if total < 16 || total > 64 * 1024 * 1024 {
+        if !(16..=64 * 1024 * 1024).contains(&total) {
             return Ok(());
         }
         let body_len = total - 16;
@@ -297,23 +293,18 @@ impl FakeScramBackend {
     pub async fn start(
         username: String,
         password: Vec<u8>,
-        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+        responses: ResponderFn,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let r = Arc::clone(&responses);
-                        let user = username.clone();
-                        let pw = password.clone();
-                        tokio::spawn(async move {
-                            let _ = serve_scram(stream, user, pw, r).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let r = Arc::clone(&responses);
+                let user = username.clone();
+                let pw = password.clone();
+                tokio::spawn(async move {
+                    let _ = serve_scram(stream, user, pw, r).await;
+                });
             }
         });
         Ok(Self { addr })
@@ -329,7 +320,7 @@ async fn serve_scram(
     mut s: TcpStream,
     username: String,
     password: Vec<u8>,
-    responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+    responses: ResponderFn,
 ) -> std::io::Result<()> {
     use base64::Engine as _;
     // ---- saslStart ----
@@ -425,7 +416,7 @@ async fn serve_scram(
         let total = i32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
         let request_id = i32::from_le_bytes([header[4], header[5], header[6], header[7]]);
         let op_code = i32::from_le_bytes([header[12], header[13], header[14], header[15]]);
-        if total < 16 || total > 64 * 1024 * 1024 || op_code != 2013 {
+        if !(16..=64 * 1024 * 1024).contains(&total) || op_code != 2013 {
             return Ok(());
         }
         let body_len = total - 16;

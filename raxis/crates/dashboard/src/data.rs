@@ -494,15 +494,14 @@ pub struct EscalationView {
 /// The verdict comes from the kernel's own
 /// `raxis_audit_tools::verify_chain_from` walker; the dashboard
 /// surfaces it but MUST NOT recompute it. `status` is one of:
-///   * `"ok"`       — every record's `prev_sha256` chains back
-///                    to genesis and `seq` is monotone.
-///   * `"broken"`   — at least one link mismatch or seq gap was
-///                    observed; `last_error` carries the short
-///                    operator-safe reason.
-///   * `"unknown"`  — verification has not run yet (the kernel
-///                    just booted, or the audit directory is
-///                    absent). Treated as a soft warn in the FE
-///                    rather than a hard red.
+///   * `"ok"` — every record's `prev_sha256` chains back to
+///     genesis and `seq` is monotone.
+///   * `"broken"` — at least one link mismatch or seq gap was
+///     observed; `last_error` carries the short operator-safe
+///     reason.
+///   * `"unknown"` — verification has not run yet (the kernel
+///     just booted, or the audit directory is absent). Treated
+///     as a soft warn in the FE rather than a hard red.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChainStatusView {
     /// Verdict discriminant — `"ok"` / `"broken"` / `"unknown"`.
@@ -2530,7 +2529,7 @@ pub mod recent_activity_filter {
     /// Returns `true` iff `event_kind` should appear in the
     /// curated Overview recent-activity feed.
     pub fn is_important(event_kind: &str) -> bool {
-        IMPORTANT_EVENT_KINDS.iter().any(|k| *k == event_kind)
+        IMPORTANT_EVENT_KINDS.contains(&event_kind)
     }
 
     #[cfg(test)]

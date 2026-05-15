@@ -129,7 +129,7 @@ pub fn header_by_sha256(
             decode_header_row,
         )
         .optional()?;
-    Ok(row.transpose()?)
+    row.transpose()
 }
 
 fn decode_header_row(

@@ -460,8 +460,12 @@ mod tests {
             tx.commit().unwrap();
         }
 
+        // Test-side type alias mirrors the test query's column
+        // tuple — clearer than spelling the full row tuple at the
+        // binding site (`clippy::type_complexity`).
+        type PlanBundleRow = (Vec<u8>, i64, i64, i64, Option<i64>, Option<Vec<u8>>);
         let conn = store.lock_sync();
-        let row: (Vec<u8>, i64, i64, i64, Option<i64>, Option<Vec<u8>>) = conn
+        let row: PlanBundleRow = conn
             .query_row(
                 &format!(
                     "SELECT bundle_sha256, schema_version, artifact_count, \

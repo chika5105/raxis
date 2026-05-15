@@ -52,10 +52,10 @@ pub enum CryptoError {
 
 /// Verify an Ed25519 signature.
 ///
-/// - `pubkey_bytes`     — 32-byte compressed point (standard Ed25519).
-/// - `message`          — the message bytes that were signed (not a digest;
-///                        ed25519-dalek hashes internally with SHA-512).
-/// - `signature_bytes`  — 64-byte signature (R || s).
+/// - `pubkey_bytes` — 32-byte compressed point (standard Ed25519).
+/// - `message` — the message bytes that were signed (not a digest;
+///   ed25519-dalek hashes internally with SHA-512).
+/// - `signature_bytes` — 64-byte signature (R || s).
 ///
 /// Returns `Ok(())` on a valid signature, `Err(CryptoError::SignatureInvalid)`
 /// on a bad signature, or `Err(CryptoError::MalformedPublicKey/Signature)` on

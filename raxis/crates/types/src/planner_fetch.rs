@@ -155,7 +155,7 @@ mod tests {
     use super::*;
 
     /// Wire round-trip pin: bincode-encode and decode the request
-    /// + response shapes so any future field reorder surfaces
+    /// and response shapes so any future field reorder surfaces
     /// before it can be deployed mid-cluster.
     #[test]
     fn planner_fetch_request_round_trips_through_serde_json() {

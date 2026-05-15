@@ -278,14 +278,14 @@ pub struct QualifiedName {
     pub table: String,
 }
 
-impl QualifiedName {
+impl std::fmt::Display for QualifiedName {
     /// Canonical `<schema>.<table>` or bare `<table>` form. Used as
     /// the audit string and as the comparison key against
     /// allowed_tables / forbidden_tables.
-    pub fn to_string(&self) -> String {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.schema {
-            Some(s) => format!("{}.{}", s.to_ascii_lowercase(), self.table),
-            None => self.table.clone(),
+            Some(s) => write!(f, "{}.{}", s.to_ascii_lowercase(), self.table),
+            None => f.write_str(&self.table),
         }
     }
 }
@@ -581,7 +581,7 @@ impl<'a> Walker<'a> {
                 .rest()
                 .first()
                 .copied()
-                .map_or(false, |b| b.is_ascii_alphabetic() || b == b'_' || b == b'"'))
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'"'))
         {
             let _ = self.read_identifier();
         }

@@ -2010,25 +2010,23 @@ mod tests {
     }
 
     /// The orchestrator NNSP MUST tell the model to call
-    /// `retry_subtask` (NOT `integration_merge`) whenever an
-    /// Executor row reads `aggregate=AtLeastOneRejected`. Without
-    /// this rule the model defaults to `integration_merge` once
-    /// every executor row reads `complete` regardless of verdict,
-    /// and reviewer-substantive disagreement loops never close.
-    /// Backed by `agent-disagreement.md` §3 (`max_review_rounds`)
-    /// + `agent-disagreement.md` §3.6 + the
-    /// `ReviewerSubstantiveDisagreementWitness` chain expectation
-    /// in `kernel/tests/extended_e2e_support/
-    /// reviewer_substantive_disagreement.rs`. Closes
-    /// `INV-PLANNER-ORCH-RETRY-ON-REJECT-01` and
-    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the trigger
-    /// MUST pivot on the kernel's terminal aggregator verdict,
-    /// not on per-Reviewer rows that flip `approved=false` as
-    /// soon as the FIRST sibling votes Reject — that race
-    /// produced the `iter42` respawn loop where the orchestrator
-    /// fired `retry_subtask` before the aggregator had bumped
-    /// `review_reject_count`, and the kernel correctly rejected
-    /// every retry per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
+    /// `retry_subtask` (NOT `integration_merge`) whenever an Executor
+    /// row reads `aggregate=AtLeastOneRejected`. Without this rule the
+    /// model defaults to `integration_merge` once every executor row
+    /// reads `complete` regardless of verdict, and reviewer-substantive
+    /// disagreement loops never close. Backed by `agent-disagreement.md`
+    /// §3 (`max_review_rounds`) and `agent-disagreement.md` §3.6 and
+    /// the `ReviewerSubstantiveDisagreementWitness` chain expectation
+    /// in `kernel/tests/extended_e2e_support/reviewer_substantive_disagreement.rs`.
+    /// Closes `INV-PLANNER-ORCH-RETRY-ON-REJECT-01` and
+    /// `INV-KSB-AGGREGATE-VERDICT-PROJECTION-01` (the trigger MUST
+    /// pivot on the kernel's terminal aggregator verdict, not on
+    /// per-Reviewer rows that flip `approved=false` as soon as the
+    /// FIRST sibling votes Reject — that race produced the `iter42`
+    /// respawn loop where the orchestrator fired `retry_subtask`
+    /// before the aggregator had bumped `review_reject_count`, and the
+    /// kernel correctly rejected every retry per
+    /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`).
     #[test]
     fn render_system_prompt_for_orchestrator_includes_review_rejection_retry_rule() {
         let args = BootArgs {

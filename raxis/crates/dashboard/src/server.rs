@@ -69,23 +69,6 @@ use crate::config::DashboardConfig;
 use crate::data::DashboardData;
 use crate::error::ApiError;
 
-#[cfg(test)]
-pub(crate) const fn body_limit_auth_for_tests() -> usize {
-    BODY_LIMIT_AUTH
-}
-#[cfg(test)]
-pub(crate) const fn body_limit_policy_for_tests() -> usize {
-    BODY_LIMIT_POLICY
-}
-#[cfg(test)]
-pub(crate) const fn handler_timeout_for_tests() -> Duration {
-    HANDLER_TIMEOUT
-}
-#[cfg(test)]
-pub(crate) const fn max_inflight_for_tests() -> usize {
-    MAX_INFLIGHT_REQUESTS
-}
-
 /// Shared application state. Cheap `Arc` clone per request.
 pub type AppState<D> = Arc<AppStateInner<D>>;
 
@@ -647,7 +630,7 @@ pub struct AuthorizedOperator {
 impl AuthorizedOperator {
     /// `true` iff the operator currently holds the supplied role.
     pub fn has_role(&self, role: DashboardRole) -> bool {
-        self.roles.iter().any(|r| *r == role)
+        self.roles.contains(&role)
     }
 }
 

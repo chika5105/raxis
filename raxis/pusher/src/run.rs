@@ -340,25 +340,22 @@ impl Pusher {
     fn advance_segments_if_rotated(&self, state: &mut PusherState, events: &mut Vec<PusherEvent>) {
         for stream in [Stream::Spans, Stream::Metrics] {
             let r = pick_reader(state, stream);
-            match r.is_rotated() {
-                Ok(true) => {
-                    if matches!(r.next_frame(), Ok(None)) {
-                        if let Ok(true) = r.advance_segment() {
-                            let new_seg = r.current_segment().to_owned();
-                            let entry = CursorEntry {
-                                segment: new_seg.clone(),
-                                offset: 0,
-                            };
-                            *state.cursor.entry_mut(stream) = entry;
-                            let _ = state.cursor.persist(&self.cfg.cursor_path);
-                            events.push(PusherEvent::SegmentAdvanced {
-                                stream,
-                                new_segment: new_seg,
-                            });
-                        }
+            if let Ok(true) = r.is_rotated() {
+                if matches!(r.next_frame(), Ok(None)) {
+                    if let Ok(true) = r.advance_segment() {
+                        let new_seg = r.current_segment().to_owned();
+                        let entry = CursorEntry {
+                            segment: new_seg.clone(),
+                            offset: 0,
+                        };
+                        *state.cursor.entry_mut(stream) = entry;
+                        let _ = state.cursor.persist(&self.cfg.cursor_path);
+                        events.push(PusherEvent::SegmentAdvanced {
+                            stream,
+                            new_segment: new_seg,
+                        });
                     }
                 }
-                _ => {}
             }
         }
     }

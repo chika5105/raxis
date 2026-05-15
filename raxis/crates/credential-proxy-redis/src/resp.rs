@@ -44,10 +44,7 @@ pub fn frame_verb_uppercased(frame: &[u8]) -> Option<String> {
         // Bulk body length is parseable but we just take whatever
         // is between after_bulk_header and the next CRLF (the
         // actual body bytes; assumes well-formed RESP).
-        let body_end = match find_crlf(frame, after_bulk_header) {
-            Some(end) => end,
-            None => return None,
-        };
+        let body_end = find_crlf(frame, after_bulk_header)?;
         let body = &frame[after_bulk_header..body_end];
         return Some(String::from_utf8_lossy(body).to_ascii_uppercase());
     }

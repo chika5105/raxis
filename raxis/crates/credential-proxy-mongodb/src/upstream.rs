@@ -222,9 +222,10 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 {
-        1
-    } else if lead < 0xc0 {
+    // ASCII (`< 0x80`) and stray continuation bytes
+    // (`0x80..=0xbf`) collapse to a 1-byte advance — see the
+    // sibling MSSQL adapter for the rationale.
+    if lead < 0xc0 {
         1
     } else if lead < 0xe0 {
         2
@@ -301,7 +302,7 @@ impl ParsedUpstreamUrl {
             },
         };
         let host_end = host_and_rest
-            .find(|c: char| c == '/' || c == '?')
+            .find(['/', '?'])
             .unwrap_or(host_and_rest.len());
         let authority = &host_and_rest[..host_end];
         // Reject host lists like `host1,host2` — the proxy talks to a
@@ -551,7 +552,7 @@ impl UpstreamSession {
             .map_err(|e| UpstreamError::RelayFailed(format!("read upstream header: {e}")))?;
         let parsed = MsgHeader::parse(header);
         let total = parsed.message_length as usize;
-        if total < HEADER_LEN || total > MAX_MESSAGE_LEN {
+        if !(HEADER_LEN..=MAX_MESSAGE_LEN).contains(&total) {
             return Err(UpstreamError::PayloadTooLarge {
                 bytes: total,
                 max: MAX_MESSAGE_LEN,
@@ -1282,7 +1283,7 @@ async fn exchange_op_msg(stream: &mut TcpStream, bson_doc: &[u8]) -> std::io::Re
     let mut header = [0u8; HEADER_LEN_GUARD];
     stream.read_exact(&mut header).await?;
     let total = i32::from_le_bytes([header[0], header[1], header[2], header[3]]) as usize;
-    if total < HEADER_LEN_GUARD || total > MAX_MESSAGE_LEN {
+    if !(HEADER_LEN_GUARD..=MAX_MESSAGE_LEN).contains(&total) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             "upstream SASL reply has invalid message_length",

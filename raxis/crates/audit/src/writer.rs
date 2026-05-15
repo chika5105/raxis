@@ -326,11 +326,9 @@ pub fn last_chain_state(path: &Path) -> Result<Option<ChainResumeInfo>, AuditWri
     let reader = BufReader::new(file);
     let mut last_seq: Option<u64> = None;
     let mut last_line_sha: Option<String> = None;
-    let mut line_number: u64 = 0;
 
-    for line in reader.lines() {
+    for (line_number, line) in (1_u64..).zip(reader.lines()) {
         let line = line?;
-        line_number += 1;
 
         if line.trim().is_empty() {
             // Tolerated: trailing blank line at EOF on some text editors.

@@ -546,25 +546,20 @@ pub struct DagRow {
     /// `raxis_kernel::initiatives::review_aggregation::
     /// AggregateReviewVerdict::wire_str`):
     ///
-    /// * `"Pending"`            — at least one sibling Reviewer
-    ///                            still owes a verdict.
-    /// * `"AllPassed"`          — every Reviewer Approved.
-    /// * `"AtLeastOneRejected"` — every Reviewer voted; at
-    ///                            least one Rejected (the kernel
-    ///                            already bumped
-    ///                            `subtask_activations.review_reject_count`
-    ///                            and a `retry_subtask` from this
-    ///                            executor's Completed activation
-    ///                            is now admission-eligible).
-    /// * `"NoSuccessors"`       — plan declares zero Reviewers
-    ///                            for this Executor (malformed in
-    ///                            V2; surface so the operator
-    ///                            sees the misconfiguration).
-    /// * `""`                   — non-Executor row (Reviewer /
-    ///                            Orchestrator) OR an Executor
-    ///                            row whose aggregate is not yet
-    ///                            relevant (kept empty to keep
-    ///                            the wire compact).
+    /// * `"Pending"` — at least one sibling Reviewer still owes a
+    ///   verdict.
+    /// * `"AllPassed"` — every Reviewer Approved.
+    /// * `"AtLeastOneRejected"` — every Reviewer voted; at least one
+    ///   Rejected (the kernel already bumped
+    ///   `subtask_activations.review_reject_count` and a
+    ///   `retry_subtask` from this executor's Completed activation is
+    ///   now admission-eligible).
+    /// * `"NoSuccessors"` — plan declares zero Reviewers for this
+    ///   Executor (malformed in V2; surface so the operator sees the
+    ///   misconfiguration).
+    /// * `""` — non-Executor row (Reviewer / Orchestrator) OR an
+    ///   Executor row whose aggregate is not yet relevant (kept empty
+    ///   to keep the wire compact).
     ///
     /// Orchestrator NNSP rule 3a (see
     /// `crates/planner-core/src/driver.rs::render_system_prompt_for_role`)

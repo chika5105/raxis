@@ -1090,7 +1090,7 @@ mod tests {
     /// EHLO continuation line with an independent `write_all`). The
     /// helper mirrors what a real SMTP client does and what
     /// `read_smtp_multi_status` does in this same file.
-    async fn drain_reply<'a>(reader: &mut tokio::io::BufReader<&'a mut TcpStream>) -> String {
+    async fn drain_reply(reader: &mut tokio::io::BufReader<&mut TcpStream>) -> String {
         use tokio::io::AsyncBufReadExt;
         let mut out = String::new();
         loop {

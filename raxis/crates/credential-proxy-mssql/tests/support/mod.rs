@@ -63,17 +63,12 @@ impl FakeBackend {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let r = Arc::clone(&responses);
-                        let e = expected.clone();
-                        tokio::spawn(async move {
-                            let _ = serve_one(stream, r, e).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let r = Arc::clone(&responses);
+                let e = expected.clone();
+                tokio::spawn(async move {
+                    let _ = serve_one(stream, r, e).await;
+                });
             }
         });
         Ok(Self { addr })
@@ -235,7 +230,7 @@ fn build_error_done_body(number: i32, message: &str) -> Vec<u8> {
     let msg_bytes: Vec<u8> = msg_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
     let server: Vec<u16> = "fake-mssql".encode_utf16().collect();
     let server_bytes: Vec<u8> = server.iter().flat_map(|c| c.to_le_bytes()).collect();
-    let inner_len = 4 + 1 + 1 + 2 + msg_bytes.len() + 1 + server_bytes.len() + 1 + 0 + 4;
+    let inner_len = 4 + 1 + 1 + 2 + msg_bytes.len() + 1 + server_bytes.len() + 1 + 4;
     body.push(TOKEN_ERROR);
     body.extend_from_slice(&(inner_len as u16).to_le_bytes());
     body.extend_from_slice(&number.to_le_bytes());

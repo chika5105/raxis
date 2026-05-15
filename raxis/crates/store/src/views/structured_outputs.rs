@@ -192,17 +192,21 @@ mod tests {
         (tmp, "init-1", "task-1", "sess-1")
     }
 
-    fn insert_row(
-        tmp: &TempDir,
-        output_id: &str,
-        initiative_id: &str,
-        task_id: &str,
-        session_id: &str,
-        kind: &str,
-        severity: Option<&str>,
-        payload_json: &str,
+    /// Test-only fixture row spec — keeps the `insert_row` helper
+    /// at one argument so `clippy::too_many_arguments` doesn't
+    /// fire while preserving named call sites.
+    struct InsertRowSpec<'a> {
+        output_id: &'a str,
+        initiative_id: &'a str,
+        task_id: &'a str,
+        session_id: &'a str,
+        kind: &'a str,
+        severity: Option<&'a str>,
+        payload_json: &'a str,
         emitted_at: i64,
-    ) {
+    }
+
+    fn insert_row(tmp: &TempDir, row: InsertRowSpec<'_>) {
         let store = Store::open(&tmp.path().join("kernel.db")).unwrap();
         let conn = store.lock_sync();
         let table = Table::StructuredOutputs.as_str();
@@ -214,14 +218,14 @@ mod tests {
                  VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)"
             ),
             r_params![
-                output_id,
-                initiative_id,
-                task_id,
-                session_id,
-                kind,
-                severity,
-                payload_json,
-                emitted_at,
+                row.output_id,
+                row.initiative_id,
+                row.task_id,
+                row.session_id,
+                row.kind,
+                row.severity,
+                row.payload_json,
+                row.emitted_at,
             ],
         )
         .unwrap();
@@ -243,36 +247,42 @@ mod tests {
 
         insert_row(
             &tmp,
-            "out-2",
-            init,
-            task,
-            sess,
-            "diagnostic_flag",
-            Some("warning"),
-            r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#,
-            200,
+            InsertRowSpec {
+                output_id: "out-2",
+                initiative_id: init,
+                task_id: task,
+                session_id: sess,
+                kind: "diagnostic_flag",
+                severity: Some("warning"),
+                payload_json: r#"{"DiagnosticFlag":{"severity":"warning","message":"x"}}"#,
+                emitted_at: 200,
+            },
         );
         insert_row(
             &tmp,
-            "out-1",
-            init,
-            task,
-            sess,
-            "progress_report",
-            None,
-            r#"{"ProgressReport":{"files_modified":[],"tests_passing":1,"tests_failing":0,"confidence":0.9}}"#,
-            100,
+            InsertRowSpec {
+                output_id: "out-1",
+                initiative_id: init,
+                task_id: task,
+                session_id: sess,
+                kind: "progress_report",
+                severity: None,
+                payload_json: r#"{"ProgressReport":{"files_modified":[],"tests_passing":1,"tests_failing":0,"confidence":0.9}}"#,
+                emitted_at: 100,
+            },
         );
         insert_row(
             &tmp,
-            "out-3",
-            init,
-            task,
-            sess,
-            "task_summary",
-            None,
-            r#"{"TaskSummary":{"commit_sha":"deadbeef","changed_paths":[],"approach":"x"}}"#,
-            300,
+            InsertRowSpec {
+                output_id: "out-3",
+                initiative_id: init,
+                task_id: task,
+                session_id: sess,
+                kind: "task_summary",
+                severity: None,
+                payload_json: r#"{"TaskSummary":{"commit_sha":"deadbeef","changed_paths":[],"approach":"x"}}"#,
+                emitted_at: 300,
+            },
         );
 
         let ro = open_ro(tmp.path()).unwrap();
@@ -319,25 +329,29 @@ mod tests {
 
         insert_row(
             &tmp,
-            "a",
-            init,
-            task,
-            sess,
-            "progress_report",
-            None,
-            "{}",
-            100,
+            InsertRowSpec {
+                output_id: "a",
+                initiative_id: init,
+                task_id: task,
+                session_id: sess,
+                kind: "progress_report",
+                severity: None,
+                payload_json: "{}",
+                emitted_at: 100,
+            },
         );
         insert_row(
             &tmp,
-            "b",
-            init,
-            "task-2",
-            "sess-2",
-            "task_summary",
-            None,
-            "{}",
-            200,
+            InsertRowSpec {
+                output_id: "b",
+                initiative_id: init,
+                task_id: "task-2",
+                session_id: "sess-2",
+                kind: "task_summary",
+                severity: None,
+                payload_json: "{}",
+                emitted_at: 200,
+            },
         );
 
         let ro = open_ro(tmp.path()).unwrap();

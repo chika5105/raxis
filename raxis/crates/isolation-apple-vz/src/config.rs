@@ -407,7 +407,7 @@ pub fn translate(
             if k.is_empty() {
                 continue;
             }
-            if STRIPPED.iter().any(|s| *s == k.as_str()) {
+            if STRIPPED.contains(&k.as_str()) {
                 continue;
             }
             effective.insert(k.clone(), v.clone());

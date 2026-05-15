@@ -171,6 +171,15 @@ impl From<CryptoError> for CertError {
 /// **Note:** `permitted_ops` is sorted internally by this function.
 /// The caller does NOT need to pre-sort; this avoids the entire
 /// class of "I sorted it differently than the verifier did" bugs.
+//
+// `clippy::too_many_arguments` is intentionally allowed: the
+// nine parameters mirror the nine fields of the canonical
+// `raxis-cert/v1` signing-input contract one-for-one. Bundling
+// them into a struct (or accepting `&OperatorCert` directly)
+// would either hide that contract behind an indirection or
+// force tests to construct a full `OperatorCert` (including the
+// not-yet-known `self_sig_hex`) just to compute signing bytes.
+#[allow(clippy::too_many_arguments)]
 pub fn cert_canonical_signing_input(
     kind: CertKind,
     display_name: &str,
@@ -203,7 +212,7 @@ pub fn cert_canonical_signing_input(
 /// input construction and structural validation so the two halves
 /// agree on what "this op set" means.
 pub fn canonicalize_ops(ops: &[String]) -> Vec<String> {
-    let mut out: Vec<String> = ops.iter().cloned().collect();
+    let mut out: Vec<String> = ops.to_vec();
     out.sort();
     out.dedup();
     out

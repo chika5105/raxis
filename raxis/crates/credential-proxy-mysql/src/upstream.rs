@@ -259,9 +259,10 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 {
-        1
-    } else if lead < 0xc0 {
+    // ASCII (`< 0x80`) and stray continuation bytes
+    // (`0x80..=0xbf`) collapse to a 1-byte advance — see the
+    // sibling MSSQL adapter for the rationale.
+    if lead < 0xc0 {
         1
     } else if lead < 0xe0 {
         2
@@ -335,7 +336,7 @@ impl ParsedUpstreamUrl {
         };
 
         let host_end = host_and_rest
-            .find(|c: char| c == '/' || c == '?')
+            .find(['/', '?'])
             .unwrap_or(host_and_rest.len());
         let authority = &host_and_rest[..host_end];
         let (host, port) = match authority.rfind(':') {
@@ -1266,11 +1267,11 @@ const _: () = {
 /// * bit 12 — `CLIENT_IGNORE_SIGPIPE`
 /// * bit 13 — `CLIENT_TRANSACTIONS`
 /// * bit 15 — `CLIENT_SECURE_CONNECTION`  (REQUIRED so the server
-///            accepts the 20-byte SHA-1 scramble layout)
+///   accepts the 20-byte SHA-1 scramble layout)
 /// * bit 17 — `CLIENT_MULTI_RESULTS`
 /// * bit 18 — `CLIENT_PS_MULTI_RESULTS`
 /// * bit 19 — `CLIENT_PLUGIN_AUTH`        (REQUIRED for the plugin
-///            string in the response)
+///   string in the response)
 ///
 /// We deliberately do NOT advertise:
 ///
@@ -1285,8 +1286,7 @@ const _: () = {
 ///   force the result-set parser to read OK packets to detect
 ///   end-of-frame, which is more state machine than V2.1 wants to
 ///   own.
-const CLIENT_CAPS: u32 = 0
-    | (1 << 0)   // CLIENT_LONG_PASSWORD
+const CLIENT_CAPS: u32 = (1 << 0)   // CLIENT_LONG_PASSWORD
     | (1 << 1)   // CLIENT_FOUND_ROWS
     | (1 << 2)   // CLIENT_LONG_FLAG
     | (1 << 3)   // CLIENT_CONNECT_WITH_DB

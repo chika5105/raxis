@@ -58,17 +58,15 @@ impl ProductionResolver {
     /// Construct a production resolver.
     ///
     /// * `cache_root` — `$RAXIS_DATA_DIR/oci-cache/`
-    /// * `client`     — caller-owned `reqwest::Client` (the kernel
-    ///                  shares one client with the gateway and the
-    ///                  http-credential proxy adapter so the same
-    ///                  TLS root store + connection pool are
-    ///                  reused).
-    /// * `bearer_token` — optional shared bearer token applied to
-    ///                    every registry request.
-    /// * `default_registry` — optional default `RegistryRef`. Used
-    ///                        when the kernel calls
-    ///                        [`ImageResolver::resolve`] without a
-    ///                        registry hint.
+    /// * `client` — caller-owned `reqwest::Client` (the kernel shares
+    ///   one client with the gateway and the http-credential proxy
+    ///   adapter so the same TLS root store + connection pool are
+    ///   reused).
+    /// * `bearer_token` — optional shared bearer token applied to every
+    ///   registry request.
+    /// * `default_registry` — optional default `RegistryRef`. Used when
+    ///   the kernel calls [`ImageResolver::resolve`] without a registry
+    ///   hint.
     pub fn new(
         cache_root: impl Into<PathBuf>,
         client: reqwest::Client,
@@ -318,7 +316,7 @@ fn prune_under(
                 continue;
             }
             total += dir_size(&digest_dir.path())?;
-            fs::remove_dir_all(&digest_dir.path()).map_err(|source| ImageResolverError::Io {
+            fs::remove_dir_all(digest_dir.path()).map_err(|source| ImageResolverError::Io {
                 path: digest_dir.path(),
                 source,
             })?;

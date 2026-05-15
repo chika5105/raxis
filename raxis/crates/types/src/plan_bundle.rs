@@ -390,7 +390,7 @@ mod tests {
         assert_eq!(pb.schema_version, SchemaVersion::V2_0);
         assert_eq!(pb.signed_at_unix_secs, None);
         assert_eq!(pb.bundle_nonce, None);
-        assert!(pb.schema_version.carries_freshness_envelope() == false);
+        assert!(!pb.schema_version.carries_freshness_envelope());
     }
 
     /// Equality is content-defined: two artifacts with the same

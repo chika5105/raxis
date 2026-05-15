@@ -11,6 +11,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
+use std::str::FromStr;
 
 // ---------------------------------------------------------------------------
 // CapabilityClass
@@ -58,18 +59,33 @@ impl CapabilityClass {
         }
     }
 
-    /// Parse from the at-rest TEXT form. Returns None on unknown variant.
-    /// The handler maps None to `OperatorErrorCode::FAIL_UNKNOWN_CAPABILITY_CLASS`.
-    pub fn from_str(s: &str) -> Option<Self> {
+    /// Parse from the at-rest TEXT form. Returns `None` on unknown
+    /// variant; the handler maps `None` to
+    /// `OperatorErrorCode::FAIL_UNKNOWN_CAPABILITY_CLASS`.
+    ///
+    /// Convenience wrapper over the [`FromStr`] impl that returns an
+    /// `Option` instead of a `Result<Self, ()>` so call sites can
+    /// `if let Some(..)` directly. Kept as a distinct name to avoid
+    /// `clippy::should_implement_trait` colliding with the standard
+    /// `FromStr::from_str` signature.
+    pub fn parse_persisted(s: &str) -> Option<Self> {
+        s.parse().ok()
+    }
+}
+
+impl FromStr for CapabilityClass {
+    type Err = ();
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "WriteSecrets" => Some(Self::WriteSecrets),
-            "NetworkEgress" => Some(Self::NetworkEgress),
-            "BreakGlass" => Some(Self::BreakGlass),
-            "InfraRead" => Some(Self::InfraRead),
-            "InfraMutate" => Some(Self::InfraMutate),
-            "DeployStaging" => Some(Self::DeployStaging),
-            "DeployProduction" => Some(Self::DeployProduction),
-            _ => None,
+            "WriteSecrets" => Ok(Self::WriteSecrets),
+            "NetworkEgress" => Ok(Self::NetworkEgress),
+            "BreakGlass" => Ok(Self::BreakGlass),
+            "InfraRead" => Ok(Self::InfraRead),
+            "InfraMutate" => Ok(Self::InfraMutate),
+            "DeployStaging" => Ok(Self::DeployStaging),
+            "DeployProduction" => Ok(Self::DeployProduction),
+            _ => Err(()),
         }
     }
 }

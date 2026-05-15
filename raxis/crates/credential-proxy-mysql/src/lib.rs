@@ -1070,11 +1070,11 @@ async fn read_packet(
     Ok(Some((h, payload)))
 }
 
-/// Derive 20 bytes of scramble. We seed a SHA-256 of (server_version
-/// + consumer.id + connection-counter) so distinct connections
-/// observe distinct scrambles even though we never use them
-/// upstream. Deterministic-by-input but unpredictable across
-/// distinct sessions.
+/// Derive 20 bytes of scramble. We seed a SHA-256 of
+/// (`server_version` ++ `consumer.id` ++ connection-counter) so
+/// distinct connections observe distinct scrambles even though we
+/// never use them upstream. Deterministic-by-input but
+/// unpredictable across distinct sessions.
 fn derive_handshake_scramble(config: &ProxyConfig) -> [u8; 20] {
     use sha2::{Digest, Sha256};
     static COUNTER: AtomicU64 = AtomicU64::new(0);
@@ -1084,7 +1084,7 @@ fn derive_handshake_scramble(config: &ProxyConfig) -> [u8; 20] {
     h.update(b"|");
     h.update(config.consumer.id.as_bytes());
     h.update(b"|");
-    h.update(&n.to_le_bytes());
+    h.update(n.to_le_bytes());
     let digest = h.finalize();
     let mut out = [0u8; 20];
     out.copy_from_slice(&digest[..20]);

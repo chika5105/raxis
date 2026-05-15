@@ -78,9 +78,10 @@ pub fn generate_session_token() -> Result<String, CryptoError> {
 /// Generate a verifier run token: 32 CSPRNG bytes.
 ///
 /// Returns `(raw_hex, token_hash_hex)`:
-///   - `raw_hex`        : sent to verifier as `RAXIS_VERIFIER_TOKEN` env var
-///   - `token_hash_hex` : hex SHA-256 of the raw bytes; stored in
-///                        `verifier_run_tokens.token_hash`
+///
+/// - `raw_hex` — sent to verifier as the `RAXIS_VERIFIER_TOKEN` env var.
+/// - `token_hash_hex` — hex SHA-256 of the raw bytes; stored in
+///   `verifier_run_tokens.token_hash`.
 pub fn generate_verifier_token() -> Result<(String, String), CryptoError> {
     let raw: [u8; 32] = try_random_array()?;
     let raw_hex = hex::encode(raw);

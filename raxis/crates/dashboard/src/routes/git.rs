@@ -41,6 +41,7 @@
 //!     are 40-char lowercase hex.
 //!   * `?path=` (tree + file) MUST pass `validate_relative_path`
 //!     (no `..`, no leading `/`, no NUL, no `.git`).
+//!
 //! These checks shut the door on path traversal and arbitrary
 //! command injection through the URL.
 

@@ -218,7 +218,7 @@ pub fn build_error_done_body(error_number: i32, message: &str) -> Vec<u8> {
     let msg_bytes: Vec<u8> = msg_utf16.iter().flat_map(|c| c.to_le_bytes()).collect();
     let server: Vec<u16> = "raxis-mssql-proxy".encode_utf16().collect();
     let server_bytes: Vec<u8> = server.iter().flat_map(|c| c.to_le_bytes()).collect();
-    let inner_len = 4 + 1 + 1 + 2 + msg_bytes.len() + 1 + server_bytes.len() + 1 + 0 + 4;
+    let inner_len = 4 + 1 + 1 + 2 + msg_bytes.len() + 1 + server_bytes.len() + 1 + 4;
 
     body.put_u8(TOKEN_ERROR);
     body.put_u16_le(inner_len as u16);

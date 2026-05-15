@@ -202,9 +202,10 @@ pub struct PolicyAdmissionService {
 
 impl PolicyAdmissionService {
     /// Build a service with the allowlist from the active policy
-    /// + task. The redirected-port set defaults to the canonical
-    /// V2 list from `vm-network-isolation.md §3.1` and can be
-    /// overridden via [`Self::with_redirected_ports`] for tests.
+    /// (combined with the task entry). The redirected-port set
+    /// defaults to the canonical V2 list from
+    /// `vm-network-isolation.md §3.1` and can be overridden via
+    /// [`Self::with_redirected_ports`] for tests.
     pub fn new(allowlist: EgressAllowlist) -> Self {
         Self {
             allowlist,

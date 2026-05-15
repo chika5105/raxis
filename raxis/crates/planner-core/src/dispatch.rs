@@ -450,7 +450,7 @@ impl DispatchLoop {
             let mut next_user_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
             for (tu_id, tool_name, input) in &tool_uses {
                 // Terminal tool? Short-circuit with the model's input.
-                if self.terminal_tools.iter().any(|n| *n == tool_name.as_str()) {
+                if self.terminal_tools.contains(&tool_name.as_str()) {
                     // Execute the terminal tool one last time so its
                     // output is observable + auditable BEFORE we
                     // return. If the terminal tool isn't registered
@@ -711,7 +711,7 @@ impl DispatchLoop {
 
             let mut next_user_blocks: Vec<ContentBlock> = Vec::with_capacity(tool_uses.len());
             for (tu_id, tool_name, input) in &tool_uses {
-                if self.terminal_tools.iter().any(|n| *n == tool_name.as_str()) {
+                if self.terminal_tools.contains(&tool_name.as_str()) {
                     let output = match self.registry.get(tool_name) {
                         Some(tool) => tool
                             .execute(input, &self.ctx)

@@ -323,7 +323,7 @@ pub fn erofs_assemble(
         .arg(out_blob)
         .arg(rootfs_dir)
         .status()
-        .map_err(|e| BuildError::io(format!("mkfs.erofs spawn"), e))?;
+        .map_err(|e| BuildError::io("mkfs.erofs spawn".to_string(), e))?;
     if !status.success() {
         return Err(BuildError::Io {
             path: out_blob.display().to_string(),

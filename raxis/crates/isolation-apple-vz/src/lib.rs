@@ -5,12 +5,12 @@
 //! [`raxis_isolation::Session`] traits on top of `VZVirtualMachine`.
 //! The substrate is built from two sub-modules:
 //!
-//! * [`config`]  — pure-data typed translator from `VmSpec` to
-//!                 `AvfConfig`. Compiles + tests on every platform.
+//! * [`config`] — pure-data typed translator from `VmSpec` to
+//!   `AvfConfig`. Compiles + tests on every platform.
 //! * [`runtime`] — macOS-only `VZVirtualMachine` driver. On other
-//!                 targets all methods return
-//!                 [`runtime::RuntimeError::Unsupported`] so the
-//!                 substrate fails closed.
+//!   targets all methods return
+//!   [`runtime::RuntimeError::Unsupported`] so the substrate fails
+//!   closed.
 //!
 //! ## Substrate lifecycle
 //!
@@ -772,7 +772,8 @@ mod tests {
 
     #[test]
     fn translate_runtime_err_produces_typed_isolation_errors() {
-        let cases: &[(RuntimeError, &dyn Fn(&IsolationError) -> bool)] = &[
+        type Predicate = dyn Fn(&IsolationError) -> bool;
+        let cases: &[(RuntimeError, &Predicate)] = &[
             (RuntimeError::Unsupported, &|e| {
                 matches!(e, IsolationError::BackendInternal(_))
             }),

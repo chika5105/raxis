@@ -601,10 +601,13 @@ impl SidecarModelClient {
         Ok(())
     }
 
-    /// reqwest::HeaderMap variant retained for the streaming path
-    /// which still consumes `reqwest::Response` directly. Delegates
-    /// to [`Self::verify_response_hmac_kv`] after a one-shot
-    /// translation.
+    /// `reqwest::HeaderMap` variant kept for unit-test ergonomics.
+    /// Production paths (`create_message`, `create_message_stream`,
+    /// see also `crate::http_fetch`) construct the kv vector
+    /// directly from the underlying transport and call
+    /// [`Self::verify_response_hmac_kv`] without going through
+    /// `reqwest::Response`, so this helper is `#[cfg(test)]`-only.
+    #[cfg(test)]
     fn verify_response_hmac(
         &self,
         expected_request_id: &str,

@@ -13,16 +13,15 @@
 //!
 //! Each custom tool decl carries:
 //!
-//! * `name`         — ASCII identifier matching `[A-Za-z0-9_]{1,64}`.
-//! * `description`  — Human-readable description (≤ 1 KiB).
-//! * `command`      — Absolute path to an executable inside the
-//!                    planner VM (typically `/usr/local/bin/<name>`),
-//!                    plus argv[1..]. The executor invokes it with
-//!                    the model-supplied JSON input on stdin.
+//! * `name` — ASCII identifier matching `[A-Za-z0-9_]{1,64}`.
+//! * `description` — Human-readable description (≤ 1 KiB).
+//! * `command` — Absolute path to an executable inside the planner VM
+//!   (typically `/usr/local/bin/<name>`), plus argv[1..]. The executor
+//!   invokes it with the model-supplied JSON input on stdin.
 //! * `input_schema` — JSON Schema for the input.
 //! * `timeout_secs` — Per-invocation deadline. Hard-capped at 300s
-//!                    (5 minutes) by the loader; values above the
-//!                    cap are rejected at registration time.
+//!   (5 minutes) by the loader; values above the cap are rejected at
+//!   registration time.
 //!
 //! The subprocess receives the model's `tool_use.input` as JSON on
 //! stdin, and is expected to write a `ToolOutput`-shaped JSON

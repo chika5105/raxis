@@ -2571,7 +2571,7 @@ mod tests {
         // consistent with the production INV-STORE-03 contract.
         let count: i64 = conn
             .query_row(
-                &format!("SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",),
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?1",
                 [Table::Tasks.as_str()],
                 |r| r.get(0),
             )
@@ -4603,11 +4603,11 @@ mod tests {
         apply_pending(&conn).unwrap();
 
         let mut stmt = conn
-            .prepare(&format!(
+            .prepare(
                 "SELECT name, sql FROM sqlite_master \
                  WHERE type='index' AND tbl_name=?1 \
                    AND name NOT LIKE 'sqlite_%'",
-            ))
+            )
             .unwrap();
         let indexes: Vec<(String, String)> = stmt
             .query_map(

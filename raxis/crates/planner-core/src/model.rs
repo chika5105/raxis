@@ -321,7 +321,7 @@ pub struct MessageRequest {
     pub max_tokens: u32,
 
     /// Top-level system prompt. The dispatch loop renders the KSB
-    /// + role-specific NNSP into this field once per session;
+    /// plus role-specific NNSP into this field once per session;
     /// individual turn-level system blocks are not used.
     #[serde(default)]
     pub system: Option<String>,
@@ -479,12 +479,11 @@ impl serde::Serialize for MessageRequest {
         // Pre-compute optional-field presence so we can pick the
         // exact map size up-front and avoid serde's "unknown size"
         // path which can confuse some downstream consumers.
-        let mut len = 2; // model, max_tokens
+        // Always-present fields: `model`, `max_tokens`, `messages`.
+        let mut len = 3;
         if self.system.is_some() {
             len += 1;
         }
-        let _messages_always = ();
-        len += 1;
         if !self.tools.is_empty() {
             len += 1;
         }
@@ -497,7 +496,6 @@ impl serde::Serialize for MessageRequest {
         if self.cache_messages {
             len += 1;
         }
-        let _ = _messages_always;
 
         let mut map = serializer.serialize_map(Some(len))?;
         map.serialize_entry("model", &self.model)?;

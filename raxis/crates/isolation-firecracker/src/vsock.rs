@@ -252,6 +252,12 @@ pub fn host_listener_path(base: &Path, _host_port: u32) -> PathBuf {
     base.to_path_buf()
 }
 
+// Compile-time guard for the test reasoning below ("comfortably
+// above the integration test's smaller fake payload"): ensures the
+// cap is at least 1 MiB. Triggers at build time, not runtime, so it
+// satisfies clippy's `assertions_on_constants`.
+const _: () = assert!(MAX_FRAME_BYTES >= 1024 * 1024);
+
 // ---------------------------------------------------------------------------
 // Tests — pin handshake / framing semantics against an in-test UDS
 // server that emulates Firecracker's `CONNECT <port>` multiplexer.
@@ -411,8 +417,9 @@ mod tests {
         // path indirectly. Simplest: skip the live wire and just
         // assert the cap constant. The framing cap is exercised in
         // the integration test below by allocating a smaller fake
-        // payload.
-        assert!(MAX_FRAME_BYTES >= 1024 * 1024);
+        // payload. The constant is sanity-checked at compile time
+        // (see the `const _:` block at the bottom of this module);
+        // no runtime assertion needed here.
         // Healthy small frame still works.
         ch.send_frame(b"ok").unwrap();
         server.join().unwrap();

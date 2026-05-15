@@ -37,7 +37,7 @@ use serde::{Deserialize, Serialize};
 
 /// Restriction set declared in `[tasks.credentials.restrictions]`
 /// for `proxy_type = "azure"`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct Restrictions {
     /// Azure resource URIs (e.g. `"https://management.azure.com/"`,
     /// `"https://database.windows.net/"`) the proxy will mint tokens
@@ -76,15 +76,6 @@ pub struct ResourceActions {
     /// enumerate the resource without scoping its actions.
     #[serde(default)]
     pub actions: Vec<String>,
-}
-
-impl Default for Restrictions {
-    fn default() -> Self {
-        Self {
-            allowed_resources: Vec::new(),
-            allowed_actions: Vec::new(),
-        }
-    }
 }
 
 impl Restrictions {

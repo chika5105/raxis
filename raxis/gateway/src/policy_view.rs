@@ -85,7 +85,12 @@ pub enum PolicyViewError {
     CredentialsParse {
         provider_id: String,
         path: PathBuf,
-        source: toml::de::Error,
+        // `toml::de::Error` is ~120 bytes so the boxed indirection
+        // keeps the enclosing `PolicyViewError` (and every
+        // `Result<PolicyView, PolicyViewError>` callers thread
+        // through the gateway boot path) compact.
+        // `clippy::result_large_err`.
+        source: Box<toml::de::Error>,
     },
     #[error("provider {provider_id:?}: credentials file {path} api_key is empty")]
     CredentialsEmpty { provider_id: String, path: PathBuf },
@@ -144,7 +149,7 @@ pub fn load_policy_view_with_credential_backend(
                     ProviderResolveError::Parse(parse) => PolicyViewError::CredentialsParse {
                         provider_id: entry.provider_id.clone(),
                         path: path.clone(),
-                        source: parse,
+                        source: Box::new(parse),
                     },
                     ProviderResolveError::EmptyApiKey => PolicyViewError::CredentialsEmpty {
                         provider_id: entry.provider_id.clone(),

@@ -60,35 +60,39 @@ pub enum RetryInadmissibleReason {
     /// never been activated; `RetrySubTask` is meaningless.
     /// Wire counterpart: `eprintln "RetrySubTaskRejectedUnknownTask"`.
     NoPriorActivation,
-    /// The most-recent activation's `activation_state` is not in
-    /// any retry-eligible class. The closed set of admissible
-    /// classes (per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01`
-    /// + iter54 fix `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`)
+    /// The most-recent activation's `activation_state` is not in any
+    /// retry-eligible class. The closed set of admissible classes
+    /// (per `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` and the
+    /// iter54 fix `INV-ORCH-RETRY-SUBTASK-PENDING-ACTIVATION-NOT-RETRYABLE-01`)
     /// is:
-    ///   * `Failed` — classic crash / `ReportFailure`.
-    ///   * `Completed` AND `review_reject_count > 0` — Reviewer-
-    ///     rejection retry per Option A.
+    ///
+    /// * `Failed` — classic crash / `ReportFailure`.
+    /// * `Completed` AND `review_reject_count > 0` — Reviewer-
+    ///   rejection retry per Option A.
+    ///
     /// Anything else lands here, including:
-    ///   * `Active` (executor VM still running);
-    ///   * `Completed` with `review_reject_count = 0`
-    ///     (clean completion — admitting would let the orchestrator
-    ///     force a re-run of a successful task);
-    ///   * `PendingActivation` with `review_reject_count = 0`
-    ///     (brand-new round-1 row — admitting would race the
-    ///     pending `ActivateSubTask`);
-    ///   * `PendingActivation` with `review_reject_count > 0` —
-    ///     iter54-fix branch. A prior `RetrySubTask` already
-    ///     admitted and inserted this row; the orchestrator's
-    ///     correct next intent is `ActivateSubTask` (which spawns
-    ///     the executor for the existing pending row), NOT another
-    ///     `RetrySubTask`. The NNSP rule 3a steers the LLM to
-    ///     `ActivateSubTask` on this rejection; admitting a second
-    ///     retry instead would let an orchestrator stuck in a
-    ///     decision-loop chain RetrySubTask→exit→respawn→
-    ///     RetrySubTask indefinitely, never spawning the executor —
-    ///     iter54's `realistic_session_lifecycle` reproduction
-    ///     drove this loop until `orchestrator_respawn_ceiling_exceeded`
-    ///     killed the initiative.
+    ///
+    /// * `Active` (executor VM still running);
+    /// * `Completed` with `review_reject_count = 0` (clean
+    ///   completion — admitting would let the orchestrator force a
+    ///   re-run of a successful task);
+    /// * `PendingActivation` with `review_reject_count = 0`
+    ///   (brand-new round-1 row — admitting would race the pending
+    ///   `ActivateSubTask`);
+    /// * `PendingActivation` with `review_reject_count > 0` —
+    ///   iter54-fix branch. A prior `RetrySubTask` already admitted
+    ///   and inserted this row; the orchestrator's correct next
+    ///   intent is `ActivateSubTask` (which spawns the executor for
+    ///   the existing pending row), NOT another `RetrySubTask`. The
+    ///   NNSP rule 3a steers the LLM to `ActivateSubTask` on this
+    ///   rejection; admitting a second retry instead would let an
+    ///   orchestrator stuck in a decision-loop chain
+    ///   RetrySubTask→exit→respawn→RetrySubTask indefinitely, never
+    ///   spawning the executor — iter54's
+    ///   `realistic_session_lifecycle` reproduction drove this loop
+    ///   until `orchestrator_respawn_ceiling_exceeded` killed the
+    ///   initiative.
+    ///
     /// Wire counterpart: `eprintln "RetrySubTaskRejectedNotRetryable"`.
     NotRetryable {
         /// The actual prior state (verbatim, lowercase per the

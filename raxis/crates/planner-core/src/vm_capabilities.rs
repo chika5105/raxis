@@ -320,7 +320,7 @@ pub fn project_manifest(
         || categories
             .iter()
             .any(|c| matches!(c, CapabilityCategory::All));
-    let want = |c: CapabilityCategory| -> bool { want_all || categories.iter().any(|x| *x == c) };
+    let want = |c: CapabilityCategory| -> bool { want_all || categories.contains(&c) };
 
     let binaries = if want(CapabilityCategory::Binaries) {
         match filter.binary_name.as_deref() {
@@ -650,10 +650,7 @@ fn best_effort_version(name: &str, path: &str) -> Option<String> {
         Ok(c) => c,
         Err(_) => return None,
     };
-    let out = match wait_with_timeout(child, Duration::from_secs(2)) {
-        Some(o) => o,
-        None => return None,
-    };
+    let out = wait_with_timeout(child, Duration::from_secs(2))?;
     let raw = if !out.stdout.is_empty() {
         String::from_utf8_lossy(&out.stdout).into_owned()
     } else {

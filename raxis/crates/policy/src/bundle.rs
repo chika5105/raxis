@@ -2516,7 +2516,7 @@ impl PlanBundleLimitsSection {
 }
 
 fn default_max_artifact_bytes() -> u64 {
-    1 * 1024 * 1024
+    1024 * 1024
 } // 1 MiB
 fn default_max_bundle_bytes() -> u64 {
     10 * 1024 * 1024
@@ -3056,30 +3056,6 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
     "DryRunAdmitted",
 ];
-
-/// Validate the raw `[notifications]` section and produce the final
-/// `(channels, routes, default_channels)` triple for `PolicyBundle`.
-///
-/// Rules enforced:
-///
-/// 1. **Channel ids are unique.** Duplicate `id` values fail loudly.
-/// 2. **No implicit channel synthesis.** The kernel unconditionally
-///    writes every notification to `inbox.jsonl` + the SQLite
-///    `notifications` table. Channels are purely operator-configured
-///    additional delivery routes (File, Email, Sidecar).
-/// 3. **Default channels reference declared ids.** Every entry in
-///    `default_channels` MUST resolve to a channel id. An empty
-///    `default_channels` is valid — it means events with no explicit
-///    route go only to the kernel-owned stores.
-/// 4. **Route channel ids resolve.** Every channel id in a route's
-///    `channels` array MUST resolve to a declared id.
-/// 5. **Route event_kind is real.** The event_kind MUST appear in
-///    [`KNOWN_AUDIT_EVENT_KINDS`] (defence against typo-silenced
-///    routes).
-/// 6. **Per-kind validation.** File channels require non-empty
-///    target. Email channels require non-empty target. Sidecar
-///    channels require a valid HTTP(S) URL and non-zero
-///    `max_in_flight`.
 
 // ---------------------------------------------------------------------------
 // `[[integration_merge_verifiers]]` operator-side validator (V2).
@@ -3718,16 +3694,42 @@ fn validate_permitted_credentials(
     Ok(out)
 }
 
+/// `(channels, routes, default_channels)` triple returned from the
+/// `[notifications]` section validator. Aliased to keep the function
+/// signature readable (the literal tuple form trips
+/// `clippy::type_complexity`).
+type NotificationsTriple = (
+    Vec<NotificationChannel>,
+    HashMap<String, Vec<String>>,
+    Vec<String>,
+);
+
+/// Validate the raw `[notifications]` section and produce the final
+/// `(channels, routes, default_channels)` triple for `PolicyBundle`.
+///
+/// Rules enforced:
+///
+/// 1. **Channel ids are unique.** Duplicate `id` values fail loudly.
+/// 2. **No implicit channel synthesis.** The kernel unconditionally
+///    writes every notification to `inbox.jsonl` + the SQLite
+///    `notifications` table. Channels are purely operator-configured
+///    additional delivery routes (File, Email, Sidecar).
+/// 3. **Default channels reference declared ids.** Every entry in
+///    `default_channels` MUST resolve to a channel id. An empty
+///    `default_channels` is valid — it means events with no explicit
+///    route go only to the kernel-owned stores.
+/// 4. **Route channel ids resolve.** Every channel id in a route's
+///    `channels` array MUST resolve to a declared id.
+/// 5. **Route event_kind is real.** The event_kind MUST appear in
+///    [`KNOWN_AUDIT_EVENT_KINDS`] (defence against typo-silenced
+///    routes).
+/// 6. **Per-kind validation.** File channels require non-empty
+///    target. Email channels require non-empty target. Sidecar
+///    channels require a valid HTTP(S) URL and non-zero
+///    `max_in_flight`.
 fn validate_notifications(
     raw: &NotificationsSection,
-) -> Result<
-    (
-        Vec<NotificationChannel>,
-        HashMap<String, Vec<String>>,
-        Vec<String>,
-    ),
-    PolicyError,
-> {
+) -> Result<NotificationsTriple, PolicyError> {
     use std::collections::HashSet;
 
     let channels: Vec<NotificationChannel> = raw.channels_raw.clone();
@@ -5516,9 +5518,7 @@ impl PolicyBundle {
     /// caller (heartbeat / sweep loops) move it into a long-lived
     /// `tokio::spawn` without holding a borrow on the `ArcSwap` snapshot.
     pub fn plan_signing(&self) -> PlanSigningSection {
-        self.plan_signing
-            .clone()
-            .unwrap_or_else(PlanSigningSection::default)
+        self.plan_signing.clone().unwrap_or_default()
     }
 
     /// V2 plan-bundle size limits — `[plan_bundle_limits]`. Returns
@@ -5528,9 +5528,7 @@ impl PolicyBundle {
     /// path (§7.3 / §8.1 step 3) when re-checking caps against the
     /// wire bundle.
     pub fn plan_bundle_limits(&self) -> PlanBundleLimitsSection {
-        self.plan_bundle_limits
-            .clone()
-            .unwrap_or_else(PlanBundleLimitsSection::default)
+        self.plan_bundle_limits.clone().unwrap_or_default()
     }
 
     // ── Provider catalogue ──────────────────────────────────────────────────

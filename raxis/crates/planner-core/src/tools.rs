@@ -830,12 +830,12 @@ pub const SLEEP_TOOL_HARD_MAX_SECONDS: u32 = 600;
 ///
 /// Rate-limit semantics:
 ///
-/// * `seconds == 0`             → success, nothing to sleep.
-/// * `seconds > max_per_call`   → `FAIL_SLEEP_PER_CALL_EXCEEDED`.
+/// * `seconds == 0` → success, nothing to sleep.
+/// * `seconds > max_per_call` → `FAIL_SLEEP_PER_CALL_EXCEEDED`.
 /// * `seconds > SLEEP_TOOL_HARD_MAX_SECONDS` → `FAIL_SLEEP_HARD_MAX_EXCEEDED`.
 /// * `cumulative + seconds > max_cumulative` → `FAIL_SLEEP_BUDGET_EXCEEDED`.
-/// * `max_per_call == 0`        → tool disabled, every call returns
-///                                `FAIL_SLEEP_DISABLED`.
+/// * `max_per_call == 0` → tool disabled, every call returns
+///   `FAIL_SLEEP_DISABLED`.
 ///
 /// All errors are STRUCTURED (returned as `ToolOutput::err`) so the
 /// model can recover; `Tool::execute` itself returns `Ok` in every

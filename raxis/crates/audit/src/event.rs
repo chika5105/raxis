@@ -487,10 +487,12 @@ pub enum AuditEventKind {
         /// Echo of the spawn event's `session_id`.
         session_id: String,
         /// Stable, PascalCase classification of the exit. One of:
-        ///   * `"GracefulExit"` — guest PID 1 returned a code.
-        ///   * `"SignalKilled"` — substrate sent a signal.
-        ///   * `"Timeout"`      — grace expired without exit.
-        ///   * `"BackendError"` — substrate-internal failure.
+        ///
+        /// * `"GracefulExit"` — guest PID 1 returned a code.
+        /// * `"SignalKilled"` — substrate sent a signal.
+        /// * `"Timeout"` — grace expired without exit.
+        /// * `"BackendError"` — substrate-internal failure.
+        ///
         /// Closed set; new variants land here AND in
         /// `IsolationError::ExitStatus` together.
         signal_class: String,
@@ -723,7 +725,9 @@ pub enum AuditEventKind {
         /// before the rate-limit check denied admission.
         direction: String,
         /// Stable PascalCase reason tag. Closed set:
-        ///   * `"RateLimit"` — the per-minute window was full.
+        ///
+        /// * `"RateLimit"` — the per-minute window was full.
+        ///
         /// New reasons land here AND in the kernel-side decision
         /// engine in lockstep.
         reason: String,
@@ -803,13 +807,15 @@ pub enum AuditEventKind {
         /// PascalCase agent-role label this resolution is binding
         /// to. Closed set, mirrors `raxis_types::SessionAgentType`'s
         /// V2 surface:
-        ///   * `"Executor"` — operator-published image backing an
-        ///     Executor activation. The only role that emits this
-        ///     event in V2.5 (Reviewer / Orchestrator activations
-        ///     bypass `resolve_vm_image_override` entirely because
-        ///     their images are kernel-canonical and
-        ///     non-operator-overridable per
-        ///     `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`).
+        ///
+        /// * `"Executor"` — operator-published image backing an
+        ///   Executor activation. The only role that emits this
+        ///   event in V2.5 (Reviewer / Orchestrator activations
+        ///   bypass `resolve_vm_image_override` entirely because
+        ///   their images are kernel-canonical and
+        ///   non-operator-overridable per
+        ///   `INV-PLANNER-HARNESS-02` / `INV-PLANNER-HARNESS-05`).
+        ///
         /// `INV-IMAGE-RESOLUTION-PER-ROLE-01` requires that this
         /// field is `"Executor"` for every emit; an audit-replay
         /// reader observing any other value is observing a kernel
@@ -943,15 +949,17 @@ pub enum AuditEventKind {
     /// `display_name` from the policy bundle at the moment of emit
     /// (a snapshot, not a live join). It is `None` for two reasons
     /// only:
-    ///   1. The event was written before the display-name plumbing
-    ///      shipped (legacy segment); the CLI render layer falls
-    ///      back to `operator_certificates` lookup and marks the
-    ///      result as historical.
-    ///   2. The kernel could not resolve the fingerprint at emit
-    ///      time (extremely rare — would require the operator that
-    ///      just authenticated and signed the plan to have been
-    ///      removed from the bundle a microsecond later; only
-    ///      realistic in tight epoch-rotation races).
+    ///
+    /// 1. The event was written before the display-name plumbing
+    ///    shipped (legacy segment); the CLI render layer falls back
+    ///    to `operator_certificates` lookup and marks the result as
+    ///    historical.
+    /// 2. The kernel could not resolve the fingerprint at emit time
+    ///    (extremely rare — would require the operator that just
+    ///    authenticated and signed the plan to have been removed
+    ///    from the bundle a microsecond later; only realistic in
+    ///    tight epoch-rotation races).
+    ///
     /// See `kernel-store.md` §2.5.2 "Operator display-name fields"
     /// for the cross-variant convention.
     PathScopeOverrideApplied {
@@ -1175,26 +1183,21 @@ pub enum AuditEventKind {
     /// carries four fields that uniquely tie its work back to a
     /// human-signed plan at a known policy epoch:
     ///
-    ///   * `session_id`         — this session row.
-    ///   * `initiative_id`      — the initiative this session belongs to
-    ///                            (None for legacy V1 free-running sessions
-    ///                            that predate hierarchical orchestration).
-    ///   * `plan_bundle_sha256` — SHA-256 of the canonical V2 plan bundle
-    ///                            (`plan-bundle-sealing.md §8.2`). For
-    ///                            legacy V1 initiatives this carries
-    ///                            `plan_artifact_sha256` and the V1 chain
-    ///                            (`plan_artifact_sha256 →
-    ///                            signed_plan_artifacts → plan.sig →
-    ///                            operator pubkey`) remains valid for
-    ///                            forensic reproducibility. The CLI render
-    ///                            layer disambiguates by joining against
-    ///                            the table that currently holds the
-    ///                            artifact.
-    ///   * `policy_epoch`       — kernel policy epoch at session-creation
-    ///                            time (None for legacy V1 segments that
-    ///                            predate the field).
-    ///   * `session_agent_type` — V2 agent kind ("Orchestrator" |
-    ///                            "Executor" | "Reviewer"), None for V1.
+    /// * `session_id` — this session row.
+    /// * `initiative_id` — the initiative this session belongs to (None
+    ///   for legacy V1 free-running sessions that predate hierarchical
+    ///   orchestration).
+    /// * `plan_bundle_sha256` — SHA-256 of the canonical V2 plan bundle
+    ///   (`plan-bundle-sealing.md §8.2`). For legacy V1 initiatives this
+    ///   carries `plan_artifact_sha256` and the V1 chain
+    ///   (`plan_artifact_sha256 → signed_plan_artifacts → plan.sig →
+    ///   operator pubkey`) remains valid for forensic reproducibility.
+    ///   The CLI render layer disambiguates by joining against the table
+    ///   that currently holds the artifact.
+    /// * `policy_epoch` — kernel policy epoch at session-creation time
+    ///   (None for legacy V1 segments that predate the field).
+    /// * `session_agent_type` — V2 agent kind ("Orchestrator" |
+    ///   "Executor" | "Reviewer"), None for V1.
     ///
     /// Reconstruction (V2): commit SHA → CompleteTask audit event →
     /// session_id → SessionCreated event → plan_bundle_sha256 →

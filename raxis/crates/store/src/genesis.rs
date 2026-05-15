@@ -45,30 +45,25 @@ use crate::{Store, StoreError, Table};
 /// `bootstrap::integration` tests pins this property).
 ///
 /// Inputs (all caller-supplied so the function stays pure / clock-free):
-///   * `policy_sha256`         — lowercase-hex SHA-256 of the genesis
-///                                `policy.toml` bytes (computed by
-///                                `raxis_policy::load_policy`).
-///   * `signed_by_authority`   — the authority pubkey fingerprint
-///                                (SHA-256[:16] hex; same convention as
-///                                `raxis_genesis_tools::pubkey_fingerprint`).
-///   * `advanced_at_unix_secs` — wall-clock timestamp the genesis row
-///                                records as `advanced_at`. Caller controls
-///                                the clock so tests can pin this value.
-///   * `bundle`                — the validated policy bundle the
-///                                genesis ceremony just produced. Cert
-///                                is mandatory (INV-CERT-01); the
-///                                bundle's operator entries are
-///                                mirrored into `operator_certificates`
-///                                inside the SAME transaction as the
-///                                genesis row INSERT, so the two
-///                                tables come up either both populated
-///                                or both empty. There is no
-///                                `Option<&PolicyBundle>` legacy path:
-///                                without a bundle we have no cert
-///                                table to populate, and an empty
-///                                cert table is itself a boot-time
-///                                failure (`raxis doctor` reports
-///                                `[FAIL]`).
+///   * `policy_sha256` — lowercase-hex SHA-256 of the genesis
+///     `policy.toml` bytes (computed by
+///     `raxis_policy::load_policy`).
+///   * `signed_by_authority` — the authority pubkey fingerprint
+///     (SHA-256[:16] hex; same convention as
+///     `raxis_genesis_tools::pubkey_fingerprint`).
+///   * `advanced_at_unix_secs` — wall-clock timestamp the genesis
+///     row records as `advanced_at`. Caller controls the clock so
+///     tests can pin this value.
+///   * `bundle` — the validated policy bundle the genesis ceremony
+///     just produced. Cert is mandatory (INV-CERT-01); the
+///     bundle's operator entries are mirrored into
+///     `operator_certificates` inside the SAME transaction as the
+///     genesis row INSERT, so the two tables come up either both
+///     populated or both empty. There is no
+///     `Option<&PolicyBundle>` legacy path: without a bundle we
+///     have no cert table to populate, and an empty cert table is
+///     itself a boot-time failure (`raxis doctor` reports
+///     `[FAIL]`).
 pub fn install_genesis_policy_epoch_row(
     store: &Store,
     policy_sha256: &str,

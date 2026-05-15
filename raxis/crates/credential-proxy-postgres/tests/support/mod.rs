@@ -62,6 +62,12 @@ impl FakeResponse {
     }
 }
 
+/// Boxed `(sql) -> Option<FakeResponse>` callback shared between
+/// the listener task and the per-connection handlers. Aliased to
+/// keep the struct/function signatures readable
+/// (`clippy::type_complexity`).
+pub type ResponderFn = Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>;
+
 /// Fake backend handle. Use [`FakeBackend::start`] to bind, then
 /// query [`FakeBackend::addr`] for the listen address.
 pub struct FakeBackend {
@@ -73,22 +79,15 @@ impl FakeBackend {
     /// `responses` callback maps a SQL string to a [`FakeResponse`]
     /// (`None` returns "command complete: 0" with no row description,
     /// the safe default for write statements).
-    pub async fn start(
-        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-    ) -> std::io::Result<Self> {
+    pub async fn start(responses: ResponderFn) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let r = Arc::clone(&responses);
-                        tokio::spawn(async move {
-                            let _ = serve_one(stream, r).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let r = Arc::clone(&responses);
+                tokio::spawn(async move {
+                    let _ = serve_one(stream, r).await;
+                });
             }
         });
         Ok(Self { addr })
@@ -100,10 +99,7 @@ impl FakeBackend {
     }
 }
 
-async fn serve_one(
-    mut s: TcpStream,
-    responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-) -> std::io::Result<()> {
+async fn serve_one(mut s: TcpStream, responses: ResponderFn) -> std::io::Result<()> {
     // ----- StartupMessage -----
     let len = s.read_i32().await?;
     if !(8..=1_000_000).contains(&len) {

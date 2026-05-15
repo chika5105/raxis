@@ -567,9 +567,9 @@ fn current_ref_oid(
     let r = repo.find_reference(target_ref).map_err(|e| {
         MainMergeError::RefUpdateFailed(format!("find_reference({target_ref:?}): {e}"))
     })?;
-    Ok(r.target().try_id().map(|id| id.to_owned()).ok_or_else(|| {
+    r.target().try_id().map(|id| id.to_owned()).ok_or_else(|| {
         MainMergeError::RefUpdateFailed(format!("{target_ref} is symbolic, expected direct"))
-    })?)
+    })
 }
 
 fn parse_oid(sha: &str) -> Result<gix::ObjectId, MainMergeError> {

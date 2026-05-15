@@ -276,7 +276,7 @@ pub fn render_genesis_policy_toml(inputs: GenesisPolicyInputs<'_>) -> String {
         // Right-pad keys to 17 chars so the equals signs align — purely
         // cosmetic, but operators read this file by hand and the alignment
         // makes a missed entry stand out at review time.
-        write!(out, "{kind:<17} = {cost}\n").expect("String write_fmt is infallible");
+        writeln!(out, "{kind:<17} = {cost}").expect("String write_fmt is infallible");
     }
     out.push('\n');
 

@@ -350,7 +350,7 @@ impl FirecrackerBackend {
             terminated: false,
             vsock_cid: spec.vsock_cid.unwrap_or(0),
             api_sock_path: api_sock,
-            vsock_uds: vsock_uds,
+            vsock_uds,
             #[cfg(unix)]
             loopback_bridges: Vec::new(),
         })

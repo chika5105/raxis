@@ -32,6 +32,17 @@ use uuid::Uuid;
 
 /// The top-level discriminant enum for all messages on the planner and
 /// operator UDS sockets. Wire: positional bincode 2.0.1 standard() u32 tag.
+//
+// `clippy::large_enum_variant` is intentionally allowed: the variant
+// payloads are wire-stable (per `peripherals.md §3.1`) and bincode
+// serializes them positionally, so boxing the larger variants
+// (`IntentRequest` ~440 B vs `EscalationRequest` ~184 B) would
+// either change the wire shape or force a per-variant Box wrapper
+// purely to satisfy a heap-vs-stack tradeoff that doesn't apply
+// here. IpcMessage values live for the duration of a single
+// dispatch frame; they are not stored in collections or moved
+// around in hot loops.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Serialize, Deserialize)]
 pub enum IpcMessage {
     // -----------------------------------------------------------------------

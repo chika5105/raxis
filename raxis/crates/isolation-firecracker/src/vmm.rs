@@ -444,7 +444,7 @@ mod tests {
     /// path into `$SOCK`, then runs the caller-supplied body.
     ///
     /// Returns the tempdir handle (caller owns) and the stub path.
-    #[cfg(unix)]
+    ///
     /// Build a `(tempdir, sh-argv-prefix)` pair the test passes to
     /// `SpawnArgs { binary: /bin/sh, pre_args }`. The supervisor's
     /// final argv is `[/bin/sh, <stub>, --api-sock, <sock>, ...]`,

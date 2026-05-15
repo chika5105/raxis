@@ -1,9 +1,9 @@
-// raxis-dashboard::jwt_secret — persistent HS256 signing secret.
-//
-// Normative reference:
-// `specs/v2/dashboard-hardening.md §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`
-// `specs/v2/self-healing-supervisor.md §10` (Operator session
-// continuity across supervisor-triggered restarts).
+//! `raxis-dashboard::jwt_secret` — persistent HS256 signing secret.
+//!
+//! Normative reference:
+//! `specs/v2/dashboard-hardening.md §INV-DASHBOARD-JWT-SECRET-PERSISTENT-01`
+//! `specs/v2/self-healing-supervisor.md §10` (Operator session
+//! continuity across supervisor-triggered restarts).
 //
 // **Why this module exists.**
 //

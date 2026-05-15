@@ -448,7 +448,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         // Whole frame followed by a half-written one (no \n).
         let s = serde_json::to_string(&span_frame()).unwrap();
-        let half = format!("{{\"kind\":\"span\",\"schema\":1,\"kernel_version");
+        let half = "{\"kind\":\"span\",\"schema\":1,\"kernel_version".to_string();
         let path = dir.join("000001.jsonl");
         let mut f = std::fs::File::create(&path).unwrap();
         f.write_all(s.as_bytes()).unwrap();

@@ -205,7 +205,7 @@ pub fn substitute(
         let format = bind.format_for_value(i);
         decoded.push(decode_value(i + 1, oid, format, v)?);
     }
-    Ok(rewrite_placeholders(sql, &decoded)?)
+    rewrite_placeholders(sql, &decoded)
 }
 
 /// One pre-decoded parameter ready for splice.

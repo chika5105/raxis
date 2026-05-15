@@ -96,7 +96,7 @@ pub fn evaluate(
         };
 
         // Step A: delegation check (pure read, no write).
-        let capability = CapabilityClass::from_str(&claim_type_str);
+        let capability = CapabilityClass::parse_persisted(&claim_type_str);
 
         // If the claim type doesn't map to a CapabilityClass, no delegation needed.
         if let Some(cap) = capability {

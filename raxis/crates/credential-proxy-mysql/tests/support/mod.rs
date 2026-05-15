@@ -69,6 +69,12 @@ pub enum FakeResponse {
     },
 }
 
+/// Boxed `(sql) -> Option<FakeResponse>` callback shared between
+/// the listener task and the per-connection handlers. Aliased to
+/// keep the struct/function signatures readable
+/// (`clippy::type_complexity`).
+pub type ResponderFn = Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>;
+
 /// Fake backend handle.
 pub struct FakeBackend {
     addr: std::net::SocketAddr,
@@ -78,9 +84,7 @@ impl FakeBackend {
     /// Bind a fake-mysql listener on a random localhost port. The
     /// `responses` callback maps a SQL string to a [`FakeResponse`]
     /// (`None` returns `OK_Packet { affected_rows = 0 }`).
-    pub async fn start(
-        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-    ) -> std::io::Result<Self> {
+    pub async fn start(responses: ResponderFn) -> std::io::Result<Self> {
         Self::start_with_password(responses, None).await
     }
 
@@ -89,23 +93,18 @@ impl FakeBackend {
     /// password. Used to assert the proxy actually computes the
     /// SHA-1 XOR scramble correctly against a real challenge.
     pub async fn start_with_password(
-        responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+        responses: ResponderFn,
         expected_password: Option<Vec<u8>>,
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind("127.0.0.1:0").await?;
         let addr = listener.local_addr()?;
         tokio::spawn(async move {
-            loop {
-                match listener.accept().await {
-                    Ok((stream, _)) => {
-                        let r = Arc::clone(&responses);
-                        let pw = expected_password.clone();
-                        tokio::spawn(async move {
-                            let _ = serve_one(stream, r, pw).await;
-                        });
-                    }
-                    Err(_) => break,
-                }
+            while let Ok((stream, _)) = listener.accept().await {
+                let r = Arc::clone(&responses);
+                let pw = expected_password.clone();
+                tokio::spawn(async move {
+                    let _ = serve_one(stream, r, pw).await;
+                });
             }
         });
         Ok(Self { addr })
@@ -119,7 +118,7 @@ impl FakeBackend {
 
 async fn serve_one(
     mut s: TcpStream,
-    responses: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
+    responses: ResponderFn,
     expected_password: Option<Vec<u8>>,
 ) -> std::io::Result<()> {
     // Send HandshakeV10 greeting (seq=0).
@@ -295,11 +294,11 @@ fn build_handshake_v10(scramble: &[u8; 20]) -> Vec<u8> {
     p.extend_from_slice(&scramble[..8]); // scramble part 1
     p.push(0); // filler
                // Capabilities (lower 16): PROTOCOL_41 + SECURE_CONNECTION + PLUGIN_AUTH.
-    let cap_lower: u16 = (1 << 9) | (1 << 15) | 0;
+    let cap_lower: u16 = (1 << 9) | (1 << 15);
     p.extend_from_slice(&cap_lower.to_le_bytes());
     p.push(0x2d); // charset utf8mb4
     p.extend_from_slice(&2u16.to_le_bytes()); // status flags (autocommit)
-    let cap_upper: u16 = (1 << (19 - 16)) | 0; // PLUGIN_AUTH (bit 19)
+    let cap_upper: u16 = 1 << (19 - 16); // PLUGIN_AUTH (bit 19)
     p.extend_from_slice(&cap_upper.to_le_bytes());
     p.push(21); // auth_plugin_data_len
     p.extend_from_slice(&[0u8; 10]); // reserved

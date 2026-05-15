@@ -192,9 +192,12 @@ pub fn redact_for_audit(msg: &str) -> String {
 }
 
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 {
-        1
-    } else if lead < 0xc0 {
+    // ASCII (`< 0x80`) and stray continuation bytes
+    // (`0x80..=0xbf`) collapse to a 1-byte advance — the latter
+    // shouldn't appear at a lead position in valid UTF-8 but we
+    // treat them defensively so the sanitiser still makes
+    // forward progress.
+    if lead < 0xc0 {
         1
     } else if lead < 0xe0 {
         2
@@ -259,7 +262,7 @@ impl ParsedUpstreamUrl {
             None => (percent_decode(userinfo), String::new()),
         };
         let host_end = host_and_rest
-            .find(|c: char| c == '/' || c == '?')
+            .find(['/', '?'])
             .unwrap_or(host_and_rest.len());
         let authority = &host_and_rest[..host_end];
         let (host, port) = match authority.rfind(':') {
@@ -675,7 +678,7 @@ async fn read_one_packet(stream: &mut TcpStream) -> std::io::Result<(PacketHeade
     stream.read_exact(&mut header_bytes).await?;
     let h = PacketHeader::parse(header_bytes);
     let total = h.length as usize;
-    if total < HEADER_LEN || total > MAX_PACKET_LEN {
+    if !(HEADER_LEN..=MAX_PACKET_LEN).contains(&total) {
         return Err(std::io::Error::new(
             std::io::ErrorKind::InvalidData,
             format!("TDS packet length {total} out of range"),
@@ -719,7 +722,7 @@ fn classify_login_response(frames: &[u8]) -> Result<(), UpstreamError> {
                 redact_for_audit(&message),
             )));
         }
-        if body.iter().any(|&b| b == 0xAD) {
+        if body.contains(&0xAD) {
             saw_loginack = true;
         }
         i = body_end;
@@ -958,7 +961,7 @@ fn build_login7(user: &str, password: &[u8], database: Option<&str>) -> Vec<u8> 
     out.extend_from_slice(&0x74_00_00_04u32.to_le_bytes()); // TDS 7.4
     out.extend_from_slice(&4096u32.to_le_bytes()); // PacketSize
     out.extend_from_slice(&0u32.to_le_bytes()); // ClientProgVer
-    out.extend_from_slice(&(std::process::id() as u32).to_le_bytes()); // ClientPID
+    out.extend_from_slice(&std::process::id().to_le_bytes()); // ClientPID
     out.extend_from_slice(&0u32.to_le_bytes()); // ConnectionID
     out.push(0x00); // option_flags1
     out.push(0x03); // option_flags2: ODBC=1, USER_SQL_AUTH (high bits 0)

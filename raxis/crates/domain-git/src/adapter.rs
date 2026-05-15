@@ -526,7 +526,7 @@ fn compute_touched_via_gix(
             Some(_) => {} // unchanged
         }
     }
-    for (path, _) in &parent_files {
+    for path in parent_files.keys() {
         if !head_files.contains_key(path) {
             out.push(TouchedResource {
                 uri: format!("path:///{path}"),

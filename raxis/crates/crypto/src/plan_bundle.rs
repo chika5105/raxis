@@ -138,9 +138,10 @@ pub enum PlanBundleCodecError {
 /// time.
 ///
 /// Returns `Err(SchemaEnvelopeMismatch)` if the bundle's
-/// `schema_version` and the freshness envelope (`signed_at_unix_secs`
-/// + `bundle_nonce`) disagree. This is a structural type-error caught
-/// at encode time so the CLI cannot produce a malformed bundle.
+/// `schema_version` and the freshness envelope
+/// (`signed_at_unix_secs` and `bundle_nonce`) disagree. This is a
+/// structural type-error caught at encode time so the CLI cannot
+/// produce a malformed bundle.
 pub fn canonical_encode(bundle: &PlanBundle) -> Result<Vec<u8>, PlanBundleCodecError> {
     let envelope_ok = match bundle.schema_version {
         SchemaVersion::V2_0 => {

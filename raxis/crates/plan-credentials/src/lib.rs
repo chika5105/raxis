@@ -61,6 +61,7 @@ pub struct TaskCredentialDecl {
     /// `mount_as` name. Use explicit, descriptive names:
     ///   - `USERS_DATABASE_URL` / `ANALYTICS_DATABASE_URL` (not `DATABASE_URL`)
     ///   - `CACHE_REDIS_URL` / `QUEUE_REDIS_URL` (not `REDIS_URL`)
+    ///
     /// A generic name like `DATABASE_URL` is only appropriate when
     /// exactly one credential of that type is declared.
     pub mount_as: String,
@@ -790,9 +791,11 @@ pub struct MongodbRestrictions {
 
     /// Fully-qualified collection allowlist (`<db>.<coll>`). The
     /// BSON walker resolves every command's primary collection
-    /// + `$db` and admits only members of this list. Empty = no
-    /// allowlist. Comparisons are case-sensitive (Mongo is case-
-    /// sensitive on both database and collection names). See
+    /// (combined with `$db`) and admits only members of this list.
+    /// An empty list disables the allowlist.
+    ///
+    /// Comparisons are case-sensitive (Mongo is case-sensitive on
+    /// both database and collection names). See
     /// `proxy-table-allowlists.md §6` for the contract.
     #[serde(default)]
     pub allowed_collections: Vec<String>,

@@ -44,7 +44,7 @@ use raxis_credentials::{
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
 
-use support::{FakeBackend as FakePg, FakeResponse, FakeRow};
+use support::{FakeBackend as FakePg, FakeResponse, FakeRow, ResponderFn};
 
 // ---------------------------------------------------------------------------
 // Fake credential backend
@@ -158,9 +158,7 @@ async fn drain_until_ready(s: &mut TcpStream) -> Vec<(u8, Vec<u8>)> {
 
 /// Boot a fake-pg upstream and return its `host:port` so the proxy's
 /// credential URL can point at it.
-async fn boot_fake_pg(
-    handler: Arc<dyn Fn(&str) -> Option<FakeResponse> + Send + Sync>,
-) -> std::net::SocketAddr {
+async fn boot_fake_pg(handler: ResponderFn) -> std::net::SocketAddr {
     let backend = FakePg::start(handler).await.expect("fake-pg bind");
     backend.addr()
 }

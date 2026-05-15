@@ -147,10 +147,10 @@ pub fn parse_trace_id(s: &str) -> Option<[u8; 16]> {
         return None;
     }
     let mut out = [0u8; 16];
-    for i in 0..16 {
+    for (i, byte) in out.iter_mut().enumerate() {
         let hi = hex_digit(s.as_bytes()[i * 2])?;
         let lo = hex_digit(s.as_bytes()[i * 2 + 1])?;
-        out[i] = (hi << 4) | lo;
+        *byte = (hi << 4) | lo;
     }
     Some(out)
 }
@@ -161,10 +161,10 @@ pub fn parse_span_id(s: &str) -> Option<[u8; 8]> {
         return None;
     }
     let mut out = [0u8; 8];
-    for i in 0..8 {
+    for (i, byte) in out.iter_mut().enumerate() {
         let hi = hex_digit(s.as_bytes()[i * 2])?;
         let lo = hex_digit(s.as_bytes()[i * 2 + 1])?;
-        out[i] = (hi << 4) | lo;
+        *byte = (hi << 4) | lo;
     }
     Some(out)
 }

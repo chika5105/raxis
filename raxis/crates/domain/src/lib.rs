@@ -609,6 +609,11 @@ pub mod conformance {
     }
 }
 
+// `serde_json` is used in tests; pull it in only there so the
+// production trait crate has zero JSON dep.
+#[cfg(test)]
+extern crate serde_json;
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -674,8 +679,3 @@ mod tests {
         }
     }
 }
-
-// `serde_json` is used in tests; pull it in only there so the
-// production trait crate has zero JSON dep.
-#[cfg(test)]
-extern crate serde_json;

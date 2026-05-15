@@ -297,7 +297,7 @@ mod tests {
         // is `{"id":1,"payload":"x"}` = 22 bytes, so the prefix must be
         // exactly [22, 0, 0, 0].
         let body_str = serde_json::to_string(&msg).unwrap();
-        let body_len = body_str.as_bytes().len() as u32;
+        let body_len = body_str.len() as u32;
         let expected_prefix = body_len.to_le_bytes();
         assert_eq!(
             &buf[..4],

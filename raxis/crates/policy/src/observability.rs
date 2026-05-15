@@ -317,7 +317,7 @@ pub struct ObservabilityPusherTlsConfig {
 // Validation
 // ---------------------------------------------------------------------------
 
-const MIN_SEGMENT_BYTES: u64 = 1 * 1024 * 1024;
+const MIN_SEGMENT_BYTES: u64 = 1024 * 1024;
 const MAX_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
 const MIN_TOTAL_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_TOTAL_BYTES: u64 = 16 * 1024 * 1024 * 1024;

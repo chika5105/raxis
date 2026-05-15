@@ -303,6 +303,11 @@ mod wire {
 
     pub(super) mod any_value {
         use prost::Oneof;
+        // The `*Value` variant names mirror the OTLP `AnyValue`
+        // oneof (see `opentelemetry-proto/.../common.proto`); they
+        // are wire identifiers, not Rust ergonomics, so the
+        // `enum_variant_names` lint doesn't apply here.
+        #[allow(clippy::enum_variant_names)]
         #[derive(Clone, PartialEq, Oneof)]
         pub enum Value {
             #[prost(string, tag = "1")]
@@ -715,7 +720,7 @@ mod wire {
         };
         let metric_protos: Vec<Metric> = metrics
             .iter()
-            .map(|m| {
+            .filter_map(|m| {
                 let attrs = attrs_pb(&m.labels);
                 let now = m.unix_nanos;
                 let datum = match (&m.metric_type, &m.datapoint) {
@@ -775,7 +780,6 @@ mod wire {
                     data: Some(datum),
                 })
             })
-            .flatten()
             .collect();
         let req = ExportMetricsServiceRequest {
             resource_metrics: vec![ResourceMetrics {

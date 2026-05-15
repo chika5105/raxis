@@ -262,13 +262,14 @@ pub fn redact_for_audit(msg: &str) -> String {
 /// makes forward progress (the message is already a redaction-only
 /// surface, so a malformed UTF-8 byte is fine to skip).
 fn utf8_char_len(lead: u8) -> usize {
-    if lead < 0x80 {
+    // ASCII (`< 0x80`) and stray continuation bytes
+    // (`0x80..=0xbf`) collapse to a 1-byte advance — the latter
+    // shouldn't appear at a lead position in valid UTF-8 but we
+    // treat them defensively so the redactor still makes forward
+    // progress.
+    if lead < 0xc0 {
         1
-    } else if lead < 0xc0 {
-        1
-    }
-    // continuation; treat as single
-    else if lead < 0xe0 {
+    } else if lead < 0xe0 {
         2
     } else if lead < 0xf0 {
         3
@@ -313,7 +314,7 @@ impl ParsedUpstreamUrl {
         };
         // Split on the first `/` or `?`.
         let host_end = after_creds
-            .find(|c: char| c == '/' || c == '?')
+            .find(['/', '?'])
             .unwrap_or(after_creds.len());
         let authority = &after_creds[..host_end];
         let (host, port) = match authority.rfind(':') {
@@ -617,7 +618,7 @@ impl UpstreamSession {
             .map(|c| FieldDescriptor {
                 name: c.name().to_owned(),
                 table_oid: c.table_oid().unwrap_or(0) as i32,
-                attribute_num: c.column_id().unwrap_or(0) as i16,
+                attribute_num: c.column_id().unwrap_or(0),
                 type_oid: c.type_().oid() as i32,
                 type_size: -1,
                 type_modifier: -1,
@@ -645,9 +646,9 @@ fn classify_connect_error(e: &tokio_postgres::Error) -> UpstreamError {
         || lower.contains("could not connect")
         || lower.contains("network is unreachable")
         || lower.contains("no route to host")
+        || lower.contains("name resolution")
+        || lower.contains("name or service not known")
     {
-        UpstreamError::TcpConnect(msg)
-    } else if lower.contains("name resolution") || lower.contains("name or service not known") {
         UpstreamError::TcpConnect(msg)
     } else {
         UpstreamError::Handshake(msg)

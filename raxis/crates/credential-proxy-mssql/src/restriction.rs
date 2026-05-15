@@ -253,12 +253,12 @@ pub struct QualifiedName {
     pub table: String,
 }
 
-impl QualifiedName {
+impl std::fmt::Display for QualifiedName {
     /// Canonical `<schema>.<table>` or bare `<table>` form.
-    pub fn to_string(&self) -> String {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match &self.schema {
-            Some(s) => format!("{}.{}", s.to_ascii_lowercase(), self.table),
-            None => self.table.clone(),
+            Some(s) => write!(f, "{}.{}", s.to_ascii_lowercase(), self.table),
+            None => f.write_str(&self.table),
         }
     }
 }
@@ -551,7 +551,7 @@ impl<'a> Walker<'a> {
         let kw2 = first_keyword(self.rest());
         if !kw2.is_empty()
             && !is_clause_boundary(&kw2)
-            && (self.rest().first().copied().map_or(false, |b| {
+            && (self.rest().first().copied().is_some_and(|b| {
                 b.is_ascii_alphabetic() || b == b'_' || b == b'"' || b == b'[' || b == b'`'
             }))
         {
