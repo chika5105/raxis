@@ -43,6 +43,12 @@ raxis-initramfs-builder  = { workspace = true }
 libc          = { workspace = true }
 
 tokio         = { workspace = true }
+# `cargo xtask images bake` serialises the per-role integrity
+# manifest as JSON; serde's `derive` feature gives us the struct
+# annotations the bake driver uses to round-trip a `BakeManifest`
+# through `serde_json::{to_vec_pretty, from_slice}`. Workspace-pinned
+# so xtask resolves to the same serde the rest of the tree uses.
+serde         = { workspace = true }
 serde_json    = { workspace = true }
 chrono        = { version = "0.4", default-features = false, features = ["clock"] }
 raxis-isolation         = { path = "../crates/isolation" }

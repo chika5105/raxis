@@ -74,7 +74,7 @@ const STAGING_PARENT: &str = "images";
 const DEFAULT_DEV_INSTALL_DIR: &str = "/usr/local/lib/raxis";
 
 /// One canonical role this pipeline knows how to stage.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Role {
     Orchestrator,
     Reviewer,
@@ -82,6 +82,21 @@ enum Role {
 }
 
 impl Role {
+    /// Does this role's rootfs come from a `Containerfile`-driven OCI
+    /// bake (`bake-rootfs`), or is it binary-only (just the staged
+    /// planner PID-1 binary)? Orchestrator + Reviewer are deliberately
+    /// binary-only per `INV-PLANNER-HARNESS-02` minimalism; only
+    /// `executor-starter` needs the OS-tooling-rich Containerfile bake.
+    ///
+    /// This single helper is the only place the dispatch lives so a
+    /// future role that flips between the two shapes stays a one-line
+    /// edit. The harness's `role_needs_rootfs_bake` mirrors this
+    /// taxonomy and is kept in lockstep by
+    /// `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`'s witness test.
+    fn needs_rootfs_bake(self) -> bool {
+        matches!(self, Role::ExecutorStarter)
+    }
+
     fn parse(s: &str) -> Result<Self> {
         match s {
             "orchestrator"     => Ok(Role::Orchestrator),
@@ -1539,6 +1554,1380 @@ fn run_export_pipeline(
         bail!("tar -x failed (exit {tar_status}); rootfs may be partially extracted at {}",
               rootfs_dir.display());
     }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// bake — single-command end-to-end pipeline + preflight + manifest.json
+//
+// `cargo xtask images bake [--role <ROLE>]... [--install-dir <PATH>]
+//                          [--signing-key <PATH>] [--kernel-from-file <PATH>]
+//                          [--skip-bake-rootfs] [--force]`
+//
+// Wraps the existing three-step pipeline (`bake-rootfs → dev-stage →
+// build-all`) with:
+//
+//  * A **host-tool preflight** that runs BEFORE any artefact is
+//    produced. Verifies the container builder (when any selected
+//    role needs an OCI bake), the Rust musl cross-target + linker,
+//    the signing key, and the Linux guest-kernel binary
+//    (`vmlinux`). Fails closed with a clear remediation when any
+//    input is missing — never lets the bake proceed half-staffed.
+//    (`INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`.)
+//
+//  * **`vmlinux` auto-staging.** Resolves the canonical Linux
+//    kernel binary path (`<install_dir>/kernel/vmlinux`) at the
+//    bake layer rather than leaving it to the harness's
+//    `ensure_canonical_kernel_binary_staged` workaround. Resolution
+//    order: explicit `--kernel-from-file`, then env override
+//    `RAXIS_DEV_KERNEL_SOURCE`, then a pre-existing file at the
+//    canonical path. `--force` is required to overwrite an existing
+//    kernel binary that doesn't match the requested source.
+//    (`INV-IMAGE-BAKE-VMLINUX-STAGED-01`.)
+//
+//  * A per-role **integrity manifest** at
+//    `<install_dir>/images/<artefact_stem>-<kver>.bake.json`. Records
+//    the SHA-256 of every input (Containerfile, in-tree
+//    `manifest.toml`, staged planner binary, signing-key
+//    fingerprint, vmlinux) and every output (`.img`,
+//    `.manifest.toml`). On re-run the bake hashes the inputs first
+//    and skips any role whose input + output SHAs match the prior
+//    manifest — re-running the bake on an unchanged tree is a fast
+//    no-op. (`INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01` and the
+//    no-stale-cache witness in `INV-IMAGE-BAKE-NO-STALE-CACHE-01`.)
+//
+//  * A **Containerfile-graph acyclicity check** that parses every
+//    in-tree `Containerfile` (one per role) and asserts no `FROM`
+//    line names another in-tree role's bake tag. This prevents the
+//    pre-migration `images/<role>/Containerfile.dev` shape (which
+//    chained one role's image into another's base) from ever
+//    re-entering the tree under a different filename.
+//    (`INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01`.)
+//
+// The existing `dev-stage`, `bake-rootfs`, and `build-all`
+// subcommands keep their semantics; `bake` is a strict superset
+// that runs them in the canonical order. Operators on a fresh
+// checkout run one command (`cargo xtask images bake`) instead of
+// the four they had to chain by hand before (`dev-kernel` plus the
+// three per-role pipeline steps).
+//
+// Normative reference: `specs/v2/canonical-images.md §7` and
+// `specs/invariants.md §10.5 INV-IMAGE-BAKE-*`.
+// ---------------------------------------------------------------------------
+
+use serde::{Deserialize, Serialize};
+use sha2::{Digest as ShaDigest, Sha256};
+
+/// Schema version embedded in every `*.bake.json` integrity manifest.
+///
+/// Bumping requires either (a) backwards-compatible additions
+/// (`#[serde(default)]`) so old manifests still round-trip into the
+/// new struct shape, or (b) a migration step that consumers run
+/// before reading manifests stamped with the prior version. Either
+/// way the version field is the trigger for that decision tree.
+const BAKE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// Workspace-relative path to the per-role staging directory's
+/// Containerfile. Used by the acyclicity check and by `preflight`
+/// to assert each role's recipe exists before we attempt the
+/// container build. Mirrors `bake_one_role`'s `containerfile`
+/// resolution.
+fn containerfile_path(workspace_root: &Path, role: Role) -> PathBuf {
+    workspace_root
+        .join(STAGING_PARENT)
+        .join(role.images_subdir())
+        .join("Containerfile")
+}
+
+/// Workspace-relative path to the per-role in-tree
+/// `manifest.toml` — the pinned `BuildInputs` fixture
+/// (kernel_version, source_date_epoch, ...).
+fn inputs_manifest_path(workspace_root: &Path, role: Role) -> PathBuf {
+    workspace_root
+        .join(STAGING_PARENT)
+        .join(role.images_subdir())
+        .join("manifest.toml")
+}
+
+/// Compute the SHA-256 of a file's contents and return the
+/// lowercase hex digest. Errors propagate the path so the caller
+/// can include "which file" in its diagnostic.
+fn sha256_file(path: &Path) -> Result<String> {
+    let bytes = std::fs::read(path)
+        .with_context(|| format!("read {}", path.display()))?;
+    let mut h = Sha256::new();
+    h.update(&bytes);
+    Ok(hex::encode(h.finalize()))
+}
+
+/// Inputs covered by the per-role integrity manifest. Recorded in
+/// `bake.json` so a re-run can shortcut to a no-op when none of the
+/// observable inputs has changed.
+///
+/// The hash set is **deliberately minimal**. Everything that
+/// influences the resulting `.img` byte stream IS hashed; nothing
+/// else is. Adding a field requires updating both the writer
+/// (`bake_one_role_full`) and the comparison shortcut
+/// (`bake_should_skip`) so a silent "I added a field but didn't
+/// gate on it" mismatch is structurally unreachable.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BakeInputs {
+    /// SHA-256 of the per-role `Containerfile` (the OCI recipe).
+    /// `None` for binary-only roles where the file MAY be absent
+    /// from a stripped checkout (though all three tracked roles
+    /// currently ship one).
+    containerfile_sha256:    Option<String>,
+    /// SHA-256 of the per-role `manifest.toml` (`BuildInputs`
+    /// fixture: kernel_version, source_date_epoch, ...).
+    inputs_manifest_sha256:  String,
+    /// SHA-256 of the staged planner binary at
+    /// `images/<role>/rootfs/usr/local/bin/<binary>`. `None` when
+    /// no binary has been staged yet (i.e. dev-stage has not run);
+    /// the bake driver always (re)stages before recording so this
+    /// is `Some(...)` in every emitted manifest.
+    staged_binary_sha256:    Option<String>,
+    /// First 16 hex chars of the Ed25519 signing-key fingerprint.
+    /// Recorded so a key rotation invalidates the cache (the
+    /// downstream `.manifest.toml` carries the full fingerprint).
+    signing_key_fp_prefix:   String,
+    /// SHA-256 of `<install_dir>/kernel/vmlinux` (the canonical
+    /// guest-kernel binary the substrate boots). `None` when
+    /// vmlinux is absent — the preflight rejects that state before
+    /// we reach the bake step, so a manifest with `vmlinux_sha256
+    /// = None` should never appear on disk under the default
+    /// invocation.
+    vmlinux_sha256:          Option<String>,
+}
+
+/// Outputs covered by the per-role integrity manifest. Recorded in
+/// `bake.json` so an operator (or downstream tooling) can verify
+/// the on-disk artefacts match what the bake claimed it produced.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BakeOutputs {
+    /// SHA-256 of the produced cpio.gz blob at
+    /// `<install_dir>/images/<stem>-<kver>.img`.
+    img_sha256:               String,
+    /// On-disk size in bytes of the produced `.img` blob.
+    img_size_bytes:           u64,
+    /// SHA-256 of the produced TOML-encoded image manifest at
+    /// `<install_dir>/images/<stem>-<kver>.manifest.toml`.
+    manifest_toml_sha256:     String,
+    /// On-disk size in bytes of the produced `.manifest.toml`.
+    manifest_toml_size_bytes: u64,
+}
+
+/// Host-context fields recorded in the integrity manifest. Pure
+/// metadata; not consulted by the no-op shortcut (a bake on a
+/// different host should not invalidate the cache as long as the
+/// observable inputs match).
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct BakeHostInfo {
+    /// `cfg!(target_os)` string when the bake ran ("macos" /
+    /// "linux" / ...).
+    os:                String,
+    /// `cfg!(target_arch)` string ("aarch64" / "x86_64").
+    arch:              String,
+    /// Cross-compile target triple the bake used.
+    target_triple:     String,
+    /// Container builder used to bake the rootfs, when relevant
+    /// (`docker` / `podman` / `buildah`). `None` for binary-only
+    /// roles that don't invoke the OCI builder.
+    container_builder: Option<String>,
+}
+
+/// On-disk shape of `<install_dir>/images/<stem>-<kver>.bake.json`.
+///
+/// Read by the no-op shortcut, written atomically by the bake
+/// driver. The same struct is also written as
+/// `<install_dir>/images/<stem>-<kver>.bake.json.tmp` then renamed
+/// so a partial write cannot corrupt the cache state.
+///
+/// **Schema discipline.** A new field MUST be `#[serde(default)]`
+/// so a pre-existing on-disk manifest from an earlier xtask version
+/// still deserialises (rather than tripping the no-op shortcut
+/// into a forced rebake). Field removals require a schema-version
+/// bump.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BakeManifest {
+    schema_version:   u32,
+    role:             String,
+    artefact_stem:    String,
+    kernel_version:   String,
+    /// UNIX seconds-since-epoch when the bake completed. Cosmetic;
+    /// the no-op shortcut does not consult this.
+    built_at_unix:    u64,
+    host:             BakeHostInfo,
+    inputs:           BakeInputs,
+    outputs:          BakeOutputs,
+}
+
+impl BakeManifest {
+    /// Path the per-role manifest lives at — sibling of the `.img`
+    /// and `.manifest.toml` it summarises. Pinning the layout in
+    /// one helper keeps every reader / writer in lockstep.
+    fn path(install_dir: &Path, role: Role, kernel_version: &str) -> PathBuf {
+        install_dir.join("images").join(format!(
+            "{stem}-{kver}.bake.json",
+            stem = role.artefact_stem(),
+            kver = kernel_version,
+        ))
+    }
+
+    /// Read a prior manifest from disk, returning `None` if the
+    /// file is absent or fails to parse (the no-op shortcut treats
+    /// "no manifest" and "corrupt manifest" identically — the
+    /// safe answer in both cases is to rebake).
+    fn read_from(path: &Path) -> Option<Self> {
+        let bytes = std::fs::read(path).ok()?;
+        let parsed: BakeManifest = serde_json::from_slice(&bytes).ok()?;
+        if parsed.schema_version != BAKE_MANIFEST_SCHEMA_VERSION {
+            // A future-version manifest is treated as "unknown" so
+            // an older xtask never trusts a newer manifest's
+            // shortcut decision; we rebake under our own rules.
+            return None;
+        }
+        Some(parsed)
+    }
+
+    /// Serialise to pretty JSON and write atomically. The pretty
+    /// shape (2-space indent) is intentional — the file is meant
+    /// to be operator-readable, and `bake.json` files are small
+    /// (under 1 KiB even with future field growth).
+    fn write_atomic(&self, dest: &Path) -> Result<()> {
+        let mut bytes = serde_json::to_vec_pretty(self)
+            .context("encode bake manifest")?;
+        bytes.push(b'\n');
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent).with_context(|| {
+                format!("create {} (for bake manifest)", parent.display())
+            })?;
+        }
+        let tmp = dest.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes)
+            .with_context(|| format!("write {} (tmp)", tmp.display()))?;
+        std::fs::rename(&tmp, dest)
+            .with_context(|| format!("rename {} -> {}", tmp.display(), dest.display()))?;
+        Ok(())
+    }
+}
+
+/// Read the per-role `BuildInputs` (and extract its `kernel_version`)
+/// without committing to a full bake. Used by the preflight to plan
+/// per-role manifest paths and by the no-op shortcut to compute
+/// where the prior `bake.json` would live.
+fn read_kernel_version_for(workspace_root: &Path, role: Role) -> Result<String> {
+    let inputs_path = inputs_manifest_path(workspace_root, role);
+    let s = std::fs::read_to_string(&inputs_path).with_context(|| {
+        format!(
+            "read {}: per-role manifest.toml is required to resolve \
+             kernel_version for bake-output paths",
+            inputs_path.display(),
+        )
+    })?;
+    let parsed: raxis_image_builder::BuildInputs = toml::from_str(&s)
+        .with_context(|| format!("parse {}", inputs_path.display()))?;
+    Ok(parsed.kernel_version)
+}
+
+/// Compute the current input inventory for one role. Reads the
+/// Containerfile, the in-tree `manifest.toml`, the staged planner
+/// binary (if any), and the canonical vmlinux.
+///
+/// Errors only on inputs the bake step is going to need anyway
+/// (`manifest.toml`, `vmlinux`). The Containerfile is `Option<Sha>`
+/// because a future role might be binary-only and ship without
+/// one; the staged-binary entry is `Option<Sha>` because dev-stage
+/// may not have run yet. The bake driver re-stages the binary
+/// before passing the inventory to `BakeManifest::write_atomic`,
+/// so a final manifest never carries `staged_binary_sha256 =
+/// None`.
+fn compute_bake_inputs(
+    role:                  Role,
+    workspace_root:        &Path,
+    install_dir:           &Path,
+    signing_key_fp_prefix: &str,
+) -> Result<BakeInputs> {
+    let containerfile = containerfile_path(workspace_root, role);
+    let containerfile_sha256 = if containerfile.exists() {
+        Some(sha256_file(&containerfile)?)
+    } else {
+        None
+    };
+
+    let inputs_manifest_sha256 = sha256_file(
+        &inputs_manifest_path(workspace_root, role),
+    )?;
+
+    let staged_binary = workspace_root
+        .join(STAGING_PARENT)
+        .join(role.images_subdir())
+        .join("rootfs")
+        .join("usr").join("local").join("bin")
+        .join(role.binary_name());
+    let staged_binary_sha256 = if staged_binary.exists() {
+        Some(sha256_file(&staged_binary)?)
+    } else {
+        None
+    };
+
+    let vmlinux = install_dir.join("kernel").join("vmlinux");
+    let vmlinux_sha256 = if vmlinux.exists() {
+        Some(sha256_file(&vmlinux)?)
+    } else {
+        None
+    };
+
+    Ok(BakeInputs {
+        containerfile_sha256,
+        inputs_manifest_sha256,
+        staged_binary_sha256,
+        signing_key_fp_prefix: signing_key_fp_prefix.to_owned(),
+        vmlinux_sha256,
+    })
+}
+
+/// Decide whether the prior `bake.json` lets us short-circuit one
+/// role's bake. Returns `Some(prior_manifest)` to skip with a log
+/// line, or `None` to proceed with the full bake.
+///
+/// The shortcut fires only when:
+///
+///  1. A prior manifest exists at the expected path.
+///  2. The prior manifest's `inputs` matches the just-computed
+///     inputs **byte-for-byte** (including the vmlinux SHA — a
+///     guest-kernel rotation re-bakes everything because the
+///     manifest binds image to kernel pair).
+///  3. The `.img` and `.manifest.toml` outputs still exist on disk
+///     and their SHA-256s match what the prior manifest recorded.
+///
+/// If ANY of those checks fails the shortcut bails. There's no
+/// "partial" no-op — either every input is unchanged AND every
+/// output is intact, or we rebake.
+fn bake_should_skip(
+    install_dir:    &Path,
+    role:           Role,
+    kernel_version: &str,
+    current_inputs: &BakeInputs,
+) -> Result<Option<BakeManifest>> {
+    let manifest_path = BakeManifest::path(install_dir, role, kernel_version);
+    let Some(prior) = BakeManifest::read_from(&manifest_path) else {
+        return Ok(None);
+    };
+    if &prior.inputs != current_inputs {
+        return Ok(None);
+    }
+    let img = install_dir.join("images").join(format!(
+        "{stem}-{kver}.img",
+        stem = role.artefact_stem(),
+        kver = kernel_version,
+    ));
+    let manifest_toml = install_dir.join("images").join(format!(
+        "{stem}-{kver}.manifest.toml",
+        stem = role.artefact_stem(),
+        kver = kernel_version,
+    ));
+    if !img.exists() || !manifest_toml.exists() {
+        return Ok(None);
+    }
+    let img_sha = sha256_file(&img)?;
+    if img_sha != prior.outputs.img_sha256 {
+        return Ok(None);
+    }
+    let mtoml_sha = sha256_file(&manifest_toml)?;
+    if mtoml_sha != prior.outputs.manifest_toml_sha256 {
+        return Ok(None);
+    }
+    Ok(Some(prior))
+}
+
+// ---------------------------------------------------------------------------
+// Containerfile graph acyclicity (INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01)
+// ---------------------------------------------------------------------------
+
+/// Per-role bake tag the OCI build step emits, in the form
+/// `raxis-rootfs-<images-subdir>:dev`. Mirrors `bake_one_role`'s
+/// `tag` construction so the acyclicity check inspects the same
+/// names the actual `<builder> build` would use as a `FROM`
+/// argument.
+fn role_bake_tag(role: Role) -> String {
+    format!("raxis-rootfs-{}:dev", role.images_subdir())
+}
+
+/// Tokens that, when found as the immediate operand of `FROM`,
+/// indicate the in-tree Containerfile chains another in-tree
+/// role's bake output as its base layer. Returning `Some(role)`
+/// means the parsed `FROM` operand matches one of `Role::all()`'s
+/// bake tags.
+fn from_token_names_in_tree_role(token: &str) -> Option<Role> {
+    let normalised = token.trim_end_matches(|c: char| c == '\n' || c.is_whitespace());
+    for r in Role::all() {
+        if normalised == role_bake_tag(*r) {
+            return Some(*r);
+        }
+    }
+    None
+}
+
+/// Parse every in-tree Containerfile and assert no role's recipe
+/// pulls another role's bake tag as a `FROM` base. The check is
+/// **conservative**: it accepts any `FROM` operand that does NOT
+/// match one of `role_bake_tag(...)` (`debian:bookworm-slim`,
+/// `scratch`, multi-stage `AS <name>` references, registry URLs,
+/// etc.). The only rejection shape is a `FROM` that explicitly
+/// names another in-tree role's tag, which is the historical
+/// `Containerfile.dev` failure mode (untracked diff in the
+/// pre-migration aegis-ai checkout; cleaned out by the
+/// `chika5105/raxis` migration sweep but kept in the spec as a
+/// regression guard).
+///
+/// Returns `Ok(())` on a clean graph; bails with the offending
+/// (role, from_token, role_pulled_in) triple otherwise so the
+/// remediation message names the exact problem line.
+fn check_containerfile_graph_acyclic(workspace_root: &Path) -> Result<()> {
+    for r in Role::all() {
+        let path = containerfile_path(workspace_root, *r);
+        if !path.exists() {
+            continue;
+        }
+        let body = std::fs::read_to_string(&path)
+            .with_context(|| format!("read {} (Containerfile graph check)", path.display()))?;
+        for (lineno, raw_line) in body.lines().enumerate() {
+            let line = raw_line.trim_start();
+            // Comments and blank lines never define a base image.
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            // Match `FROM <image>` (case-insensitive — Containerfile
+            // grammar treats directives as case-insensitive). We
+            // accept `FROM`, `from`, `From`, etc.
+            let lower = line.to_ascii_lowercase();
+            if !lower.starts_with("from ") && !lower.starts_with("from\t") {
+                continue;
+            }
+            // After `FROM`, the operand is the next whitespace-
+            // separated token. We strip the optional `--platform=`
+            // flag the Containerfile grammar allows so a
+            // `FROM --platform=$BUILDPLATFORM scratch` line
+            // resolves to the `scratch` operand for this check.
+            let rest = &line[4..].trim_start();
+            let mut tokens = rest.split_whitespace();
+            let Some(mut operand) = tokens.next() else {
+                continue;
+            };
+            while operand.starts_with("--") {
+                operand = match tokens.next() {
+                    Some(t) => t,
+                    None    => break,
+                };
+            }
+            if let Some(target) = from_token_names_in_tree_role(operand) {
+                bail!(
+                    "INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 VIOLATED: \
+                     {} line {} declares `FROM {}`, which is the bake \
+                     tag the in-tree pipeline produces for role {:?}. \
+                     This is the pre-migration `Containerfile.dev` \
+                     shape — one role's image chained as another \
+                     role's base layer — and produces a build-order \
+                     cycle that surfaces as a confusing `image not \
+                     found` failure on a fresh checkout (the upstream \
+                     role's tag does not exist until you bake it). \n\n\
+                     Remediation: replace the `FROM` operand with a \
+                     concrete upstream image (`debian:bookworm-slim`, \
+                     `scratch`, …) and copy in the upstream binaries \
+                     via `COPY --from=<stage>` from the upstream \
+                     Containerfile if needed.",
+                    path.display(),
+                    lineno + 1,
+                    operand,
+                    target,
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// vmlinux staging (INV-IMAGE-BAKE-VMLINUX-STAGED-01)
+// ---------------------------------------------------------------------------
+
+/// Source of truth resolution for the Linux guest-kernel binary
+/// the bake should stage into `<install_dir>/kernel/vmlinux`.
+///
+/// Order, with the **first present** source winning:
+///
+/// 1. Explicit `--kernel-from-file <PATH>` on the bake CLI.
+/// 2. `RAXIS_DEV_KERNEL_SOURCE` env var.
+/// 3. An already-staged file at `<install_dir>/kernel/vmlinux`
+///    (the bake reuses it).
+/// 4. The canonical host install at
+///    `/usr/local/lib/raxis/kernel/vmlinux` (the same path the
+///    `cargo xtask images dev-kernel` flow targets per
+///    `system-requirements.md §11`).
+///
+/// Returns the path the bake should copy (or `None` if the target
+/// already-staged path is in use and matches the canonical
+/// location — i.e. nothing to copy). Bails with a remediation
+/// message naming the `dev-kernel` flow when none of the four
+/// sources resolves.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum VmlinuxResolution {
+    /// `<install_dir>/kernel/vmlinux` already exists and we will
+    /// NOT overwrite it. The bake records its SHA in the manifest.
+    AlreadyStaged { path: PathBuf },
+    /// Source resolves to a path we MUST copy into the canonical
+    /// staging location.
+    CopyFrom { source: PathBuf },
+}
+
+fn resolve_vmlinux_source(
+    install_dir:     &Path,
+    explicit_from:   Option<&Path>,
+    force_overwrite: bool,
+) -> Result<VmlinuxResolution> {
+    let staged = install_dir.join("kernel").join("vmlinux");
+
+    // 1 + 2: explicit / env override. Both win over an
+    // already-staged file IFF `--force` is set; without force,
+    // any in-place file takes precedence so a successful prior
+    // `dev-kernel` run is not re-overwritten by a stale env var.
+    let explicit_env = std::env::var_os("RAXIS_DEV_KERNEL_SOURCE")
+        .map(PathBuf::from);
+    let override_source = explicit_from
+        .map(PathBuf::from)
+        .or(explicit_env);
+
+    if let Some(src) = override_source.as_ref() {
+        let src_meta = std::fs::metadata(src).with_context(|| {
+            format!(
+                "stat {} (resolved from --kernel-from-file / RAXIS_DEV_KERNEL_SOURCE)",
+                src.display(),
+            )
+        })?;
+        if !src_meta.is_file() || src_meta.len() == 0 {
+            bail!(
+                "INV-IMAGE-BAKE-VMLINUX-STAGED-01: explicit kernel source {} \
+                 is not a non-empty file (size={}, is_file={}). The bake \
+                 refuses to stage a stub or a directory as vmlinux.",
+                src.display(),
+                src_meta.len(),
+                src_meta.is_file(),
+            );
+        }
+        // If the source IS the same canonical path that's already
+        // staged (e.g. the operator passed `--kernel-from-file
+        // /usr/local/lib/raxis/kernel/vmlinux` which happens to be
+        // the install dir's staged path), don't copy onto itself.
+        if let Ok(staged_canon) = staged.canonicalize() {
+            if let Ok(src_canon) = src.canonicalize() {
+                if staged_canon == src_canon {
+                    return Ok(VmlinuxResolution::AlreadyStaged { path: staged });
+                }
+            }
+        }
+        if staged.exists() && !force_overwrite {
+            // Honour --force semantics: refuse to overwrite a
+            // working kernel unless explicitly asked. The
+            // operator's intent matters here — a fresh
+            // `--kernel-from-file` after a successful boot run
+            // should NOT silently invalidate the staged binary
+            // without a deliberate `--force`.
+            return Ok(VmlinuxResolution::AlreadyStaged { path: staged });
+        }
+        return Ok(VmlinuxResolution::CopyFrom { source: src.clone() });
+    }
+
+    // 3: already staged at the install dir (the common no-op case
+    // when the operator already ran `dev-kernel` or a previous
+    // bake).
+    if let Ok(meta) = std::fs::metadata(&staged) {
+        if meta.is_file() && meta.len() > 0 {
+            return Ok(VmlinuxResolution::AlreadyStaged { path: staged });
+        }
+    }
+
+    // 4: canonical host install (the path `dev-kernel` defaults
+    // to). Used by operators who keep one global kernel and run
+    // bakes against per-developer install dirs.
+    let canonical = PathBuf::from("/usr/local/lib/raxis/kernel/vmlinux");
+    if canonical.exists() && canonical != staged {
+        return Ok(VmlinuxResolution::CopyFrom { source: canonical });
+    }
+
+    bail!(
+        "INV-IMAGE-BAKE-VMLINUX-STAGED-01 VIOLATED: no Linux guest-kernel \
+         binary (`vmlinux`) found at any of:\n  \
+         - --kernel-from-file <PATH>            (CLI flag)\n  \
+         - $RAXIS_DEV_KERNEL_SOURCE             (env override)\n  \
+         - {staged}\n  \
+         - /usr/local/lib/raxis/kernel/vmlinux  (canonical install)\n\n\
+         AVF and Firecracker substrates resolve their boot kernel from \n  \
+         <install_dir>/kernel/vmlinux\n\
+         per `canonical_images_preflight::linux_kernel_path`. Without it, \
+         the first session-spawn surfaces `AVF VM start failed: Invalid \
+         virtual machine configuration. The boot loader is invalid.` two \
+         seconds into the run.\n\n\
+         Remediation: stage a kernel via `cargo xtask images dev-kernel \
+         --from-file <PATH>` and re-run bake; or pass \
+         `--kernel-from-file <PATH>` directly to `cargo xtask images bake`.",
+        staged = staged.display(),
+    )
+}
+
+/// Apply a resolved `VmlinuxResolution`: copy if needed, leave
+/// alone otherwise. Returns the SHA-256 of the bytes on disk after
+/// the operation (so the caller can fold it into the per-role
+/// integrity manifest without re-reading the file). Atomically
+/// stages via a temp-file rename so a partial copy never replaces
+/// a working kernel.
+fn apply_vmlinux_resolution(
+    install_dir: &Path,
+    resolution:  &VmlinuxResolution,
+) -> Result<String> {
+    match resolution {
+        VmlinuxResolution::AlreadyStaged { path } => sha256_file(path),
+        VmlinuxResolution::CopyFrom { source } => {
+            let dest_dir = install_dir.join("kernel");
+            std::fs::create_dir_all(&dest_dir)
+                .with_context(|| format!("create {}", dest_dir.display()))?;
+            let dest = dest_dir.join("vmlinux");
+            let tmp  = dest_dir.join(".vmlinux.tmp");
+            std::fs::copy(source, &tmp).with_context(|| {
+                format!(
+                    "copy vmlinux: {} -> {}",
+                    source.display(),
+                    tmp.display(),
+                )
+            })?;
+            std::fs::rename(&tmp, &dest).with_context(|| {
+                format!(
+                    "atomic rename {} -> {}",
+                    tmp.display(),
+                    dest.display(),
+                )
+            })?;
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"bake_vmlinux_staged\",\
+                 \"source\":{:?},\"dest\":{:?}}}",
+                source.display().to_string(),
+                dest.display().to_string(),
+            );
+            sha256_file(&dest)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Host-tool preflight (INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01)
+// ---------------------------------------------------------------------------
+
+/// Outcome from preflight: every input that the bake needs has been
+/// resolved AND probed for availability. The bake driver consumes
+/// this struct and never re-resolves any of these — preflight is
+/// the single point where missing-input failures surface.
+#[derive(Debug)]
+struct PreflightOutcome {
+    /// Container builder for roles that need an OCI bake. `None`
+    /// when the selected roles are all binary-only.
+    container_builder: Option<Builder>,
+    /// Cross-compile target triple all roles will build against.
+    target_triple:     String,
+    /// Resolved vmlinux source (or "already staged"). The bake
+    /// driver passes this to `apply_vmlinux_resolution`.
+    vmlinux:           VmlinuxResolution,
+    /// First 16 hex chars of the signing-key fingerprint, recorded
+    /// in the integrity manifest.
+    signing_key_fp_prefix: String,
+}
+
+/// Preflight every input the bake will need before producing ANY
+/// artefact. Fails closed with a remediation message naming the
+/// missing piece. Pure-read: never mutates the filesystem.
+///
+/// The function takes ownership of the parsed bake args so it can
+/// emit role-specific remediation (e.g., "container builder is
+/// only required because role `executor-starter` needs it").
+fn preflight_bake_inputs(
+    workspace_root:    &Path,
+    install_dir:       &Path,
+    signing_key:       &Path,
+    roles:             &[Role],
+    explicit_builder:  Option<Builder>,
+    explicit_kernel:   Option<&Path>,
+    force_overwrite:   bool,
+) -> Result<PreflightOutcome> {
+    // 1. Containerfile graph acyclicity — runs first because it's
+    //    pure-read and a cycle means no bake can ever succeed.
+    check_containerfile_graph_acyclic(workspace_root)?;
+
+    // 2. Per-role `manifest.toml` and `Containerfile` existence.
+    //    The bake step would error on these later anyway; surfacing
+    //    them here gives the operator one clean diagnostic instead
+    //    of a partial bake followed by a confusing per-role error.
+    for r in roles {
+        let containerfile = containerfile_path(workspace_root, *r);
+        let inputs        = inputs_manifest_path(workspace_root, *r);
+        if r.needs_rootfs_bake() && !containerfile.exists() {
+            bail!(
+                "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: role {:?} \
+                 requires an OCI rootfs bake but its Containerfile is \
+                 missing at {}. The bake refuses to proceed without \
+                 the per-role recipe.",
+                r,
+                containerfile.display(),
+            );
+        }
+        if !inputs.exists() {
+            bail!(
+                "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: role {:?} is \
+                 missing its in-tree manifest.toml at {}. This fixture \
+                 pins kernel_version / source_date_epoch / ... and is \
+                 required for the build-all signing step.",
+                r,
+                inputs.display(),
+            );
+        }
+    }
+
+    // 3. Signing key presence + non-empty + parseable.
+    if !signing_key.exists() {
+        bail!(
+            "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: signing key not \
+             found at {}. Run `cargo xtask dev-keys init` first \
+             (release-and-distribution.md §8.1), or pass --signing-key \
+             <PATH> to point at a pre-existing key.",
+            signing_key.display(),
+        );
+    }
+    let signing_key_bytes = load_signing_key(signing_key)?;
+    let fp_hex = hex::encode(raxis_image_manifest::fingerprint_signing_key(
+        &signing_key_bytes.verifying_key(),
+    ));
+    let signing_key_fp_prefix = fp_hex.chars().take(16).collect::<String>();
+
+    // 4. Container builder resolution (only when any role needs
+    //    an OCI bake). Detects daemon-not-running for `docker`
+    //    explicitly so we don't wait for the `build` subprocess to
+    //    surface that as a confusing exit-1 deep in the bake step.
+    let any_needs_bake = roles.iter().any(|r| r.needs_rootfs_bake());
+    let container_builder = if any_needs_bake {
+        let builder = match explicit_builder {
+            Some(b) => b,
+            None    => Builder::auto_detect()?,
+        };
+        verify_builder_daemon(builder)?;
+        Some(builder)
+    } else {
+        None
+    };
+
+    // 5. Rust musl cross-target sanity. We don't fail closed on a
+    //    missing target here (the dev-stage step surfaces a clear
+    //    `rustup target add` remediation) but we DO assert the
+    //    matching musl linker exists when on macOS — that's the
+    //    `brew install musl-cross` hint operators hit most often.
+    let target_triple = default_target_triple().to_owned();
+    #[cfg(target_os = "macos")]
+    {
+        if target_triple.contains("musl") {
+            let prefix = if target_triple.starts_with("aarch64-") {
+                "aarch64-linux-musl-gcc"
+            } else {
+                "x86_64-linux-musl-gcc"
+            };
+            if which(prefix).is_none() {
+                bail!(
+                    "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: musl \
+                     linker `{prefix}` not found on $PATH. Install via:\n  \
+                     brew install filosottile/musl-cross/musl-cross\n\
+                     (or pin a different target via --target). Bake \
+                     refuses to proceed because dev-stage would fail \
+                     mid-flight with a less helpful error from cargo."
+                );
+            }
+        }
+    }
+
+    // 6. vmlinux resolution — fails closed if no source resolves.
+    let vmlinux = resolve_vmlinux_source(install_dir, explicit_kernel, force_overwrite)?;
+
+    Ok(PreflightOutcome {
+        container_builder,
+        target_triple,
+        vmlinux,
+        signing_key_fp_prefix,
+    })
+}
+
+/// Probe the resolved container builder for an active daemon /
+/// usable socket. `docker info` is the universally-supported probe
+/// — both rootful and rootless daemons answer it; `podman` accepts
+/// it as a compatibility shim; `buildah` is daemon-less so the
+/// probe degenerates to "the binary exists" (already verified by
+/// `Builder::auto_detect`).
+///
+/// On daemon-not-running, surfaces a clear remediation message
+/// naming the offending socket. The most common shape on a fresh
+/// macOS dev host is "Docker CLI installed via Homebrew but
+/// Docker Desktop is not running" — the remediation explicitly
+/// names that.
+fn verify_builder_daemon(builder: Builder) -> Result<()> {
+    match builder {
+        Builder::Buildah => Ok(()), // daemon-less; binary check sufficed.
+        Builder::Docker | Builder::Podman => {
+            let out = std::process::Command::new(builder.binary())
+                .arg("info")
+                .output()
+                .with_context(|| format!(
+                    "spawn `{builder} info` (daemon probe)",
+                    builder = builder.binary(),
+                ))?;
+            if out.status.success() {
+                return Ok(());
+            }
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Docker Desktop's daemon-down stderr contains a
+            // "Cannot connect to the Docker daemon" line; podman's
+            // analogous message names the socket. Surface either
+            // verbatim alongside our remediation hint.
+            let hint = match builder {
+                Builder::Docker => "Start Docker Desktop (macOS: open /Applications/Docker.app)",
+                Builder::Podman => "Start the podman machine (`podman machine start`)",
+                Builder::Buildah => unreachable!(),
+            };
+            bail!(
+                "INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01: `{} info` \
+                 reports the container daemon is not reachable \
+                 (exit {}). The bake refuses to proceed because the \
+                 subsequent `build` would fail with a less helpful \
+                 error mid-pipeline.\n\n\
+                 Remediation: {}\n\n\
+                 Daemon probe output:\n--- stderr ---\n{}\n\
+                 --- stdout (tail) ---\n{}",
+                builder.binary(),
+                out.status,
+                hint,
+                stderr.trim(),
+                stdout.lines().rev().take(4)
+                    .collect::<Vec<_>>().into_iter().rev()
+                    .collect::<Vec<_>>().join("\n"),
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `cargo xtask images bake` entry point + arg parser
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct BakeArgs {
+    /// Empty = bake every role. Non-empty = bake the named roles
+    /// only.
+    roles:             Vec<Role>,
+    install_dir:       PathBuf,
+    signing_key:       PathBuf,
+    workspace_root:    PathBuf,
+    explicit_builder:  Option<Builder>,
+    explicit_kernel:   Option<PathBuf>,
+    /// When true, overwrite an existing
+    /// `<install_dir>/kernel/vmlinux` with the explicit-source
+    /// kernel even if the staged copy already exists. The bake
+    /// itself still uses the prior-manifest no-op shortcut for
+    /// rootfs images; `--force` only flips the vmlinux replacement
+    /// behaviour.
+    force:             bool,
+    /// When true, bake refuses to short-circuit even when the prior
+    /// `bake.json` says nothing changed. Used by CI to assert the
+    /// pipeline reproduces from scratch.
+    no_cache:          bool,
+}
+
+impl BakeArgs {
+    fn parse(argv: &[String]) -> Result<Self> {
+        let mut roles:            Vec<Role>        = Vec::new();
+        let mut install_dir:      Option<PathBuf>  = None;
+        let mut signing_key:      Option<PathBuf>  = None;
+        let mut explicit_builder: Option<Builder>  = None;
+        let mut explicit_kernel:  Option<PathBuf>  = None;
+        let mut force:            bool             = false;
+        let mut no_cache:         bool             = false;
+
+        let mut i = 0;
+        while i < argv.len() {
+            match argv[i].as_str() {
+                "--role" => {
+                    i += 1;
+                    let r = Role::parse(
+                        argv.get(i).context("--role requires a value")?,
+                    )?;
+                    if !roles.contains(&r) {
+                        roles.push(r);
+                    }
+                }
+                "--install-dir" => {
+                    i += 1;
+                    install_dir = Some(PathBuf::from(
+                        argv.get(i).context("--install-dir requires a path")?,
+                    ));
+                }
+                "--signing-key" => {
+                    i += 1;
+                    signing_key = Some(PathBuf::from(
+                        argv.get(i).context("--signing-key requires a path")?,
+                    ));
+                }
+                "--builder" => {
+                    i += 1;
+                    explicit_builder = Some(Builder::parse(
+                        argv.get(i).context("--builder requires a value")?,
+                    )?);
+                }
+                "--kernel-from-file" => {
+                    i += 1;
+                    explicit_kernel = Some(PathBuf::from(
+                        argv.get(i).context("--kernel-from-file requires a path")?,
+                    ));
+                }
+                "--force"    => force    = true,
+                "--no-cache" => no_cache = true,
+                "-h" | "--help" => {
+                    print_bake_help();
+                    std::process::exit(0);
+                }
+                other => bail!("unknown bake arg: {other}"),
+            }
+            i += 1;
+        }
+
+        if roles.is_empty() {
+            roles.extend(Role::all().iter().copied());
+        }
+
+        let install_dir = install_dir
+            .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
+        let signing_key = signing_key.or_else(default_signing_key_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not resolve --signing-key (HOME unset?). Pass --signing-key \
+                 <PATH> or run `cargo xtask dev-keys init` first."
+            )
+        })?;
+        let workspace_root = workspace_root_from_cwd()?;
+
+        Ok(Self {
+            roles,
+            install_dir,
+            signing_key,
+            workspace_root,
+            explicit_builder,
+            explicit_kernel,
+            force,
+            no_cache,
+        })
+    }
+}
+
+fn print_bake_help() {
+    eprintln!(
+        "usage: cargo xtask images bake [--role <ROLE>]... \n         \
+         [--install-dir <PATH>] [--signing-key <PATH>] \n         \
+         [--builder docker|podman|buildah] [--kernel-from-file <PATH>] \n         \
+         [--force] [--no-cache]\n\
+         \n\
+         Single-command end-to-end image-bake pipeline. Runs the canonical\n\
+         `bake-rootfs → dev-stage → build-all` flow for every selected role\n\
+         AFTER a host-input preflight, and stages the Linux guest-kernel\n\
+         binary at <install_dir>/kernel/vmlinux so the substrate can boot\n\
+         from a fresh install dir on first try.\n\
+         \n\
+         Defaults:\n  \
+         --role             every canonical role (orchestrator, reviewer, executor-starter)\n  \
+         --install-dir      $RAXIS_INSTALL_DIR (or {default_install})\n  \
+         --signing-key      $HOME/.config/raxis/keys/raxis-dev-signing.key.hex\n  \
+         --builder          auto-detect (docker → podman → buildah)\n  \
+         --kernel-from-file resolution order: --kernel-from-file → \n                     \
+                            $RAXIS_DEV_KERNEL_SOURCE → \n                     \
+                            <install_dir>/kernel/vmlinux (already-staged) → \n                     \
+                            /usr/local/lib/raxis/kernel/vmlinux\n\
+         \n\
+         Per-role outputs:\n  \
+         <install_dir>/images/raxis-<role>-<kver>.img\n  \
+         <install_dir>/images/raxis-<role>-<kver>.manifest.toml   (signed)\n  \
+         <install_dir>/images/raxis-<role>-<kver>.bake.json       (integrity manifest)\n  \
+         <install_dir>/kernel/vmlinux                              (guest kernel)\n\
+         \n\
+         Re-running `bake` on an unchanged tree is a fast no-op: the bake\n\
+         hashes each input and compares against the prior bake.json before\n\
+         deciding whether to re-run the per-role pipeline. Pass --no-cache\n\
+         to force a full rebake regardless of cached state.\n",
+        default_install = DEFAULT_DEV_INSTALL_DIR,
+    );
+}
+
+/// Entry point for `cargo xtask images bake`.
+pub fn run_bake(argv: &[String]) -> Result<()> {
+    let args = BakeArgs::parse(argv)?;
+    run_bake_inner(&args)
+}
+
+fn run_bake_inner(args: &BakeArgs) -> Result<()> {
+    let roles_json: Vec<&str> = args
+        .roles
+        .iter()
+        .map(|r| r.workspace_crate())
+        .collect();
+    let begin_payload = serde_json::json!({
+        "level": "info",
+        "event": "bake_begin",
+        "roles": roles_json,
+        "install_dir": args.install_dir.display().to_string(),
+        "workspace_root": args.workspace_root.display().to_string(),
+    });
+    eprintln!("{begin_payload}");
+
+    // 1. Preflight (pure-read; fails closed before any mutation).
+    let outcome = preflight_bake_inputs(
+        &args.workspace_root,
+        &args.install_dir,
+        &args.signing_key,
+        &args.roles,
+        args.explicit_builder,
+        args.explicit_kernel.as_deref(),
+        args.force,
+    )?;
+
+    // 2. Stage vmlinux into the canonical install location BEFORE
+    //    per-role bakes. This way every per-role manifest can
+    //    record the vmlinux SHA in its `inputs` block, binding
+    //    image to guest-kernel pair.
+    let vmlinux_sha = apply_vmlinux_resolution(&args.install_dir, &outcome.vmlinux)?;
+
+    // 3. Ensure the install-dir's images/ subdir exists. The
+    //    `build-all` step would create it, but doing it here keeps
+    //    the per-role error messages cleaner (existence-check
+    //    failures from inside `bake_one_role` surface at the
+    //    OCI-builder layer; doing this up front means a missing
+    //    install-dir surfaces as a single, clean error).
+    let images_dir = args.install_dir.join("images");
+    std::fs::create_dir_all(&images_dir).with_context(|| {
+        format!("create {} (per-role outputs)", images_dir.display())
+    })?;
+
+    // The signing key is re-loaded by the per-role `build_all`
+    // invocation from `args.signing_key` so we don't pass the
+    // parsed key down — keeping the per-role driver decoupled from
+    // the umbrella `bake` driver's load order.
+
+    // 4. Per-role bake.
+    for role in &args.roles {
+        bake_one_role_full(
+            *role,
+            args,
+            &outcome,
+            &vmlinux_sha,
+        )?;
+    }
+
+    let roles_json: Vec<&str> = args
+        .roles
+        .iter()
+        .map(|r| r.workspace_crate())
+        .collect();
+    let payload = serde_json::json!({
+        "level": "info",
+        "event": "bake_ok",
+        "roles": roles_json,
+    });
+    eprintln!("{payload}");
+    Ok(())
+}
+
+/// Top-level driver for one role: decide whether to short-circuit
+/// via the prior `bake.json`, otherwise run the canonical
+/// `bake-rootfs → dev-stage → build-all` flow and emit a fresh
+/// integrity manifest.
+fn bake_one_role_full(
+    role:        Role,
+    args:        &BakeArgs,
+    outcome:     &PreflightOutcome,
+    vmlinux_sha: &str,
+) -> Result<()> {
+    let kernel_version = read_kernel_version_for(&args.workspace_root, role)?;
+
+    let inputs_now = compute_bake_inputs(
+        role,
+        &args.workspace_root,
+        &args.install_dir,
+        &outcome.signing_key_fp_prefix,
+    )?;
+
+    // No-op shortcut: prior manifest agrees AND outputs intact.
+    if !args.no_cache {
+        if let Some(prior) = bake_should_skip(
+            &args.install_dir, role, &kernel_version, &inputs_now,
+        )? {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"bake_role_no_op\",\
+                 \"role\":{:?},\"reason\":\"inputs_unchanged_outputs_intact\",\
+                 \"img_sha256\":{:?}}}",
+                role.workspace_crate(),
+                prior.outputs.img_sha256,
+            );
+            return Ok(());
+        }
+    }
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"bake_role_begin\",\
+         \"role\":{:?},\"kernel_version\":{:?}}}",
+        role.workspace_crate(),
+        kernel_version,
+    );
+
+    // ── Step 1: bake-rootfs (only for roles that need an OCI bake).
+    if role.needs_rootfs_bake() {
+        let builder = outcome.container_builder.expect(
+            "preflight ensures container_builder.is_some() whenever any \
+             selected role needs a rootfs bake",
+        );
+        let platform = oci_platform_for_target_triple(&outcome.target_triple)?
+            .to_owned();
+        bake_one_role(role, builder, &platform, &args.workspace_root, false)?;
+    }
+
+    // ── Step 2: dev-stage. For binary-only roles we pass
+    //    `--allow-stub` to skip the stub guard (their staging tree
+    //    is intentionally just the planner binary).
+    let dev_stage_args = DevStageArgs {
+        role,
+        target:         outcome.target_triple.clone(),
+        workspace_root: args.workspace_root.clone(),
+        cargo:          std::env::var("CARGO")
+                            .unwrap_or_else(|_| "cargo".to_owned()),
+        allow_stub:     !role.needs_rootfs_bake(),
+    };
+    dev_stage(&dev_stage_args).with_context(|| {
+        format!("dev-stage for role {role:?} (bake driver)")
+    })?;
+
+    // ── Step 3: build-all (pack + sign).
+    let build_args = BuildAllArgs {
+        role:           Some(role),
+        install_dir:    args.install_dir.clone(),
+        workspace_root: args.workspace_root.clone(),
+        signing_key:    args.signing_key.clone(),
+        no_auto_stage:  true, // we already ran dev-stage above
+    };
+    build_all(&build_args)?;
+
+    // ── Step 4: record the integrity manifest. Re-compute inputs
+    //    AFTER dev-stage so the staged-binary SHA reflects the
+    //    freshly-built binary.
+    let inputs_after = compute_bake_inputs(
+        role,
+        &args.workspace_root,
+        &args.install_dir,
+        &outcome.signing_key_fp_prefix,
+    )?;
+    let img_path = args.install_dir.join("images").join(format!(
+        "{stem}-{kver}.img",
+        stem = role.artefact_stem(),
+        kver = kernel_version,
+    ));
+    let manifest_toml_path = args.install_dir.join("images").join(format!(
+        "{stem}-{kver}.manifest.toml",
+        stem = role.artefact_stem(),
+        kver = kernel_version,
+    ));
+    let img_sha          = sha256_file(&img_path)?;
+    let img_size         = std::fs::metadata(&img_path)?.len();
+    let mtoml_sha        = sha256_file(&manifest_toml_path)?;
+    let mtoml_size       = std::fs::metadata(&manifest_toml_path)?.len();
+
+    let manifest = BakeManifest {
+        schema_version:   BAKE_MANIFEST_SCHEMA_VERSION,
+        role:             role.workspace_crate().to_owned(),
+        artefact_stem:    role.artefact_stem().to_owned(),
+        kernel_version:   kernel_version.clone(),
+        built_at_unix:    std::time::SystemTime::now()
+            .duration_since(std::time::SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_secs())
+            .unwrap_or(0),
+        host: BakeHostInfo {
+            os:                std::env::consts::OS.to_owned(),
+            arch:              std::env::consts::ARCH.to_owned(),
+            target_triple:     outcome.target_triple.clone(),
+            container_builder: outcome.container_builder.map(|b| b.binary().to_owned()),
+        },
+        inputs: BakeInputs {
+            vmlinux_sha256: Some(vmlinux_sha.to_owned()),
+            ..inputs_after
+        },
+        outputs: BakeOutputs {
+            img_sha256:               img_sha.clone(),
+            img_size_bytes:           img_size,
+            manifest_toml_sha256:     mtoml_sha,
+            manifest_toml_size_bytes: mtoml_size,
+        },
+    };
+
+    let dest = BakeManifest::path(&args.install_dir, role, &kernel_version);
+    manifest.write_atomic(&dest)?;
+
+    eprintln!(
+        "{{\"level\":\"info\",\"event\":\"bake_role_ok\",\
+         \"role\":{:?},\"img_sha256\":{:?},\"bake_manifest\":{:?}}}",
+        role.workspace_crate(),
+        img_sha,
+        dest.display().to_string(),
+    );
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// `cargo xtask images preflight` — read-only preflight surface
+// ---------------------------------------------------------------------------
+
+#[derive(Debug)]
+struct PreflightArgs {
+    roles:             Vec<Role>,
+    install_dir:       PathBuf,
+    signing_key:       PathBuf,
+    workspace_root:    PathBuf,
+    explicit_builder:  Option<Builder>,
+    explicit_kernel:   Option<PathBuf>,
+}
+
+impl PreflightArgs {
+    fn parse(argv: &[String]) -> Result<Self> {
+        let mut roles:            Vec<Role>       = Vec::new();
+        let mut install_dir:      Option<PathBuf> = None;
+        let mut signing_key:      Option<PathBuf> = None;
+        let mut explicit_builder: Option<Builder> = None;
+        let mut explicit_kernel:  Option<PathBuf> = None;
+
+        let mut i = 0;
+        while i < argv.len() {
+            match argv[i].as_str() {
+                "--role" => {
+                    i += 1;
+                    let r = Role::parse(
+                        argv.get(i).context("--role requires a value")?,
+                    )?;
+                    if !roles.contains(&r) { roles.push(r); }
+                }
+                "--install-dir" => {
+                    i += 1;
+                    install_dir = Some(PathBuf::from(
+                        argv.get(i).context("--install-dir requires a path")?,
+                    ));
+                }
+                "--signing-key" => {
+                    i += 1;
+                    signing_key = Some(PathBuf::from(
+                        argv.get(i).context("--signing-key requires a path")?,
+                    ));
+                }
+                "--builder" => {
+                    i += 1;
+                    explicit_builder = Some(Builder::parse(
+                        argv.get(i).context("--builder requires a value")?,
+                    )?);
+                }
+                "--kernel-from-file" => {
+                    i += 1;
+                    explicit_kernel = Some(PathBuf::from(
+                        argv.get(i).context("--kernel-from-file requires a path")?,
+                    ));
+                }
+                "-h" | "--help" => {
+                    eprintln!(
+                        "usage: cargo xtask images preflight [--role <ROLE>]... \
+                         [--install-dir <P>] [--signing-key <P>] [--builder <B>] \
+                         [--kernel-from-file <P>]\n\
+                         \n\
+                         Read-only preflight: verifies every input the bake \
+                         step would need (container builder + daemon, signing \
+                         key, vmlinux, Containerfile graph acyclicity, per-role \
+                         manifest.toml) WITHOUT producing any artefacts. Useful \
+                         in CI to surface missing-input failures before \
+                         spending time on a bake that would later abort.\n"
+                    );
+                    std::process::exit(0);
+                }
+                other => bail!("unknown preflight arg: {other}"),
+            }
+            i += 1;
+        }
+
+        if roles.is_empty() {
+            roles.extend(Role::all().iter().copied());
+        }
+
+        let install_dir = install_dir
+            .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
+            .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
+        let signing_key = signing_key.or_else(default_signing_key_path).ok_or_else(|| {
+            anyhow::anyhow!(
+                "could not resolve --signing-key (HOME unset?). Pass --signing-key \
+                 <PATH> or run `cargo xtask dev-keys init` first."
+            )
+        })?;
+        let workspace_root = workspace_root_from_cwd()?;
+
+        Ok(Self {
+            roles, install_dir, signing_key, workspace_root,
+            explicit_builder, explicit_kernel,
+        })
+    }
+}
+
+/// Entry point for `cargo xtask images preflight`.
+pub fn run_preflight(argv: &[String]) -> Result<()> {
+    let args = PreflightArgs::parse(argv)?;
+    let outcome = preflight_bake_inputs(
+        &args.workspace_root,
+        &args.install_dir,
+        &args.signing_key,
+        &args.roles,
+        args.explicit_builder,
+        args.explicit_kernel.as_deref(),
+        false,
+    )?;
+    let roles_json: Vec<&str> = args
+        .roles
+        .iter()
+        .map(|r| r.workspace_crate())
+        .collect();
+    let vmlinux_token = match &outcome.vmlinux {
+        VmlinuxResolution::AlreadyStaged { path } => {
+            format!("already-staged:{}", path.display())
+        }
+        VmlinuxResolution::CopyFrom { source } => {
+            format!("copy-from:{}", source.display())
+        }
+    };
+    let builder_token = outcome
+        .container_builder
+        .map(|b| serde_json::Value::String(b.binary().to_string()))
+        .unwrap_or(serde_json::Value::Null);
+    // Hand the structured payload to `serde_json` so the
+    // `container_builder` null and any future stringly-typed
+    // field with embedded quotes round-trips through `jq`
+    // cleanly. The line is single-line per the rest of xtask's
+    // JSON-event logging convention.
+    let payload = serde_json::json!({
+        "level": "info",
+        "event": "preflight_ok",
+        "roles": roles_json,
+        "target_triple": outcome.target_triple,
+        "container_builder": builder_token,
+        "vmlinux": vmlinux_token,
+        "signing_key_fp_prefix": outcome.signing_key_fp_prefix,
+    });
+    eprintln!("{payload}");
     Ok(())
 }
 

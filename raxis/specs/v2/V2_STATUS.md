@@ -54,6 +54,8 @@
 | `raxis-image-builder` (Ed25519 signing, SHA-256 image digest, `SOURCE_DATE_EPOCH`) | shipped | `crates/image-builder/` |
 | `raxis-canonical-images` (kernel-pinned image digests via `build.rs`) | shipped | `crates/canonical-images/` (env vars: `RAXIS_KERNEL_SIGNING_KEY_HEX`, `RAXIS_EXPECTED_*_IMAGE_DIGEST_HEX`) |
 | `raxis-image-cache` (OCI digest → local rootfs path resolver) | shipped | `crates/image-cache/` |
+| `cargo xtask images bake` — single-command end-to-end pipeline (preflight + bake-rootfs + dev-stage + build-all + vmlinux stage; per-role `*.bake.json` integrity manifest; fail-closed input preflight) | shipped | `xtask/src/images.rs::run_bake`, `canonical-images.md §7`; invariants `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`, `INV-IMAGE-BAKE-VMLINUX-STAGED-01`, `INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01`, `INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01`, `INV-IMAGE-CPIO-MULTI-ARCHIVE-PRESERVED-01` |
+| `cargo xtask images preflight` — read-only verifier of every bake input (CI gate) | shipped | `xtask/src/images.rs::run_preflight` |
 
 ### 1.5 Egress (two-tier)
 

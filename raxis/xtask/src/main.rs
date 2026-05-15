@@ -61,17 +61,29 @@ fn main() -> anyhow::Result<()> {
             // `cargo xtask images <subcommand> [args...]`
             let mut rest = args.into_iter().skip(1);
             let sub = rest.next().ok_or_else(|| anyhow::anyhow!(
-                "missing images subcommand; available: dev-kernel, bake-rootfs, dev-stage, build-all"
+                "missing images subcommand; available: bake, preflight, \
+                 dev-kernel, bake-rootfs, dev-stage, build-all"
             ))?;
             let tail: Vec<String> = rest.collect();
             match sub.as_str() {
+                // `cargo xtask images bake` is the umbrella one-command
+                // pipeline: preflight + bake-rootfs + dev-stage +
+                // build-all + vmlinux stage + per-role integrity
+                // manifest. See `xtask/src/images.rs::run_bake`.
+                "bake"        => images::run_bake(&tail).context("images bake"),
+                // `cargo xtask images preflight` — read-only verifier
+                // of every input `bake` would need. Used by CI to
+                // surface missing-input failures before spending time
+                // on a bake that would later abort.
+                "preflight"   => images::run_preflight(&tail).context("images preflight"),
                 "dev-kernel"  => dev_kernel::run(&tail).context("images dev-kernel"),
                 "bake-rootfs" => images::run_bake_rootfs(&tail).context("images bake-rootfs"),
                 "dev-stage"   => images::run_dev_stage(&tail).context("images dev-stage"),
                 "build-all"   => images::run_build_all(&tail).context("images build-all"),
                 other         => anyhow::bail!(
                     "unknown images subcommand: {other:?}; \
-                     available: dev-kernel, bake-rootfs, dev-stage, build-all"
+                     available: bake, preflight, dev-kernel, bake-rootfs, \
+                     dev-stage, build-all"
                 ),
             }
         }
@@ -186,9 +198,10 @@ fn main() -> anyhow::Result<()> {
             "unknown xtask target: {other:?}\n\
              available: spec-graph [--strict], license-check [--strict], \
              dev-keys, dev-codesign, dev-prereqs, dev-reset, hygiene, \
-             hygiene-check, hygiene-install-timer, images, linux-microvm, \
-             linux-prereqs, macos-firewall-prereq, macos-firewall-status, \
-             perf, observability"
+             hygiene-check, hygiene-install-timer, \
+             images {{bake|preflight|dev-kernel|bake-rootfs|dev-stage|build-all}}, \
+             linux-microvm, linux-prereqs, macos-firewall-prereq, \
+             macos-firewall-status, perf, observability"
         ),
         None => anyhow::bail!(
             "usage: cargo xtask <target> [flags]\n\
@@ -202,6 +215,8 @@ fn main() -> anyhow::Result<()> {
              hygiene-check  [--threshold-pct N]         — read-only `df -P` probe across the repo\n                                                          volume, /private/tmp, and /var/folders/*.\n                                                          Exits non-zero when any volume exceeds\n                                                          --threshold-pct (default 85). Used as\n                                                          live-e2e preflight at 90%.\n                                                          (INV-HOST-HYGIENE-01)\n  \
              hygiene-install-timer                      — install the periodic hygiene-sweep timer\n                 [--system]                                  (every 6h via launchd on macOS or\n                 [--uninstall]                               systemd on Linux; user-scope by default,\n                 [--dry-run]                                 --system for shared hosts).\n                                                          (INV-HOST-HYGIENE-01,\n                                                           guides/operator/18-host-hygiene.md)\n  \
              dev-reset notifications                    — wipe the operator-notifications inbox\n                 [--data-dir <PATH>]                       projection (kernel.db::notifications\n                 [--dry-run]                               table + notifications/inbox.jsonl)\n                                                           so the next kernel boot starts empty\n                                                           AFTER the notification_priority\n                                                           filter took effect. The audit chain\n                                                           at <data_dir>/audit/ is NEVER touched\n                                                           (INV-NOTIF-SCOPE-01).\n  \
+             images bake                                — single-command end-to-end bake:\n                 [--role <ROLE>]...                        preflight + bake-rootfs + dev-stage +\n                 [--install-dir <PATH>]                    build-all + vmlinux stage. Fails closed\n                 [--signing-key <PATH>]                    on any missing input BEFORE producing\n                 [--builder <B>]                           an artefact. Writes a per-role\n                 [--kernel-from-file <PATH>]               integrity manifest at\n                 [--force] [--no-cache]                    <install_dir>/images/<stem>-<kver>.bake.json\n                                                          recording the SHA of every input + output\n                                                          so a re-run with no changes is a fast\n                                                          no-op. Stages the canonical Linux\n                                                          guest-kernel binary at\n                                                          <install_dir>/kernel/vmlinux\n                                                          (resolution: --kernel-from-file →\n                                                          $RAXIS_DEV_KERNEL_SOURCE → already-staged\n                                                          → /usr/local/lib/raxis/kernel/vmlinux).\n                                                          (canonical-images.md §7;\n                                                          INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01,\n                                                          INV-IMAGE-BAKE-VMLINUX-STAGED-01,\n                                                          INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01,\n                                                          INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01)\n  \
+             images preflight                           — read-only verifier of every input\n                 [--role <ROLE>]...                        `bake` would need (container builder\n                 [--install-dir <PATH>]                    + daemon, signing key, vmlinux,\n                 [--signing-key <PATH>]                    Containerfile graph acyclicity,\n                 [--builder <B>]                           per-role manifest.toml). Useful in CI\n                 [--kernel-from-file <PATH>]               to surface missing-input failures\n                                                          BEFORE spending time on a bake that\n                                                          would later abort.\n  \
              images dev-kernel                          — stage Linux guest-kernel binary at\n                 (--from-file <PATH> | --url <URL> --sha256 <HEX>) \n                 [--install-dir <PATH>] [--arch <ARCH>] [--force]\n                                                 <install_dir>/kernel/vmlinux\n                                                 (system-requirements.md §11)\n  \
              images bake-rootfs --role <ROLE>           — docker build per-role Containerfile\n                 [--builder docker|podman|buildah]         and extract OCI rootfs into\n                 [--platform <PLAT>] [--keep]              images/<role>/rootfs/. Auto-detects\n                                                           docker → podman → buildah on $PATH;\n                                                           --platform defaults to the OCI shape\n                                                           of `default_target_triple()`. Run\n                                                           BEFORE dev-stage; dev-stage overlays\n                                                           the planner binary on top.\n  \
              images dev-stage --role <ROLE>             — cross-compile raxis-planner-<role>\n                 [--target <TRIPLE>]                       and stage it into images/<role>/rootfs/init\n                                                 (planner-harness.md §14.4)\n  \
