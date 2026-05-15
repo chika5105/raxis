@@ -381,7 +381,7 @@ function CTA() {
             Browse documentation
           </Link>
           <a
-            href="https://github.com/"
+            href="https://github.com/chika5105/raxis"
             target="_blank"
             rel="noopener noreferrer"
             className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"

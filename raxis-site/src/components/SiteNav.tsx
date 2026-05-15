@@ -44,7 +44,7 @@ export function SiteNav() {
             Contact
           </a>
           <a
-            href="https://github.com/"
+            href="https://github.com/chika5105/raxis"
             target="_blank"
             rel="noopener noreferrer"
             aria-label="GitHub"

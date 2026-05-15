@@ -63,7 +63,7 @@ export function SiteFooter() {
             <li><Link href="/docs/search" className="text-[var(--muted)] hover:text-[var(--fg)]">Search</Link></li>
             <li>
               <a
-                href="https://github.com/"
+                href="https://github.com/chika5105/raxis"
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
                 target="_blank"
                 rel="noopener noreferrer"

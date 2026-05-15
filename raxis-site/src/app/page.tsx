@@ -48,7 +48,7 @@ function Hero() {
             Browse documentation
           </Link>
           <a
-            href="https://github.com/"
+            href="https://github.com/chika5105/raxis"
             target="_blank"
             rel="noopener noreferrer"
             className="text-base text-[var(--muted)] hover:text-[var(--fg)] underline underline-offset-4 decoration-[var(--rule)] hover:decoration-[var(--rule-strong)] transition"
@@ -455,7 +455,7 @@ function CreatorSection() {
                 rel="noopener noreferrer"
                 className="text-accent hover:underline underline-offset-4"
               >
-                Aegis
+              Aegis
               </a>{" "}
               and asking coding agents to operate at the speed that required.
               The architecture that emerged became a paradigm. The paradigm
@@ -470,6 +470,12 @@ function CreatorSection() {
               >
                 Connect on LinkedIn
               </a>
+              <Link
+                href="/about"
+                className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"
+              >
+                Learn more about me →
+              </Link>
             </div>
             <div className="mt-6 flex flex-wrap items-center gap-6 text-sm">
               <a
@@ -519,7 +525,7 @@ function CTA() {
             Read the paradigm
           </Link>
           <a
-            href="https://github.com/"
+            href="https://github.com/chika5105/raxis"
             target="_blank"
             rel="noopener noreferrer"
             className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"
