@@ -15,10 +15,10 @@ export function SiteFooter() {
             Source open under SSPL. For enterprise licensing, evaluations, or
             partnerships, reach{" "}
             <a
-              href="mailto:license@raxis.io"
+              href="mailto:chikajinanwa@raxis.io"
               className="text-[var(--fg)] hover:text-accent transition"
             >
-              license@raxis.io
+              chikajinanwa@raxis.io
             </a>
             .
           </p>
@@ -26,7 +26,7 @@ export function SiteFooter() {
             Created by{" "}
             <a
               className="text-[var(--fg)] hover:text-accent transition"
-              href="https://www.linkedin.com/"
+              href="https://www.linkedin.com/in/chika-jinanwa/"
               target="_blank"
               rel="noopener noreferrer"
             >
@@ -52,6 +52,7 @@ export function SiteFooter() {
             <li><Link href="/threat-model" className="text-[var(--muted)] hover:text-[var(--fg)]">Threat model</Link></li>
             <li><Link href="/conformance" className="text-[var(--muted)] hover:text-[var(--fg)]">Conformance</Link></li>
             <li><Link href="/about" className="text-[var(--muted)] hover:text-[var(--fg)]">About</Link></li>
+            <li><Link href="/investors" className="text-[var(--muted)] hover:text-[var(--fg)]">Investors</Link></li>
           </ul>
         </div>
         <div>
@@ -71,11 +72,11 @@ export function SiteFooter() {
               </a>
             </li>
             <li>
-              <a
-                href="mailto:support@raxis.io"
+            <a
+                href="mailto:chikajinanwa@raxis.io"
                 className="text-[var(--muted)] hover:text-[var(--fg)]"
               >
-                support@raxis.io
+                chikajinanwa@raxis.io
               </a>
             </li>
           </ul>
@@ -85,8 +86,8 @@ export function SiteFooter() {
         <div className="mx-auto max-w-5xl px-4 sm:px-6 py-5 flex flex-col sm:flex-row gap-2 items-start sm:items-center justify-between text-xs text-[var(--muted)]">
           <span>© {new Date().getFullYear()} Raxis. All rights reserved.</span>
           <span>
-            <a href="mailto:license@raxis.io" className="hover:text-[var(--fg)]">
-              license@raxis.io
+            <a href="mailto:chikajinanwa@raxis.io" className="hover:text-[var(--fg)]">
+              chikajinanwa@raxis.io
             </a>
           </span>
         </div>

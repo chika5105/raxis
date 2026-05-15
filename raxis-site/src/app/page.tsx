@@ -1,4 +1,5 @@
 import Link from "next/link";
+import Image from "next/image";
 import { Section } from "@/components/Section";
 
 export default function HomePage() {
@@ -12,6 +13,7 @@ export default function HomePage() {
       <ReferenceImpl />
       <Conformance />
       <FAQ />
+      <CreatorSection />
       <CTA />
     </>
   );
@@ -419,6 +421,89 @@ function FAQ() {
         ))}
       </div>
     </Section>
+  );
+}
+
+function CreatorSection() {
+  return (
+    <section className="border-t border-[var(--rule)] bg-[var(--accent-soft)]">
+      <div className="mx-auto max-w-5xl px-4 sm:px-6 py-16 sm:py-20">
+        <div className="grid gap-10 lg:grid-cols-[280px_minmax(0,1fr)] items-center">
+          <div className="flex justify-center lg:justify-start">
+            <div className="relative w-52 h-52 sm:w-64 sm:h-64 rounded-2xl overflow-hidden border border-[var(--rule)] shadow-lg">
+              <Image
+                src="/images/chika-jinanwa.png"
+                alt="Chika Jinanwa, creator of Raxis"
+                fill
+                className="object-cover object-top"
+                sizes="(max-width: 640px) 208px, 256px"
+              />
+            </div>
+          </div>
+          <div>
+            <p className="eyebrow mb-4">The person behind Raxis</p>
+            <h2 className="h-section max-w-2xl">
+              Chika Jinanwa created Raxis
+            </h2>
+            <p className="mt-5 text-[var(--muted)] leading-relaxed max-w-xl">
+              Raxis grew out of the hard problems encountered while building{" "}
+              <a
+                href="https://tryaegis.io"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-accent hover:underline underline-offset-4"
+              >
+                Aegis
+              </a>{" "}
+              — and asking coding agents to operate at the speed that required.
+              The architecture that emerged became a paradigm. The paradigm
+              became a spec. The spec became an open reference implementation.
+            </p>
+            <div className="mt-8 flex flex-wrap items-center gap-4">
+              <a
+                href="https://www.linkedin.com/in/chika-jinanwa/"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="btn btn-primary"
+              >
+                Connect on LinkedIn
+              </a>
+              <Link
+                href="/about"
+                className="text-base text-[var(--fg)] hover:text-accent underline underline-offset-4 decoration-[var(--rule)] hover:decoration-accent transition"
+              >
+                Learn more about me →
+              </Link>
+            </div>
+            <div className="mt-6 flex flex-wrap items-center gap-6 text-sm">
+              <a
+                href="https://paypal.me/chikajinanwa"
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-2 text-[var(--muted)] hover:text-accent transition font-medium"
+              >
+                <span aria-hidden="true">☕</span>
+                Buy me a coffee
+              </a>
+              <Link
+                href="/investors"
+                className="inline-flex items-center gap-1.5 text-[var(--muted)] hover:text-accent transition font-medium"
+              >
+                <span aria-hidden="true">📄</span>
+                Investor overview
+              </Link>
+              <a
+                href="mailto:chikajinanwa@raxis.io"
+                className="inline-flex items-center gap-1.5 text-[var(--muted)] hover:text-accent transition font-medium"
+              >
+                <span aria-hidden="true">✉️</span>
+                chikajinanwa@raxis.io
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   );
 }
 
