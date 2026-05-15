@@ -30,7 +30,7 @@ pub struct GenesisPolicyInputs<'a> {
     pub quality_pubkey_hex: &'a str,
     /// Hex-encoded 32-byte operator Ed25519 public key (64 hex chars).
     pub operator_pubkey_hex: &'a str,
-    /// SHA-256[:16] of the operator pubkey bytes — 32 hex chars. The caller
+    /// `SHA-256[:16]` of the operator pubkey bytes — 32 hex chars. The caller
     /// MUST compute this through `super::pubkey_fingerprint(...)` to keep
     /// every emitter on the same hash function. Not derived from
     /// `operator_pubkey_hex` here so that a misuse (e.g. computing the

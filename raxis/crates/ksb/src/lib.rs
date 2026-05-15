@@ -97,7 +97,7 @@ pub const PLANNER_KSB_ENV: &str = "RAXIS_PLANNER_KSB";
 /// var would carry.
 ///
 /// Why a sidecar exists. The Apple-VZ substrate has no
-/// `Command::env` analogue and folds [`raxis_isolation::VmSpec::env`]
+/// `Command::env` analogue and folds `raxis_isolation::VmSpec::env`
 /// into the Linux `/proc/cmdline` as a single base64-encoded token
 /// (`raxis.envb64=<base64>`). Linux's `COMMAND_LINE_SIZE` ceiling on
 /// aarch64 (default 2048 bytes) means a KSB JSON of more than ~1 KiB

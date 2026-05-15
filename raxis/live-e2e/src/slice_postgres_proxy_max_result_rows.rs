@@ -379,7 +379,7 @@ async fn read_tagged_message(s: &mut TcpStream) -> Result<(u8, Vec<u8>)> {
     let mut len = [0u8; 4];
     s.read_exact(&mut len).await?;
     let len = i32::from_be_bytes(len);
-    if len < 4 || len > 64 * 1024 * 1024 {
+    if !(4..=64 * 1024 * 1024).contains(&len) {
         return Err(anyhow!("backend frame length out of range: {len}"));
     }
     let body_len = (len as usize) - 4;

@@ -105,7 +105,7 @@ pub enum OperatorRequest {
     ///   `signing_input` per §3.2 (= `RAXIS-V2-PLAN-BUNDLE-SIG\0` ||
     ///   `bundle_sha256`).
     /// * `signed_by` is the 8-byte operator key fingerprint
-    ///   (SHA-256[:16] of the operator's Ed25519 public key) used
+    ///   (`SHA-256[:16]` of the operator's Ed25519 public key) used
     ///   to look up the operator entry in `policy.operators` at
     ///   admission step 8.
     ///
@@ -135,7 +135,7 @@ pub enum OperatorRequest {
         /// 128-char lowercase hex.
         signature_hex: String,
         /// Operator's pubkey fingerprint — 16-char lowercase hex of
-        /// the 8-byte SHA-256[:16] fingerprint.
+        /// the 8-byte `SHA-256[:16]` fingerprint.
         signed_by_hex: String,
     },
     ApprovePlan {

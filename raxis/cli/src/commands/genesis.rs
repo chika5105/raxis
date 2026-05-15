@@ -1607,7 +1607,7 @@ mod run_genesis_e2e {
         );
         let policy = std::fs::read_to_string(tmp.path().join("policy/policy.toml")).unwrap();
         assert!(policy.contains("[operators.entries.cert]"));
-        assert!(policy.contains(&format!("display_name = \"Chika\"")));
+        assert!(policy.contains("display_name = \"Chika\""));
 
         // (2) The CRITICAL invariant: the seed_hex string from the
         //     operator's key file must NOT appear anywhere under

@@ -352,7 +352,7 @@ pub struct HandlerContext {
     /// in [`crate::push::BroadcastingAuditSink`] so every successful
     /// audit emit that carries an `initiative_id` AND maps to a
     /// public-wire `InitiativeEvent` (per
-    /// [`crate::push::audit_kind_to_initiative_event`]) is mirrored
+    /// `crate::push::audit_kind_to_initiative_event`) is mirrored
     /// onto this bus. The operator-side `SubscribeInitiative`
     /// streaming handler (`ipc::operator_ergonomics_stream::run`)
     /// holds one subscriber per attached operator and forwards

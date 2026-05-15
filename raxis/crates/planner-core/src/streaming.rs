@@ -10,7 +10,7 @@
 //! budget-abort opportunity (per `provider-failure-handling.md §7`).
 //!
 //! C9 closes the V2 streaming gap by adding a **second, opt-in,
-//! incremental-events trait method** — [`ModelClient::create_message_stream`]
+//! incremental-events trait method** — `ModelClient::create_message_stream`
 //! — that yields a sequence of [`StreamEvent`]s as the upstream
 //! generates content. The buffered `create_message` shape is
 //! preserved for backwards compatibility: every existing impl that
@@ -26,7 +26,7 @@
 //!   Incremental [`StreamEvent::ContentBlockDelta`] /
 //!   [`StreamEvent::Usage`] events are observability-only and
 //!   never carry partial JSON or half-formed `tool_use` blocks.
-//!   The aggregator inside [`AnthropicStreamReader`] guarantees
+//!   The aggregator inside `AnthropicStreamReader` guarantees
 //!   that the [`MessageResponse`] handed to the dispatch loop is
 //!   structurally complete (every `content_block_start` paired
 //!   with a matching `content_block_stop`).

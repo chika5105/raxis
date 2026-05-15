@@ -1006,7 +1006,7 @@ impl Tool for SleepTool {
 /// **Wire shape.** The model invokes the tool with
 /// `{ "kind": "progress_report", "files_modified": [...], ... }`
 /// (snake-case `kind` discriminator + variant fields). The tool
-/// parses into [`StructuredOutputKind`] (which uses the default
+/// parses into `StructuredOutputKind` (which uses the default
 /// external-tag serde representation for `bincode::serde`
 /// compatibility) by manually mapping the snake-case `kind`
 /// string to the matching variant. This is the ONLY place in

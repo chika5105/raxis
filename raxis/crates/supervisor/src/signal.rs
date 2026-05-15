@@ -49,7 +49,7 @@ impl IntentionalShutdownFlag {
         self.0.store(true, Ordering::SeqCst);
     }
 
-    /// `true` iff [`set`] has been called and [`take`] has not
+    /// `true` iff `set` has been called and `take` has not
     /// been called since.
     pub fn is_set(&self) -> bool {
         self.0.load(Ordering::SeqCst)

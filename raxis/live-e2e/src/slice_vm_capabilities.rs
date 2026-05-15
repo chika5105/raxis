@@ -323,7 +323,7 @@ fn run_assertions(
     tracing::info!("vm-capabilities: kernel-private sentinel does NOT leak");
 
     // ── Assertion 6: system-prompt hint coherence.
-    let hint = build_capability_hint(&manifest);
+    let hint = build_capability_hint(manifest);
     for needle in [
         "## VM Environment",
         // Pinned by `build_capability_hint`. If a future change

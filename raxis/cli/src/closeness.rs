@@ -106,7 +106,7 @@ pub fn format_suggestion(suggestions: &[&str]) -> Option<String> {
     }
 }
 
-/// Build the full "unknown <kind>" usage message a `match`-arm error
+/// Build the full `"unknown <kind>"` usage message a `match`-arm error
 /// branch should return, including the suggestion line when one is
 /// available.
 ///
@@ -168,8 +168,8 @@ fn damerau_levenshtein(a: &str, b: &str) -> usize {
     }
 
     let mut dp = vec![vec![0usize; m + 1]; n + 1];
-    for i in 0..=n {
-        dp[i][0] = i;
+    for (i, row) in dp.iter_mut().enumerate().take(n + 1) {
+        row[0] = i;
     }
     for j in 0..=m {
         dp[0][j] = j;

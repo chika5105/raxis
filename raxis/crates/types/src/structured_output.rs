@@ -96,7 +96,7 @@ pub enum StructuredOutputKind {
         severity: DiagnosticSeverity,
         /// Operator-facing message. Capped at
         /// `STRUCTURED_OUTPUT_MAX_DIAG_MESSAGE_BYTES`. Larger
-        /// payloads are TRUNCATED with a "<truncated>" marker
+        /// payloads are TRUNCATED with a `"<truncated>"` marker
         /// rather than rejected so a verbose model output still
         /// surfaces something operator-actionable.
         message: String,

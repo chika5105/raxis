@@ -33,8 +33,10 @@
 //!         "OperatorImageDigestMismatch" }` audit-event variants
 //!         the kernel emits (no notification-inbox spam for
 //!         success; Critical for tamper).
-//!     This guards against drift in the helper APIs, the audit-
-//!     event surface, and the `policy.toml` injection format.
+//!
+//!     This guards against drift in the helper APIs, the
+//!     audit-event surface, and the `policy.toml` injection
+//!     format.
 //!
 //!   * **Live mode (gated).** Requires `RAXIS_LIVE_E2E=1` AND
 //!     `RAXIS_LIVE_E2E_BYO=1`. Bakes the BYO Containerfile via
@@ -55,6 +57,7 @@
 //!         `Python 3.11.x` and fail the regex).
 //!       - Tier 3: kernel log path, audit dir, worktree, dashboard
 //!         URL printed via `Tier3Reporter`.
+//!
 //!     A negative variant tampers the digest in `policy.toml`
 //!     (last hex char flipped), submits the same plan, and
 //!     asserts `SecurityViolationDetected { violation_kind:

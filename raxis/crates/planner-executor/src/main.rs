@@ -1,5 +1,5 @@
 //! `raxis-executor` — guest-side planner-harness binary for the
-//! [`Role::Executor`](raxis_planner_core::Role::Executor) role.
+//! [`raxis_planner_core::Role::Executor`] role.
 //!
 //! See `raxis-planner-orchestrator/src/main.rs` for the full
 //! lifecycle commentary; the executor binary differs only in:

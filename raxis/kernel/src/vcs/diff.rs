@@ -276,8 +276,8 @@ pub fn compute(
 /// `git-diff(1)` man page entry for `-z` under `--raw`/`--name-status`):
 ///
 ///   - A/M/D/T row : `<status>\0<path>\0`            — TWO fields
-///   - C<score>    : `<status>\0<src>\0<dst>\0`      — THREE fields
-///   - R<score>    : `<status>\0<src>\0<dst>\0`      — THREE (rejected: --no-renames)
+///   - `C<score>`    : `<status>\0<src>\0<dst>\0`      — THREE fields
+///   - `R<score>`    : `<status>\0<src>\0<dst>\0`      — THREE (rejected: --no-renames)
 ///   - U           : `<status>\0<path>\0`            — TWO fields (rejected: unmerged)
 ///
 /// **Important:** `-z` does NOT keep the `<status>\t<path>` shape that
@@ -396,11 +396,11 @@ fn post_process_path(raw: &str) -> Result<PathBuf, VcsError> {
 enum DiffStatus {
     /// A, M, D, T — one path in column 2.
     SinglePath,
-    /// C<score> — two paths (source + destination), both included.
+    /// `C<score>` — two paths (source + destination), both included.
     CopyRow,
     /// U — unmerged file; intent must be rejected.
     Unmerged,
-    /// R<score> — rename; should never appear with --no-renames.
+    /// `R<score>` — rename; should never appear with --no-renames.
     Rename,
     /// Anything else (X, B, malformed, unknown).
     Invalid,

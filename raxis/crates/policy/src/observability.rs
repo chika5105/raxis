@@ -7,11 +7,11 @@
 //!
 //! Two layers of structure:
 //!
-//! 1. **Raw** ([`ObservabilitySection`] and friends) — TOML-mapped
+//! 1. **Raw** (`ObservabilitySection` and friends) — TOML-mapped
 //!    structs with `serde(default)`. Used inside `RawPolicy`.
 //! 2. **Validated** ([`ObservabilityConfig`]) — the read-only
 //!    runtime view exposed via `PolicyBundle::observability()`.
-//!    Constructed by [`ObservabilityConfig::validate`] from the
+//!    Constructed by `ObservabilityConfig::validate` from the
 //!    raw section. Validation is a pure function — no I/O — so the
 //!    same code path covers `policy_manager::advance_epoch`.
 //!

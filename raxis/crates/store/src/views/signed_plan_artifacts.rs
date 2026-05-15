@@ -52,7 +52,7 @@ pub struct SignedPlanArtifactHeader {
     /// query argument; included for callers that want a single
     /// owned struct for downstream rendering.
     pub initiative_id: String,
-    /// Operator pubkey_fingerprint (32 hex chars, SHA-256[:16] of
+    /// Operator pubkey_fingerprint (32 hex chars, `SHA-256[:16]` of
     /// the operator's Ed25519 pubkey) that signed `plan.toml`.
     /// `None` for legacy rows inserted under migration 1/2 before
     /// the column was backfill-able. v1 callers MUST handle

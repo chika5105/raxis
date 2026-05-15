@@ -328,7 +328,7 @@ pub struct VmSpec {
     /// production path.
     ///
     /// **Population.** The kernel populates this via
-    /// [`canonical_images::linux_kernel_path`] at session-spawn
+    /// `canonical_images::linux_kernel_path` at session-spawn
     /// time. Operators wanting to point at a different host kernel
     /// extend `VmSpec`'s ctor in `session_spawn_orchestrator`
     /// rather than mutating the field on the trait surface.
@@ -851,7 +851,7 @@ pub trait Session: Send + 'static {
     ///
     /// **Default impl returns `None`** because substrates where the
     /// planner dials the kernel's UDS planner socket directly (e.g.
-    /// the test-only [`SubprocessIsolation`]) do not expose a
+    /// the test-only `SubprocessIsolation`) do not expose a
     /// kernel-side IPC fd: the kernel-side accept loop on
     /// `planner.sock` already gives the dispatcher a UDS stream
     /// without any substrate involvement.

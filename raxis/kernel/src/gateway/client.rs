@@ -148,6 +148,7 @@ pub trait LlmTurnObserver: Send + Sync {
     /// received from the upstream (or `None` on error). The
     /// observer is responsible for any size capping / UTF-8
     /// validation it wants to apply before storing.
+    #[allow(clippy::too_many_arguments)]
     fn observe(
         &self,
         task_id: &str,
@@ -287,6 +288,7 @@ impl GatewayClient {
     /// - `Dropped`         — gateway crashed while we were waiting
     /// - `GatewayError(s)` — gateway returned `FetchResponse.error = s`
     /// - `UnexpectedReply` — protocol violation
+    #[allow(clippy::too_many_arguments)]
     pub async fn fetch(
         &self,
         gateway_token: String,
@@ -623,9 +625,11 @@ mod tests {
     /// `pump_skips_observer_when_no_task_id` tests below.
     /// Captures every `(task_id, fetch_id, status, body_str, error)`
     /// tuple it sees so the test can assert on order + content.
+    type RecordingRow = (String, Uuid, Option<u16>, String, Option<String>);
+
     #[derive(Default)]
     struct RecordingObserver {
-        seen: parking_lot::Mutex<Vec<(String, Uuid, Option<u16>, String, Option<String>)>>,
+        seen: parking_lot::Mutex<Vec<RecordingRow>>,
     }
 
     impl LlmTurnObserver for RecordingObserver {

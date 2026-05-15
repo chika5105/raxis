@@ -65,7 +65,7 @@ pub use policy_toml::{render_genesis_policy_toml, GenesisPolicyInputs, PERMITTED
 // Crate-level fingerprint helper
 // ---------------------------------------------------------------------------
 
-/// SHA-256[:16] fingerprint of an Ed25519 public key — 16 raw bytes hex-encoded
+/// `SHA-256[:16]` fingerprint of an Ed25519 public key — 16 raw bytes hex-encoded
 /// to 32 chars. Matches `kernel-store.md` §2.5.4 and
 /// `raxis_policy::loader::operator_pubkey_fingerprint`.
 ///

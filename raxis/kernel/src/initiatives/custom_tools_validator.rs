@@ -284,7 +284,7 @@ pub fn validate_plan_custom_tools(
                 });
             }
             // §5.1 reserved.
-            if RESERVED_TOOL_NAMES.iter().any(|r| *r == name) {
+            if RESERVED_TOOL_NAMES.contains(&name) {
                 return Err(CustomToolValidationError::NameReserved {
                     profile: profile_name.clone(),
                     name: name.to_owned(),
@@ -617,7 +617,7 @@ session_agent_type = "Executor"
             "WebFetch",
         ] {
             assert!(
-                RESERVED_TOOL_NAMES.iter().any(|r| *r == n),
+                RESERVED_TOOL_NAMES.contains(&n),
                 "RESERVED_TOOL_NAMES must contain {n:?} per custom-tools.md §5.1"
             );
         }

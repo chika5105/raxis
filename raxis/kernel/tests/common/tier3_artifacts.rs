@@ -135,13 +135,13 @@ impl Tier3Reporter {
         self
     }
 
-    /// Opt the reporter into emitting the Prometheus + Grafana
-    /// + OTel-collector URL block as part of the end-of-run
+    /// Opt the reporter into emitting the Prometheus, Grafana,
+    /// and OTel-collector URL block as part of the end-of-run
     /// artifact dump. The block surfaces ALL the URLs whether
-    /// the stack is up or not (so an operator who forgot to bring
-    /// it up sees the runnable `cargo xtask observability up`
-    /// command in the same place); reachability is annotated
-    /// per-line with a TCP probe.
+    /// the stack is up or not (so an operator who forgot to
+    /// bring it up sees the runnable `cargo xtask observability
+    /// up` command in the same place); reachability is
+    /// annotated per-line with a TCP probe.
     ///
     /// Pinned to a builder rather than a constructor flag so the
     /// existing call sites (

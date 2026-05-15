@@ -156,7 +156,7 @@ pub async fn run_loop(
             _ = interval.tick() => {
                 let store_for_tick  = Arc::clone(&store);
                 let plan_signing    = policy.load().plan_signing();
-                let now             = raxis_types::unix_now_secs() as i64;
+                let now             = raxis_types::unix_now_secs();
                 let outcome = tokio::task::spawn_blocking(move || {
                     sweep_once(&store_for_tick, &plan_signing, now)
                 }).await;
@@ -385,7 +385,7 @@ mod tests {
                     _ = interval.tick() => {
                         let store_for_tick   = Arc::clone(&store_for_loop);
                         let signing_for_tick = signing_for_loop.clone();
-                        let now = raxis_types::unix_now_secs() as i64;
+                        let now = raxis_types::unix_now_secs();
                         let _ = tokio::task::spawn_blocking(move || {
                             sweep_once(&store_for_tick, &signing_for_tick, now)
                         }).await;

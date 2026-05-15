@@ -319,7 +319,7 @@ async fn run_v3_forwarding_witness() -> Result<()> {
     let proxy = GcpProxy::bind_v3(
         backend,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
         Arc::clone(&audit_sink),
         http_client,
         token_cache,

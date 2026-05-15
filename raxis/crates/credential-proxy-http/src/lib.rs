@@ -628,7 +628,7 @@ pub enum AuditEvent {
         method: String,
         /// Request path.
         path: String,
-        /// SHA-256 of "<method> <path>".
+        /// SHA-256 of `"<method> <path>"`.
         path_sha256: String,
         /// Status returned to the agent.
         status_code: u16,

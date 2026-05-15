@@ -26,7 +26,7 @@ use raxis_types::unix_now_secs;
 pub struct ApprovalToken {
     /// UUID v4 identifying this specific approval instance.
     pub approval_id: String,
-    /// SHA-256[:16] fingerprint of the operator's public key.
+    /// `SHA-256[:16]` fingerprint of the operator's public key.
     pub issued_by: String,
     /// Unix seconds when the token was signed.
     pub issued_at: i64,

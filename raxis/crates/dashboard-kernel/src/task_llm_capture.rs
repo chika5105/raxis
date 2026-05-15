@@ -16,7 +16,7 @@
 //!    When a file would exceed [`TaskCaptureConfig::max_file_bytes`]
 //!    (default 4 MiB), the module compacts it in place keeping
 //!    only the most recent ~50 % of lines (see
-//!    [`TaskLlmCapture::compact_locked`]). One compaction per
+//!    `TaskLlmCapture::compact_locked`). One compaction per
 //!    overflow — not per append — keeps amortised cost flat.
 //!
 //! 2. A per-task **broadcast channel** for live SSE subscribers.

@@ -97,7 +97,7 @@ pub async fn run() -> Result<()> {
     let proxy = GcpProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
     )
     .await
     .context("bind GcpProxy")?;

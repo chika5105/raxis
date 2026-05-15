@@ -246,7 +246,7 @@ impl DispatchOutcome {
     }
 }
 
-/// Terminal error surfaced by [`DispatchLoop::next`]; either the model client
+/// Terminal error surfaced by `DispatchLoop::next`; either the model client
 /// failed (HTTP, rate-limit, malformed JSON) or a tool implementation reported
 /// a hard error.  The caller maps these onto an `IntentKind::Failure` and ends
 /// the run.

@@ -98,7 +98,7 @@ pub struct AppStateInner<D: DashboardData> {
     pub shutdown: Arc<ShutdownSignal>,
     /// V3 perf-telemetry — optional handle to the kernel's
     /// `ObservabilityHub`. When present, the middleware in
-    /// [`build_router`] records one
+    /// `build_router` records one
     /// `raxis.dashboard.http.request.duration` observation per
     /// request, and the SSE handler in
     /// `routes::sessions::stream` updates the

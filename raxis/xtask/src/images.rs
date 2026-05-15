@@ -242,15 +242,13 @@ impl DevStageArgs {
 /// to a planner-tool spawn or runtime requirement that would ENOENT
 /// at the first invocation if absent.
 ///
-/// * `bin/bash`              — `BashTool` spawn (`tokio::process::
-///                             Command::new("bash")`).
-/// * `usr/bin/python3`       — required by the executor's
-///                             "LLM writes a `psycopg2` script and
-///                             pipes it through `bash -c 'python3 -c
-///                             "..."'`" canonical pattern. Without
-///                             python the credential-proxy round-trip
-///                             tests can never run.
-/// * `usr/bin/git`           — `GitCommitTool` spawn.
+/// * `bin/bash` — `BashTool` spawn (`tokio::process::
+///   Command::new("bash")`).
+/// * `usr/bin/python3` — required by the executor's
+///   "LLM writes a `psycopg2` script and pipes it through
+///   `bash -c 'python3 -c "..."'`" canonical pattern. Without
+///   python the credential-proxy round-trip tests can never run.
+/// * `usr/bin/git` — `GitCommitTool` spawn.
 ///
 /// Orchestrator and Reviewer are intentionally binary-only today
 /// (`INV-PLANNER-HARNESS-02 — minimalism`); their `required_binaries`

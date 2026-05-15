@@ -148,9 +148,9 @@ pub fn glob_matches(pattern: &str, path: &str) -> bool {
 fn glob_rec(pat: &[u8], s: &[u8]) -> bool {
     match (pat.first(), s.first()) {
         // Both exhausted.
-        (None, None) => return true,
+        (None, None) => true,
         // Pattern exhausted but path has chars left — only matches if remaining is empty.
-        (None, Some(_)) => return false,
+        (None, Some(_)) => false,
         // `**` — matches zero or more characters of any kind (including '/').
         (Some(b'*'), _) if pat.get(1) == Some(&b'*') => {
             // Consume the `**`.
@@ -167,7 +167,7 @@ fn glob_rec(pat: &[u8], s: &[u8]) -> bool {
                     return true;
                 }
             }
-            return false;
+            false
         }
         // Single `*` — matches any run of non-'/' chars.
         (Some(b'*'), _) => {
@@ -185,15 +185,11 @@ fn glob_rec(pat: &[u8], s: &[u8]) -> bool {
             }
         }
         // `?` — matches any single non-'/' char.
-        (Some(b'?'), Some(sc)) if *sc != b'/' => {
-            return glob_rec(&pat[1..], &s[1..]);
-        }
+        (Some(b'?'), Some(sc)) if *sc != b'/' => glob_rec(&pat[1..], &s[1..]),
         // Literal char match.
-        (Some(pc), Some(sc)) if pc == sc => {
-            return glob_rec(&pat[1..], &s[1..]);
-        }
+        (Some(pc), Some(sc)) if pc == sc => glob_rec(&pat[1..], &s[1..]),
         // No match.
-        _ => return false,
+        _ => false,
     }
 }
 

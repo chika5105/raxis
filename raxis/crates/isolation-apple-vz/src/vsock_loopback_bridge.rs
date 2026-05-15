@@ -7,7 +7,7 @@
 //!
 //! # What this module provides
 //!
-//! [`AvfRuntime::register_loopback_listener`] registers a
+//! `AvfRuntime::register_loopback_listener` registers a
 //! `VZVirtioSocketListener` on the VM's `VZVirtioSocketDevice` for
 //! a given `vsock_port`. When the in-VM forwarder
 //! (`raxis-tproxy::loopback_forwarder`) opens an AF_VSOCK
@@ -32,8 +32,8 @@
 //!
 //! # Per-VM isolation argument
 //!
-//! Each [`AvfRuntime`] owns exactly one `VZVirtioSocketDevice`
-//! (wired in [`AvfRuntime::build_configuration`]). The listener
+//! Each `AvfRuntime` owns exactly one `VZVirtioSocketDevice`
+//! (wired in `AvfRuntime::build_configuration`). The listener
 //! registered here is bound on **that device** — i.e. on this
 //! VM's vsock CID. A second VM running on the same host has its
 //! own `VZVirtualMachine`, its own `VZVirtioSocketDevice`, its
@@ -66,7 +66,7 @@
 //!     when the threads finish their copy_bidirectional
 //!     work.
 //!
-//! [`AvfRuntime`] holds the handles in a `Vec` so they live for
+//! `AvfRuntime` holds the handles in a `Vec` so they live for
 //! the session's lifetime.
 
 #![allow(unsafe_code)]
@@ -77,7 +77,7 @@ use std::time::Duration;
 use raxis_vsock_loopback::{LoopbackEntry, LoopbackPlan};
 use thiserror::Error;
 
-/// Errors surfaced by [`AvfRuntime::register_loopback_listener`].
+/// Errors surfaced by `AvfRuntime::register_loopback_listener`.
 #[derive(Debug, Error)]
 pub enum LoopbackBridgeError {
     /// Target platform is not macOS — the AVF runtime is a stub.
@@ -172,7 +172,7 @@ mod stub_api {
 // ---------------------------------------------------------------------------
 
 /// macOS-only AVF wiring for the vsock-loopback bridge. The
-/// [`register_listener`] entry point creates a real
+/// `register_listener` entry point creates a real
 /// `VZVirtioSocketListener` + Rust-defined delegate class
 /// (`VsockLoopbackDelegate`) and registers them on the VM's
 /// `VZVirtioSocketDevice` for one `(vsock_port,

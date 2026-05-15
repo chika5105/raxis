@@ -4,7 +4,7 @@
 //! the guest (there is no `Command::env` analogue at the AVF surface;
 //! the `VZLinuxBootLoader` only exposes a kernel command-line). The
 //! substrate therefore folds the kernel-stamped
-//! [`raxis_isolation::VmSpec::env`] into the kernel command-line as a
+//! `raxis_isolation::VmSpec::env` into the kernel command-line as a
 //! single base64-encoded token —
 //!
 //! ```text
@@ -101,7 +101,7 @@ pub enum HydrationOutcome {
 /// tokio runtime spins up, so the process is still single-threaded
 /// at the call site. The caller is responsible for honouring that
 /// contract — this is a load-bearing invariant of the AVF guest
-/// boot path documented in [`raxis_planner_orchestrator::main`].
+/// boot path documented in `raxis_planner_orchestrator::main`.
 pub fn hydrate_from_proc_cmdline() -> HydrationOutcome {
     hydrate_from_path(Path::new("/proc/cmdline"))
 }

@@ -163,7 +163,7 @@ mod tests {
 
     #[test]
     fn token_with_non_hex_chars_is_rejected() {
-        let bad = format!("{}", "Z".repeat(64));
+        let bad = "Z".repeat(64);
         let err = parse_gateway_env(&bad, "/tmp/gw.sock", "/tmp/data").unwrap_err();
         assert!(matches!(err, GatewayEnvError::InvalidToken { .. }));
     }

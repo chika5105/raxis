@@ -998,7 +998,7 @@ pub async fn run_role_session_with_connected_transport(
 }
 
 /// **`INV-FAILURE-REASON-CONCRETE-01`** — map a [`DriverOutcome`]
-/// (the driver-side terminal shape) onto a [`PlannerExitOutcome`]
+/// (the driver-side terminal shape) onto a `PlannerExitOutcome`
 /// (the wire-level structured exit cause shipped to the kernel
 /// over `IpcMessage::PlannerExitNotice`).
 ///

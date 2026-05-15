@@ -113,7 +113,6 @@ pub fn run(_flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 
 fn print_help() {
     println!(
-        "{}",
         "raxis plan fmt — canonicalize a plan.toml file's formatting.\n\
          \n\
          USAGE:\n\

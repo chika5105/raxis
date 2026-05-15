@@ -129,11 +129,9 @@ impl ImageResolver for PrePopulatedResolver {
                     continue;
                 }
                 bytes_freed += dir_size(&digest_dir.path())?;
-                fs::remove_dir_all(digest_dir.path()).map_err(|source| {
-                    ImageResolverError::Io {
-                        path: digest_dir.path(),
-                        source,
-                    }
+                fs::remove_dir_all(digest_dir.path()).map_err(|source| ImageResolverError::Io {
+                    path: digest_dir.path(),
+                    source,
                 })?;
             }
         }

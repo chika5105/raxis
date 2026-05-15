@@ -640,12 +640,12 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     );
     let stream = resp.bytes_stream();
     let reader =
-        tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(|e| std::io::Error::other(e))));
+        tokio_util::io::StreamReader::new(stream.map(|r| r.map_err(std::io::Error::other)));
     let mut lines = tokio::io::BufReader::new(reader).lines();
 
     // Capture lines until we see the `tail-complete` marker.
     let mut tail_lines = Vec::new();
-    let read_tail = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+    tokio::time::timeout(std::time::Duration::from_secs(10), async {
         while let Ok(Some(line)) = lines.next_line().await {
             tail_lines.push(line.clone());
             if line == "event: tail-complete" {
@@ -658,7 +658,6 @@ async fn stream_capture_round_trips_through_real_sse_endpoint() {
     .expect("did not see tail-complete in 10s")
     .expect("tail read");
 
-    let _ = read_tail;
     let body = tail_lines.join("\n");
     assert!(
         body.contains("hello") && body.contains("world"),

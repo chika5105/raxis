@@ -756,7 +756,7 @@ mod tests {
             }
         }
 
-        fn into_operator_entry(&self) -> raxis_policy::OperatorEntry {
+        fn to_operator_entry(&self) -> raxis_policy::OperatorEntry {
             // The operator fingerprint stored in policy is the
             // CANONICAL "SHA-256[:16]" form (i.e. 16 hex chars, 8
             // bytes) — this is what `signed_by` carries and what the
@@ -782,7 +782,7 @@ mod tests {
     /// default) policy-defaults for `[plan_signing]` /
     /// `[plan_bundle_limits]`.
     fn build_policy(op: &OperatorFixture) -> PolicyBundle {
-        let entry = op.into_operator_entry();
+        let entry = op.to_operator_entry();
         PolicyBundle::for_tests_with_operators(vec![entry])
     }
 

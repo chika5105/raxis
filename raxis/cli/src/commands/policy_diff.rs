@@ -4,7 +4,7 @@
 //!
 //! # What this command answers
 //!
-//! "What changes if I rotate from <left>.toml to <right>.toml?" by
+//! "What changes if I rotate from `<left>.toml` to `<right>.toml`?" by
 //! loading both through `raxis_policy::load_policy` (so we diff the
 //! *validated* shape, not raw TOML bytes) and surfacing every
 //! per-section delta the operator needs to reason about a rotation:
@@ -688,9 +688,9 @@ mod tests {
         diff_lanes(&mut report, &l, &r);
         let kinds: Vec<DiffKind> = report.entries.iter().map(|e| e.kind).collect();
         // We expect: a.max_concurrent_tasks Changed, b Removed, c Added.
-        assert!(kinds.iter().any(|k| *k == DiffKind::Added));
-        assert!(kinds.iter().any(|k| *k == DiffKind::Removed));
-        assert!(kinds.iter().any(|k| *k == DiffKind::Changed));
+        assert!(kinds.contains(&DiffKind::Added));
+        assert!(kinds.contains(&DiffKind::Removed));
+        assert!(kinds.contains(&DiffKind::Changed));
     }
 
     #[test]

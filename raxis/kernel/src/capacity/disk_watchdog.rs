@@ -86,7 +86,7 @@ struct Inner {
 
 impl DiskWatchdog {
     /// Construct a watchdog without spawning the background poll.
-    /// Callers (`main.rs`) call [`spawn`] to start the loop.
+    /// Callers (`main.rs`) call `spawn` to start the loop.
     pub fn new(disk_root: PathBuf, min_free_mb: u64, behavior: String) -> Self {
         Self {
             inner: Arc::new(Inner {

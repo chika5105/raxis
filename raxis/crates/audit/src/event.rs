@@ -736,7 +736,7 @@ pub enum AuditEventKind {
     /// V2.5 — emitted by
     /// `kernel/src/handlers/intent.rs::handle_activate_sub_task`
     /// AFTER an operator-declared `[[vm_images]]` alias has been
-    /// resolved through [`raxis_image_cache::ImageResolver::resolve`]
+    /// resolved through `raxis_image_cache::ImageResolver::resolve`
     /// to a verified rootfs blob, BEFORE the session-spawn step
     /// proceeds. This is the **mechanical witness** for the BYO
     /// (bring-your-own-image) contract: the audit chain records
@@ -1339,7 +1339,7 @@ pub enum AuditEventKind {
     /// V2 §Step 12 + `agent-disagreement.md §3.6` —
     /// `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` audit anchor.
     ///
-    /// Emitted by [`handle_retry_sub_task`] exactly when the prior
+    /// Emitted by `handle_retry_sub_task` exactly when the prior
     /// activation's `activation_state = 'Completed'` AND
     /// `review_reject_count > 0` (the Option-A precondition
     /// relaxation per agent-disagreement.md §3.6). This is the
@@ -1375,7 +1375,7 @@ pub enum AuditEventKind {
     ///
     /// **Paired with what.** Per `audit-paired-writes.md §4`, this
     /// event is the chain-side half of the SQLite-side state
-    /// mutation in [`handle_retry_sub_task`] Step 2d (the
+    /// mutation in `handle_retry_sub_task` Step 2d (the
     /// new `PendingActivation` row insert). The pairing is
     /// post-commit: the SQLite transaction commits first, then
     /// the audit event is emitted in the same handler frame.
@@ -1815,7 +1815,7 @@ pub enum AuditEventKind {
     ///
     /// Field semantics:
     ///
-    /// * `pubkey_fingerprint` — SHA-256[:16] hex of `pubkey_hex`.
+    /// * `pubkey_fingerprint` — SHA-256\[:16\] hex of `pubkey_hex`.
     /// * `epoch_id` — the policy epoch this cert is now scoped to.
     /// * `cert_kind` — `"Standard"` or `"EmergencyRecovery"` (matches
     ///   `CertKind::as_str`). The field is named `cert_kind` (NOT just
@@ -3206,7 +3206,7 @@ pub enum AuditEventKind {
     ///     bytes; matches the `PolicyEpochAdvanced.policy_sha256`
     ///     in the same chain segment.
     PolicyUpdatedViaDashboard {
-        /// Operator pubkey fingerprint (SHA-256[:16] hex).
+        /// Operator pubkey fingerprint (`SHA-256\[:16\]` hex).
         operator_fingerprint: String,
         /// Epoch the kernel was running before the PUT.
         previous_epoch: u64,

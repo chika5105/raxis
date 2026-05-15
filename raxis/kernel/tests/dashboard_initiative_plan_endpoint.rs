@@ -15,9 +15,11 @@
 //!   2. Both kernel-store back-ends:
 //!        * V1 (`signed_plan_artifacts`)
 //!        * V2.1 (`plan_bundles` + `plan_bundle_artifacts`)
-//!      fall through the same `views::plan_fields::submitted_toml_for_initiative`
-//!      lookup, so the wire body is byte-identical to the bytes the
-//!      operator originally sealed.
+//!
+//!      fall through the same
+//!      `views::plan_fields::submitted_toml_for_initiative`
+//!      lookup, so the wire body is byte-identical to the
+//!      bytes the operator originally sealed.
 //!   3. Error disambiguation:
 //!        * 404 — initiative id unknown (typo / stale link).
 //!        * 410 — initiative exists but its plan blob is missing
@@ -167,6 +169,7 @@ async fn seed_v1_initiative(
 /// at a freshly-sealed V2.1 bundle holding the supplied plan TOML
 /// at `artifact_seq=0`. Mirrors the V2 admission write set
 /// described in `plan-bundle-sealing.md §8.1 step 12`.
+#[allow(clippy::too_many_arguments)]
 async fn seed_v2_1_initiative(
     store: &Store,
     initiative_id: &str,

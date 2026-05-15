@@ -1,5 +1,5 @@
 //! `raxis-reviewer` — guest-side planner-harness binary for the
-//! [`Role::Reviewer`](raxis_planner_core::Role::Reviewer) role.
+//! [`raxis_planner_core::Role::Reviewer`] role.
 //!
 //! See `raxis-planner-orchestrator/src/main.rs` for the full
 //! lifecycle commentary; the reviewer binary differs only in:

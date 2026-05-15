@@ -151,7 +151,7 @@ async fn admission_loop_denies_disallowed_host_and_emits_transparent_proxy_denie
     }
 
     drop(proxy_side);
-    let _ = loop_handle.await.expect("join").expect("loop result");
+    loop_handle.await.expect("join").expect("loop result");
 
     let events = audit.events();
     let denial = events
@@ -254,7 +254,7 @@ async fn admission_loop_pipelines_three_decisions_in_order() {
         got.push(resp);
     }
     drop(proxy_side);
-    let _ = loop_handle.await.unwrap().unwrap();
+    loop_handle.await.unwrap().unwrap();
 
     match &got[0] {
         ProxyAdmissionResponse::Admit { connection_id } => assert_eq!(*connection_id, 1),
@@ -339,7 +339,7 @@ async fn three_denials_to_same_host_emit_one_session_egress_stall_detected() {
         proxy_side.read_exact(&mut body).await.unwrap();
     }
     drop(proxy_side);
-    let _ = loop_handle.await.unwrap().unwrap();
+    loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
     let denials: Vec<_> = events
@@ -436,7 +436,7 @@ async fn two_denials_below_threshold_do_not_emit_stall_event() {
         proxy_side.read_exact(&mut body).await.unwrap();
     }
     drop(proxy_side);
-    let _ = loop_handle.await.unwrap().unwrap();
+    loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
     let stalls: Vec<_> = events
@@ -496,7 +496,7 @@ async fn admit_verdicts_do_not_feed_the_stall_tracker() {
         proxy_side.read_exact(&mut body).await.unwrap();
     }
     drop(proxy_side);
-    let _ = loop_handle.await.unwrap().unwrap();
+    loop_handle.await.unwrap().unwrap();
 
     let events = audit.events();
     let stalls: Vec<_> = events

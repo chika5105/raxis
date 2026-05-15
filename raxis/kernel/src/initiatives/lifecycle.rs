@@ -3556,7 +3556,7 @@ fn validate_workspace_lane_in_policy(
 ///     auto-created session or run alongside it; both are wrong.
 ///
 /// The structural rule fires first (it's a more general violation:
-/// any Orchestrator-in-[[tasks]] is wrong, regardless of clone
+/// any Orchestrator-in-`[[tasks]]` is wrong, regardless of clone
 /// strategy). The semantic rule fires when an Orchestrator declaration
 /// somehow slipped past defense-in-depth — useful for forward-compat
 /// where the Orchestrator might re-enter `[[tasks]]` in a future spec.
@@ -3964,8 +3964,8 @@ fn validate_path_allowlist_v2_format(tasks: &[PlanTask]) -> Result<(), Lifecycle
 /// **Cardinality rule:**
 /// * 0 → task is environment-neutral (passes trivially).
 /// * 1 → task is bound to that environment (passes).
-/// * ≥ 2 → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (hard reject; not
-///         downgradable by `--no-strict` per §11.7).
+/// * ≥ 2 → `FAIL_TASK_ENVIRONMENT_INCONSISTENT` (hard reject;
+///   not downgradable by `--no-strict` per §11.7).
 ///
 /// **Activation gate (`§1.5.2`).** When `policy_environments` is
 /// empty, the entire check is a no-op — the operator has not
@@ -3997,11 +3997,8 @@ fn validate_task_environment_consistency(
             let permitted = policy_permitted_creds.iter().find(|c| c.name == cred_name);
             if let Some(p) = permitted {
                 if let Some(label) = p.environment.as_deref() {
-                    if envs.insert(label) {
-                        sources.push((label.to_owned(), format!("credential:{cred_name}")));
-                    } else {
-                        sources.push((label.to_owned(), format!("credential:{cred_name}")));
-                    }
+                    envs.insert(label);
+                    sources.push((label.to_owned(), format!("credential:{cred_name}")));
                 }
             }
         }
@@ -4287,7 +4284,7 @@ fn insert_task_credential_proxies_in_tx(
             &decl.mount_as,
             proxy_type,
             proxy_json,
-            now as i64,
+            now,
         ])?;
     }
 
@@ -4353,7 +4350,7 @@ fn insert_subtask_activation_in_tx(
     }
 
     let activation_id = uuid::Uuid::new_v4().to_string();
-    let now = unix_now_secs() as i64;
+    let now = unix_now_secs();
 
     tx.execute(
         &format!(
@@ -5839,7 +5836,7 @@ predecessors       = ["run-tests"]
                  ORDER BY task_id"
             ))
             .unwrap();
-        let rows: Vec<(
+        type ActivationRow = (
             String,
             String,
             Option<String>,
@@ -5847,7 +5844,8 @@ predecessors       = ["run-tests"]
             Option<i64>,
             i64,
             i64,
-        )> = stmt
+        );
+        let rows: Vec<ActivationRow> = stmt
             .query_map(rusqlite::params![&init_id], |r| {
                 Ok((
                     r.get(0)?,
@@ -6120,7 +6118,7 @@ predecessors = ["build-svc"]
         // here as a hard test failure rather than slipping through
         // review.
         let columns: Vec<String> = conn
-            .prepare(&format!("SELECT name FROM pragma_table_info(?1)"))
+            .prepare("SELECT name FROM pragma_table_info(?1)")
             .unwrap()
             .query_map([TASK_CREDENTIAL_PROXIES], |r| r.get::<_, String>(0))
             .unwrap()
@@ -7316,7 +7314,7 @@ target_ref = "refs/heads/raxis/feature"
             .expect("approve_plan must surface orchestrator_session_id");
 
         let conn = store.lock_sync();
-        let row: (
+        type SessionRow = (
             String,
             String,
             String, // session_id, role_id, session_token
@@ -7325,7 +7323,8 @@ target_ref = "refs/heads/raxis/feature"
             Option<String>,
             Option<i64>, // base_sha, vsock_cid
             i64,         // can_delegate
-        ) = conn
+        );
+        let row: SessionRow = conn
             .query_row(
                 &format!(
                     "SELECT session_id, role_id, session_token,

@@ -165,8 +165,9 @@ pub struct TaskPlanFields {
     ///     for the spec-extension rationale: an LLM that loops on
     ///     `report_failure` is operationally indistinguishable from
     ///     a crash loop, and the V2 ops contract bounds every
-    ///     unsuccessful attempt against an Executor under the same
-    ///     per-task ceiling).
+    ///     unsuccessful attempt against an Executor under the
+    ///     same per-task ceiling).
+    ///
     /// The retry handler reads it at counter-check time only.
     pub max_crash_retries: Option<u32>,
 
@@ -267,12 +268,12 @@ pub struct TaskPlanFields {
     /// declaration with `FAIL_REVIEWER_ELASTIC_NOT_ALLOWED`).
     ///
     /// Resolution precedence (`elastic-vm-scaling.md §2.2`):
-    /// task-level explicit value > initiative-level explicit value
-    /// > policy `enabled` flag. Plan-narrows-policy
-    /// (INV-ELASTIC-01): `Some(true)` is rejected at admission
-    /// when policy `enabled = false`; `Some(false)` is always
-    /// admissible (a plan can always be MORE restrictive than
-    /// policy).
+    /// task-level explicit value beats initiative-level
+    /// explicit value, which beats the policy `enabled` flag.
+    /// Plan-narrows-policy (INV-ELASTIC-01): `Some(true)` is
+    /// rejected at admission when policy `enabled = false`;
+    /// `Some(false)` is always admissible (a plan can always be
+    /// MORE restrictive than policy).
     pub elastic: Option<bool>,
 
     /// Operator-declared floor on vCPU count for any spawn /

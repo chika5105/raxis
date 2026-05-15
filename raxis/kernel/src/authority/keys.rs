@@ -175,7 +175,7 @@ pub fn sign_audit_record(record_bytes: &[u8], registry: &KeyRegistry) -> Signatu
     registry.authority.sign(record_bytes)
 }
 
-/// Returns the hex-encoded SHA-256[:16] fingerprint of the authority public key.
+/// Returns the hex-encoded `SHA-256[:16]` fingerprint of the authority public key.
 /// Included in the `KernelStarted` audit event and genesis record.
 pub fn authority_pubkey_fingerprint(registry: &KeyRegistry) -> String {
     let mut h = Sha256::new();
@@ -234,14 +234,14 @@ fn hmac_sha256(key: &[u8; 32], msg: &[u8]) -> Vec<u8> {
     // inner = SHA256(k_ipad || msg)
     let inner = {
         let mut h = Sha256::new();
-        h.update(&k_ipad);
+        h.update(k_ipad);
         h.update(msg);
         h.finalize()
     };
     // outer = SHA256(k_opad || inner)
     let mut h = Sha256::new();
-    h.update(&k_opad);
-    h.update(&inner);
+    h.update(k_opad);
+    h.update(inner);
     h.finalize().to_vec()
 }
 

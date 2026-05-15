@@ -389,7 +389,7 @@ impl VmImageConfig {
     /// Whether this image's `role_restriction` includes the
     /// requested role token. Comparison is case-sensitive
     /// (`"Executor"`, `"Verifier"`); a non-canonical token never
-    /// matches because [`validate_vm_images`] already rejects
+    /// matches because `validate_vm_images` already rejects
     /// such entries at policy load.
     pub fn permits_role(&self, role: &str) -> bool {
         self.role_restriction.iter().any(|r| r == role)
@@ -953,7 +953,7 @@ pub(crate) struct ElasticSection {
 /// the dynamic-scaling engine (per-session ceilings + rate
 /// limit). All fields are non-Optional after validation; the
 /// section's optionality is captured on the raw side
-/// ([`ElasticSection`]).
+/// (`ElasticSection`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ElasticConfig {
     /// Master switch. `true` ⇒ upward scaling is permitted (still
@@ -1313,7 +1313,7 @@ pub(crate) struct PolicyMeta {
     #[serde(default)]
     #[allow(dead_code)]
     pub(crate) policy_sha256: Option<String>,
-    /// SHA-256[:16] fingerprint of the signing operator's Ed25519 public key.
+    /// `SHA-256[:16]` fingerprint of the signing operator's Ed25519 public key.
     pub(crate) signed_by: String,
     pub(crate) signed_at: i64,
 }
@@ -1600,7 +1600,7 @@ pub(crate) struct OperatorsBlock {
 /// bypassable** — a forged cert is always rejected.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct OperatorEntry {
-    /// SHA-256[:16] fingerprint of the operator's Ed25519 public key (32 hex chars).
+    /// `SHA-256[:16]` fingerprint of the operator's Ed25519 public key (32 hex chars).
     pub pubkey_fingerprint: String,
     pub display_name: String,
     /// Raw 32-byte Ed25519 public key, hex-encoded (64 hex chars).
@@ -1648,7 +1648,7 @@ pub struct OperatorEntry {
 /// chain of custody is visible.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BypassedCertMisconfig {
-    /// SHA-256[:16] of the operator's pubkey — matches the
+    /// `SHA-256[:16]` of the operator's pubkey — matches the
     /// `pubkey_fingerprint` field on the originating entry.
     pub operator_fingerprint: String,
     /// Operator display name as declared on the entry (NOT the cert,
@@ -3727,9 +3727,7 @@ type NotificationsTriple = (
 ///    target. Email channels require non-empty target. Sidecar
 ///    channels require a valid HTTP(S) URL and non-zero
 ///    `max_in_flight`.
-fn validate_notifications(
-    raw: &NotificationsSection,
-) -> Result<NotificationsTriple, PolicyError> {
+fn validate_notifications(raw: &NotificationsSection) -> Result<NotificationsTriple, PolicyError> {
     use std::collections::HashSet;
 
     let channels: Vec<NotificationChannel> = raw.channels_raw.clone();
@@ -4894,7 +4892,7 @@ impl PolicyBundle {
     /// V2_GAPS §E1 — declared `[[permitted_credentials]]`
     /// entries. Empty when the operator omits the section. When
     /// present, names are unique and every `environment` field
-    /// resolves to a key in [`environments`].
+    /// resolves to a key in `environments`.
     pub fn permitted_credentials(&self) -> &[PermittedCredentialConfig] {
         &self.permitted_credentials
     }
@@ -5064,7 +5062,7 @@ impl PolicyBundle {
         None
     }
 
-    /// Convenience around [`operator_entry`] for the (very common)
+    /// Convenience around `operator_entry` for the (very common)
     /// audit-emit + log-line lookup of "what is this fingerprint's
     /// human-readable display name?". Returns `None` when the
     /// fingerprint is not in this bundle (e.g. the operator was
@@ -5099,7 +5097,7 @@ impl PolicyBundle {
     /// `operator_entry()` lookups (e.g. signature verification on
     /// the operator IPC handlers) and not budgets, lanes, gates, etc.
     /// For tests that also need escalation rate-limit configuration
-    /// see [`for_tests_with_operators_and_escalation_policy`].
+    /// see `for_tests_with_operators_and_escalation_policy`.
     ///
     /// Gated on `debug_assertions || cfg(test)` — disappears in
     /// release builds, mirroring the convention used by
@@ -7068,7 +7066,7 @@ mod plan_bundle_limits_tests {
             write_and_load(&super::gateway_providers_tests::minimal_policy_toml_for_tests())
                 .expect("policy without [plan_bundle_limits] must load");
         let p = bundle.plan_bundle_limits();
-        assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
+        assert_eq!(p.max_artifact_bytes, 1024 * 1024);
         assert_eq!(p.max_bundle_bytes, 10 * 1024 * 1024);
         assert_eq!(p.max_artifact_count, 200);
     }
@@ -7078,7 +7076,7 @@ mod plan_bundle_limits_tests {
         let bundle = write_and_load(&minimal_with_plan_bundle_limits("\n[plan_bundle_limits]\n"))
             .expect("[plan_bundle_limits] with no fields must inherit field defaults");
         let p = bundle.plan_bundle_limits();
-        assert_eq!(p.max_artifact_bytes, 1 * 1024 * 1024);
+        assert_eq!(p.max_artifact_bytes, 1024 * 1024);
         assert_eq!(p.max_bundle_bytes, 10 * 1024 * 1024);
         assert_eq!(p.max_artifact_count, 200);
     }
@@ -8221,7 +8219,7 @@ permitted_ops      = ["CreateInitiative"]
     // ── Hard failures (NEVER bypassable) ──────────────────────────────
 
     /// Fingerprint mismatch: entry's pubkey_fingerprint does not equal
-    /// SHA-256[:16] of pubkey_hex. NEVER bypassable.
+    /// `SHA-256[:16]` of pubkey_hex. NEVER bypassable.
     #[test]
     fn fingerprint_mismatch_is_a_hard_failure() {
         let mut entry = entry_with_cert(

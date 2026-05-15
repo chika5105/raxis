@@ -313,9 +313,7 @@ impl ParsedUpstreamUrl {
             None => &raw[scheme_end..],
         };
         // Split on the first `/` or `?`.
-        let host_end = after_creds
-            .find(['/', '?'])
-            .unwrap_or(after_creds.len());
+        let host_end = after_creds.find(['/', '?']).unwrap_or(after_creds.len());
         let authority = &after_creds[..host_end];
         let (host, port) = match authority.rfind(':') {
             Some(colon) => {

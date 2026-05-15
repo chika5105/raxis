@@ -1,7 +1,7 @@
 //! AWS SigV4 signing for the V3 STS forwarding path.
 //!
 //! Normative reference:
-//! https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html
+//! <https://docs.aws.amazon.com/general/latest/gr/sigv4_signing.html>
 //!
 //! Implementation note: we deliberately do NOT depend on the
 //! `aws-sigv4` crate. SigV4 is small, fully specified, and

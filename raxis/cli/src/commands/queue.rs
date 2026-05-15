@@ -12,7 +12,7 @@
 //!
 //! Optional third section: pending verifier spawn queue, sourced
 //! from `heartbeat.json::queued_spawns`. Marked "(approximate; from
-//! heartbeat at <age> ago)" to set operator expectations.
+//! heartbeat at `<age>` ago)" to set operator expectations.
 
 use std::io::Write;
 use std::path::Path;
@@ -100,13 +100,7 @@ fn render_blocked<W: Write>(out: &mut W, rows: &[BlockingEdgeRow], limit: usize)
         let _ = writeln!(out, "  (no blocked tasks)");
         return;
     }
-    let _ = writeln!(
-        out,
-        "  {task_id:<22} {wait:<22} {reason}",
-        task_id = "task_id",
-        wait = "waiting_on",
-        reason = "reason",
-    );
+    let _ = writeln!(out, "  {:<22} {:<22} reason", "task_id", "waiting_on",);
     for r in rows.iter().take(limit) {
         let _ = writeln!(
             out,

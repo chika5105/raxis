@@ -463,12 +463,8 @@ mod tests {
             FetchKind::Inference,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend
-            .seen_stream_idle
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("backend must have been called");
+        let observed =
+            (*backend.seen_stream_idle.lock().unwrap()).expect("backend must have been called");
         assert_eq!(
             observed,
             Some(Duration::from_secs(30)),
@@ -493,12 +489,8 @@ mod tests {
             FetchKind::Inference,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend
-            .seen_stream_idle
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("backend must have been called");
+        let observed =
+            (*backend.seen_stream_idle.lock().unwrap()).expect("backend must have been called");
         assert_eq!(
             observed,
             Some(Duration::from_millis(120_000)),
@@ -524,12 +516,8 @@ mod tests {
             FetchKind::DataFetch,
         );
         let _ = handle_fetch_request(req, EXPECTED_TOKEN, Some(&view), &backend).await;
-        let observed = backend
-            .seen_stream_idle
-            .lock()
-            .unwrap()
-            .clone()
-            .expect("backend must have been called");
+        let observed =
+            (*backend.seen_stream_idle.lock().unwrap()).expect("backend must have been called");
         // After the outer `expect` the value type is `Option<Duration>`;
         // `None` means "no per-chunk idle deadline attached".
         assert_eq!(
@@ -626,8 +614,10 @@ mod tests {
     #[tokio::test]
     async fn backend_too_large_maps_to_response_too_large_string() {
         let view = view_with_anthropic();
-        let mut backend = MockBackend::default();
-        backend.canned_body = vec![0; 100];
+        let backend = MockBackend {
+            canned_body: vec![0; 100],
+            ..MockBackend::default()
+        };
         // Override provider via building the view by hand with a tiny cap.
         let mut tiny = anthropic_provider();
         tiny.max_response_bytes = 16;

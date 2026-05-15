@@ -180,7 +180,7 @@ impl SpecGraphLint {
         let mut findings = Vec::new();
         let mut total_section_refs = 0usize;
 
-        for (_basename, spec) in &self.files {
+        for spec in self.files.values() {
             let body = std::fs::read_to_string(&spec.path)?;
             // ── Check #1: section anchor resolution ──────────────────────
             for (line_no, line) in body.lines().enumerate() {

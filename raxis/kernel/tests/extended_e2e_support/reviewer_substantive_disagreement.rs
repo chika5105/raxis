@@ -63,24 +63,25 @@
 //! 1. **Chain-side (Option-A wire surface — see
 //!    `agent-disagreement.md §3.6`).** The audit chain contains,
 //!    in order:
-//!    a. `IntentAccepted{SubmitReview, task=reviewer_a_task_id}`.
-//!    b. `ExecutorRespawnFromReviewRejection{task_id=
-//!       executor_task_id}` AFTER (a) — the
-//!       `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` chain
-//!       anchor emitted by `handle_retry_sub_task` when the
-//!       Orchestrator's `RetrySubTask` is admitted off a
-//!       Completed activation whose `review_reject_count > 0`.
-//!       This event is strictly stronger than the prior
-//!       `SessionVmSpawned` predicate it replaced: a round-1
-//!       spawn fires `SessionVmSpawned` too, so the older
-//!       witness had to join `subtask_activations` to count
-//!       prior rows; `ExecutorRespawnFromReviewRejection`
-//!       carries `(prior_activation_id, new_activation_id,
-//!       review_reject_count)` inline, removing the SQLite
-//!       coupling (and satisfying `INV-AUDIT-04`).
-//!    c. `IntentAccepted{SubmitReview, task=reviewer_b_task_id}`
-//!       AFTER (a).
-//!    d. `ReviewAggregationCompleted{executor_task_id, verdict=AllPassed}`.
+//!    The chain carries
+//!    `IntentAccepted{SubmitReview, task=reviewer_a_task_id}`,
+//!    then `ExecutorRespawnFromReviewRejection{task_id=
+//!    executor_task_id}` — the
+//!    `INV-RETRY-FROM-COMPLETED-REVIEW-REJECTED-01` chain anchor
+//!    emitted by `handle_retry_sub_task` when the
+//!    Orchestrator's `RetrySubTask` is admitted off a Completed
+//!    activation whose `review_reject_count > 0`. This event is
+//!    strictly stronger than the prior `SessionVmSpawned`
+//!    predicate it replaced: a round-1 spawn fires
+//!    `SessionVmSpawned` too, so the older witness had to join
+//!    `subtask_activations` to count prior rows;
+//!    `ExecutorRespawnFromReviewRejection` carries
+//!    `(prior_activation_id, new_activation_id,
+//!    review_reject_count)` inline, removing the SQLite coupling
+//!    (and satisfying `INV-AUDIT-04`). It is followed by
+//!    `IntentAccepted{SubmitReview, task=reviewer_b_task_id}`
+//!    and finally
+//!    `ReviewAggregationCompleted{executor_task_id, verdict=AllPassed}`.
 //!
 //! 2. **SQLite-side (substantive critique).** The `last_critique`
 //!    column on the executor's `tasks` row is non-empty AND

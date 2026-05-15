@@ -707,7 +707,7 @@ async fn main() {
         // precision isn't required for the audit row; a future
         // PR can hoist an `Instant` if a tighter reading is
         // needed.
-        let recovery_sweep_ms = unix_now.saturating_sub(started_at).saturating_mul(1000) as u64;
+        let recovery_sweep_ms = unix_now.saturating_sub(started_at).saturating_mul(1000);
         let sentinel_path = data_dir.join("kernel_lifecycle_status.json");
         let sentinel = restart_lifecycle::read_sentinel_for_restart(&sentinel_path);
         let supervisor_restart_id = sentinel.as_ref().map(|s| {
@@ -1121,7 +1121,7 @@ async fn main() {
                 if let Err(e) = inner_audit.emit(
                     AuditEventKind::IsolationSubstrateSelected {
                         backend_id: selected.backend.backend_id().to_owned(),
-                        tier: serde_json::to_value(&selected.tier)
+                        tier: serde_json::to_value(selected.tier)
                             .ok()
                             .and_then(|v| v.as_str().map(str::to_owned))
                             .unwrap_or_else(|| "Unknown".to_owned()),

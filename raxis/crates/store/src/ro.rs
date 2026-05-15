@@ -75,11 +75,11 @@ const SCHEMA_VERSION_TABLE: &str = Table::SchemaVersion.as_str();
 ///
 /// | Variant | CLI exit | CLI message snippet |
 /// |---|---|---|
-/// | `DbMissing` | 1 | "kernel.db not found at <path>; has the kernel been bootstrapped?" |
-/// | `OpenFailed` | 1 | "kernel.db at <path> could not be opened: <reason>" |
-/// | `SchemaMissing` | 7 | "schema_version table not present at <path>" |
+/// | `DbMissing` | 1 | `"kernel.db not found at <path>; has the kernel been bootstrapped?"` |
+/// | `OpenFailed` | 1 | `"kernel.db at <path> could not be opened: <reason>"` |
+/// | `SchemaMissing` | 7 | `"schema_version table not present at <path>"` |
 /// | `SchemaMismatch` | 7 | "kernel.db is at schema version N; this CLI expects M" |
-/// | `Sqlite` | 1 | "sqlite error during read: <reason>" |
+/// | `Sqlite` | 1 | `"sqlite error during read: <reason>"` |
 #[derive(Debug, Error)]
 pub enum RoError {
     /// The `kernel.db` file does not exist at the resolved path.

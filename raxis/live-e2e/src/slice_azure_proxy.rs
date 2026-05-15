@@ -96,7 +96,7 @@ pub async fn run() -> Result<()> {
     let proxy = AzureProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
     )
     .await
     .context("bind AzureProxy")?;

@@ -618,7 +618,7 @@ mod tests {
                 arch.as_str(),
             );
             assert!(
-                url.ends_with(&format!("vmlinux-5.10.225")),
+                url.ends_with("vmlinux-5.10.225"),
                 "ref URL for {} no longer pins the documented 5.10.225 floor: {url}",
                 arch.as_str(),
             );

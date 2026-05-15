@@ -6,7 +6,7 @@
 //!
 //! * `raxis/specs/v2/system-requirements.md §11` — `$RAXIS_INSTALL_DIR`
 //!   layout. The kernel binary resolves the guest-kernel path via
-//!   [`raxis_kernel::canonical_images_preflight::linux_kernel_path`],
+//!   `raxis_kernel::canonical_images_preflight::linux_kernel_path`,
 //!   which is `<install_dir>/kernel/vmlinux`.
 //! * `raxis/specs/v2/extensibility-traits.md §3.4` — `VmSpec.linux_kernel_path`
 //!   contract: substrate hands this exact path to AVF's

@@ -214,11 +214,12 @@ enum Slice {
     /// DML denial (sqlstate `42501`) for INSERT / UPDATE / DELETE while
     /// keeping SELECT and the session alive.
     PostgresProxyRestrictions,
-    /// Real `PostgresProxy` with V2 `allowed_tables` / `forbidden_tables`
-    /// + `enforce = false` audit-only mode. Drives the SQL walker
-    /// end-to-end against real Postgres wire bytes, asserting that
-    /// the closed-enum `restriction_reason` strings reach the audit
-    /// channel per `proxy-table-allowlists.md §8`.
+    /// Real `PostgresProxy` with V2 `allowed_tables` /
+    /// `forbidden_tables` + `enforce = false` audit-only mode.
+    /// Drives the SQL walker end-to-end against real Postgres wire
+    /// bytes, asserting that the closed-enum `restriction_reason`
+    /// strings reach the audit channel per
+    /// `proxy-table-allowlists.md §8`.
     PostgresProxyTableAllowlists,
     /// Real `PostgresProxy` with `max_result_rows = 5` against the
     /// docker-compose Postgres 16 container. Drives the V2.2
@@ -238,11 +239,12 @@ enum Slice {
     /// asserting that denied requests never reach upstream and never
     /// resolve the credential.
     HttpProxyRestrictions,
-    /// Real `SessionSpawnService` driving real `CredentialProxyManager`
-    /// + real `PolicyAdmissionService` + real `SubprocessIsolation`.
-    /// Asserts the full spawn → admission → terminate audit chain in
-    /// the spec's fixed order, plus byte-shape verdicts on the
-    /// admission wire (Admit + Deny).
+    /// Real `SessionSpawnService` driving real
+    /// `CredentialProxyManager` + real `PolicyAdmissionService` +
+    /// real `SubprocessIsolation`. Asserts the full spawn →
+    /// admission → terminate audit chain in the spec's fixed
+    /// order, plus byte-shape verdicts on the admission wire
+    /// (Admit + Deny).
     SessionSpawn,
     /// Real `SmtpProxy` + an in-process upstream SMTP relay. Asserts
     /// that the proxy strips the agent's AUTH PLAIN payload and

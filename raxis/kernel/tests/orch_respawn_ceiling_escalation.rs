@@ -200,14 +200,13 @@ fn drive_to_ceiling_and_insert_escalation(conn: &mut Connection, initiative_id: 
     })
     .to_string();
 
-    let justification = format!(
-        "Orchestrator respawn-no-progress ceiling exceeded \
+    let justification = "Orchestrator respawn-no-progress ceiling exceeded \
          (4 respawns within 120s with zero subtask FSM transitions). \
          Last orchestrator intent: RetrySubTask rejected as \
          RetrySubTaskRejectedNotRetryable. Operator approval required \
          to reset the respawn counter and retry, or deny to \
          preserve the Failed terminal state."
-    );
+        .to_string();
 
     tx.execute(
         &format!(

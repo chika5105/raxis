@@ -104,8 +104,7 @@ pub async fn run() -> Result<()> {
         resolves: AtomicU32::new(0),
     });
 
-    let credential_name = CredentialName::try_from("live-e2e".to_owned())
-        .map_err(|e| anyhow!("CredentialName: {e}"))?;
+    let credential_name = CredentialName::from("live-e2e".to_owned());
     let cfg = ProxyConfig {
         listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: credential_name.clone(),
@@ -116,7 +115,7 @@ pub async fn run() -> Result<()> {
     let proxy = MongodbProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
     )
     .await
     .context("MongodbProxy::bind")?;

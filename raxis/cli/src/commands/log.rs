@@ -209,10 +209,12 @@ fn run_follow(
 /// closure into a static slot (one slot, last-installer-wins) and
 /// then `sigaction`s a trampoline that calls it. Adequate for our
 /// "set an atomic flag" use case; v2 should adopt `signal-hook`.
+type SigintHandler = Box<dyn Fn() + Send + Sync + 'static>;
+
 fn install_sigint_handler<F: Fn() + Send + Sync + 'static>(f: F) {
     use std::sync::Mutex;
     use std::sync::OnceLock;
-    static SLOT: OnceLock<Mutex<Option<Box<dyn Fn() + Send + Sync + 'static>>>> = OnceLock::new();
+    static SLOT: OnceLock<Mutex<Option<SigintHandler>>> = OnceLock::new();
     let slot = SLOT.get_or_init(|| Mutex::new(None));
     *slot.lock().unwrap() = Some(Box::new(f));
 
@@ -536,40 +538,60 @@ mod tests {
     #[test]
     fn matches_filter_initiative_id_strict_match() {
         let r = make_record(1, "X", None, Some("init-x"), None, None);
-        let mut opts = LogOpts::default();
-        opts.initiative_id = Some("init-x".to_owned());
+        let opts = LogOpts {
+            initiative_id: Some("init-x".to_owned()),
+            ..LogOpts::default()
+        };
         assert!(matches_filter(&r, &opts));
-        opts.initiative_id = Some("init-y".to_owned());
+        let opts = LogOpts {
+            initiative_id: Some("init-y".to_owned()),
+            ..LogOpts::default()
+        };
         assert!(!matches_filter(&r, &opts));
     }
 
     #[test]
     fn matches_filter_kind_substring_case_insensitive() {
         let r = make_record(1, "WitnessAccepted", None, None, None, None);
-        let mut opts = LogOpts::default();
-        opts.kind = Some("witness".to_owned());
+        let opts = LogOpts {
+            kind: Some("witness".to_owned()),
+            ..LogOpts::default()
+        };
         assert!(matches_filter(&r, &opts), "case-insensitive substring");
-        opts.kind = Some("REJECTED".to_owned());
+        let opts = LogOpts {
+            kind: Some("REJECTED".to_owned()),
+            ..LogOpts::default()
+        };
         assert!(!matches_filter(&r, &opts));
     }
 
     #[test]
     fn matches_filter_since_excludes_too_old() {
         let r = make_record(1, "X", Some(1_700_000_000), None, None, None);
-        let mut opts = LogOpts::default();
-        opts.since_unix_secs = Some(1_700_000_500);
+        let opts = LogOpts {
+            since_unix_secs: Some(1_700_000_500),
+            ..LogOpts::default()
+        };
         assert!(!matches_filter(&r, &opts), "older than --since must drop");
-        opts.since_unix_secs = Some(1_700_000_000);
+        let opts = LogOpts {
+            since_unix_secs: Some(1_700_000_000),
+            ..LogOpts::default()
+        };
         assert!(matches_filter(&r, &opts), "boundary must include");
-        opts.since_unix_secs = Some(1_699_999_999);
+        let opts = LogOpts {
+            since_unix_secs: Some(1_699_999_999),
+            ..LogOpts::default()
+        };
         assert!(matches_filter(&r, &opts));
     }
 
     #[test]
     fn matches_filter_no_emitted_at_drops_when_since_set() {
         let r = make_record(1, "X", None, None, None, None);
-        let mut opts = LogOpts::default();
-        opts.since_unix_secs = Some(1_700_000_000);
+        let opts = LogOpts {
+            since_unix_secs: Some(1_700_000_000),
+            ..LogOpts::default()
+        };
         assert!(
             !matches_filter(&r, &opts),
             "missing emitted_at must drop under --since (we cannot prove it's recent)"

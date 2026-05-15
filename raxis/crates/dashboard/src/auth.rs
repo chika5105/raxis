@@ -287,7 +287,7 @@ impl DashboardRole {
 /// Authenticated operator carried in the JWT.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct OperatorClaims {
-    /// SHA-256[:16] hex fingerprint of the operator's Ed25519
+    /// `SHA-256[:16]` hex fingerprint of the operator's Ed25519
     /// pubkey. Used to look up the live operator entry on every
     /// request.
     pub fingerprint: OperatorFingerprint,

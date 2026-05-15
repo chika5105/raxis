@@ -258,7 +258,7 @@ fn submit_escalation_blocking(
     // pipeline so the rate-limit, quarantine, and timeout reads all
     // see the same epoch (INV-POLICY-01).
     let policy_snapshot = ctx.policy.load_full();
-    let now_secs = unix_now_secs() as i64;
+    let now_secs = unix_now_secs();
     let max_per_window = policy_snapshot.escalation_max_per_window() as i64;
     let window_secs = policy_snapshot.escalation_window().as_secs() as i64;
     let quarantine_threshold = policy_snapshot.escalation_quarantine_threshold() as i64;

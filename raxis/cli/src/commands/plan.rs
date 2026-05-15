@@ -108,7 +108,7 @@ pub fn to_wire(req: &OperatorRequest) -> Result<Value, CliError> {
 /// Pattern-match the kernel's `OperatorResponse` envelope. The wire
 /// shape (locked by `raxis_types::operator_wire::tests`) is:
 ///
-///   { "status": "<Variant>", "payload": {...} }
+///   `{ "status": "<Variant>", "payload": {...} }`
 ///
 /// `status = "Error"` collapses to `CliError::KernelError`; every other
 /// status is treated as success and the inner `payload` object is

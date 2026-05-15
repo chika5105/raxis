@@ -30,9 +30,10 @@
 //! ## What the slice asserts
 //!
 //! 1. PRELOGIN ↔ LOGIN7 ↔ LOGINACK + DONE succeeds (proxy-local).
-//! 2. `SQLBatch "SELECT 1"` round-trips real `COLMETADATA + ROW
-//!    + DONE` tokens — assertion: `upstream_connects_succeeded ≥ 1`,
-//!    no ERROR token in the reply.
+//! 2. `SQLBatch "SELECT 1"` round-trips real `COLMETADATA`,
+//!    `ROW`, and `DONE` tokens — assertion:
+//!    `upstream_connects_succeeded ≥ 1`, no ERROR token in the
+//!    reply.
 //! 3. `SQLBatch "INSERT INTO t VALUES (1)"` is rejected at the
 //!    restriction layer BEFORE upstream — assertion: ERROR + DONE.
 //! 4. Counters: `connections_served ≥ 1`, `queries_audited == 2`,
@@ -126,8 +127,7 @@ pub async fn run() -> Result<()> {
         resolves: AtomicU32::new(0),
     });
 
-    let credential_name = CredentialName::try_from("live-e2e".to_owned())
-        .map_err(|e| anyhow!("CredentialName: {e}"))?;
+    let credential_name = CredentialName::from("live-e2e".to_owned());
     let cfg = ProxyConfig {
         listen_addr: "127.0.0.1:0".to_owned(),
         credential_name: credential_name.clone(),
@@ -140,7 +140,7 @@ pub async fn run() -> Result<()> {
     let proxy = MssqlProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
     )
     .await
     .context("MssqlProxy::bind")?;
@@ -221,8 +221,8 @@ pub async fn run() -> Result<()> {
         .await
         .context("read SELECT reply")?
         .ok_or_else(|| anyhow!("EOF after SELECT"))?;
-    let has_error = sel_reply.1.iter().any(|&b| b == 0xAA);
-    let has_done = sel_reply.1.iter().any(|&b| b == 0xFD);
+    let has_error = sel_reply.1.contains(&0xAA);
+    let has_done = sel_reply.1.contains(&0xFD);
     let _ = hermetic;
     if has_error {
         return Err(anyhow!(
@@ -249,7 +249,7 @@ pub async fn run() -> Result<()> {
             ins_reply.1.first().copied().unwrap_or(0),
         ));
     }
-    if !ins_reply.1.iter().any(|&b| b == 0xFD) {
+    if !ins_reply.1.contains(&0xFD) {
         return Err(anyhow!("INSERT reply missing DONE token"));
     }
 

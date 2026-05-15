@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// * `Str` — UTF-8 string. The redactor caps and sanitises every
 ///   string per the per-key `max_bytes` budget in
-///   [`crate::redact::ATTR_ALLOW_LIST`].
+///   `crate::redact::ATTR_ALLOW_LIST`.
 /// * `I64` — covers durations in milliseconds, byte counts up to
 ///   8 EiB, sequence numbers, etc.
 /// * `F64` — covers histogram sums and ratio values. NaN / ±Inf

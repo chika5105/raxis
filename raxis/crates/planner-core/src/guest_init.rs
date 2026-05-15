@@ -480,7 +480,7 @@ pub const A3_DEFAULT_TPROXY_PORT: u16 = 3129;
 ///   1. Disable IPv6 entirely (sysfs writes to
 ///      `/proc/sys/net/ipv6/conf/{all,default,lo}/disable_ipv6`).
 ///      The substrate refuses to provision a NIC under
-///      [`raxis_isolation::EgressTier::Mediated`], so the guest
+///      `raxis_isolation::EgressTier::Mediated`, so the guest
 ///      has no IPv6 interface to begin with, but defence in
 ///      depth: a future substrate that exposes an IPv6
 ///      auto-configured device cannot leak via SLAAC.

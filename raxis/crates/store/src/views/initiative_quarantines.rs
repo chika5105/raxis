@@ -52,7 +52,7 @@ pub struct InitiativeQuarantineRow {
     pub initiative_id: String,
     pub quarantined_at: i64,
     /// Operator pubkey_fingerprint that issued the command; 32 hex
-    /// chars (SHA-256[:16] of the operator's Ed25519 pubkey, per
+    /// chars (`SHA-256[:16]` of the operator's Ed25519 pubkey, per
     /// peripherals.md §3 'operator socket').
     pub quarantined_by: String,
     /// Free-form operator-supplied label; capped to 512 bytes by the

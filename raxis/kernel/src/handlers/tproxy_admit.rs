@@ -180,7 +180,7 @@ impl TunnelRegistry {
 // ---------------------------------------------------------------------------
 
 /// Top-level dispatch entry point. Mirrors the
-/// [`handlers::planner_fetch::handle`] shape: returns a
+/// `handlers::planner_fetch::handle` shape: returns a
 /// [`TproxyAdmissionResponse`] for every input (no panics, no
 /// early-returns into the dispatch loop) and emits exactly one
 /// paired audit event before the response.

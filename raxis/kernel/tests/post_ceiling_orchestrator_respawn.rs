@@ -112,7 +112,7 @@
 
 mod common;
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use raxis_ipc::{read_frame, write_frame, IpcMessage};
@@ -542,7 +542,7 @@ fn mint_session_token() -> String {
 /// and lay down the entire post-ceiling fixture in ONE
 /// transaction so a partial seed cannot leave the kernel observing
 /// a half-applied state.
-fn seed_post_ceiling_state(data_dir: &PathBuf, session_token: &str) {
+fn seed_post_ceiling_state(data_dir: &Path, session_token: &str) {
     let db_path = data_dir.join("kernel.db");
     let mut conn =
         Connection::open(&db_path).unwrap_or_else(|e| panic!("open kernel.db at {db_path:?}: {e}"));

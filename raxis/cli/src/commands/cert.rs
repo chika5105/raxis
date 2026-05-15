@@ -1651,7 +1651,7 @@ mod revoke {
         // operator socket so the kernel persists it inside the
         // hash-chained segment.
         let _ = append_local_cert_cli_event(
-            &flags.data_dir(),
+            flags.data_dir(),
             &serde_json::json!({
                 "kind":               "OperatorCertRevoked",
                 "subject_fingerprint": record.subject_fingerprint,

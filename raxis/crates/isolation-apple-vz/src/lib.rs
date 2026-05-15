@@ -33,7 +33,7 @@
 //!   the kernel image resolver.
 //!
 //! On hosts that don't satisfy these prerequisites,
-//! [`AppleVzBackend::probe_host`] returns
+//! `AppleVzBackend::probe_host` returns
 //! [`HostSupport::Unsupported`] and
 //! [`Backend::verify_isolation_guarantee`] returns
 //! [`IsolationLevel::FallbackOnly`] — the production admission helper

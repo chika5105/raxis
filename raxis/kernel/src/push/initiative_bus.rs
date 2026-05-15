@@ -353,10 +353,7 @@ mod tests {
             _t: Option<&str>,
             _i: Option<&str>,
         ) -> Result<AuditEvent, AuditWriterError> {
-            Err(AuditWriterError::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "stub failure",
-            )))
+            Err(AuditWriterError::Io(std::io::Error::other("stub failure")))
         }
     }
 

@@ -4,7 +4,7 @@
 //! Normative references:
 //!
 //! * `raxis/specs/v2/extensibility-traits.md §3.4` — `VmSpec.linux_kernel_path`
-//!   contract and the [`raxis_isolation::ImageKind::RootfsInitramfsCpio`]
+//!   contract and the `raxis_isolation::ImageKind::RootfsInitramfsCpio`
 //!   variant the substrates dispatch on. This crate produces the bytes
 //!   that variant points at.
 //! * `raxis/specs/v2/e2e-live-test-gap.md` — the `mkfs.erofs`-on-macOS
@@ -56,7 +56,7 @@
 //! 1. Entries are sorted by path (ASCII byte order) before writing.
 //! 2. `c_mtime` is `source_date_epoch` for every entry.
 //! 3. `c_uid` / `c_gid` are caller-supplied per entry but default to
-//!    `0` (root) via [`InitramfsBuilder::add_*`]. Determinism is the
+//!    `0` (root) via `InitramfsBuilder::add_*`. Determinism is the
 //!    caller's responsibility once they supply non-default values.
 //! 4. `c_ino` is sequentially assigned in sort order — never derived
 //!    from any host filesystem inode.
@@ -65,12 +65,12 @@
 //!    to refuse those at the API boundary).
 //! 6. The gzip stream uses the deterministic header fields the
 //!    `flate2`/`miniz_oxide` writer emits with `mtime=0`, `os=0xFF`,
-//!    `xfl=0` — see [`InitramfsBuilder::write_gzip_deterministic_header`].
+//!    `xfl=0` — see `InitramfsBuilder::write_gzip_deterministic_header`.
 //!
 //! ## Module layout
 //!
 //! * [`InitramfsBuilder`] — the public surface.
-//! * [`CpioEntry`] — what the builder owns internally; not part of the
+//! * `CpioEntry` — what the builder owns internally; not part of the
 //!   public API but exposed via `pub(crate)` for tests.
 //! * `write_newc_entry` — header + path + data writer.
 //! * `write_gzip_deterministic_header` — the determinism shim around

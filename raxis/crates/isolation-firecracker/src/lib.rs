@@ -32,7 +32,7 @@
 //!   kernel image resolver.
 //!
 //! On hosts that don't satisfy these prerequisites,
-//! [`FirecrackerBackend::probe_host`] returns
+//! `FirecrackerBackend::probe_host` returns
 //! [`HostSupport::Unsupported`] and [`Backend::verify_isolation_guarantee`]
 //! returns [`IsolationLevel::FallbackOnly`] — the production admission
 //! helper [`raxis_isolation::verify_admission_tier`] then refuses the
@@ -475,7 +475,7 @@ fn drive_boot(
 // directly; `request_action` is a tiny adapter for tests that want to
 // dispatch on a runtime variant.
 impl FirecrackerApi {
-    /// Issue an arbitrary action variant. Used by [`drive_boot`] so
+    /// Issue an arbitrary action variant. Used by `drive_boot` so
     /// the dispatch path is single-call-site.
     pub fn request_action(&self, kind: ActionType) -> Result<(), api::ApiError> {
         let body = Action { action_type: kind };

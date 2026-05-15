@@ -193,11 +193,11 @@ pub fn dispatch(
     // to per-channel spawns. Cloning the channel id list is cheap
     // (single Vec<String> with a handful of entries).
     let channel_ids: Vec<String> = match bundle.notification_route(&event.event_kind) {
-        Some(explicit) if explicit.is_empty() => {
+        Some([]) => {
             // Silenced route. Drop.
             return;
         }
-        Some(explicit) => explicit.iter().cloned().collect(),
+        Some(explicit) => explicit.to_vec(),
         None => bundle.default_notification_channels().to_vec(),
     };
     if channel_ids.is_empty() {
@@ -321,8 +321,8 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     }
 
     let channel_ids: Vec<String> = match bundle.notification_route(&event.event_kind) {
-        Some(explicit) if explicit.is_empty() => return,
-        Some(explicit) => explicit.iter().cloned().collect(),
+        Some([]) => return,
+        Some(explicit) => explicit.to_vec(),
         None => bundle.default_notification_channels().to_vec(),
     };
     for channel_id in channel_ids {

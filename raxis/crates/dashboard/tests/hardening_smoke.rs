@@ -179,7 +179,7 @@ async fn worktree_name_with_slash_yields_404_or_400() {
         .expect("send");
     let s = res.status().as_u16();
     assert!(
-        s >= 400 && s < 500,
+        (400..500).contains(&s),
         "encoded slash in :name must yield a 4xx (got {s})",
     );
     handle.shutdown().await.expect("shutdown");
@@ -206,7 +206,7 @@ async fn sse_with_last_event_id_on_unknown_session_yields_4xx() {
         .expect("send");
     let s = res.status().as_u16();
     assert!(
-        s >= 400 && s < 500,
+        (400..500).contains(&s),
         "SSE on unknown session w/ Last-Event-ID must 4xx, got {s}",
     );
     handle.shutdown().await.expect("shutdown");
@@ -234,7 +234,7 @@ async fn burst_of_unauth_requests_drains_without_panicking() {
     for j in joins {
         let s = j.await.expect("task join");
         assert!(
-            s >= 400 && s < 500,
+            (400..500).contains(&s),
             "every burst request must surface a 4xx (got {s})",
         );
     }

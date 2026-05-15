@@ -222,10 +222,11 @@ fn run_default(flags: &GlobalFlags, opts: DoctorOpts) -> Result<(), CliError> {
 ///
 /// Exit code:
 ///   * 0 — a real (non-placeholder) key is baked in.
-///   * 1 — the binary was built without `RAXIS_KERNEL_SIGNING_KEY_HEX`
-///         (or the matching bytes path) set; surfaced loudly so an
-///         operator who installed an unsigned `cargo build` knows
-///         their kernel cannot verify any image manifest.
+///   * 1 — the binary was built without
+///     `RAXIS_KERNEL_SIGNING_KEY_HEX` (or the matching bytes
+///     path) set; surfaced loudly so an operator who installed
+///     an unsigned `cargo build` knows their kernel cannot
+///     verify any image manifest.
 ///
 /// The compiled-in `EXPECTED_KERNEL_SIGNING_KEY_BYTES` constant is
 /// the public half of the kernel signing keypair; this command is
@@ -284,13 +285,14 @@ fn run_signing_key_fp(opts: DoctorOpts) -> Result<(), CliError> {
 /// Exit code:
 ///   * 0 — every present image verifies.
 ///   * 1 — at least one image is missing on disk (Warn). Doctor
-///         does NOT distinguish "not yet installed" from "deleted",
-///         so the formula's `post_install` treats this as
-///         non-fatal but still surfaces it.
+///     does NOT distinguish "not yet installed" from "deleted",
+///     so the formula's `post_install` treats this as non-fatal
+///     but still surfaces it.
 ///   * 2 — at least one image's manifest signature failed, the
-///         streamed SHA-256 disagreed with the manifest's signed
-///         digest, or the trust anchor is unpopulated. The formula's
-///         `post_install` aborts the install in this case.
+///     streamed SHA-256 disagreed with the manifest's signed
+///     digest, or the trust anchor is unpopulated. The
+///     formula's `post_install` aborts the install in this
+///     case.
 fn run_canonical_images(opts: DoctorOpts, install_dir: PathBuf) -> Result<(), CliError> {
     let kernel_version = env!("CARGO_PKG_VERSION");
     let stdout = std::io::stdout();
@@ -404,7 +406,7 @@ fn verify_one(
             report.push(
                 id_verify,
                 Outcome::Ok,
-                format!("manifest signature + image digest verify against trust anchor"),
+                "manifest signature + image digest verify against trust anchor".to_string(),
             );
         }
         Err(CanonicalImageError::SigningKeyFpNotPopulated) => {
@@ -444,11 +446,11 @@ fn verify_one(
 ///
 /// Exit code:
 ///   * 0 — prune completed successfully (any number of bytes
-///         freed, including 0).
+///     freed, including 0).
 ///   * 1 — `--dry-run`-only diagnostic mode finished; same shape
-///         as 0 but no bytes were freed.
+///     as 0 but no bytes were freed.
 ///   * 2 — the cache could not be enumerated (filesystem error
-///         walking the cache root, etc.); details on stderr.
+///     walking the cache root, etc.); details on stderr.
 fn run_cache_prune(flags: &GlobalFlags, opts: DoctorOpts, dry_run: bool) -> Result<(), CliError> {
     use raxis_image_cache::{ImageResolver, OciDigest, ProductionResolver};
     use std::collections::HashSet;
@@ -1099,7 +1101,7 @@ fn collect(data_dir: &Path) -> Report {
     // 8. Operator-cert status sweep (step-11). Only runs if the store
     // opened cleanly above.
     if let Some(conn) = conn.as_ref() {
-        check_operator_certs(&mut r, conn, unix_now_secs() as i64);
+        check_operator_certs(&mut r, conn, unix_now_secs());
     }
 
     r
@@ -2229,6 +2231,7 @@ mod tests {
     // `raxis-crypto::cert::tests`; here we only assert the
     // doctor-side mapping (status → Outcome + id format).
 
+    #[allow(clippy::too_many_arguments)]
     fn setup_db_with_cert(
         tmp: &TempDir,
         fp: &str,

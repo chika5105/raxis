@@ -22,7 +22,7 @@
 //!
 //! Mirrors the AVF reference implementation in
 //! `crates/isolation-apple-vz/src/vsock_loopback_bridge.rs`:
-//!   * Both backends share the [`raxis_vsock_loopback`] wire format
+//!   * Both backends share the `raxis_vsock_loopback` wire format
 //!     (the `RAXIS_VSOCK_LOOPBACK_PLAN` env var produced by
 //!     `raxis-session-spawn`).
 //!   * Both backends share the in-guest forwarder

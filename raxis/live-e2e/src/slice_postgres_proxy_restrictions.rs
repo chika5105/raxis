@@ -23,7 +23,7 @@
 //!   1. StartupMessage → AuthenticationOk → … → ReadyForQuery.
 //!   2. `SELECT 1`     → `CommandComplete` ('C') + `ReadyForQuery`.
 //!   3. `INSERT INTO`  → `ErrorResponse` ('E') with sqlstate `42501`
-//!                       + `ReadyForQuery`.
+//!      + `ReadyForQuery`.
 //!   4. `UPDATE … SET` → `ErrorResponse` ('E') + `ReadyForQuery`.
 //!   5. `DELETE FROM`  → `ErrorResponse` ('E') + `ReadyForQuery`.
 //!   6. Terminate ('X').

@@ -36,7 +36,7 @@
 //! the audit event:
 //!
 //! - When `--operator-key` is supplied, we load the private key,
-//!   compute the SHA-256[:16] fingerprint of its public half via
+//!   compute the SHA-256\[:16\] fingerprint of its public half via
 //!   [`raxis_policy::loader::operator_pubkey_fingerprint`], and use
 //!   that 32-hex-char fingerprint. This matches the `signed_by`
 //!   field in `policy.toml [meta]`, so an auditor can cross-reference

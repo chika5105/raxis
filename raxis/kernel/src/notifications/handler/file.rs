@@ -42,7 +42,7 @@ pub async fn deliver(
     let target = resolve_target(channel)?;
 
     let record = FileRecord {
-        notified_at: raxis_types::unix_now_secs() as i64,
+        notified_at: raxis_types::unix_now_secs(),
         event_kind: &event.event_kind,
         event_seq: event.seq,
         payload: &event.payload,
@@ -51,7 +51,7 @@ pub async fn deliver(
     let mut line = serde_json::to_vec(&record).map_err(|e| {
         // serde_json on a serializable input fails only on a writer
         // I/O error; surface as Io for consistency.
-        DeliveryError::Io(std::io::Error::new(std::io::ErrorKind::Other, e))
+        DeliveryError::Io(std::io::Error::other(e))
     })?;
     line.push(b'\n');
 

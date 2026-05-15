@@ -59,7 +59,7 @@ impl ChallengeEnvelope {
 /// Response envelope from operator to kernel.
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
 pub struct ResponseEnvelope {
-    /// SHA-256[:16] fingerprint of the operator's Ed25519 public key (32 hex chars).
+    /// `SHA-256[:16]` fingerprint of the operator's Ed25519 public key (32 hex chars).
     pub fingerprint: String,
     /// Ed25519 signature over `challenge_bytes` — 64 bytes, hex-encoded as 128 chars.
     pub signed_challenge_hex: String,

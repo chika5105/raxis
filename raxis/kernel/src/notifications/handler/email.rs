@@ -220,9 +220,7 @@ async fn load_password_sidecar(data_dir: &Path, channel_id: &str) -> Result<Stri
             path.display(),
         ))
     })?;
-    let trimmed = s
-        .trim_end_matches(|c: char| c == '\r' || c == '\n')
-        .to_owned();
+    let trimmed = s.trim_end_matches(['\r', '\n']).to_owned();
     if trimmed.is_empty() {
         return Err(DeliveryError::CredentialUnavailable(format!(
             "sidecar at {} is empty",
@@ -805,7 +803,7 @@ mod tests {
         // relay terminates DATA on a bare ".\r\n" line, so leaking
         // an unescaped dot would truncate the message.
         for line in text.split("\r\n") {
-            if line.starts_with('.') && !line.starts_with("..") && line != "" {
+            if line.starts_with('.') && !line.starts_with("..") && !line.is_empty() {
                 panic!("un-stuffed dot-line leaked into body: {line:?}");
             }
         }

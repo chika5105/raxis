@@ -40,9 +40,10 @@
 //!         (`vm_capabilities::build_capability_hint`) producing
 //!         the load-bearing `## VM Environment` header AND the
 //!         egress-warning sentinel string.
+//!
 //!     This guards against drift in any of the four call sites
-//!     the live mode would exercise inside the canonical executor
-//!     guest.
+//!     the live mode would exercise inside the canonical
+//!     executor guest.
 //!
 //!   * **Live mode (gated).** Requires `RAXIS_LIVE_E2E=1` AND
 //!     `RAXIS_LIVE_E2E_VM_CAPABILITIES=1`. Boots a canonical
@@ -62,9 +63,10 @@
 //!           * `redis`
 //!           * `PyMySQL`
 //!           * `pymssql`
-//!         A regression that drops one of these (or that lets the
-//!         probe fall back to a stale cached snapshot) trips the
-//!         Tier-2 assertion immediately.
+//!
+//!         A regression that drops one of these (or that lets
+//!         the probe fall back to a stale cached snapshot)
+//!         trips the Tier-2 assertion immediately.
 //!       - Tier 2 (`assert!`): the witness JSON's `env` map
 //!         contains `RAXIS_VSOCK_LOOPBACK_PLAN: "<redacted>"` and
 //!         NEVER the var's actual base64 payload — the redaction

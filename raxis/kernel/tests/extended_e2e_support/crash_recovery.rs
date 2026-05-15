@@ -10,18 +10,17 @@
 //!     known to be in flight by waiting for its
 //!     `SessionVmSpawned` audit record before sending the
 //!     signal),
-//!   * the chain must show at least one **recovery signal** after
-//!     the crash — either:
-//!     a. a [`ReconciliationGap`] event the kernel emitted on
-//!        restart (crash between commit-to-SQLite and JSONL
-//!        write), OR
-//!     b. a [`TaskBlockedForRecovery`] event for the in-flight
-//!        task (the kernel detected the task's mid-flight state
-//!        on reboot and blocked it for operator review), OR
-//!     c. a **respawn**: a second `SessionVmSpawned` for the
-//!        same task_id whose `seq` strictly exceeds the pre-
-//!        crash spawn's `seq` (the kernel decided to resume the
-//!        task autonomously),
+//!   * the chain must show at least one **recovery signal**
+//!     after the crash — either a [`ReconciliationGap`] event
+//!     the kernel emitted on restart (crash between
+//!     commit-to-SQLite and JSONL write), OR a
+//!     [`TaskBlockedForRecovery`] event for the in-flight task
+//!     (the kernel detected the task's mid-flight state on
+//!     reboot and blocked it for operator review), OR a
+//!     **respawn**: a second `SessionVmSpawned` for the same
+//!     task_id whose `seq` strictly exceeds the pre-crash
+//!     spawn's `seq` (the kernel decided to resume the task
+//!     autonomously),
 //!   * the chain's `seq` field is strictly monotonically
 //!     increasing — any unreconciled gap is a real INV-AUDIT-01
 //!     violation the witness must surface loudly. A "reconciled"

@@ -617,8 +617,8 @@ pub fn verify_chain_full(audit_dir: &Path) -> Result<ChainStats, ChainReadError>
 /// `from_seq = 0` is byte-identical to [`verify_chain_full`] —
 /// that's how `verify_chain_full` is now defined.
 ///
-/// Spec reference: cli-readonly.md §5.5.13 ("--from <seq> — start
-/// from the given seq (default 0)"). The spec leaves the
+/// Spec reference: cli-readonly.md §5.5.13 (`"--from <seq> — start
+/// from the given seq (default 0)"`). The spec leaves the
 /// interpretation of "start" to the implementor; this implementation
 /// is **pre-anchored**: chain integrity is verified from segment
 /// zero so the operator cannot miss a corruption that occurred

@@ -2063,9 +2063,9 @@ const TASK_CREDENTIAL_PROXIES_TABLE: &str = "task_credential_proxies";
 /// Why we duplicate rather than depending on `raxis-kernel`:
 /// the dashboard-kernel → raxis-kernel direction would close a
 /// dependency cycle (the kernel depends on dashboard-kernel for
-/// the dashboard surface). Pinning the schema in `migration_sql_dumps`
-/// + this helper gives us the same wire shape with a tiny code
-/// duplication budget. Drift is caught by
+/// the dashboard surface). Pinning the schema in
+/// `migration_sql_dumps` and this helper gives us the same wire
+/// shape with a tiny code duplication budget. Drift is caught by
 /// `tests::credential_proxies_table_round_trips_through_dashboard_view`
 /// in the kernel-side e2e suite.
 fn read_task_credential_proxies_via_dashboard_glue(
@@ -2388,13 +2388,15 @@ fn list_system_credential_metadata(
 ///   kernel bug.
 /// * [`git::GitError::Spawn`] / [`git::GitError::NonZero`] — kernel-side
 ///   trouble. 500.
-/// Aggregate per-card statuses into the single banner tone
-/// the FE Health tab renders above the grid. Worst-case wins:
-/// any `failing` ⇒ `failing`; otherwise any `degraded` ⇒
-/// `degraded`; otherwise any `unknown` ⇒ `unknown`; otherwise
-/// `ok`. Matches the `INV-DASHBOARD-VALIDATE-01` contract that
-/// the dashboard surfaces the kernel's worst-known signal
-/// without re-classifying.
+// ---------------------------------------------------------------
+// Health-tab subsystem aggregator.
+//
+// Aggregate per-card statuses into the single banner tone the FE
+// Health tab renders above the grid. Worst-case wins: any
+// `failing` ⇒ `failing`; otherwise any `degraded` ⇒ `degraded`;
+// otherwise any `unknown` ⇒ `unknown`; otherwise `ok`. Matches
+// the `INV-DASHBOARD-VALIDATE-01` contract that the dashboard
+// surfaces the kernel's worst-known signal without re-classifying.
 fn aggregate_subsystem_status(cards: &[SubsystemHealthCard]) -> String {
     let mut has_failing = false;
     let mut has_degraded = false;
@@ -2901,6 +2903,7 @@ struct OuterPolicy {
 ///   - the file is unreadable,
 ///   - the `[dashboard]` block is absent,
 ///   - `enabled = false`.
+///
 /// Any other parse failure surfaces as `Err`.
 pub fn load_dashboard_config(policy_path: &Path) -> Result<Option<DashboardConfig>, String> {
     let raw = match std::fs::read_to_string(policy_path) {
@@ -2981,6 +2984,13 @@ pub async fn start_dashboard(
 /// without a hub) the helpers degrade to the standard noop
 /// path. Production boot in `kernel/src/main.rs` MUST pass
 /// `Some(_)` — that's the seam the V3 Part 2 wiring closes.
+// 11-argument boot path mirrors the dashboard-spec contract
+// (every collaborator that flows through `KernelDashboardData` is
+// passed positionally so call sites at `kernel/src/main.rs` can
+// opt out of any single seam by passing `None` / a no-op without
+// touching the others). Wrapping the lot in a builder struct
+// would obscure that contract for marginal stylistic gain.
+#[allow(clippy::too_many_arguments)]
 pub async fn start_dashboard_with_advancer(
     cfg: DashboardConfig,
     store: Arc<Store>,

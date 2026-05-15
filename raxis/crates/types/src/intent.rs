@@ -354,7 +354,7 @@ pub struct IntentRequest {
     /// The cumulative token usage the planner has consumed in its
     /// dispatch loop *up to and including* the LLM turn that
     /// produced this intent. Stamped by
-    /// [`crate::IntentSubmitter`] from the dispatch loop's
+    /// `crate::IntentSubmitter` from the dispatch loop's
     /// `(cum_in, cum_out)` counters.
     ///
     /// **Required by every planner-submitted intent.** Forward-only,
@@ -407,7 +407,7 @@ pub struct IntentRequest {
 /// has to reason about overflow). Cache-read / cache-creation
 /// counters are zero unless the model client surfaces them
 /// explicitly via the streaming `usage` events; the
-/// [`raxis_policy::ProviderPricing::cost_micro_dollars`] arithmetic
+/// `raxis_policy::ProviderPricing::cost_micro_dollars` arithmetic
 /// handles all four channels uniformly.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TokensReport {

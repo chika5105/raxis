@@ -74,7 +74,7 @@ impl ScaleDirection {
 ///
 /// Multiple signals firing for the same session collapse into a
 /// single decision per scheduling tick — the multiplier is
-/// computed via [`ScaleMultiplier::for_signals`] so a multi-signal
+/// computed via `ScaleMultiplier::for_signals` so a multi-signal
 /// trigger jumps further than a single-signal trigger.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ScaleSignal {
@@ -253,6 +253,13 @@ impl ElasticBounds {
 /// AND the old/new vcpu / memory pair the caller stamps into the
 /// `SessionVmScaleEvent` audit. `Skip` carries a stable PascalCase
 /// reason tag suitable for structured logging.
+// `Apply` carries a `VmSpec` (~265 bytes) while `Skip` is a
+// short reason string. Boxing the largest variant would force
+// every read site into a deref + heap dance for the hot path —
+// the scale decision is created and consumed once per scale
+// tick, never stored long-lived. Allowing the size disparity is
+// the lower-friction trade-off.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone)]
 pub enum ScaleDecision {
     /// The decision was admitted. Caller should respawn with
@@ -332,7 +339,7 @@ pub fn build_scaled_vm_spec(
     elastic: bool,
 ) -> VmSpec {
     debug_assert!(
-        !(direction == ScaleDirection::Up && !elastic),
+        direction != ScaleDirection::Up || elastic,
         "INV-ELASTIC-05: build_scaled_vm_spec called with direction = Up \
          and elastic = false; the call site failed to gate. Production \
          falls through to the baseline-clamp path; dev/test trips here.",
@@ -894,6 +901,7 @@ pub fn emit_scale_deferred_audit(
 /// surface as `AuditWriterError` so the caller can log + treat as
 /// non-fatal (the new VM is already running; the loss of the scale
 /// event is dashboard-visible but does not invalidate the spawn).
+#[allow(clippy::too_many_arguments)]
 pub fn emit_scale_event_audit(
     audit: &Arc<dyn AuditSink>,
     session_id: &str,

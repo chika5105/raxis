@@ -549,6 +549,7 @@ impl OrchestratorSpawn for NoopOrchestratorSpawn {
 // the kernel ever sees).
 // ---------------------------------------------------------------------------
 
+#[allow(clippy::too_many_arguments)]
 async fn spawn_orchestrator_for_initiative(
     spawn_ctx: &OrchestratorSpawnContext,
     session_id: &str,
@@ -677,7 +678,7 @@ async fn spawn_orchestrator_for_initiative(
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
-                &*conn,
+                &conn,
                 &registry_for_ksb,
                 &crate::initiatives::ksb_assembly::KsbInputs {
                     initiative_id: &initiative_owned,
@@ -1123,6 +1124,8 @@ async fn spawn_orchestrator_for_initiative(
 /// rebuild, return + capture for the post-spawn audit emit. The
 /// helper keeps both spawn paths aligned without duplicating the
 /// logic.
+type ScaleDownTrace = (u32, u32, u32, u32, String);
+
 #[allow(clippy::too_many_arguments)]
 fn maybe_apply_scale_down(
     vm_spec: VmSpec,
@@ -1135,7 +1138,7 @@ fn maybe_apply_scale_down(
     task_id: Option<&str>,
     initiative_id: &str,
     plan: &crate::elastic::PlanElasticOverrides,
-) -> (VmSpec, Option<(u32, u32, u32, u32, String)>) {
+) -> (VmSpec, Option<ScaleDownTrace>) {
     match crate::elastic::decide_scale_down(&vm_spec, elastic, plan, history.as_ref(), role) {
         crate::elastic::ScaleDecision::Apply {
             new_spec,
@@ -3089,8 +3092,8 @@ fn maybe_emit_planner_max_turns_scaled_audit(
 /// carrying the progressive-scaling fields per
 /// `INV-PLANNER-MAX-TURNS-PROGRESSIVE-ON-RETRY-01`. Operator-grep
 /// stays compatible with the V2.7 `event = "PlannerMaxTurnsResolved"`
-/// + `source = …` lexemes; the new `attempt` / `base` / `step` /
-/// `effective` / `hard_ceiling` fields are additive.
+/// and `source = …` lexemes; the new `attempt`, `base`, `step`,
+/// `effective`, and `hard_ceiling` fields are additive.
 fn log_planner_max_turns_resolved(
     resolved: ResolvedPlannerMaxTurns,
     task_id_for_log: &str,
@@ -4199,7 +4202,7 @@ pub async fn spawn_executor_for_task(
         let task_id_owned = task_id.to_owned();
         tokio::task::spawn_blocking(move || {
             let conn = store_for_read.lock_sync();
-            read_crash_retry_count_for_task(&*conn, &task_id_owned)
+            read_crash_retry_count_for_task(&conn, &task_id_owned)
         })
         .await
         .unwrap_or(0)
@@ -4245,7 +4248,7 @@ pub async fn spawn_executor_for_task(
         tokio::task::spawn_blocking(move || {
             let conn = store_for_ksb.lock_sync();
             crate::initiatives::ksb_assembly::assemble_ksb_snapshot(
-                &*conn,
+                &conn,
                 &registry_for_ksb,
                 &crate::initiatives::ksb_assembly::KsbInputs {
                     initiative_id: &initiative_owned,
@@ -4463,6 +4466,7 @@ fn plan_elastic_overrides_for_task(
 }
 
 #[cfg(test)]
+#[allow(clippy::await_holding_lock)]
 mod tests {
     //! Inline tests for the kernel-side bridge.
     //!
@@ -5083,9 +5087,10 @@ mod tests {
 
     /// Helper: `TaskPlanFields` with only `max_turns` overridden.
     fn task_with_max_turns(c: Option<u32>) -> crate::initiatives::TaskPlanFields {
-        let mut tf = crate::initiatives::TaskPlanFields::default();
-        tf.max_turns = c;
-        tf
+        crate::initiatives::TaskPlanFields {
+            max_turns: c,
+            ..crate::initiatives::TaskPlanFields::default()
+        }
     }
 
     /// `INV-PLANNER-MAX-TURNS-PRECEDENCE-01` arm 1: a `Some(c)` on
@@ -5199,10 +5204,11 @@ mod tests {
         c: Option<u32>,
         step: Option<u32>,
     ) -> crate::initiatives::TaskPlanFields {
-        let mut tf = crate::initiatives::TaskPlanFields::default();
-        tf.max_turns = c;
-        tf.max_turns_step = step;
-        tf
+        crate::initiatives::TaskPlanFields {
+            max_turns: c,
+            max_turns_step: step,
+            ..crate::initiatives::TaskPlanFields::default()
+        }
     }
 
     /// V3 — `attempt = 1` MUST always return `effective = base`

@@ -23,7 +23,7 @@
 //!    `TunnelRegistry`, opens the upstream TCP, and from that point
 //!    the agent ↔ kernel-tunnel pair is spliced via
 //!    `tokio::io::copy_bidirectional` — see
-//!    [`crate::linux::accept_loop_a3`].
+//!    `crate::linux::accept_loop_a3`.
 //! 5. **On Deny** — shutdown the agent socket. The agent's library
 //!    surfaces `ECONNREFUSED`.
 //!

@@ -106,6 +106,7 @@ fn fresh_disk_conn() -> (tempfile::TempDir, std::path::PathBuf, Connection) {
 /// (`Failed` or `Completed`) — both states satisfy the table's
 /// terminal-row CHECK (activated_at + terminated_at NOT NULL +
 /// session_id NOT NULL).
+#[allow(clippy::too_many_arguments)]
 fn seed_terminal_activation(
     conn: &Connection,
     activation_id: &str,
@@ -165,10 +166,7 @@ fn read_and_project_view(
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .ok();
-    let (prior_state, crash, review) = match row {
-        Some(t) => t,
-        None => (String::new(), 0_i64, 0_i64),
-    };
+    let (prior_state, crash, review) = row.unwrap_or_default();
     let crash_u = u32::try_from(crash).unwrap_or(0);
     let review_u = u32::try_from(review).unwrap_or(0);
     let admit_inputs = RetryAdmitInputs {

@@ -143,11 +143,10 @@ fn audit_and_return(
 }
 
 fn query_type_matches(q: DnsQueryType, ip: &IpAddr) -> bool {
-    match (q, ip) {
-        (DnsQueryType::A, IpAddr::V4(_)) => true,
-        (DnsQueryType::Aaaa, IpAddr::V6(_)) => true,
-        _ => false,
-    }
+    matches!(
+        (q, ip),
+        (DnsQueryType::A, IpAddr::V4(_)) | (DnsQueryType::Aaaa, IpAddr::V6(_))
+    )
 }
 
 async fn resolve_session_id(token: &str, ctx: &Arc<HandlerContext>) -> Option<String> {

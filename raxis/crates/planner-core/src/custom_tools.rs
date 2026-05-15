@@ -48,7 +48,7 @@ pub struct CustomToolDecl {
     pub name: String,
     /// Human-readable description shown to the model.
     pub description: String,
-    /// argv. argv[0] is the path to the executable; subsequent
+    /// argv. argv`0` is the path to the executable; subsequent
     /// entries are static prefix arguments. The model's input
     /// arrives on stdin, NOT in argv.
     pub command: Vec<String>,

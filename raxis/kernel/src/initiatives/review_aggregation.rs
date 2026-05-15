@@ -326,7 +326,7 @@ pub fn compute_aggregate_review_outcome(
     agent_type_filter: Option<AgentTypeFilter<'_>>,
 ) -> Result<AggregateOutcome, rusqlite::Error> {
     let conn = store.lock_sync();
-    compute_aggregate_review_outcome_with_conn(executor_task_id, &*conn, agent_type_filter)
+    compute_aggregate_review_outcome_with_conn(executor_task_id, &conn, agent_type_filter)
 }
 
 /// `&Connection`-borrowing variant of
@@ -949,7 +949,7 @@ mod tests {
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
         let via_conn = {
             let conn = store.lock_sync();
-            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+            compute_aggregate_review_outcome_with_conn(&exe, &conn, None).unwrap()
         };
         assert_eq!(via_store.verdict, AggregateReviewVerdict::Pending);
         assert_eq!(via_conn, via_store);
@@ -965,7 +965,7 @@ mod tests {
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
         let via_conn = {
             let conn = store.lock_sync();
-            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+            compute_aggregate_review_outcome_with_conn(&exe, &conn, None).unwrap()
         };
         assert_eq!(
             via_store.verdict,
@@ -984,7 +984,7 @@ mod tests {
         let via_store = compute_aggregate_review_outcome(&exe, &store, None).unwrap();
         let via_conn = {
             let conn = store.lock_sync();
-            compute_aggregate_review_outcome_with_conn(&exe, &*conn, None).unwrap()
+            compute_aggregate_review_outcome_with_conn(&exe, &conn, None).unwrap()
         };
         assert_eq!(via_store.verdict, AggregateReviewVerdict::AllPassed);
         assert_eq!(via_conn, via_store);

@@ -1,5 +1,5 @@
 //! `raxis-orchestrator` — guest-side planner-harness binary for the
-//! [`Role::Orchestrator`](raxis_planner_core::Role::Orchestrator) role.
+//! [`raxis_planner_core::Role::Orchestrator`] role.
 //!
 //! ## Lifecycle (V2.4)
 //!

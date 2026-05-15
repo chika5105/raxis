@@ -17,7 +17,7 @@
 //   gateway.sock  : 0660 — operator + gateway group
 // (The kernel is responsible for chmod after bind; chown is outside scope.)
 
-use std::path::PathBuf;
+use std::path::Path;
 use std::sync::Arc;
 
 use tokio::net::{UnixListener, UnixStream};
@@ -85,7 +85,7 @@ impl ShutdownReason {
 ///
 /// Called from `main.rs` step 9 (enter IPC dispatch loop).
 pub async fn start(
-    data_dir: &PathBuf,
+    data_dir: &Path,
     ctx: Arc<HandlerContext>,
 ) -> Result<ShutdownReason, KernelError> {
     let sockets_dir = data_dir.join("sockets");

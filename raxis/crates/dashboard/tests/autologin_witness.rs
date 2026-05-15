@@ -187,20 +187,20 @@ async fn mint_jwt_via_http(
 // so this single assertion covers every code path that defaults
 // to the constant rather than carrying an explicit override.
 
-#[test]
-fn default_jwt_ttl_secs_outlives_realistic_kernel_uptime() {
+// `INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01`:
+// `DEFAULT_JWT_TTL_SECS` must be `>= AUTOLOGIN_MIN_TTL_SECS` so
+// the autologin URL minted at kernel boot stays valid through the
+// realistic-scenario live-e2e harness's typical 60+ minute
+// lifetime. We enforce this at compile time — both constants are
+// `const`, so a runtime `assert!` would optimise out and Clippy
+// (correctly) flags it as dead code. The `const _` pattern
+// guarantees a compile error if the relationship ever inverts.
+const _: () = {
     assert!(
         DEFAULT_JWT_TTL_SECS >= AUTOLOGIN_MIN_TTL_SECS,
-        "INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01: \
-         DEFAULT_JWT_TTL_SECS (= {default}) must be >= {min} so the autologin \
-         URL minted at kernel boot stays valid through the realistic-scenario \
-         live-e2e harness's typical 60+ minute lifetime. See \
-         crates/dashboard/src/config.rs for the rationale comment + the \
-         dashboard-hardening.md §2.8 spec contract.",
-        default = DEFAULT_JWT_TTL_SECS,
-        min = AUTOLOGIN_MIN_TTL_SECS,
+        "DEFAULT_JWT_TTL_SECS must outlive AUTOLOGIN_MIN_TTL_SECS — see crates/dashboard/src/config.rs and dashboard-hardening.md §2.8."
     );
-}
+};
 
 // ---------------------------------------------------------------------------
 // Witness 2 — end-to-end: boot dashboard, mint JWT, follow it.

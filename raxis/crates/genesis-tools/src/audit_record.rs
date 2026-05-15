@@ -47,7 +47,7 @@ pub const GENESIS_EVENT_KIND: &str = "GenesisRecord";
 /// `emitted_at_unix_secs` from their `Clock`.
 #[derive(Debug, Clone, Copy)]
 pub struct GenesisAuditInputs<'a> {
-    /// SHA-256[:16] of the authority pubkey bytes — 32 hex chars. Use
+    /// `SHA-256[:16]` of the authority pubkey bytes — 32 hex chars. Use
     /// `super::pubkey_fingerprint` to compute. Embedded in the genesis
     /// record's `authority_pubkey_fingerprint` field; downstream verifiers
     /// (e.g. `recovery::verify_audit_chain`) treat this as the chain's

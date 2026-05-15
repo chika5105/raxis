@@ -36,23 +36,22 @@
 //!    agent `AUTH`, then `PING / SET / GET` (allow path) and
 //!    `FLUSHDB` (deny path).
 //! 4. Verify against the **real upstream**:
-//!    a. The proxy was able to authenticate to upstream — a wrong
-//!       `requirepass` would surface as `-NOAUTH` and the slice
-//!       would fail at the first forwarded `PING`. The fact that
-//!       `PING / SET / GET` round-trip proves the proxy stripped
-//!       the agent's junk AUTH and injected the real credential.
-//!    b. `GET deploy:latest` returns the bytes `SET` wrote — the
-//!       value lives in real Redis memory, not a fixture's match
-//!       arm.
-//!    c. `FLUSHDB` is rejected by the proxy with `-ERR command
-//!       FLUSHDB not allowed by RAXIS policy`. The slice then
-//!       opens an out-of-band connection straight to the
-//!       container and verifies the key is still there — proving
-//!       FLUSHDB never reached upstream.
-//!    d. The proxy's `commands_forwarded` counter ≥ 3 (PING + SET
-//!       + GET) and `commands_blocked` ≥ 1 (FLUSHDB).
-//!    e. `CredentialBackend::resolve` was called at least once
-//!       per connection (rotation semantics).
+//!    The proxy was able to authenticate to upstream — a wrong
+//!    `requirepass` would surface as `-NOAUTH` and the slice
+//!    would fail at the first forwarded `PING`. The fact that
+//!    `PING / SET / GET` round-trip proves the proxy stripped
+//!    the agent's junk AUTH and injected the real credential.
+//!    `GET deploy:latest` returns the bytes `SET` wrote — the
+//!    value lives in real Redis memory, not a fixture's match
+//!    arm. `FLUSHDB` is rejected by the proxy with `-ERR
+//!    command FLUSHDB not allowed by RAXIS policy`; the slice
+//!    then opens an out-of-band connection straight to the
+//!    container and verifies the key is still there — proving
+//!    FLUSHDB never reached upstream. The proxy's
+//!    `commands_forwarded` counter ≥ 3 (PING + SET + GET) and
+//!    `commands_blocked` ≥ 1 (FLUSHDB), and
+//!    `CredentialBackend::resolve` was called at least once per
+//!    connection (rotation semantics).
 
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
@@ -166,7 +165,7 @@ pub async fn run() -> Result<()> {
     let proxy = RedisProxy::bind(
         Arc::clone(&backend) as Arc<dyn CredentialBackend>,
         cfg,
-        Arc::new(NoopAuditChannel::default()),
+        Arc::new(NoopAuditChannel),
     )
     .await
     .context("bind RedisProxy")?;

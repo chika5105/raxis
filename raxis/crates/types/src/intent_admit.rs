@@ -14,8 +14,8 @@
 //!      against the same row reads it uses for the rest of the KSB
 //!      projection (turn-coherent, `INV-KSB-CAPABILITIES-TURN-
 //!      COHERENT-01`) and stamps the verdict into
-//!      [`raxis_ksb::TaskCapabilityView::retry_admissible`] /
-//!      [`raxis_ksb::TaskCapabilityView::retry_inadmissible_reason`].
+//!      `raxis_ksb::TaskCapabilityView::retry_admissible` /
+//!      `raxis_ksb::TaskCapabilityView::retry_inadmissible_reason`.
 //!
 //! The parity contract is: given the same `(prior_state,
 //! crash_retry_count, review_reject_count, max_crash_retries,
@@ -122,7 +122,7 @@ pub enum RetryInadmissibleReason {
 
 impl RetryInadmissibleReason {
     /// Human-readable form for the
-    /// [`raxis_ksb::TaskCapabilityView::retry_inadmissible_reason`]
+    /// `raxis_ksb::TaskCapabilityView::retry_inadmissible_reason`
     /// projection. Substring-stable across kernel revisions — the
     /// orchestrator NNSP MAY pattern-match against the leading
     /// lexeme (`prior state`, `crash_retry_count`,

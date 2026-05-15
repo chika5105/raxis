@@ -358,7 +358,7 @@ pub enum OperatorErrorCode {
     /// **V2 (V2_GAPS.md §12.8).** The plan's
     /// `[workspace] target_ref` (or the operator's
     /// `[git] default_target_ref`) failed
-    /// [`raxis_policy::validate_target_ref_format`] — the value did
+    /// `raxis_policy::validate_target_ref_format` — the value did
     /// not match the spec's fully-qualified branch-ref shape (must
     /// start with `refs/heads/`, no control chars, no `..`, etc.).
     /// Surfaced from `approve_plan` (plan-side) and from

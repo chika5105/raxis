@@ -79,8 +79,8 @@ pub use raxis_types::operator_wire::{OperatorRequest, OperatorResponse};
 ///   * request frame received  → `op_request`  (info)
 ///   * malformed JSON received → `frame_decode_failed` (warn)
 ///   * permitted_ops rejection → `unauthorized` (warn)
-///   * response sent           → `op_response` (info on Ok variants;
-///                               warn on `OperatorResponse::Error`)
+///   * response sent           → `op_response` (info on Ok
+///     variants; warn on `OperatorResponse::Error`)
 ///
 /// Each line carries the originating operator fingerprint and the per-op
 /// context fields ([`request_context_fields`]: initiative_id, session_id,
@@ -158,7 +158,7 @@ pub async fn dispatch_loop(
         // who shouldn't be able to call the op anyway), and BEFORE
         // handler dispatch so a denied request never mutates kernel state.
         // Cert-less ("legacy") operators pass through silently.
-        let now_unix = raxis_types::unix_now_secs() as i64;
+        let now_unix = raxis_types::unix_now_secs();
         let bundle_snapshot = ctx.policy.load_full();
         match ctx.cert_enforcer.enforce(
             &operator.fingerprint,
@@ -959,6 +959,7 @@ async fn handle_request(
 /// through operator IPC. Any other role string (wrong casing,
 /// `"gateway"`, `"verifier"`, or unknown values) is rejected with
 /// `FAIL_ROLE_NOT_OPERATOR_CREATABLE`.
+#[allow(clippy::result_large_err)]
 fn parse_operator_creatable_role(
     role_str: &str,
 ) -> Result<authority::session::Role, OperatorResponse> {
@@ -1152,6 +1153,7 @@ async fn handle_revoke_session(session_id_str: String, ctx: &HandlerContext) -> 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_grant_delegation(
     session_id_str: String,
     delegation_id: String,
@@ -1362,7 +1364,7 @@ async fn handle_create_initiative(
     // `unix_now_secs` returns u64; the admission handler takes i64
     // (because skew arithmetic needs signed semantics). Cast is
     // saturating-safe — the kernel cannot run past 2^63 Unix seconds.
-    let now = raxis_types::unix_now_secs() as i64;
+    let now = raxis_types::unix_now_secs();
 
     let outcome = initiatives::v2_admission::create_initiative_v2_blocking(
         req,
@@ -1396,14 +1398,14 @@ async fn handle_create_initiative(
 ///   fingerprint that the connected operator claims to be acting as.
 ///   Per `kernel-store.md` §2.5.3:
 ///
-///     - `approving_operator` MUST equal the authenticated fingerprint
-///       (no impersonation between operators on the wire).
-///     - The pubkey used for signature verification MUST be looked up
-///       from `policy.operator_entry(approving_operator).pubkey_hex`
-///       — the wire request never carries an attacker-controlled
-///       pubkey. The legacy `operator_pubkey_hex` wire field that
-///       earlier V2 builds accepted-and-ignored has been removed in
-///       V2.5; the kernel no longer participates in carrying it.
+///   - `approving_operator` MUST equal the authenticated fingerprint
+///     (no impersonation between operators on the wire).
+///   - The pubkey used for signature verification MUST be looked up
+///     from `policy.operator_entry(approving_operator).pubkey_hex`
+///     — the wire request never carries an attacker-controlled
+///     pubkey. The legacy `operator_pubkey_hex` wire field that
+///     earlier V2 builds accepted-and-ignored has been removed in
+///     V2.5; the kernel no longer participates in carrying it.
 ///
 /// Only after the identity check passes do we resolve the policy pubkey,
 /// hex-decode it, and hand the bytes to `lifecycle::approve_plan`, which
@@ -1965,7 +1967,7 @@ async fn handle_quarantine_initiative(
     let store_arc = Arc::clone(&ctx.store);
     let initiative_clone = initiative_id.clone();
     let operator_fp = operator.fingerprint.clone();
-    let now = raxis_types::unix_now_secs() as i64;
+    let now = raxis_types::unix_now_secs();
     let reason_for_blk = reason_capped.clone();
     // §2.5.2 "Operator display-name fields" — snapshot now, before
     // we cross the spawn_blocking boundary.
@@ -2048,7 +2050,7 @@ async fn handle_quarantine_plans_by(
     let store_arc = Arc::clone(&ctx.store);
     let target_clone = target_fingerprint.clone();
     let operator_fp = operator.fingerprint.clone();
-    let now = raxis_types::unix_now_secs() as i64;
+    let now = raxis_types::unix_now_secs();
     let reason_for_blk = reason_capped.clone();
     // §2.5.2 "Operator display-name fields" — snapshot both
     // operator names from the same policy bundle. The *target*
@@ -3808,11 +3810,11 @@ mod rotate_epoch_dispatch_tests {
         // MUST NOT fire when the signal succeeded.
         let kinds = sink.event_kinds();
         assert!(
-            kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            kinds.contains(&"PolicyEpochAdvanced"),
             "PolicyEpochAdvanced absent: {kinds:?}"
         );
         assert!(
-            !kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            !kinds.contains(&"GatewaySignalFailed"),
             "GatewaySignalFailed must NOT fire when signal delivered: {kinds:?}"
         );
     }
@@ -3915,10 +3917,10 @@ mod rotate_epoch_dispatch_tests {
             other => panic!("expected Error, got {other:?}"),
         }
         let kinds = sink.event_kinds();
-        assert!(kinds.iter().any(|k| *k == "PolicyAdvanceRejected"));
-        assert!(!kinds.iter().any(|k| *k == "PolicyEpochAdvanced"));
+        assert!(kinds.contains(&"PolicyAdvanceRejected"));
+        assert!(!kinds.contains(&"PolicyEpochAdvanced"));
         assert!(
-            !kinds.iter().any(|k| *k == "GatewaySignalFailed"),
+            !kinds.contains(&"GatewaySignalFailed"),
             "no Phase 3 attempt → no GatewaySignalFailed; got: {kinds:?}"
         );
 

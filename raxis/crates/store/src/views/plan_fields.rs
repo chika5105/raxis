@@ -112,7 +112,7 @@ pub enum PlanFieldsError {
 ///   fields default to the spec lockdown (`path_allowlist = []`,
 ///   `path_export_to_successors = false`, `path_export_globs = []`,
 ///   `path_scope_override = false`). Identical defaults to the
-///   kernel's [`raxis_kernel::initiatives::plan_registry::TaskPlanFields`]
+///   kernel's `raxis_kernel::initiatives::plan_registry::TaskPlanFields`
 ///   struct.
 /// - `Err(...)` — see [`PlanFieldsError`] for the typed failure cases.
 pub fn reveal_for_task(conn: &RoConn, task_id: &str) -> Result<PlanPathFields, PlanFieldsError> {

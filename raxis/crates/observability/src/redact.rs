@@ -17,7 +17,7 @@
 //! ## Runtime behaviour
 //!
 //! Any attribute outside the allow-list (or in the denylist) causes
-//! [`Redactor::sanitize`] to drop the **entire** span / metric —
+//! `Redactor::sanitize` to drop the **entire** span / metric —
 //! never a partial frame. The hub increments
 //! [`crate::hub::DropReason::RedactionFailure`] so the operator's
 //! dashboard surfaces the bug via `raxis.observability.dropped.total`.

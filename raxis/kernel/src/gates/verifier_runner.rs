@@ -276,6 +276,7 @@ pub async fn spawn_verifier(
 // ---------------------------------------------------------------------------
 
 #[cfg(all(test, unix))]
+#[allow(clippy::await_holding_lock)]
 mod integration {
     use super::*;
     use raxis_test_support::mem_store;
@@ -481,7 +482,7 @@ mod integration {
         // result of THIS call.
         let counter = active_verifier_count();
         assert!(
-            counter <= baseline + 0,
+            counter <= baseline,
             "spawn-failure leaked the counter: baseline={baseline}, current={counter}"
         );
     }
@@ -800,6 +801,7 @@ mod integration {
 // ---------------------------------------------------------------------------
 
 #[cfg(all(test, unix))]
+#[allow(clippy::await_holding_lock)]
 mod stub_round_trip {
     use super::*;
     use crate::handlers::witness as witness_handler;

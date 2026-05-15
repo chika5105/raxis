@@ -25,7 +25,7 @@
 //! V2 inverts the trust direction:
 //!
 //! 1. The kernel binary anchors only the **signing-key fingerprint**
-//!    ([`EXPECTED_KERNEL_SIGNING_KEY_FP`]) — a single 32-byte value
+//!    (`EXPECTED_KERNEL_SIGNING_KEY_FP`) — a single 32-byte value
 //!    that changes only on a key rotation, not on every release.
 //! 2. The on-disk distribution carries, per role:
 //!    * `images/raxis-<role>-<kernel_version>.img` — the EROFS rootfs.
@@ -36,7 +36,7 @@
 //! 3. At boot (and as defense-in-depth at activation), the kernel:
 //!    * Loads the manifest TOML.
 //!    * Calls [`raxis_image_manifest::verify`] against the kernel's
-//!      compiled-in [`EXPECTED_KERNEL_SIGNING_KEY_FP`]; the manifest
+//!      compiled-in `EXPECTED_KERNEL_SIGNING_KEY_FP`; the manifest
 //!      crate refuses any wrong-key, wrong-schema, or
 //!      bundle-hash-mismatch manifest.
 //!    * Streams the on-disk .img and compares its SHA-256 against
@@ -522,8 +522,8 @@ pub fn verify_canonical_image_via_manifest_with_key(
 /// This is the V2 spawn-time entry point used by
 /// `kernel/src/session_spawn_orchestrator.rs` (and its Reviewer
 /// counterpart) to construct
-/// [`raxis_isolation::VerifiedImage`] with the correct
-/// [`raxis_isolation::ImageKind`] without re-implementing the
+/// `raxis_isolation::VerifiedImage` with the correct
+/// `raxis_isolation::ImageKind` without re-implementing the
 /// trust-anchor gate or the manifest-load + signature-verify
 /// sequence.
 ///

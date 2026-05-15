@@ -14,7 +14,7 @@
 //!   built on the Firecracker UDS multiplexer. It carries
 //!   length-prefixed frames host⇄guest. The substrate's `Session`
 //!   impl uses this for `push` / `recv_intent`.
-//! * [`spawn_host_listener`] — wires the kernel's listener on a host
+//! * `spawn_host_listener` — wires the kernel's listener on a host
 //!   port (`<uds_path>_<port>`) so the guest can establish a
 //!   reverse-direction connection later. RAXIS' microVMs only use
 //!   forward connections in V2 (host opens stream, guest accepts), so

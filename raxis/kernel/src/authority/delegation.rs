@@ -51,6 +51,7 @@ pub struct DelegationRow {
 ///
 /// Called by the IPC `GrantDelegation` handler. The handler has already loaded
 /// the session row and resolved the policy.
+#[allow(clippy::too_many_arguments)]
 pub fn grant_delegation(
     session_id: &SessionId,
     delegation_id: &str,

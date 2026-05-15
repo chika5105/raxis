@@ -49,7 +49,7 @@ use crate::{Store, StoreError, Table};
 ///     `policy.toml` bytes (computed by
 ///     `raxis_policy::load_policy`).
 ///   * `signed_by_authority` — the authority pubkey fingerprint
-///     (SHA-256[:16] hex; same convention as
+///     (`SHA-256[:16]` hex; same convention as
 ///     `raxis_genesis_tools::pubkey_fingerprint`).
 ///   * `advanced_at_unix_secs` — wall-clock timestamp the genesis
 ///     row records as `advanced_at`. Caller controls the clock so

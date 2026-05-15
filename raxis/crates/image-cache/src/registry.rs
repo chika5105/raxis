@@ -36,7 +36,7 @@ pub struct RegistryRef {
 
 impl RegistryRef {
     /// Construct from owned strings. Both inputs must be non-empty
-    /// or [`RegistryRefError::Empty`] is returned.
+    /// or `RegistryRefError::Empty` is returned.
     pub fn new(
         host: impl Into<String>,
         repository: impl Into<String>,

@@ -1691,12 +1691,12 @@ fn assert_audit_invariants(chain: &[AuditEvent], initiative_id: &str) {
         if e.initiative_id.as_deref() == Some(initiative_id) {
             return true;
         }
-        match serde_json::from_value::<AuditEventKind>(e.payload.clone()) {
+        matches!(
+            serde_json::from_value::<AuditEventKind>(e.payload.clone()),
             Ok(AuditEventKind::IntegrationMergeCompleted {
                 initiative_id: id, ..
-            }) if id == initiative_id => true,
-            _ => false,
-        }
+            }) if id == initiative_id
+        )
     });
     assert!(
         merged_for_us,

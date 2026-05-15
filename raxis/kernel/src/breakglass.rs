@@ -23,7 +23,7 @@
 //! - **Hard TTL.** `expires_at <= activated_at + max_duration`.
 //!   Default `max_duration = 4 h`. Activations whose TTL has
 //!   passed are silently treated as inactive on the next
-//!   [`check_active`] call and pruned.
+//!   `check_active` call and pruned.
 //! - **Audit chain.** Every state change emits an audit event:
 //!   `BreakglassActivated`, `BreakglassDeactivated`, and (per
 //!   bypassed action) `BreakglassAction`.
@@ -101,7 +101,7 @@ pub struct BreakglassActivation {
     pub signature_2: Vec<u8>,
 }
 
-/// Output of [`check_active`]. Closed enum so callers exhaustively
+/// Output of `check_active`. Closed enum so callers exhaustively
 /// match.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum BreakglassStatus {
@@ -411,7 +411,7 @@ pub fn activate(
 ) -> Result<Uuid, BreakglassError> {
     // 1. Length-check.
     let justification = sanitise_justification(&activation.justification);
-    let len = justification.as_bytes().len();
+    let len = justification.len();
     if len == 0 || len > MAX_JUSTIFICATION_BYTES {
         return Err(BreakglassError::JustificationTooLong {
             len,

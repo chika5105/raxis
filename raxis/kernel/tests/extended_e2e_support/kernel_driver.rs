@@ -1170,10 +1170,10 @@ pub fn seed_main_repository(data_dir: &Path) {
 ///
 /// `materialize_seed.sh` itself wipes the target dir if it exists
 /// (idempotent contract documented in the script header), then
-/// `git init` + 11 commits. After it returns we add the bait `.env`
-/// + proxy scripts at the worktree root and commit them with a
-/// pinned identity / date so HEAD is byte-stable across developer
-/// machines (no `~/.gitconfig` dependency).
+/// `git init` and 11 commits. After it returns we add the bait
+/// `.env` and proxy scripts at the worktree root and commit them
+/// with a pinned identity / date so HEAD is byte-stable across
+/// developer machines (no `~/.gitconfig` dependency).
 ///
 /// **Replaces** `seed_main_repository` for the realistic-scenario
 /// driver. `seed_main_repository` (single empty commit) remains for
@@ -2281,7 +2281,7 @@ pub fn poll_for_dual_lifecycle_completion(
             // ceiling fired after three no-progress respawn cycles.
             if e.event_kind == "OrchestratorRespawnCeilingExceeded" {
                 if let Some(bad_initiative) = e.initiative_id.as_deref() {
-                    if initiative_ids.iter().any(|w| *w == bad_initiative) {
+                    if initiative_ids.contains(&bad_initiative) {
                         let stderr_tail = std::fs::read_to_string(&stderr_path)
                             .ok()
                             .map(|s| {

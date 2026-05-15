@@ -451,11 +451,11 @@ mod tests {
         // PolicyUpdatedViaDashboard.
         let kinds = sink.event_kinds();
         assert!(
-            kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            kinds.contains(&"PolicyEpochAdvanced"),
             "expected PolicyEpochAdvanced; got {kinds:?}"
         );
         assert!(
-            kinds.iter().any(|k| *k == "PolicyUpdatedViaDashboard"),
+            kinds.contains(&"PolicyUpdatedViaDashboard"),
             "expected PolicyUpdatedViaDashboard; got {kinds:?}"
         );
         // The on-disk policy.toml + sig now hold the new bytes.
@@ -486,7 +486,7 @@ mod tests {
         assert_eq!(swap.load().epoch(), 0); // Not 1, because the swap was seeded with for_tests epoch=0
                                             // No PolicyUpdatedViaDashboard event.
         let kinds = sink.event_kinds();
-        assert!(!kinds.iter().any(|k| *k == "PolicyUpdatedViaDashboard"));
+        assert!(!kinds.contains(&"PolicyUpdatedViaDashboard"));
         // On-disk files restored to their previous content.
         assert_eq!(std::fs::read(&policy_path).unwrap(), prev_toml);
         assert_eq!(
@@ -512,7 +512,7 @@ mod tests {
         let result = advancer.advance(&toml_bytes, &sig_bytes, "op-dashboard");
         assert!(matches!(result, Err(AdvanceError::Validation(_))));
         let kinds = sink.event_kinds();
-        assert!(!kinds.iter().any(|k| *k == "PolicyUpdatedViaDashboard"));
+        assert!(!kinds.contains(&"PolicyUpdatedViaDashboard"));
         assert_eq!(std::fs::read(&policy_path).unwrap(), prev_toml);
     }
 }

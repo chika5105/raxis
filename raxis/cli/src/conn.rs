@@ -43,7 +43,7 @@ impl OperatorConn {
     /// Open connection to the operator socket and complete the challenge-response handshake.
     ///
     /// `key_path` is the operator's Ed25519 private key (PEM or raw hex seed).
-    /// `fingerprint` is the SHA-256[:16] hex fingerprint of the operator's public key.
+    /// `fingerprint` is the SHA-256\[:16\] hex fingerprint of the operator's public key.
     pub fn connect(
         socket_path: &Path,
         key_path: &Path,
@@ -154,7 +154,7 @@ fn map_frame_err(e: JsonFrameError) -> CliError {
     }
 }
 
-/// Derive the SHA-256[:16] fingerprint from a raw Ed25519 public key (32 bytes).
+/// Derive the `SHA-256\[:16\]` fingerprint from a raw Ed25519 public key (32 bytes).
 ///
 /// Used when the CLI needs to compute its operator fingerprint from a loaded key.
 pub fn pubkey_fingerprint(pubkey_bytes: &[u8]) -> String {

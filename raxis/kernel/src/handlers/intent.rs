@@ -1157,14 +1157,15 @@ fn run_phase_a(
     // ── Step 6: Topology check ────────────────────────────────────────────
     // SingleCommit: enforce parent(head) == base (no merge commits in range).
     // IntegrationMerge: topology check is skipped.
-    if matches!(req.intent_kind, IntentKind::SingleCommit) {
-        if let Err(_) = rt_handle.block_on(ctx.domain.topology_check(
-            &base_sha_raw,
-            &head_sha_raw,
-            &worktree_path,
-        )) {
-            return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidCommitTopology, task_state);
-        }
+    if matches!(req.intent_kind, IntentKind::SingleCommit)
+        && rt_handle
+            .block_on(
+                ctx.domain
+                    .topology_check(&base_sha_raw, &head_sha_raw, &worktree_path),
+            )
+            .is_err()
+    {
+        return PreGateOutcome::Reject(PlannerErrorCode::FailInvalidCommitTopology, task_state);
     }
 
     // ── Step 7: VCS diff → touched_paths ──────────────────────────────────
@@ -2480,7 +2481,7 @@ fn handle_complete_task(
     // segment NEVER skips topology_check — there is no IntegrationMerge
     // carve-out on the gap between the last admitted range and the
     // CompleteTask head_sha.
-    if let (Some(ref h_bind_str), Some(ref h_req)) = (h_bind.as_ref(), req_head.as_ref()) {
+    if let (Some(h_bind_str), Some(h_req)) = (h_bind.as_ref(), req_head.as_ref()) {
         if h_bind_str.as_str() != h_req.as_str() {
             let _h_bind_sha = CommitSha::new(h_bind_str)
                 .map_err(|_| (PlannerErrorCode::FailInvalidDiff, task_state))?;
@@ -2686,15 +2687,14 @@ fn handle_complete_task(
     })
 }
 
+type CompletionInputs = (Option<String>, Vec<(String, String)>);
+
 /// Read `(tasks.evaluation_sha, list-of-(base, head))` for one task.
 ///
 /// `evaluation_sha` may be SQL `NULL` — returned as `None` to signal
 /// "no kernel-bound tip yet", in which case the trailing-segment branch
 /// of CompleteTask is skipped (§2.5.8 step 4 vacuous case).
-fn read_completion_inputs(
-    task_id: &str,
-    store: &Store,
-) -> Result<(Option<String>, Vec<(String, String)>), ()> {
+fn read_completion_inputs(task_id: &str, store: &Store) -> Result<CompletionInputs, ()> {
     let conn = store.lock_sync();
 
     let h_bind: Option<String> = conn
@@ -3394,7 +3394,7 @@ fn handle_submit_review(
         active_orchestrator_session_id_for_initiative(&initiative_id_str, store)
             .and_then(|s| SessionId::parse(&s).ok());
     let initiative_id_obj = raxis_types::InitiativeId::parse(&initiative_id_str).ok();
-    let push_now_unix = unix_now_secs() as i64;
+    let push_now_unix = unix_now_secs();
     for predecessor in &predecessors {
         let outcome = match crate::initiatives::review_aggregation::compute_aggregate_review_outcome(
             predecessor.as_str(),
@@ -3719,7 +3719,7 @@ fn handle_structured_output(
                 kind_tag,
                 severity,
                 payload_json,
-                emitted_at as i64,
+                emitted_at,
             ],
         )
         .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, task_state))?;
@@ -3943,7 +3943,7 @@ fn handle_structured_output_initiative_scoped(
                 kind_tag,
                 severity,
                 payload_json,
-                emitted_at as i64,
+                emitted_at,
             ],
         )
         .map_err(|_| (PlannerErrorCode::FailStructuredOutputInvalid, synth_state))?;
@@ -5307,10 +5307,7 @@ async fn handle_activate_sub_task(
     // `respawn_orchestrator_after_*`. The wiring contract is
     // symmetric across roles — every per-VM session that surrenders
     // a kernel IPC fd needs a dispatcher driving it.
-    crate::session_spawn_orchestrator::spawn_planner_dispatcher(
-        &mut spawn_handle,
-        Arc::clone(&ctx),
-    );
+    crate::session_spawn_orchestrator::spawn_planner_dispatcher(&mut spawn_handle, Arc::clone(ctx));
 
     // ── Step 5: audit-after-commit — `SessionCreated`. ─────────────────
     //
@@ -5607,13 +5604,15 @@ async fn handle_retry_sub_task(
         /// review-rejection branches:
         ///   * `Completed + review_reject_count > 0` — Option A.
         ///   * `PendingActivation + review_reject_count > 0` —
-        ///     iter48 extension covering the orchestrator-died-
-        ///     between-RetrySubTask-and-ActivateSubTask case.
+        ///     iter48 extension covering the
+        ///     orchestrator-died-between-RetrySubTask-and-ActivateSubTask
+        ///     case.
+        ///
         /// `false` for the classic `prior_state = 'Failed'`
         /// crash-retry path. Drives the post-commit
         /// `ExecutorRespawnFromReviewRejection` audit emission —
-        /// the audit chain anchor that disambiguates retry-after-
-        /// review from retry-after-crash for the
+        /// the audit chain anchor that disambiguates
+        /// retry-after-review from retry-after-crash for the
         /// `ReviewerSubstantiveDisagreementWitness`.
         from_review_rejection: bool,
     }
@@ -9151,11 +9150,7 @@ mod tests {
                  VALUES (?1, ?2, 'init-rev', 'PendingActivation', NULL, NULL,
                          0, 0, ?3, NULL, NULL)"
             ),
-            rusqlite::params![
-                uuid::Uuid::new_v4().to_string(),
-                task_id,
-                unix_now_secs() as i64,
-            ],
+            rusqlite::params![uuid::Uuid::new_v4().to_string(), task_id, unix_now_secs(),],
         )
         .unwrap();
     }
@@ -10195,13 +10190,14 @@ mod tests {
     //   * Prior session revoke: the bound `sessions` row has
     //     `revoked = 1` after retry.
 
-    /// Build a HandlerContext rooted at a tempdir, a fresh in-memory
-    /// store, and a fresh PlanRegistry. Mirrors
-    /// `build_review_test_ctx` but with a dedicated tempdir (the
-    /// retry handler reads `ctx.policy` for the lane budget snapshot
-    /// + uses `ctx.session_spawn` for best-effort VM termination —
-    /// neither hits disk in our tests, but a unique tempdir keeps
-    /// concurrent test runs isolated).
+    /// Build a HandlerContext rooted at a tempdir, a fresh
+    /// in-memory store, and a fresh PlanRegistry. Mirrors
+    /// `build_review_test_ctx` but with a dedicated tempdir
+    /// (the retry handler reads `ctx.policy` for the lane
+    /// budget snapshot and uses `ctx.session_spawn` for
+    /// best-effort VM termination — neither hits disk in our
+    /// tests, but a unique tempdir keeps concurrent test runs
+    /// isolated).
     fn build_retry_test_ctx(
         store: Arc<Store>,
     ) -> (
@@ -10268,6 +10264,7 @@ mod tests {
     /// Insert an initiative + task + Failed activation row + plan
     /// registry entry so the retry handler has a complete substrate
     /// to operate on.
+    #[allow(clippy::too_many_arguments)]
     fn seed_failed_executor_for_retry(
         store: &Store,
         registry: &crate::initiatives::PlanRegistry,

@@ -187,7 +187,7 @@ impl SqliteCircuitStore {
     ///
     /// Lock contract: acquires `self.conn` once for the duration of
     /// the read and releases it on return. Internal callers that
-    /// already hold the guard MUST use [`Self::load_with_conn`] to
+    /// already hold the guard MUST use `Self::load_with_conn` to
     /// avoid re-entering the non-reentrant `Mutex<Connection>`.
     pub fn load(&self, provider: &str, model: &str) -> CircuitRowSqlite {
         let conn = self.conn.lock().unwrap();
@@ -228,7 +228,7 @@ impl SqliteCircuitStore {
     ///
     /// Lock contract: acquires `self.conn` **once** for the
     /// `BEGIN IMMEDIATE` transaction *and* the post-commit
-    /// read-back; the read-back uses [`Self::load_with_conn`] to
+    /// read-back; the read-back uses `Self::load_with_conn` to
     /// reuse the outer guard (the underlying `Mutex<Connection>`
     /// is not re-entrant on the same thread).
     pub fn record_failure(

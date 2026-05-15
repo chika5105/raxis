@@ -576,9 +576,11 @@ impl<'a> Walker<'a> {
         let kw2 = first_keyword(self.rest());
         if !kw2.is_empty()
             && !is_clause_boundary(&kw2)
-            && (self.rest().first().copied().is_some_and(|b| {
-                b.is_ascii_alphabetic() || b == b'_' || b == b'"' || b == b'`'
-            }))
+            && (self
+                .rest()
+                .first()
+                .copied()
+                .is_some_and(|b| b.is_ascii_alphabetic() || b == b'_' || b == b'"' || b == b'`'))
         {
             let _ = self.read_identifier();
         }

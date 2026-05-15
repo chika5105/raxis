@@ -273,7 +273,7 @@ pub fn commit_merge_to_target_ref(
 /// `IntegrationMerge` handler (`raxis-kernel::handlers::intent`)
 /// resolves `target_ref` from the orchestrator plan-fields registry
 /// and calls [`commit_merge_to_target_ref`] directly; this wrapper
-/// only feeds the adapter shim ([`crate::adapter::GitDomainAdapter`])
+/// only feeds the adapter shim (`crate::adapter::GitDomainAdapter`)
 /// and the in-crate test helpers, both of which target
 /// `refs/heads/main` explicitly.
 pub fn commit_merge_to_main(

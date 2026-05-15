@@ -68,8 +68,8 @@
 //!     planner's context-window management and the executor's
 //!     multi-file edit discipline are tested under realistic
 //!     load — not just "create new file".
-//!   * **Pre-existing tests and lint config** (rustfmt + clippy
-//!     + eslint + prettier + ruff configs at the root) so the
+//!   * **Pre-existing tests and lint config** (rustfmt, clippy,
+//!     eslint, prettier, ruff configs at the root) so the
 //!     executor must respect formatting/lint rules and the
 //!     reviewer must catch violations — exercising the
 //!     review-rejection → re-spawn loop on a real defect, not a

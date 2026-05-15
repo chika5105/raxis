@@ -277,18 +277,12 @@ pub(crate) async fn run() -> Result<()> {
             _ => None,
         })
         .collect();
-    if !reasons
-        .iter()
-        .any(|r| *r == Some("collection_not_in_allowed_list"))
-    {
+    if !reasons.contains(&Some("collection_not_in_allowed_list")) {
         return Err(anyhow!(
             "missing restriction_reason 'collection_not_in_allowed_list' in audit; got {reasons:?}",
         ));
     }
-    if !reasons
-        .iter()
-        .any(|r| *r == Some("collection_in_forbidden_list"))
-    {
+    if !reasons.contains(&Some("collection_in_forbidden_list")) {
         return Err(anyhow!(
             "missing restriction_reason 'collection_in_forbidden_list' in audit; got {reasons:?}",
         ));

@@ -1,6 +1,6 @@
 //! V2_GAPS §C2 — per-provider circuit breaker (BLOCKER closure).
 //!
-//! Without this module, [`FallbackModelClient`] is **sticky on
+//! Without this module, `FallbackModelClient` is **sticky on
 //! failure**: once a primary provider starts failing the chain falls
 //! through to the secondary and stays there even after the primary
 //! recovers, because every subsequent dispatch is paid in full
@@ -17,8 +17,8 @@
 //! closes the circuit, failure re-opens it for another
 //! `open_duration`.
 //!
-//! Wired through the same trait as [`RetryingModelClient`] /
-//! [`FallbackModelClient`] so `BootContext::main` can compose:
+//! Wired through the same trait as `RetryingModelClient` /
+//! `FallbackModelClient` so `BootContext::main` can compose:
 //!
 //! ```text
 //! Fallback[

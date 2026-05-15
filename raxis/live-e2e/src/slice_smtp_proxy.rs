@@ -52,17 +52,16 @@
 //!      junk agent `AUTH PLAIN`. The proxy MUST strip the agent's
 //!      bytes and inject the real credential.
 //!   4. Verify against the **real upstream**:
-//!      a. The proxy's `messages_relayed` counter incremented and
-//!         `messages_rejected` stayed at zero — the only way that
-//!         could happen is if the proxy's AUTH PLAIN was accepted
-//!         by real Dovecot, proving the proxy stripped the agent
-//!         junk and injected the real bytes.
-//!      b. A `docker exec ls /var/mail/.../Maildir/new/` finds
-//!         exactly one new message file containing the body
-//!         the slice sent; the message's headers carry the
-//!         envelope `MAIL FROM` and at least one of the
-//!         allowlisted recipients.
-//!      c. The `CredentialBackend` was asked at least once.
+//!      The proxy's `messages_relayed` counter incremented and
+//!      `messages_rejected` stayed at zero — the only way that
+//!      could happen is if the proxy's AUTH PLAIN was accepted
+//!      by real Dovecot, proving the proxy stripped the agent
+//!      junk and injected the real bytes. A `docker exec ls
+//!      /var/mail/.../Maildir/new/` finds exactly one new
+//!      message file containing the body the slice sent; the
+//!      message's headers carry the envelope `MAIL FROM` and at
+//!      least one of the allowlisted recipients. Finally, the
+//!      `CredentialBackend` was asked at least once.
 //!
 //! The previous in-process SMTP fixture (`UpstreamRecord`,
 //! `spawn_upstream`, `drive_upstream`, base64 helpers) is fully

@@ -9,7 +9,7 @@
 //! Every macOS code path is real AVF binding code — there is no
 //! mock, no stub, no test-only fork. Specifically:
 //!
-//! * [`AvfRuntime::build_configuration`] allocates a real
+//! * `AvfRuntime::build_configuration` allocates a real
 //!   `VZVirtualMachineConfiguration` and wires every device class V2
 //!   uses:
 //!   - `VZLinuxBootLoader` from `cfg.boot_loader`
@@ -323,7 +323,7 @@ mod macos {
     ///
     /// Holds the AVF objects the substrate retains for the lifetime
     /// of the session. All AVF interaction is routed through
-    /// [`Self::queue`] (a serial dispatch queue) per Apple's
+    /// `Self::queue` (a serial dispatch queue) per Apple's
     /// queue-confinement contract.
     pub struct AvfRuntime {
         cfg: AvfConfig,

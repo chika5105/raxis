@@ -226,24 +226,16 @@ pub fn bake_byo_executor_image_full(
         .arg(&dockerfile)
         .arg(&context)
         .status()
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("spawn `docker build` for BYO image: {e}"),
-            )
-        })?;
+        .map_err(|e| std::io::Error::other(format!("spawn `docker build` for BYO image: {e}")))?;
     if !status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "docker build for BYO image failed (exit {status}); \
+        return Err(std::io::Error::other(format!(
+            "docker build for BYO image failed (exit {status}); \
                  re-run manually for richer diagnostics:\n  \
                  docker build --platform {platform} -t {tag} \
                  -f {} {}",
-                dockerfile.display(),
-                context.display(),
-            ),
-        ));
+            dockerfile.display(),
+            context.display(),
+        )));
     }
 
     // Create the container WITHOUT starting it. The default `sh`
@@ -255,26 +247,17 @@ pub fn bake_byo_executor_image_full(
         .arg(&platform)
         .arg(&tag)
         .output()
-        .map_err(|e| {
-            std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("spawn `docker create`: {e}"),
-            )
-        })?;
+        .map_err(|e| std::io::Error::other(format!("spawn `docker create`: {e}")))?;
     if !create.status.success() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!(
-                "docker create failed for BYO image (exit {}): {}",
-                create.status,
-                String::from_utf8_lossy(&create.stderr),
-            ),
-        ));
+        return Err(std::io::Error::other(format!(
+            "docker create failed for BYO image (exit {}): {}",
+            create.status,
+            String::from_utf8_lossy(&create.stderr),
+        )));
     }
     let container_id = String::from_utf8_lossy(&create.stdout).trim().to_owned();
     if container_id.is_empty() {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::Other,
+        return Err(std::io::Error::other(
             "docker create returned an empty container id",
         ));
     }
@@ -303,10 +286,9 @@ pub fn bake_byo_executor_image_full(
         std::io::copy(&mut stdout, &mut file)?;
         let status = child.wait()?;
         if !status.success() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("docker export failed (exit {status})"),
-            ));
+            return Err(std::io::Error::other(format!(
+                "docker export failed (exit {status})"
+            )));
         }
         Ok(())
     })();

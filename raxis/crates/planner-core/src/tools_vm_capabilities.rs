@@ -35,7 +35,7 @@
 //!
 //! ## Wire shape (output)
 //!
-//! Pretty-printed JSON serialisation of [`CapabilityManifest`]
+//! Pretty-printed JSON serialisation of `CapabilityManifest`
 //! after applying the LLM-supplied categories + filter. Always a
 //! success [`ToolOutput::ok`] — a missing interpreter / probe
 //! failure is real information about the VM, not an error.

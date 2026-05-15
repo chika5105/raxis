@@ -128,14 +128,15 @@ pub struct KsbInputs<'a> {
     /// the literal empty string for `session_id`.
     pub session_id: &'a str,
 
-    /// **V2.7 — `INV-KSB-MAX-TURNS-VISIBILITY-01`.** Resolved per-session
-    /// planner turn ceiling. The spawn callsites
+    /// **V2.7 — `INV-KSB-MAX-TURNS-VISIBILITY-01`.** Resolved
+    /// per-session planner turn ceiling. The spawn callsites
     /// (`session_spawn_orchestrator::spawn_orchestrator_for_initiative`
-    /// + `…spawn_executor_for_task`) MUST populate this with the SAME
-    /// `ResolvedPlannerMaxTurns::effective` value
-    /// `resolve_planner_max_turns_for(task_fields, gateway, attempt)`
-    /// returns for the env stamp — single source of truth for the
-    /// resolution. Tests that do not care can pass
+    /// and `…spawn_executor_for_task`) MUST populate this with
+    /// the SAME `ResolvedPlannerMaxTurns::effective` value
+    /// `resolve_planner_max_turns_for(task_fields, gateway,
+    /// attempt)` returns for the env stamp — single source of
+    /// truth for the resolution. Tests that do not care can
+    /// pass
     /// [`crate::initiatives::plan_registry::DEFAULT_PLANNER_MAX_TURNS`].
     pub planner_max_turns: u32,
 
@@ -887,10 +888,7 @@ fn build_task_capability_view(
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })
         .optional()?;
-    let (prior_state, crash, review) = match row {
-        Some(t) => t,
-        None => (String::new(), 0_i64, 0_i64),
-    };
+    let (prior_state, crash, review) = row.unwrap_or_default();
     let crash_u = u32::try_from(crash).unwrap_or(0);
     let review_u = u32::try_from(review).unwrap_or(0);
     let admit_inputs = RetryAdmitInputs {
@@ -1031,7 +1029,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: "init-1",
@@ -1076,7 +1074,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: "init-1",
@@ -1114,7 +1112,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: "init-1",
@@ -1166,7 +1164,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: "init-1",
@@ -1285,7 +1283,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: init,
@@ -1481,7 +1479,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: init,
@@ -1621,7 +1619,7 @@ mod tests {
 
         let conn = store.lock_sync();
         let snap = assemble_ksb_snapshot(
-            &*conn,
+            &conn,
             &registry,
             &KsbInputs {
                 initiative_id: init,
@@ -1716,7 +1714,7 @@ mod tests {
         for role in [KsbRole::Orchestrator, KsbRole::Executor] {
             let conn = store.lock_sync();
             let snap = assemble_ksb_snapshot(
-                &*conn,
+                &conn,
                 &registry,
                 &KsbInputs {
                     initiative_id: "init-mt",

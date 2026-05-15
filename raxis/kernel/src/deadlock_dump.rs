@@ -44,12 +44,14 @@ use serde::{Deserialize, Serialize};
 /// Forensic dump payload written by the deadlock watcher.
 ///
 /// The boot-time rehydration path in `main.rs` reads this back
-/// and synthesises a [`raxis_audit_tools::AuditEventKind::KernelDeadlockDetected`]
-/// event from `thread_count` + `lock_count` + `detected_at_unix_secs`
-/// + the dump path. The full per-thread backtrace stays in the
-/// JSON file (the audit chain is a wire-shape contract; we keep
-/// the full forensic blob in a sidecar to avoid bloating every
-/// chain line with thousands of bytes of backtrace).
+/// and synthesises a
+/// [`raxis_audit_tools::AuditEventKind::KernelDeadlockDetected`]
+/// event from `thread_count`, `lock_count`,
+/// `detected_at_unix_secs`, and the dump path. The full
+/// per-thread backtrace stays in the JSON file (the audit
+/// chain is a wire-shape contract; we keep the full forensic
+/// blob in a sidecar to avoid bloating every chain line with
+/// thousands of bytes of backtrace).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DeadlockDump {
     /// `CARGO_PKG_VERSION` at the time the dump was written.

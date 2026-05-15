@@ -94,7 +94,7 @@ pub fn run(config: &BootstrapConfig) -> Result<(), KernelError> {
 /// Identical to [`run`] in every observable side effect except that on
 /// success it returns `Ok(())` instead of calling `std::process::exit(0)`.
 /// Exposed `pub(crate)` so the integration tests at the bottom of this
-/// file can run bootstrap against a [`tempfile::TempDir`] and then assert:
+/// file can run bootstrap against a `tempfile::TempDir` and then assert:
 ///
 ///   - Every output file exists with the spec-mandated permission mode.
 ///   - `policy.toml` round-trips through `raxis_policy::load_policy`.
@@ -102,7 +102,7 @@ pub fn run(config: &BootstrapConfig) -> Result<(), KernelError> {
 ///     `authority::load_key_registry`.
 ///   - The genesis audit record is accepted by
 ///     `recovery::verify_audit_chain`.
-///   - `policy.toml`'s `meta.signed_by` fingerprint matches the SHA-256[:16]
+///   - `policy.toml`'s `meta.signed_by` fingerprint matches the `SHA-256[:16]`
 ///     of the operator pubkey on disk.
 ///
 /// Production callers MUST go through [`run`]; they MUST NOT call
@@ -334,7 +334,7 @@ pub(crate) fn run_inner(config: &BootstrapConfig) -> Result<(), KernelError> {
 /// permissions, and return the `SigningKey` for immediate use.
 ///
 /// The on-disk format is a simplified PEM block:
-/// ```
+/// ```text
 /// -----BEGIN ED25519 PRIVATE KEY-----
 /// <64-char hex: 32-byte seed>
 /// -----END ED25519 PRIVATE KEY-----
@@ -478,11 +478,11 @@ fn read_verifying_key_from_pem(pem_path: &Path) -> Result<VerifyingKey, KernelEr
 // Fingerprint
 // ---------------------------------------------------------------------------
 
-/// SHA-256[:16] fingerprint of a hex-encoded pubkey — 32 hex chars.
+/// `SHA-256[:16]` fingerprint of a hex-encoded pubkey — 32 hex chars.
 ///
 /// Thin adaptor over `raxis_genesis_tools::pubkey_fingerprint`, which takes
 /// raw bytes; the hex-decode step lives here because the operator pubkey
-/// arrives as hex on stdin / `--operator-pubkey`. The actual SHA-256[:16]
+/// arrives as hex on stdin / `--operator-pubkey`. The actual `SHA-256[:16]`
 /// computation lives in the shared crate so every fingerprint site
 /// (kernel bootstrap, CLI genesis, AuditDir test fixture, planner client)
 /// shares one implementation.
@@ -602,7 +602,7 @@ fn install_genesis_policy_epoch_row(
         &store,
         &sha256_hex,
         &signed_by_authority,
-        unix_now_secs() as i64,
+        unix_now_secs(),
         &bundle,
     )
     .map_err(|e| KernelError::BootstrapFailed {

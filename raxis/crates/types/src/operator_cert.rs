@@ -133,7 +133,7 @@ impl RevocationReason {
 ///   * `subject_pubkey_hex` — 64-char lowercase hex of the revoked
 ///     cert's `pubkey_hex`. Used as the on-disk filename (so a
 ///     single cert has at most one revocation record on disk).
-///   * `subject_fingerprint` — SHA-256[:16]-byte 32-hex-char
+///   * `subject_fingerprint` — SHA-256\[:16\]-byte 32-hex-char
 ///     fingerprint of `subject_pubkey_hex` bytes (matches
 ///     `policy.toml [meta].signed_by` and the `actor_fingerprint`
 ///     audit field).

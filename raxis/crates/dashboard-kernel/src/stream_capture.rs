@@ -8,7 +8,7 @@
 //!    JSON-serialised [`StreamEvent`]. When a file would exceed
 //!    [`CaptureConfig::max_file_bytes`], the module rewrites it
 //!    keeping only the most recent ~50 % of lines (see
-//!    [`SessionStreamCapture::compact_locked`]). One compaction
+//!    `SessionStreamCapture::compact_locked`). One compaction
 //!    per overflow — not per append — keeps amortised cost flat.
 //!
 //! 2. A per-session **broadcast channel** sized at

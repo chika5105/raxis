@@ -52,6 +52,12 @@ pub fn record_intent_admission(
 /// Record one `raxis.gateway.fetch.{total,duration}` pair plus a
 /// `raxis.tokens.consumed` counter when the response carries token
 /// usage. Called from the gateway-fetch outbound path.
+//
+// Argument count is dictated by the OTel attribute set we stamp on
+// every gateway fetch; bundling these into a struct would force every
+// call site (kernel/gateway/CLI) to construct an extra wrapper type
+// without changing the wire shape, so we accept the lint here.
+#[allow(clippy::too_many_arguments)]
 pub fn record_gateway_fetch(
     hub: &ObservabilityHub,
     provider: &str,

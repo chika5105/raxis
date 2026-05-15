@@ -165,10 +165,10 @@ pub fn run_list(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
 ///
 /// Reads the new credential bytes via the chosen input method,
 /// then drives `FileCredentialBackend::rotate` (atomic temp-write
-/// + rename + parent-dir fsync). The `actor` field of the audit
-/// event is the operator's pubkey fingerprint resolved from the
-/// CLI flags, so forensic queries can attribute the rotation to a
-/// specific operator certificate.
+/// followed by `rename` and a parent-dir fsync). The `actor`
+/// field of the audit event is the operator's pubkey fingerprint
+/// resolved from the CLI flags, so forensic queries can attribute
+/// the rotation to a specific operator certificate.
 pub fn run_rotate(flags: &GlobalFlags, args: &[String]) -> Result<(), CliError> {
     let mut name: Option<String> = None;
     let mut input: InputMode = InputMode::Stdin;
@@ -1415,7 +1415,7 @@ fn verify_structurally(
             mode & 0o777,
         ));
     }
-    notes.push(format!("mode 0600 OK"));
+    notes.push("mode 0600 OK".to_string());
 
     if let Some(want) = current_uid() {
         if uid != want {

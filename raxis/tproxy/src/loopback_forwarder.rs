@@ -23,7 +23,7 @@
 //!   * On each accept it dials AF_VSOCK to
 //!     `(VMADDR_CID_HOST, <vsock_port>)`. The host side of that
 //!     CID/port pair is bound by `crates/isolation-apple-vz` as a
-//!     [`VZVirtioSocketListener`], which in turn re-emits to host
+//!     `VZVirtioSocketListener`, which in turn re-emits to host
 //!     `127.0.0.1:<host_proxy_port>` — i.e. the credential proxy.
 //!   * It splices bytes bidirectionally between the agent's TCP
 //!     stream and the vsock stream until either side closes.

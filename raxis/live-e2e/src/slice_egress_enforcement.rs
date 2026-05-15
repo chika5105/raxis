@@ -14,15 +14,15 @@
 //!   2. Spawn the real `run_gateway_with_backend` with the real
 //!      `HttpBackend`.
 //!   3. Drive THREE FetchRequests:
-//!        a. `https://api.anthropic.com/v1/messages` → expect 200.
-//!        b. `https://httpbin.org/anything`         → expect
-//!           `error == "DomainNotAllowed"` and `status_code is None`.
-//!        c. `http://api.anthropic.com/v1/messages` → expect a
-//!           policy denial (the policy's allowlist is host-based;
-//!           any extra protocol guarding is enforced separately).
-//!           For the MVP we just assert the request is structurally
-//!           denied — either by `DomainNotAllowed` or by an
-//!           upstream error if the server rejects plain HTTP.
+//!      `https://api.anthropic.com/v1/messages` should return
+//!      200; `https://httpbin.org/anything` should fail with
+//!      `error == "DomainNotAllowed"` and `status_code is
+//!      None`; and `http://api.anthropic.com/v1/messages`
+//!      should be denied by policy (the allowlist is
+//!      host-based; any extra protocol guarding is enforced
+//!      separately). For the MVP we just assert the request is
+//!      structurally denied — either by `DomainNotAllowed` or
+//!      by an upstream error if the server rejects plain HTTP.
 //!
 //! The slice REQUIRES a real Anthropic key for (a). (b) is the
 //! proof point — even with a working backend, the gateway refuses.

@@ -489,7 +489,7 @@ fn require_arg<'a>(args: &'a [String], pos: usize, flag: &str) -> Result<&'a str
 ///    test runners).
 /// 3. If neither is set, return `None` and let the per-subcommand
 ///    validation surface the standard
-///    "usage: --operator-key <path> is required" error so the
+///    `"usage: --operator-key <path> is required"` error so the
 ///    operator sees the same message they would have seen before
 ///    the env-var fallback existed (no silent skipping).
 ///
@@ -1008,10 +1008,13 @@ mod catalog_consistency_tests {
                     }
                     let lit = &body[start..end];
                     let after = body[end + 1..].trim_start();
-                    if after.starts_with("=>") || after.starts_with("|") {
-                        if !lit.is_empty() && lit != "--help" && lit != "-h" && !lit.contains(' ') {
-                            out.insert(lit.to_owned());
-                        }
+                    if (after.starts_with("=>") || after.starts_with("|"))
+                        && !lit.is_empty()
+                        && lit != "--help"
+                        && lit != "-h"
+                        && !lit.contains(' ')
+                    {
+                        out.insert(lit.to_owned());
                     }
                     while let Some(&(_, ch)) = chars.peek() {
                         if ch == '"' {

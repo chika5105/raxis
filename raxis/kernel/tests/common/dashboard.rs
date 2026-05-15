@@ -875,8 +875,11 @@ mod tests {
     /// disable the bound, re-introducing the
     /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` violation)
     /// trips here.
-    #[test]
-    fn inv_live_e2e_dashboard_fe_bundle_present_01_default_timeouts_are_generous_but_bounded() {
+    // Constant guards: enforce the generous-but-bounded
+    // `INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01` envelope at
+    // compile time. Runtime `assert!`s on `const` values would
+    // be optimised out and Clippy correctly flags them as dead.
+    const _: () = {
         assert!(
             DEFAULT_NPM_INSTALL_TIMEOUT_SECS >= 60,
             "install timeout must allow a cold registry pull"
@@ -893,7 +896,7 @@ mod tests {
             DEFAULT_NPM_BUILD_TIMEOUT_SECS <= 900,
             "build timeout must be bounded (15 min ceiling)"
         );
-    }
+    };
 
     /// `node_modules_vite_present` returns `false` for an
     /// empty / missing tree (the iter52 root-cause shape: a

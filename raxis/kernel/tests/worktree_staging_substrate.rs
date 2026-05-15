@@ -111,7 +111,7 @@ fn step10_full_pipeline_stage_spawn_push_recv_destroy() {
         .expect("substrate construction must succeed under RAXIS_TEST_HARNESS=1");
     let spec = fixture_spec("tok-step10", vec![staged.mount.clone()]);
     let mut session = backend
-        .spawn(&fixture_image(), &[staged.mount.clone()], &spec)
+        .spawn(&fixture_image(), std::slice::from_ref(&staged.mount), &spec)
         .expect("Backend::spawn must accept the staged mount + spec");
 
     // 3. Push a frame, recv it back. The default substrate child is
@@ -186,7 +186,7 @@ fn step10_mount_carries_content_hash_through_substrate_boundary() {
     // boundary.
     let spec = fixture_spec("tok-rev", vec![staged.mount.clone()]);
     let mut session = backend
-        .spawn(&fixture_image(), &[staged.mount.clone()], &spec)
+        .spawn(&fixture_image(), std::slice::from_ref(&staged.mount), &spec)
         .unwrap();
     let _ = session.shutdown(Duration::from_millis(200));
 
@@ -232,14 +232,14 @@ fn step10_distinct_sessions_stage_independent_worktrees() {
     let mut sess_a = backend
         .spawn(
             &fixture_image(),
-            &[staged_a.mount.clone()],
+            std::slice::from_ref(&staged_a.mount),
             &fixture_spec("tok-A", vec![staged_a.mount.clone()]),
         )
         .unwrap();
     let mut sess_b = backend
         .spawn(
             &fixture_image(),
-            &[staged_b.mount.clone()],
+            std::slice::from_ref(&staged_b.mount),
             &fixture_spec("tok-B", vec![staged_b.mount.clone()]),
         )
         .unwrap();

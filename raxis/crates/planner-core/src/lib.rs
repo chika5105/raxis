@@ -171,7 +171,7 @@ pub use vm_capabilities::{
 /// **The three valid planner-harness roles** — informational mirror
 /// of the build-time `[features]` selector in each binary's
 /// `Cargo.toml`. The kernel expects exactly one of these three
-/// argv[0] values (full path) to be the `entrypoint_argv` head of a
+/// argv`0` values (full path) to be the `entrypoint_argv` head of a
 /// spawned session.
 ///
 /// The mapping below is the **load-bearing** binding between this

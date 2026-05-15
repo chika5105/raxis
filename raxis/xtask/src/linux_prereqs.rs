@@ -21,31 +21,24 @@
 //!
 //! ## Checks performed
 //!
-//! 1. `linux.kernel_version`         — host kernel ≥ 5.10 (per
-//!                                      `system-requirements.md §1.1`).
-//! 2. `linux.dev_kvm.exists`         — `/dev/kvm` is a character
-//!                                      device.
-//! 3. `linux.dev_kvm.openable`       — current user can open it
-//!                                      RW (the substrate's
-//!                                      `probe_host` does the same
-//!                                      check at session-spawn).
-//! 4. `linux.kvm_group.membership`   — current user's groups
-//!                                      include the `kvm` group
-//!                                      (the canonical recovery
-//!                                      hint when (3) fails).
-//! 5. `linux.vhost_vsock.module`     — `/proc/modules` shows
-//!                                      `vhost_vsock` loaded (or
-//!                                      `/dev/vhost-vsock` exists,
-//!                                      which catches statically-
-//!                                      compiled-in builds).
-//! 6. `linux.cgroup_v2.mounted`      — `/sys/fs/cgroup/cgroup.controllers`
-//!                                      exists.
-//! 7. `linux.firecracker.binary`     — `firecracker(1)` is on
-//!                                      `$PATH` (Warn — operator
-//!                                      may install it later).
-//! 8. `linux.virtiofsd.binary`       — `virtiofsd(1)` on `$PATH`
-//!                                      (Warn — V2 doesn't require
-//!                                      it; V3 will).
+//! 1. `linux.kernel_version` — host kernel ≥ 5.10 (per
+//!    `system-requirements.md §1.1`).
+//! 2. `linux.dev_kvm.exists` — `/dev/kvm` is a character device.
+//! 3. `linux.dev_kvm.openable` — current user can open it RW
+//!    (the substrate's `probe_host` does the same check at
+//!    session-spawn).
+//! 4. `linux.kvm_group.membership` — current user's groups
+//!    include the `kvm` group (the canonical recovery hint when
+//!    (3) fails).
+//! 5. `linux.vhost_vsock.module` — `/proc/modules` shows
+//!    `vhost_vsock` loaded (or `/dev/vhost-vsock` exists, which
+//!    catches statically-compiled-in builds).
+//! 6. `linux.cgroup_v2.mounted` —
+//!    `/sys/fs/cgroup/cgroup.controllers` exists.
+//! 7. `linux.firecracker.binary` — `firecracker(1)` is on
+//!    `$PATH` (Warn — operator may install it later).
+//! 8. `linux.virtiofsd.binary` — `virtiofsd(1)` on `$PATH`
+//!    (Warn — V2 doesn't require it; V3 will).
 //!
 //! Each check returns a typed [`Outcome`] (`Ok` | `Warn` | `Fail`)
 //! plus a human-readable detail string the rendering layer prints
@@ -205,6 +198,7 @@ fn check_kernel_version_at(path: &Path) -> Result<(u32, u32, String)> {
 ///   * `5.15.0-105-generic`
 ///   * `6.1.0-21-amd64`
 ///   * `5.10.225`
+///
 /// Returns `(major, minor)` or an error if the leading numeric pair
 /// is malformed.
 fn parse_osrelease(raw: &str) -> Result<(u32, u32)> {

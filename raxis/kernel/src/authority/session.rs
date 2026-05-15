@@ -363,10 +363,10 @@ pub enum EnvelopeReplayReason {
 ///
 /// Combines, in one SQLite transaction:
 ///   1. **Check (A)** — sequence number is exactly `sessions.sequence_number + 1`.
-///   2. **Check (B)** — `INSERT INTO nonce_cache (session_id, sequence_num,
-///                       envelope_nonce, observed_at)`. Fails on duplicate
-///                       `(session_id, envelope_nonce)` (UNIQUE) or duplicate
-///                       `(session_id, sequence_num)` (PK).
+///   2. **Check (B)** — `INSERT INTO nonce_cache (session_id,
+///      sequence_num, envelope_nonce, observed_at)`. Fails on
+///      duplicate `(session_id, envelope_nonce)` (UNIQUE) or
+///      duplicate `(session_id, sequence_num)` (PK).
 ///   3. **Atomic advance** — `UPDATE sessions SET sequence_number = sequence_num`.
 ///
 /// Either all three succeed and commit, or none do (transaction rollback). The

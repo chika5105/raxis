@@ -21,7 +21,7 @@
 //!   in-memory revocation set on logout.
 //! * Read-only API surface backed by an injectable
 //!   [`DashboardData`] trait. The kernel binary wires a concrete
-//!   [`KernelDashboardData`] (in `kernel/src/dashboard_glue.rs`)
+//!   `KernelDashboardData` (in `kernel/src/dashboard_glue.rs`)
 //!   that fans out to `raxis_store::views`,
 //!   `crate::push::InitiativeEventBus`, and the audit
 //!   `ChainReader`.  Tests wire `InMemoryDashboardData` so the

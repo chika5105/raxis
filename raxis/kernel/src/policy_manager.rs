@@ -165,7 +165,7 @@ pub fn read_current_epoch(store: &Store) -> Result<u64, PolicyError> {
 /// `policy_sha256` is the lowercase-hex SHA-256 of the genesis
 /// `policy.toml` bytes (computed by `raxis_policy::load_policy`).
 /// `signed_by_authority` is the authority pubkey fingerprint
-/// (SHA-256[:16] hex; same convention as
+/// (`SHA-256[:16]` hex; same convention as
 /// `raxis_genesis_tools::pubkey_fingerprint`).
 pub fn install_genesis_policy_epoch(
     store: &Store,
@@ -469,7 +469,7 @@ pub fn advance_epoch(
     }
     let signed_by_authority =
         raxis_genesis_tools::pubkey_fingerprint(authority_verifying_key(registry).as_bytes());
-    let advanced_at_unix_secs = unix_now_secs() as i64;
+    let advanced_at_unix_secs = unix_now_secs();
 
     // ── Phase 1: SQL transaction ─────────────────────────────────────
     // Acquire the connection mutex once and hold it for the entire
@@ -1134,18 +1134,20 @@ mod tests {
         (policy_path, sig_path)
     }
 
-    /// Boot a HandlerContext-shaped state suitable for `advance_epoch`:
-    /// in-memory store with the genesis epoch row pre-installed, a
-    /// fresh `Arc<ArcSwap<PolicyBundle>>` holding a stub bundle, and a
-    /// `FakeAuditSink` that captures every emitted event.
-    fn boot_state() -> (
+    type BootState = (
         StdArc<KeyRegistry>,
         SigningKey,
         StdArc<Store>,
         StdArc<ArcSwap<PolicyBundle>>,
         StdArc<dyn AuditSink>,
         StdArc<FakeAuditSink>,
-    ) {
+    );
+
+    /// Boot a HandlerContext-shaped state suitable for `advance_epoch`:
+    /// in-memory store with the genesis epoch row pre-installed, a
+    /// fresh `Arc<ArcSwap<PolicyBundle>>` holding a stub bundle, and a
+    /// `FakeAuditSink` that captures every emitted event.
+    fn boot_state() -> BootState {
         let (registry, sk) = registry_and_signing_key();
         let store = StdArc::new(open_mem_store());
         // Pre-install the genesis epoch_id = 1 row so `advance_epoch`
@@ -1284,7 +1286,7 @@ mod tests {
         // Audit event emitted.
         let kinds = sink.event_kinds();
         assert!(
-            kinds.iter().any(|k| *k == "PolicyEpochAdvanced"),
+            kinds.contains(&"PolicyEpochAdvanced"),
             "expected PolicyEpochAdvanced in {kinds:?}"
         );
     }
@@ -1337,9 +1339,7 @@ mod tests {
         // Sanity: the deleted OperatorCertLegacyEntryDetected MUST
         // never appear in any kernel emit path again.
         assert!(
-            !kinds
-                .iter()
-                .any(|k| *k == "OperatorCertLegacyEntryDetected"),
+            !kinds.contains(&"OperatorCertLegacyEntryDetected"),
             "deleted variant must never be emitted; kinds={kinds:?}"
         );
     }

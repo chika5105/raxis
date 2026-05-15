@@ -569,7 +569,7 @@ pub struct PolicySnapshotView {
 /// Per-operator summary in [`PolicySnapshotView`].
 #[derive(Debug, Clone, Serialize)]
 pub struct PolicyOperatorView {
-    /// SHA-256[:16] hex fingerprint.
+    /// `SHA-256[:16]` hex fingerprint.
     pub fingerprint: String,
     /// Display name.
     pub display_name: String,
@@ -1054,7 +1054,7 @@ impl std::fmt::Debug for CredentialReveal {
 
 /// Stable wire-string label for the dashboard's credential rate
 /// limiter. The route layer captures the limit + window from
-/// [`crate::config::DashboardConfig::reveal_rate_limit_per_window`]
+/// `crate::config::DashboardConfig::reveal_rate_limit_per_window`
 /// and `reveal_rate_limit_window_secs`; the data layer enforces
 /// it via `enforce_reveal_rate_limit` so a future test fixture or
 /// a future second backend (Vault) can re-use the same throttle

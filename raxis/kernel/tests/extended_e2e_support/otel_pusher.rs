@@ -994,29 +994,33 @@ mod tests {
     /// bound, re-introducing
     /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` violation)
     /// trips here.
-    #[test]
-    fn inv_live_e2e_otel_pusher_present_01_default_build_timeout_generous_but_bounded() {
+    // Constant guards for `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`:
+    // the floor/ceiling/default relationship is enforced at
+    // compile time. Runtime `assert!`s on `const` values would be
+    // optimised out and Clippy correctly flags them as dead.
+    const _: () = {
         assert!(
             DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS >= MIN_OTEL_PUSHER_BUILD_TIMEOUT_SECS,
-            "default build timeout must clear the safe floor",
+            "default build timeout must clear the safe floor"
         );
         assert!(
             DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS <= MAX_OTEL_PUSHER_BUILD_TIMEOUT_SECS,
-            "default build timeout must clear the safe ceiling",
+            "default build timeout must clear the safe ceiling"
         );
         assert!(
-            (60..=600).contains(&DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS),
-            "default sits in [60s, 600s] window per invariant statement",
+            DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS >= 60
+                && DEFAULT_OTEL_PUSHER_BUILD_TIMEOUT_SECS <= 600,
+            "default sits in [60s, 600s] window per invariant statement"
         );
         assert!(
             MIN_OTEL_PUSHER_BUILD_TIMEOUT_SECS >= 60,
-            "floor must allow a cold-cache build (60s minimum)",
+            "floor must allow a cold-cache build (60s minimum)"
         );
         assert!(
             MAX_OTEL_PUSHER_BUILD_TIMEOUT_SECS <= 600,
-            "ceiling bounds the wedge surface (600s maximum)",
+            "ceiling bounds the wedge surface (600s maximum)"
         );
-    }
+    };
 
     /// `RAXIS_E2E_OTEL_PUSHER_BUILD_TIMEOUT_SECS=0` (or any
     /// non-positive / unparseable value) clamps to the default

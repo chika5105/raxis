@@ -25,7 +25,7 @@
 //!   configured threshold AND we haven't already emitted a stall
 //!   event for this bucket inside the current window, the tracker
 //!   returns a [`StallSignal::Detected`] carrying the values the
-//!   caller plumbs into [`AuditEventKind::SessionEgressStallDetected`].
+//!   caller plumbs into `AuditEventKind::SessionEgressStallDetected`.
 //! - Subsequent denials inside the same window return
 //!   [`StallSignal::Quiet`] (debounced). Once the window slides
 //!   past the last emit, the tracker re-arms.

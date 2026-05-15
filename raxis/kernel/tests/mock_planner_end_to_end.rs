@@ -626,7 +626,7 @@ async fn intent_with_real_session_token_clears_step2_envelope_acceptance() {
     {
         let conn = rusqlite::Connection::open(&kernel_db_path)
             .unwrap_or_else(|e| panic!("open kernel.db at {kernel_db_path:?}: {e}"));
-        let now = raxis_types::unix_now_secs() as i64;
+        let now = raxis_types::unix_now_secs();
         let far_exp = now + 86_400;
         conn.execute(
             &format!(

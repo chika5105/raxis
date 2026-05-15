@@ -97,7 +97,7 @@ pub enum PlannerError {
 
     /// V2.4 — driver pre-/post-loop failure (transport setup,
     /// model client error, intent submission). The stderr detail
-    /// is the [`crate::driver::DriverError::to_string`] output.
+    /// is the `crate::driver::DriverError::to_string` output.
     #[error("driver failure: {0}")]
     DriverFailure(String),
 }

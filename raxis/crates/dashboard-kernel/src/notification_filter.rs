@@ -32,7 +32,7 @@
 //! belong in the audit chain only. The match is exhaustive over
 //! `AuditEventKind`: adding a new variant without picking a
 //! priority is a compile error
-//! ([`crate::notification_filter::tests`] fixes the wire-shape
+//! (`crate::notification_filter::tests` fixes the wire-shape
 //! discipline at the unit-test level).
 //!
 //! Stable-wire output
@@ -114,7 +114,7 @@ impl std::fmt::Display for NotificationPriority {
 /// `NotificationView`, the kernel's `dispatch()` defense-in-depth
 /// gate). Mirror match-arms of the typed function below — drift
 /// is caught by
-/// [`tests::typed_and_string_apis_agree_on_all_constructed_variants`].
+/// `tests::typed_and_string_apis_agree_on_all_constructed_variants`.
 ///
 /// The fallback for an unknown kind is `None` (audit-only). New
 /// `AuditEventKind` variants added without a string arm therefore
@@ -234,7 +234,7 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
 ///   * The match is exhaustive: adding a new `AuditEventKind`
 ///     variant without picking a priority (or explicitly `None`)
 ///     is a compile error. The unit test
-///     [`tests::every_variant_has_a_decision`] doubles as a wire-
+///     `tests::every_variant_has_a_decision` doubles as a wire-
 ///     shape regression test against silent additions.
 #[allow(clippy::too_many_lines)]
 // Deprecated `OperatorViewed*` variants (retired in

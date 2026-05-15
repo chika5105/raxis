@@ -8,7 +8,7 @@
 //! The proxy converts the extended-query pipeline (`Parse` → `Bind`
 //! → `Describe`? → `Execute` → `Sync`) into a single substituted
 //! simple-query forwarded through the existing
-//! [`UpstreamSession::forward_simple_query`] path. Why simple-query
+//! `UpstreamSession::forward_simple_query` path. Why simple-query
 //! substitution rather than a pass-through `query_raw` over
 //! `tokio_postgres::Statement`?
 //!

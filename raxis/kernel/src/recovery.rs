@@ -3137,7 +3137,7 @@ mod supervisor_auto_resume_witness {
     /// `SELECT_ALL_COLS`.
     fn quarantine_initiative(store: &Store, initiative_id: &str) {
         let conn = store.lock_sync();
-        let now = unix_now_secs() as i64;
+        let now = unix_now_secs();
         conn.execute(
             &format!(
                 "INSERT INTO {INITIATIVE_QUARANTINES}

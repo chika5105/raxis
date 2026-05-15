@@ -600,7 +600,7 @@ mod tests {
         // boundary the request was on the wrong side of.
         let kinds = sink.event_kinds();
         assert!(
-            kinds.iter().any(|k| *k == "OperatorCertExpiredOpDenied"),
+            kinds.contains(&"OperatorCertExpiredOpDenied"),
             "expected OperatorCertExpiredOpDenied in {kinds:?}"
         );
     }

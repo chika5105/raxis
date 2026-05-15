@@ -2,8 +2,8 @@
 //!
 //! Spec: `v3/otel-observability.md §12.3`.
 //!
-//! This is where the [`config`], [`cursor`], [`reader`], [`batch`],
-//! [`otlp`], [`retry`] and [`health`] modules are wired together.
+//! This is where the `config`, `cursor`, `reader`, `batch`,
+//! `otlp`, `retry` and `health` modules are wired together.
 //!
 //! ```text
 //!     ┌──────────────┐

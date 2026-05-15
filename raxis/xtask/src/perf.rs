@@ -28,8 +28,8 @@
 //!
 //! When the live-e2e Prometheus stack
 //! (`raxis/live-e2e/docker-compose.e2e.yml`) is already up
-//! - detected by probing `http://127.0.0.1:9090/-/healthy` -
-//! the harness attaches to that stack rather than spinning up its
+//! (detected by probing `http://127.0.0.1:9090/-/healthy`), the
+//! harness attaches to that stack rather than spinning up its
 //! own. Operators should never have two Prometheus instances
 //! competing for the same host port, and the named-volume
 //! persistence story (14-day retention; see

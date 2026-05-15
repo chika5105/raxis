@@ -580,12 +580,11 @@ fn render_task_table<W: Write + ?Sized>(out: &mut W, tasks: &[TaskRow]) {
     }
     let _ = writeln!(
         out,
-        "  {tid:<24} {state:<24} {lane:<14} {ts:<12} {actor}",
+        "  {tid:<24} {state:<24} {lane:<14} {ts:<12} actor",
         tid = "task_id",
         state = "state",
         lane = "lane",
         ts = "transitioned_at",
-        actor = "actor",
     );
     for t in tasks {
         let _ = writeln!(

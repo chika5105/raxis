@@ -71,7 +71,7 @@ pub enum GenesisWriteError {
 ///
 /// * `audit_dir` — `<data_dir>/audit/` (must already exist).
 /// * `authority_pubkey` — 32-byte Ed25519 public key bytes; the
-///   SHA-256[:16] fingerprint becomes `authority_pubkey_fingerprint`
+///   `SHA-256[:16]` fingerprint becomes `authority_pubkey_fingerprint`
 ///   in the record.
 /// * `nonce_bytes` — 64 CSPRNG bytes. The kernel and the CLI both
 ///   mint these via `raxis_crypto::token::try_random_array` so a
