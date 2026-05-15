@@ -54,12 +54,11 @@ const IS_DEV = process.env.NODE_ENV === "development";
 const GITHUB_REPO = process.env.RAXIS_GITHUB_REPO; // "owner/repo"
 const GITHUB_BRANCH = process.env.RAXIS_GITHUB_BRANCH ?? "main";
 const GITHUB_TOKEN = process.env.RAXIS_GITHUB_TOKEN;
-const FORCE_GITHUB = process.env.RAXIS_FORCE_GITHUB === "true";
 const REVALIDATE = 3600; // 1 hour
 
 // Use GitHub API when the repo is configured (production).
 // In dev we always use the filesystem for speed and offline support.
-const USE_GITHUB = !!GITHUB_REPO && (!IS_DEV || FORCE_GITHUB);
+const USE_GITHUB = !!GITHUB_REPO && !IS_DEV;
 
 // ─── Exclusion rules ─────────────────────────────────────────────────────────
 
@@ -282,7 +281,9 @@ async function ghFetch(url: string): Promise<Response> {
 
 async function fetchRaw(filePath: string): Promise<string> {
   const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${filePath}`;
-  const res = await fetch(url, { next: { revalidate: REVALIDATE } });
+  const rawHeaders: Record<string, string> = {};
+  if (GITHUB_TOKEN) rawHeaders["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
+  const res = await fetch(url, { headers: rawHeaders, cache: "no-store" });
   if (!res.ok) throw new Error(`GitHub raw ${res.status}: ${filePath}`);
   return res.text();
 }
