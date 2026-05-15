@@ -517,6 +517,65 @@ pub enum MetricName {
     /// (re-emitted) on every increment / decrement so the gauge
     /// tracks actual concurrency.
     KernelSubstrateIpcInflight,
+
+    // ── iter61: dataplane bottleneck instrumentation ──────────────
+    //
+    // Six histograms covering the subsystems that previously had
+    // only end-to-end latency (or none at all). Each pivots on a
+    // closed `stage` lexicon so operators can localise a
+    // bottleneck inside one subsystem. Spec:
+    // `specs/v3/observability-prometheus.md §3.x` (iter61) +
+    // `INV-OBSERVABILITY-DATAPLANE-LATENCY-*` family.
+    //
+    /// `raxis.store.query.duration` — Histogram (ms). Labels:
+    /// `query_class` (closed lexicon —
+    /// `raxis_store::observability::QUERY_CLASS_CLOSED_SET`),
+    /// `outcome` (`ok` / `error`). One observation per
+    /// SQLite-backed query the kernel issues. Wired at the
+    /// `raxis_store` query-execution seam so all callers get
+    /// instrumentation for free.
+    StoreQueryDuration,
+    /// `raxis.fsm.transition.duration` — Histogram (ms). Labels:
+    /// `fsm_kind` (`session` / `initiative` / `task`),
+    /// `from_state`, `to_state`. Wall-clock from event-receive
+    /// to next-state-commit. Pairs with the existing
+    /// `SessionLifecycleTransitionTotal` counter (which emits
+    /// transition-occurred events without timing).
+    FsmTransitionDuration,
+    /// `raxis.audit.chain.stage.duration` — Histogram (ms).
+    /// Labels: `stage` (`hash` / `persist` / `verify`),
+    /// `outcome`. Per-stage breakdown of the audit-chain
+    /// append path; complements the end-to-end
+    /// `AuditEventAppendDuration` so a slow `persist` (fsync
+    /// barrier) is distinguishable from a slow `hash` (large
+    /// payload) or a slow `verify` (tip-validation regression).
+    AuditChainStageDuration,
+    /// `raxis.git.worktree.stage.duration` — Histogram (ms).
+    /// Labels: `stage` (`clone` / `fetch` / `checkout` /
+    /// `verify`), `outcome`. Per-stage breakdown of the
+    /// worktree-provision path; complements the end-to-end
+    /// `GitWorktreeProvisionDuration` so a slow `fetch`
+    /// (network) is distinguishable from a slow `checkout`
+    /// (disk) or a slow `verify` (`.bake.json` integrity).
+    GitWorktreeStageDuration,
+    /// `raxis.gateway.stage.duration` — Histogram (ms).
+    /// Labels: `provider`, `stage` (`dns` / `tls` /
+    /// `tproxy_admit` / `first_byte`), `outcome`. Per-stage
+    /// breakdown of the gateway fetch path; complements the
+    /// existing end-to-end `GatewayFetchDuration` /
+    /// `GatewayUpstreamDuration` so a slow upstream is
+    /// disambiguable into DNS / TLS / proxy-admission /
+    /// first-byte components.
+    GatewayStageDuration,
+    /// `raxis.kernel.substrate.ipc.frame.stage.duration` —
+    /// Histogram (ms). Labels: `role`, `message_kind`,
+    /// `stage` (`encode` / `write` / `read` / `decode`),
+    /// `outcome`. Per-stage breakdown of the bincode-IPC frame
+    /// pipeline; complements the existing end-to-end
+    /// `KernelSubstrateIpcRoundtripDuration` so a slow
+    /// roundtrip is disambiguable into serialise / wire /
+    /// deserialise components.
+    IpcFrameStageDuration,
 }
 
 impl MetricName {
@@ -618,6 +677,14 @@ impl MetricName {
             }
             Self::KernelSubstrateIpcMessagesTotal => "raxis.kernel.substrate.ipc.messages.total",
             Self::KernelSubstrateIpcInflight => "raxis.kernel.substrate.ipc.inflight",
+
+            // iter61 dataplane bottleneck instrumentation.
+            Self::StoreQueryDuration => "raxis.store.query.duration",
+            Self::FsmTransitionDuration => "raxis.fsm.transition.duration",
+            Self::AuditChainStageDuration => "raxis.audit.chain.stage.duration",
+            Self::GitWorktreeStageDuration => "raxis.git.worktree.stage.duration",
+            Self::GatewayStageDuration => "raxis.gateway.stage.duration",
+            Self::IpcFrameStageDuration => "raxis.kernel.substrate.ipc.frame.stage.duration",
         }
     }
 
@@ -651,7 +718,13 @@ impl MetricName {
             | Self::GitMergeDuration
             | Self::KernelRespawnDuration
             | Self::OperatorIpcDuration
-            | Self::KernelSubstrateIpcRoundtripDuration => MetricType::Histogram,
+            | Self::KernelSubstrateIpcRoundtripDuration
+            | Self::StoreQueryDuration
+            | Self::FsmTransitionDuration
+            | Self::AuditChainStageDuration
+            | Self::GitWorktreeStageDuration
+            | Self::GatewayStageDuration
+            | Self::IpcFrameStageDuration => MetricType::Histogram,
 
             Self::CircuitBreakerState
             | Self::SessionsActive
@@ -733,7 +806,13 @@ impl MetricName {
             | Self::GitMergeDuration
             | Self::KernelRespawnDuration
             | Self::OperatorIpcDuration
-            | Self::KernelSubstrateIpcRoundtripDuration => Unit::Milliseconds,
+            | Self::KernelSubstrateIpcRoundtripDuration
+            | Self::StoreQueryDuration
+            | Self::FsmTransitionDuration
+            | Self::AuditChainStageDuration
+            | Self::GitWorktreeStageDuration
+            | Self::GatewayStageDuration
+            | Self::IpcFrameStageDuration => Unit::Milliseconds,
 
             Self::TokensConsumed | Self::PlannerInferenceTokensTotal => Unit::Tokens,
 

@@ -17,7 +17,7 @@
 //! ## Runtime behaviour
 //!
 //! Any attribute outside the allow-list (or in the denylist) causes
-//! `Redactor::sanitize` to drop the **entire** span / metric —
+//! [`Redactor::sanitize`] to drop the **entire** span / metric —
 //! never a partial frame. The hub increments
 //! [`crate::hub::DropReason::RedactionFailure`] so the operator's
 //! dashboard surfaces the bug via `raxis.observability.dropped.total`.
@@ -628,6 +628,47 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
         AttrSchema {
             ty: AttrTy::Str,
             max_bytes: 32,
+        },
+    ),
+    // iter61 dataplane bottleneck instrumentation —
+    // `INV-OBSERVABILITY-DATAPLANE-LATENCY-*` family. The `stage`
+    // label disambiguates per-stage histograms inside a single
+    // subsystem (e.g. audit-chain `hash` / `persist` / `verify`,
+    // gateway `dns` / `tls` / `tproxy_admit` / `first_byte`,
+    // worktree `clone` / `fetch` / `checkout` / `verify`, IPC
+    // frame `encode` / `write` / `read` / `decode`). Closed
+    // lexicons live next to the helpers in
+    // `kernel/src/observability.rs`.
+    (
+        "stage",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
+        },
+    ),
+    // iter61 — per-query store latency. Closed lexicon of SQL
+    // query classes (e.g. `audit_append`, `session_select`,
+    // `task_update`) pinned by
+    // `raxis_store::observability::QUERY_CLASS_CLOSED_SET`.
+    // Cardinality is bounded by the closed set; a typo or unknown
+    // class collapses to `unknown` so the dashboard pivots stay
+    // total.
+    (
+        "query_class",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 32,
+        },
+    ),
+    // iter61 — FSM transition latency. Closed lexicon of FSM
+    // kinds (`session`, `initiative`, `task`) so the dashboard
+    // can rank slow FSMs against each other. Per-transition
+    // pivots use the existing `from_state` / `to_state` keys.
+    (
+        "fsm_kind",
+        AttrSchema {
+            ty: AttrTy::Str,
+            max_bytes: 16,
         },
     ),
 ];

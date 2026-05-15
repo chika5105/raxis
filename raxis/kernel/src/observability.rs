@@ -2322,6 +2322,208 @@ pub fn kernel_substrate_ipc_inflight_snapshot(role: &str) -> i64 {
     inflight_counter_for(role).load(Ordering::Relaxed)
 }
 
+// ---------------------------------------------------------------------------
+// iter61 dataplane bottleneck instrumentation helpers
+//
+// Six histogram helpers covering the subsystems that previously had
+// only end-to-end latency (or none at all). Each is a histogram-only
+// `record_*` mirroring the `record_gateway_upstream` pattern (single
+// histogram, closed label set, hub-disabled fast path). Per-stage
+// closed lexicons live next to each helper.
+//
+// Spec: `specs/v3/dataplane-latency-instrumentation.md`.
+// Invariants: `INV-OBSERVABILITY-DATAPLANE-LATENCY-{01..06}` in
+// `specs/invariants.md`.
+// ---------------------------------------------------------------------------
+
+/// Closed lexicon of audit-chain append stages.
+pub const AUDIT_CHAIN_STAGE_HASH: &str = "hash";
+pub const AUDIT_CHAIN_STAGE_PERSIST: &str = "persist";
+pub const AUDIT_CHAIN_STAGE_VERIFY: &str = "verify";
+pub const AUDIT_CHAIN_STAGES: &[&str] = &[
+    AUDIT_CHAIN_STAGE_HASH,
+    AUDIT_CHAIN_STAGE_PERSIST,
+    AUDIT_CHAIN_STAGE_VERIFY,
+];
+
+/// `raxis.audit.chain.stage.duration` — per-stage breakdown of the
+/// audit-chain append path. Pairs with the existing end-to-end
+/// `AuditEventAppendDuration`.
+pub fn record_audit_chain_stage(
+    hub: &ObservabilityHub,
+    stage: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("stage", stage), ("outcome", outcome)]);
+    hub.record_histogram(
+        MetricName::AuditChainStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// Closed lexicon of worktree-provision stages.
+pub const WORKTREE_STAGE_CLONE: &str = "clone";
+pub const WORKTREE_STAGE_FETCH: &str = "fetch";
+pub const WORKTREE_STAGE_CHECKOUT: &str = "checkout";
+pub const WORKTREE_STAGE_VERIFY: &str = "verify";
+pub const WORKTREE_STAGES: &[&str] = &[
+    WORKTREE_STAGE_CLONE,
+    WORKTREE_STAGE_FETCH,
+    WORKTREE_STAGE_CHECKOUT,
+    WORKTREE_STAGE_VERIFY,
+];
+
+/// `raxis.git.worktree.stage.duration` — per-stage breakdown of
+/// the worktree-provision path. Pairs with the existing end-to-end
+/// `GitWorktreeProvisionDuration`.
+pub fn record_git_worktree_stage(
+    hub: &ObservabilityHub,
+    stage: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("stage", stage), ("outcome", outcome)]);
+    hub.record_histogram(
+        MetricName::GitWorktreeStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// Closed lexicon of gateway-fetch internal stages.
+pub const GATEWAY_STAGE_DNS: &str = "dns";
+pub const GATEWAY_STAGE_TLS: &str = "tls";
+pub const GATEWAY_STAGE_TPROXY_ADMIT: &str = "tproxy_admit";
+pub const GATEWAY_STAGE_FIRST_BYTE: &str = "first_byte";
+pub const GATEWAY_STAGES: &[&str] = &[
+    GATEWAY_STAGE_DNS,
+    GATEWAY_STAGE_TLS,
+    GATEWAY_STAGE_TPROXY_ADMIT,
+    GATEWAY_STAGE_FIRST_BYTE,
+];
+
+/// `raxis.gateway.stage.duration` — per-stage breakdown of the
+/// gateway-fetch path.
+pub fn record_gateway_stage(
+    hub: &ObservabilityHub,
+    provider: &str,
+    stage: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([
+        ("provider", provider),
+        ("stage", stage),
+        ("outcome", outcome),
+    ]);
+    hub.record_histogram(
+        MetricName::GatewayStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// Closed lexicon of FSM kinds.
+pub const FSM_KIND_SESSION: &str = "session";
+pub const FSM_KIND_INITIATIVE: &str = "initiative";
+pub const FSM_KIND_TASK: &str = "task";
+pub const FSM_KINDS: &[&str] = &[FSM_KIND_SESSION, FSM_KIND_INITIATIVE, FSM_KIND_TASK];
+
+/// `raxis.fsm.transition.duration` — wall-clock from event-receive
+/// to next-state-commit. Pairs with the existing
+/// `SessionLifecycleTransitionTotal` counter.
+pub fn record_fsm_transition(
+    hub: &ObservabilityHub,
+    fsm_kind: &str,
+    from_state: &str,
+    to_state: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([
+        ("fsm_kind", fsm_kind),
+        ("from_state", from_state),
+        ("to_state", to_state),
+    ]);
+    hub.record_histogram(
+        MetricName::FsmTransitionDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// `raxis.store.query.duration` — per-query-class store/SQLite
+/// latency. The `query_class` lexicon is owned by
+/// `raxis_store::observability::QUERY_CLASS_*`.
+pub fn record_store_query(
+    hub: &ObservabilityHub,
+    query_class: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("query_class", query_class), ("outcome", outcome)]);
+    hub.record_histogram(
+        MetricName::StoreQueryDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
+/// Closed lexicon of bincode-IPC frame stages.
+pub const IPC_FRAME_STAGE_ENCODE: &str = "encode";
+pub const IPC_FRAME_STAGE_WRITE: &str = "write";
+pub const IPC_FRAME_STAGE_READ: &str = "read";
+pub const IPC_FRAME_STAGE_DECODE: &str = "decode";
+pub const IPC_FRAME_STAGES: &[&str] = &[
+    IPC_FRAME_STAGE_ENCODE,
+    IPC_FRAME_STAGE_WRITE,
+    IPC_FRAME_STAGE_READ,
+    IPC_FRAME_STAGE_DECODE,
+];
+
+/// `raxis.kernel.substrate.ipc.frame.stage.duration` — per-stage
+/// breakdown of the bincode-IPC frame pipeline. Pairs with the
+/// existing end-to-end `KernelSubstrateIpcRoundtripDuration`.
+pub fn record_ipc_frame_stage(
+    hub: &ObservabilityHub,
+    role: &str,
+    message_kind: &str,
+    stage: &str,
+    outcome: &str,
+    duration_ms: i64,
+) {
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([
+        ("role", role),
+        ("message_kind", message_kind),
+        ("stage", stage),
+        ("outcome", outcome),
+    ]);
+    hub.record_histogram(
+        MetricName::IpcFrameStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
+
 #[cfg(test)]
 mod substrate_ipc_tests {
     use super::*;
