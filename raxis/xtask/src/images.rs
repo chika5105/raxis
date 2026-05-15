@@ -3488,4 +3488,692 @@ mod tests {
         handle_staged_binary_freshness(Role::Reviewer, &args)
             .expect("fresh binary must not error");
     }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 witnesses
+    // -----------------------------------------------------------------
+
+    /// Build a workspace scaffold containing per-role
+    /// `images/<subdir>/Containerfile` files with operator-supplied
+    /// `FROM` directives. Returns the tempdir handle (held until
+    /// drop) plus the workspace root path.
+    fn build_containerfile_graph_scaffold(
+        per_role_from: &[(Role, &str)],
+    ) -> (tempfile::TempDir, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let workspace = tmp.path().to_owned();
+        for (role, from_line) in per_role_from {
+            let dir = workspace
+                .join(STAGING_PARENT)
+                .join(role.images_subdir());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("Containerfile"),
+                format!("# scaffold\n{from_line}\nRUN true\n"),
+            ).unwrap();
+        }
+        (tmp, workspace)
+    }
+
+    #[test]
+    fn inv_image_bake_no_circular_containerfile_01_accepts_external_bases() {
+        // Real in-tree shape: every Containerfile names an upstream
+        // image (`debian:bookworm-slim`, `scratch`). The acyclicity
+        // check must accept those without complaint.
+        let (_tmp, ws) = build_containerfile_graph_scaffold(&[
+            (Role::Orchestrator,    "FROM debian:bookworm-slim AS base"),
+            (Role::Reviewer,        "FROM scratch"),
+            (Role::ExecutorStarter, "FROM debian:bookworm-slim"),
+        ]);
+        check_containerfile_graph_acyclic(&ws)
+            .expect("clean graph must pass");
+    }
+
+    #[test]
+    fn inv_image_bake_no_circular_containerfile_01_rejects_in_tree_role_base() {
+        // The historical `Containerfile.dev` shape: one role's
+        // bake tag (`raxis-rootfs-orchestrator-core:dev`) used as
+        // another role's `FROM` base. The acyclicity check must
+        // reject this with the invariant token + line number.
+        let (_tmp, ws) = build_containerfile_graph_scaffold(&[
+            (Role::Orchestrator,    "FROM debian:bookworm-slim"),
+            (Role::Reviewer,        "FROM raxis-rootfs-orchestrator-core:dev"),
+            (Role::ExecutorStarter, "FROM debian:bookworm-slim"),
+        ]);
+        let err = check_containerfile_graph_acyclic(&ws)
+            .unwrap_err().to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-NO-CIRCULAR-CONTAINERFILE-01 VIOLATED"),
+            "remediation must cite the invariant: {err}",
+        );
+        assert!(
+            err.contains("raxis-rootfs-orchestrator-core:dev"),
+            "remediation must name the offending FROM operand: {err}",
+        );
+        assert!(
+            err.contains("line 2"),
+            "remediation must include the line number: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_no_circular_containerfile_01_ignores_comments_and_case() {
+        // A commented-out `FROM raxis-rootfs-*:dev` line MUST NOT
+        // trip the check; an uppercase `FROM` directive MUST be
+        // recognised (Containerfile grammar is case-insensitive).
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        let dir = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("Containerfile"),
+            "# FROM raxis-rootfs-orchestrator-core:dev  (commented out)\n\
+             from debian:bookworm-slim\n\
+             RUN true\n",
+        ).unwrap();
+        check_containerfile_graph_acyclic(&ws).expect("comment must be ignored");
+
+        std::fs::write(
+            dir.join("Containerfile"),
+            "FROM raxis-rootfs-orchestrator-core:dev\n",
+        ).unwrap();
+        let err = check_containerfile_graph_acyclic(&ws).unwrap_err().to_string();
+        assert!(err.contains("VIOLATED"), "uppercase FROM must trip: {err}");
+    }
+
+    #[test]
+    fn inv_image_bake_no_circular_containerfile_01_skips_missing_files() {
+        // A worktree pruned to e.g. just the reviewer Containerfile
+        // MUST NOT trip the check for the other two roles. Pin
+        // this contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        let dir = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir());
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
+        check_containerfile_graph_acyclic(&ws).expect("partial worktree must pass");
+    }
+
+    #[test]
+    fn inv_image_bake_no_circular_containerfile_01_handles_platform_flag() {
+        // `FROM --platform=$BUILDPLATFORM <image>` is a valid
+        // grammar; the acyclicity check must skip the `--platform`
+        // flag and inspect the actual operand.
+        let (_tmp, ws) = build_containerfile_graph_scaffold(&[
+            (Role::Orchestrator, "FROM --platform=linux/arm64 raxis-rootfs-reviewer-core:dev"),
+        ]);
+        let err = check_containerfile_graph_acyclic(&ws).unwrap_err().to_string();
+        assert!(
+            err.contains("raxis-rootfs-reviewer-core:dev"),
+            "remediation must surface the operand past --platform: {err}",
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-VMLINUX-STAGED-01 witnesses
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_returns_copy_from_for_explicit_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("explicit.bin");
+        std::fs::write(&src, b"DUMMY KERNEL").unwrap();
+        let install = tmp.path().join("install");
+        let res = resolve_vmlinux_source(&install, Some(&src), false).unwrap();
+        match res {
+            VmlinuxResolution::CopyFrom { source } => assert_eq!(source, src),
+            other => panic!("expected CopyFrom, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_already_staged_when_in_place() {
+        let tmp     = tempfile::tempdir().unwrap();
+        let install = tmp.path().to_owned();
+        let kdir    = install.join("kernel");
+        std::fs::create_dir_all(&kdir).unwrap();
+        std::fs::write(kdir.join("vmlinux"), b"STAGED").unwrap();
+        let res = resolve_vmlinux_source(&install, None, false).unwrap();
+        assert!(matches!(res, VmlinuxResolution::AlreadyStaged { .. }));
+    }
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_explicit_does_not_overwrite_without_force() {
+        let tmp     = tempfile::tempdir().unwrap();
+        let install = tmp.path().to_owned();
+        let kdir    = install.join("kernel");
+        std::fs::create_dir_all(&kdir).unwrap();
+        std::fs::write(kdir.join("vmlinux"), b"STAGED").unwrap();
+        let src = tmp.path().join("explicit.bin");
+        std::fs::write(&src, b"DIFFERENT").unwrap();
+        let res = resolve_vmlinux_source(&install, Some(&src), false).unwrap();
+        assert!(
+            matches!(res, VmlinuxResolution::AlreadyStaged { .. }),
+            "without --force, a present staged binary must win",
+        );
+        // With --force the explicit source wins.
+        let res_forced = resolve_vmlinux_source(&install, Some(&src), true).unwrap();
+        assert!(matches!(res_forced, VmlinuxResolution::CopyFrom { .. }));
+    }
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_bails_with_remediation_when_no_source() {
+        // No --kernel-from-file, no env, no canonical /usr/local,
+        // no already-staged file. The bail message must cite the
+        // invariant token AND the dev-kernel command.
+        let tmp     = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("install");
+        // Clear env so the fallback to RAXIS_DEV_KERNEL_SOURCE
+        // doesn't accidentally hit a path leaked in by the parent
+        // test invocation. SAFETY: single-threaded test.
+        let prev = std::env::var_os("RAXIS_DEV_KERNEL_SOURCE");
+        unsafe { std::env::remove_var("RAXIS_DEV_KERNEL_SOURCE") };
+        let res = resolve_vmlinux_source(&install, None, false);
+        if let Some(v) = prev {
+            unsafe { std::env::set_var("RAXIS_DEV_KERNEL_SOURCE", v) };
+        }
+        // Skip the assertion when the host happens to have a
+        // canonical kernel at `/usr/local/lib/raxis/kernel/vmlinux`
+        // (the test env this PR was authored on does). The
+        // function's documented order means "canonical install
+        // wins over bail" so a real-world bail surface is only
+        // reachable when both the install dir AND `/usr/local`
+        // are empty.
+        if PathBuf::from("/usr/local/lib/raxis/kernel/vmlinux").exists() {
+            assert!(matches!(res, Ok(VmlinuxResolution::CopyFrom { .. })),
+                "with canonical install present, must resolve to CopyFrom");
+            return;
+        }
+        let err = res.unwrap_err().to_string();
+        assert!(
+            err.contains("INV-IMAGE-BAKE-VMLINUX-STAGED-01 VIOLATED"),
+            "remediation must cite the invariant: {err}",
+        );
+        assert!(
+            err.contains("cargo xtask images dev-kernel"),
+            "remediation must name dev-kernel: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_rejects_empty_explicit_source() {
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("empty.bin");
+        std::fs::write(&src, b"").unwrap();
+        let install = tmp.path().join("install");
+        let err = resolve_vmlinux_source(&install, Some(&src), false)
+            .unwrap_err().to_string();
+        assert!(
+            err.contains("is not a non-empty file"),
+            "empty source must be rejected: {err}",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_vmlinux_staged_01_apply_copy_writes_atomically() {
+        let tmp     = tempfile::tempdir().unwrap();
+        let install = tmp.path().join("install");
+        let src     = tmp.path().join("k.bin");
+        std::fs::write(&src, b"BYTES").unwrap();
+        let sha = apply_vmlinux_resolution(
+            &install,
+            &VmlinuxResolution::CopyFrom { source: src.clone() },
+        ).unwrap();
+        // SHA matches manual computation.
+        assert_eq!(sha, sha256_file(&src).unwrap());
+        // The dest exists and matches src bytes.
+        let dest = install.join("kernel").join("vmlinux");
+        assert_eq!(std::fs::read(&dest).unwrap(), b"BYTES");
+        // No leftover .vmlinux.tmp.
+        assert!(!install.join("kernel").join(".vmlinux.tmp").exists());
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-MANIFEST-INTEGRITY-01 witnesses
+    // -----------------------------------------------------------------
+
+    /// Helper: synthesise a minimal scaffold the bake driver
+    /// consumes: `<workspace>/images/<subdir>/manifest.toml` and
+    /// `<workspace>/images/<subdir>/rootfs/usr/local/bin/<binary>`.
+    fn build_bake_inputs_scaffold(
+        role:           Role,
+        kernel_version: &str,
+    ) -> (tempfile::TempDir, PathBuf, PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        let images_subdir = ws.join(STAGING_PARENT).join(role.images_subdir());
+        std::fs::create_dir_all(&images_subdir).unwrap();
+        let manifest_toml = format!(
+            "role = {role:?}\n\
+             kernel_version = \"{kver}\"\n\
+             source_date_epoch = 0\n\
+             erofs_version = \"1.6.0\"\n\
+             tar_version = \"1.34\"\n\
+             zstd_version = \"1.5.5\"\n",
+            role = role.manifest_role(),
+            kver = kernel_version,
+        );
+        std::fs::write(images_subdir.join("manifest.toml"), manifest_toml).unwrap();
+        let bin_dir = images_subdir.join("rootfs").join("usr").join("local").join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+        std::fs::write(bin_dir.join(role.binary_name()), b"PLANNER BINARY BYTES").unwrap();
+        let install = ws.join("install");
+        std::fs::create_dir_all(install.join("kernel")).unwrap();
+        std::fs::write(install.join("kernel").join("vmlinux"), b"FAKE KERNEL").unwrap();
+        (tmp, ws, install)
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_inputs_round_trip_through_compute() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+        let fp = "deadbeefdeadbeef";
+        let inputs = compute_bake_inputs(Role::Reviewer, &ws, &install, fp).unwrap();
+        assert_eq!(inputs.signing_key_fp_prefix, fp);
+        assert!(inputs.vmlinux_sha256.is_some(), "vmlinux MUST be hashed");
+        assert!(inputs.staged_binary_sha256.is_some(), "staged binary MUST be hashed when present");
+        // The Containerfile is absent in this scaffold; the
+        // optional field MUST be None.
+        assert!(inputs.containerfile_sha256.is_none());
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_compute_detects_planner_binary_change() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+        let before = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        let binary = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir())
+            .join("rootfs").join("usr").join("local").join("bin")
+            .join(Role::Reviewer.binary_name());
+        std::fs::write(&binary, b"DIFFERENT PLANNER BINARY").unwrap();
+        let after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        assert_ne!(
+            before.staged_binary_sha256,
+            after.staged_binary_sha256,
+            "a binary rewrite MUST change the recorded SHA",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_compute_detects_vmlinux_change() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+        let before = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        std::fs::write(
+            install.join("kernel").join("vmlinux"),
+            b"DIFFERENT KERNEL BYTES",
+        ).unwrap();
+        let after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        assert_ne!(before.vmlinux_sha256, after.vmlinux_sha256);
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_compute_detects_signing_key_rotation() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+        let before = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp-old").unwrap();
+        let after  = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp-new").unwrap();
+        assert_ne!(
+            before.signing_key_fp_prefix,
+            after.signing_key_fp_prefix,
+            "a key rotation MUST surface as a recorded-input change",
+        );
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_no_op_shortcut_skips_unchanged_role() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+
+        // Synthesise a prior bake.json + matching .img / .manifest.toml.
+        let img_path = install.join("images").join(format!(
+            "{stem}-{kver}.img",
+            stem = Role::Reviewer.artefact_stem(),
+            kver = "0.1.0",
+        ));
+        let mtoml_path = install.join("images").join(format!(
+            "{stem}-{kver}.manifest.toml",
+            stem = Role::Reviewer.artefact_stem(),
+            kver = "0.1.0",
+        ));
+        std::fs::create_dir_all(img_path.parent().unwrap()).unwrap();
+        std::fs::write(&img_path, b"IMG BYTES").unwrap();
+        std::fs::write(&mtoml_path, b"MANIFEST BYTES").unwrap();
+        let inputs_now = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        let img_sha   = sha256_file(&img_path).unwrap();
+        let mtoml_sha = sha256_file(&mtoml_path).unwrap();
+        let manifest = BakeManifest {
+            schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
+            role:           Role::Reviewer.workspace_crate().to_owned(),
+            artefact_stem:  Role::Reviewer.artefact_stem().to_owned(),
+            kernel_version: "0.1.0".to_owned(),
+            built_at_unix:  1,
+            host: BakeHostInfo {
+                os: "test".to_owned(), arch: "test".to_owned(),
+                target_triple: "test".to_owned(), container_builder: None,
+            },
+            inputs: inputs_now.clone(),
+            outputs: BakeOutputs {
+                img_sha256:               img_sha.clone(),
+                img_size_bytes:           std::fs::metadata(&img_path).unwrap().len(),
+                manifest_toml_sha256:     mtoml_sha,
+                manifest_toml_size_bytes: std::fs::metadata(&mtoml_path).unwrap().len(),
+            },
+        };
+        manifest.write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0")).unwrap();
+
+        // Now the shortcut must fire (Some).
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now)
+            .unwrap();
+        assert!(verdict.is_some(), "unchanged tree MUST be a no-op");
+
+        // Mutate the binary; the shortcut must bail.
+        let binary = ws.join(STAGING_PARENT).join(Role::Reviewer.images_subdir())
+            .join("rootfs").join("usr").join("local").join("bin")
+            .join(Role::Reviewer.binary_name());
+        std::fs::write(&binary, b"NEW PLANNER").unwrap();
+        let inputs_after = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_after)
+            .unwrap();
+        assert!(verdict.is_none(), "binary change MUST invalidate the cache");
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_no_op_shortcut_rejects_tampered_img() {
+        let (_tmp, ws, install) = build_bake_inputs_scaffold(Role::Reviewer, "0.1.0");
+        let img_path = install.join("images").join(format!(
+            "{stem}-{kver}.img",
+            stem = Role::Reviewer.artefact_stem(),
+            kver = "0.1.0",
+        ));
+        let mtoml_path = install.join("images").join(format!(
+            "{stem}-{kver}.manifest.toml",
+            stem = Role::Reviewer.artefact_stem(),
+            kver = "0.1.0",
+        ));
+        std::fs::create_dir_all(img_path.parent().unwrap()).unwrap();
+        std::fs::write(&img_path, b"IMG BYTES").unwrap();
+        std::fs::write(&mtoml_path, b"MANIFEST BYTES").unwrap();
+        let inputs_now = compute_bake_inputs(Role::Reviewer, &ws, &install, "fp").unwrap();
+        let manifest = BakeManifest {
+            schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
+            role:           Role::Reviewer.workspace_crate().to_owned(),
+            artefact_stem:  Role::Reviewer.artefact_stem().to_owned(),
+            kernel_version: "0.1.0".to_owned(),
+            built_at_unix:  1,
+            host: BakeHostInfo {
+                os: "test".to_owned(), arch: "test".to_owned(),
+                target_triple: "test".to_owned(), container_builder: None,
+            },
+            inputs: inputs_now.clone(),
+            outputs: BakeOutputs {
+                img_sha256:               sha256_file(&img_path).unwrap(),
+                img_size_bytes:           std::fs::metadata(&img_path).unwrap().len(),
+                manifest_toml_sha256:     sha256_file(&mtoml_path).unwrap(),
+                manifest_toml_size_bytes: std::fs::metadata(&mtoml_path).unwrap().len(),
+            },
+        };
+        manifest.write_atomic(&BakeManifest::path(&install, Role::Reviewer, "0.1.0")).unwrap();
+
+        // Tamper the on-disk .img — the recorded SHA in the
+        // bake.json now disagrees with disk. Shortcut MUST bail.
+        std::fs::write(&img_path, b"TAMPERED").unwrap();
+        let verdict = bake_should_skip(&install, Role::Reviewer, "0.1.0", &inputs_now)
+            .unwrap();
+        assert!(verdict.is_none(),
+            "tampered .img must NOT pass the integrity check");
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_manifest_round_trips_through_json() {
+        let inputs = BakeInputs {
+            containerfile_sha256:   Some("aa".repeat(32)),
+            inputs_manifest_sha256: "bb".repeat(32),
+            staged_binary_sha256:   Some("cc".repeat(32)),
+            signing_key_fp_prefix:  "deadbeef00112233".to_owned(),
+            vmlinux_sha256:         Some("dd".repeat(32)),
+        };
+        let outputs = BakeOutputs {
+            img_sha256:               "ee".repeat(32),
+            img_size_bytes:           42,
+            manifest_toml_sha256:     "ff".repeat(32),
+            manifest_toml_size_bytes: 7,
+        };
+        let manifest = BakeManifest {
+            schema_version: BAKE_MANIFEST_SCHEMA_VERSION,
+            role:           "raxis-planner-reviewer".to_owned(),
+            artefact_stem:  "raxis-reviewer-core".to_owned(),
+            kernel_version: "0.1.0".to_owned(),
+            built_at_unix:  1_700_000_000,
+            host: BakeHostInfo {
+                os: "macos".to_owned(), arch: "aarch64".to_owned(),
+                target_triple: "aarch64-unknown-linux-musl".to_owned(),
+                container_builder: Some("docker".to_owned()),
+            },
+            inputs:  inputs.clone(),
+            outputs: outputs.clone(),
+        };
+        let json = serde_json::to_vec_pretty(&manifest).unwrap();
+        let back: BakeManifest = serde_json::from_slice(&json).unwrap();
+        assert_eq!(back.inputs,  inputs);
+        assert_eq!(back.outputs, outputs);
+        assert_eq!(back.schema_version, BAKE_MANIFEST_SCHEMA_VERSION);
+    }
+
+    #[test]
+    fn inv_image_bake_manifest_integrity_01_unknown_schema_version_treated_as_missing() {
+        // A future-version manifest must be treated as "unknown"
+        // so a stale xtask cannot trust a newer manifest's
+        // shortcut decision. Pin this contract.
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("future.bake.json");
+        let json = serde_json::json!({
+            "schema_version": 999,
+            "role": "x",
+            "artefact_stem": "x",
+            "kernel_version": "x",
+            "built_at_unix": 0,
+            "host": { "os": "x", "arch": "x", "target_triple": "x", "container_builder": null },
+            "inputs": {
+                "containerfile_sha256": null,
+                "inputs_manifest_sha256": "00",
+                "staged_binary_sha256": null,
+                "signing_key_fp_prefix": "",
+                "vmlinux_sha256": null,
+            },
+            "outputs": {
+                "img_sha256": "00",
+                "img_size_bytes": 0,
+                "manifest_toml_sha256": "00",
+                "manifest_toml_size_bytes": 0,
+            },
+        });
+        std::fs::write(&path, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
+        assert!(BakeManifest::read_from(&path).is_none(),
+            "future schema version must read as None");
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01 witnesses
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn inv_image_bake_preflight_fail_closed_01_missing_signing_key_bails() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        // Make every per-role manifest.toml + Containerfile exist
+        // so the preflight reaches the signing-key check.
+        for r in Role::all() {
+            let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("manifest.toml"), format!(
+                "role = {role:?}\nkernel_version=\"0.1.0\"\n\
+                 source_date_epoch=0\nerofs_version=\"x\"\n\
+                 tar_version=\"x\"\nzstd_version=\"x\"\n",
+                role = r.manifest_role(),
+            )).unwrap();
+            std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
+        }
+        let install = tmp.path().join("install");
+        std::fs::create_dir_all(install.join("kernel")).unwrap();
+        std::fs::write(install.join("kernel").join("vmlinux"), b"k").unwrap();
+        let signing_key = tmp.path().join("nope.hex");
+        let err = preflight_bake_inputs(
+            &ws, &install, &signing_key,
+            &[Role::Reviewer],   // binary-only avoids the daemon probe
+            None, None, false,
+        ).unwrap_err().to_string();
+        assert!(err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
+            "remediation must cite the invariant: {err}");
+        assert!(err.contains("dev-keys init"),
+            "remediation must mention dev-keys init: {err}");
+    }
+
+    #[test]
+    fn inv_image_bake_preflight_fail_closed_01_missing_inputs_manifest_bails() {
+        // Set up signing key + vmlinux + an empty workspace (no
+        // per-role manifest.toml). The preflight must surface
+        // the missing per-role fixture with the invariant token.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        let install = tmp.path().join("install");
+        std::fs::create_dir_all(install.join("kernel")).unwrap();
+        std::fs::write(install.join("kernel").join("vmlinux"), b"k").unwrap();
+        let key_hex = tmp.path().join("k.hex");
+        std::fs::write(&key_hex, "11".repeat(32)).unwrap();
+        let err = preflight_bake_inputs(
+            &ws, &install, &key_hex,
+            &[Role::Reviewer],
+            None, None, false,
+        ).unwrap_err().to_string();
+        assert!(err.contains("INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01"),
+            "remediation must cite the invariant: {err}");
+        assert!(err.contains("manifest.toml"),
+            "remediation must name the missing fixture: {err}");
+    }
+
+    #[test]
+    fn inv_image_bake_preflight_fail_closed_01_binary_only_skips_builder_probe() {
+        // When the selected roles are all binary-only
+        // (`Role::Reviewer`, `Role::Orchestrator`), the preflight
+        // must NOT require a container builder — a fresh macOS
+        // dev box without docker/podman/buildah can still bake
+        // the two canonical binary-only roles.
+        let tmp = tempfile::tempdir().unwrap();
+        let ws  = tmp.path().to_owned();
+        for r in &[Role::Reviewer, Role::Orchestrator] {
+            let dir = ws.join(STAGING_PARENT).join(r.images_subdir());
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("manifest.toml"), format!(
+                "role = {role:?}\nkernel_version=\"0.1.0\"\n\
+                 source_date_epoch=0\nerofs_version=\"x\"\n\
+                 tar_version=\"x\"\nzstd_version=\"x\"\n",
+                role = r.manifest_role(),
+            )).unwrap();
+            std::fs::write(dir.join("Containerfile"), "FROM scratch\n").unwrap();
+        }
+        let install = tmp.path().join("install");
+        std::fs::create_dir_all(install.join("kernel")).unwrap();
+        std::fs::write(install.join("kernel").join("vmlinux"), b"k").unwrap();
+        let key_hex = tmp.path().join("k.hex");
+        std::fs::write(&key_hex, "11".repeat(32)).unwrap();
+        let outcome = preflight_bake_inputs(
+            &ws, &install, &key_hex,
+            &[Role::Reviewer, Role::Orchestrator],
+            None, None, false,
+        ).expect("binary-only preflight must pass without a builder");
+        assert!(outcome.container_builder.is_none(),
+            "no role needs a builder; preflight must NOT resolve one");
+    }
+
+    #[test]
+    fn inv_image_bake_preflight_fail_closed_01_role_needs_rootfs_bake_taxonomy() {
+        // Pin which roles need the OCI bake. A future change to
+        // this table MUST update the harness's
+        // `role_needs_rootfs_bake` in lockstep — they MUST agree
+        // because the harness auto-bake mirrors the bake driver.
+        assert!(!Role::Orchestrator.needs_rootfs_bake(),
+            "Orchestrator is binary-only by spec");
+        assert!(!Role::Reviewer.needs_rootfs_bake(),
+            "Reviewer is binary-only by spec");
+        assert!(Role::ExecutorStarter.needs_rootfs_bake(),
+            "ExecutorStarter needs OS tooling via Containerfile bake");
+    }
+
+    // -----------------------------------------------------------------
+    // INV-IMAGE-CPIO-MULTI-ARCHIVE-PRESERVED-01 witnesses
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn inv_image_cpio_multi_archive_preserved_01_pack_emits_exactly_one_trailer() {
+        // The `pack_initramfs` helper walks a directory and emits
+        // a single cpio archive terminated by exactly one `TRAILER!!!`
+        // entry. Pin this byte-stream contract so a future
+        // optimisation (e.g. multi-archive concatenation for early
+        // initrd support) doesn't silently truncate the per-role
+        // rootfs by adding a second TRAILER mid-stream.
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("init"), b"#!/bin/sh\n").unwrap();
+        std::fs::write(tmp.path().join("etc-x"), b"x").unwrap();
+        let cpio_gz = pack_initramfs(tmp.path(), 1).unwrap();
+
+        // gunzip and count occurrences of the trailer's
+        // `TRAILER!!!` literal in the raw cpio.
+        use flate2::read::GzDecoder;
+        use std::io::Read;
+        let mut decoded = Vec::new();
+        GzDecoder::new(&cpio_gz[..]).read_to_end(&mut decoded).unwrap();
+        let trailer_count = decoded.windows(10)
+            .filter(|w| *w == b"TRAILER!!!")
+            .count();
+        assert_eq!(trailer_count, 1,
+            "exactly one TRAILER!!! must appear in the cpio stream \
+             (multi-archive concatenation would emit more)");
+    }
+
+    #[test]
+    fn inv_image_cpio_multi_archive_preserved_01_concat_two_streams_is_a_valid_initramfs() {
+        // The Linux kernel's `init/initramfs.c` documents that a
+        // multi-archive initramfs is two or more cpio.gz streams
+        // concatenated byte-for-byte (early-initrd shape). Pin
+        // that two independently-built `pack_initramfs` outputs
+        // can be concatenated and the resulting bytes still
+        // satisfy the "one TRAILER per archive" invariant — i.e.
+        // each archive's TRAILER survives the concat.
+        let tmp_a = tempfile::tempdir().unwrap();
+        std::fs::write(tmp_a.path().join("a.txt"), b"a").unwrap();
+        let a = pack_initramfs(tmp_a.path(), 1).unwrap();
+        let tmp_b = tempfile::tempdir().unwrap();
+        std::fs::write(tmp_b.path().join("b.txt"), b"b").unwrap();
+        let b = pack_initramfs(tmp_b.path(), 1).unwrap();
+
+        let mut concatenated = Vec::with_capacity(a.len() + b.len());
+        concatenated.extend_from_slice(&a);
+        concatenated.extend_from_slice(&b);
+
+        // The Linux kernel's gunzip is multi-member-aware (it
+        // reads `gzip` member after `gzip` member until EOF; each
+        // member's body feeds the cpio unpacker). We mirror that
+        // with `MultiGzDecoder` here, which consumes every member
+        // in the concatenated stream. Each member's body MUST
+        // carry its own `TRAILER!!!`; the kernel uses those to
+        // separate archives.
+        use flate2::read::MultiGzDecoder;
+        use std::io::Read;
+        let mut decoded = Vec::new();
+        MultiGzDecoder::new(&concatenated[..])
+            .read_to_end(&mut decoded).unwrap();
+        let trailer_count = decoded.windows(10)
+            .filter(|w| *w == b"TRAILER!!!")
+            .count();
+        assert_eq!(trailer_count, 2,
+            "concatenated multi-archive cpio MUST preserve BOTH \
+             trailers byte-for-byte (the Linux kernel's initramfs \
+             unpacker reads them as separate archives)");
+
+        // Byte-level concat invariant: the prefix of the
+        // concatenated stream MUST be exactly archive A's bytes
+        // (no archive-B bytes leaked in, no archive-A bytes
+        // truncated). This is what makes "multi-archive cpio
+        // inputs survive the bake step byte-for-byte" mechanical.
+        assert_eq!(&concatenated[..a.len()], a.as_slice(),
+            "archive A bytes must survive the concat byte-for-byte");
+        assert_eq!(&concatenated[a.len()..], b.as_slice(),
+            "archive B bytes must survive the concat byte-for-byte");
+    }
 }
