@@ -283,7 +283,7 @@ async function fetchRaw(filePath: string): Promise<string> {
   const url = `https://raw.githubusercontent.com/${GITHUB_REPO}/${GITHUB_BRANCH}/${filePath}`;
   const rawHeaders: Record<string, string> = {};
   if (GITHUB_TOKEN) rawHeaders["Authorization"] = `Bearer ${GITHUB_TOKEN}`;
-  const res = await fetch(url, { headers: rawHeaders, cache: "no-store" });
+  const res = await fetch(url, { headers: rawHeaders, next: { revalidate: REVALIDATE } });
   if (!res.ok) throw new Error(`GitHub raw ${res.status}: ${filePath}`);
   return res.text();
 }
