@@ -48,6 +48,10 @@ As models get smarter, they write tighter plans, require fewer human escalations
 
 The barrier to entry here is immense. RAXIS is not a thin wrapper around the OpenAI API. It is a deep-tech, Rust-based infrastructure play built on 12 non-negotiable structural invariants (`specs/paradigm.md`). 
 
-We have solved the hard problems of UDS (Unix Domain Socket) mediation, microVM lifecycle management, deterministic capability bounding, and cryptographic attestation exchanges.
+By invoking the concept of a **Reference Monitor**, we establish a local, structural boundary. A major question investors ask is: *"What stops OpenAI or Anthropic from just building this into their API?"*
+
+The answer is that they structurally cannot. OpenAI cannot build a reference monitor into their API because the API is inherently on the wrong side of the trust boundary—it *is* the untrusted intelligence. A true reference monitor must live on the host machine, independently mediating the VM, the filesystem, and the local credentials. This proves RAXIS has a deep, defensible moat that an LLM provider cannot easily subsume.
+
+We have solved the hard problems to make this local reference monitor a reality: UDS (Unix Domain Socket) mediation, microVM lifecycle management, deterministic capability bounding, and cryptographic attestation exchanges.
 
 Companies are desperate to deploy autonomous engineering workforces, but CISOs cannot and will not authorize them without guaranteed, fail-closed auditability. RAXIS is the OS kernel that makes the agentic economy enterprise-ready.
