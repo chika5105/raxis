@@ -44,6 +44,17 @@ export function SiteNav() {
             Contact
           </a>
           <a
+            href="https://www.reddit.com/r/raxis/"
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label="Reddit community"
+            className="hidden sm:inline-flex items-center text-[var(--muted)] hover:text-[var(--fg)] transition"
+          >
+            <svg viewBox="0 0 20 20" width="18" height="18" fill="currentColor" aria-hidden="true">
+              <path d="M20 10a10 10 0 1 0-10 10A10 10 0 0 0 20 10zm-2 0a2 2 0 0 1-.77 1.58 4.54 4.54 0 0 1 .05.65c0 2.69-3.25 4.87-7.28 4.87s-7.28-2.18-7.28-4.87a4.54 4.54 0 0 1 .05-.65A2 2 0 1 1 5.37 8.4a9.16 9.16 0 0 1 4.68-1.39l.86-3.76a.34.34 0 0 1 .4-.25l2.71.58a1.38 1.38 0 1 1-.24.88l-2.39-.51-.75 3.3a9.13 9.13 0 0 1 4.63 1.38A2 2 0 0 1 18 10zm-10.87 1a1.38 1.38 0 1 0 1.38-1.38A1.38 1.38 0 0 0 7.13 11zm6.64 2.43a3.65 3.65 0 0 1-3.77 0 .34.34 0 0 0-.41.54 4.32 4.32 0 0 0 4.59 0 .34.34 0 1 0-.41-.54zm-.41-1.05a1.38 1.38 0 1 0-1.38-1.38 1.38 1.38 0 0 0 1.38 1.38z"/>
+            </svg>
+          </a>
+          <a
             href="https://github.com/chika5105/raxis"
             target="_blank"
             rel="noopener noreferrer"
@@ -76,6 +87,16 @@ export function SiteNav() {
               </Link>
             </li>
           ))}
+          <li className="shrink-0">
+            <a
+              href="https://www.reddit.com/r/raxis/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-[var(--muted)] hover:text-[var(--fg)]"
+            >
+              Community
+            </a>
+          </li>
           <li className="shrink-0">
             <a
               href="https://docs.google.com/forms/d/e/1FAIpQLScnVmQUI-PEX-eykhXFdmcLPgxjfqGsKai4N6BRmSnozr--Vw/viewform?usp=publish-editor"
