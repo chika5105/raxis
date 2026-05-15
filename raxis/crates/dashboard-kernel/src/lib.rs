@@ -1366,13 +1366,28 @@ impl DashboardData for KernelDashboardData {
                 kind: "worktree-path".into(),
             });
         }
-        let head_sha = git::head_sha(&path);
-        let branch = git::branch(&path);
-        let status_lines = git::status_lines(&path);
-        let (ahead, behind) = match (&resolved.summary.base_sha, head_sha.as_ref()) {
-            (Some(base), Some(_)) => git::ahead_behind(&path, base)
-                .map(|(b, a)| (Some(a), Some(b)))
-                .unwrap_or((None, None)),
+        // `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`
+        // (`specs/v2/dashboard-hardening.md §1.9`): run the four
+        // read-only probes (`rev-parse HEAD`, `symbolic-ref --short
+        // HEAD`, `status --porcelain=v1`, `rev-list --left-right`)
+        // in parallel under `std::thread::scope`. They are mutually
+        // independent — serially they sum to 60–300 ms on a clean
+        // machine; in parallel the wall-clock cost is bounded by the
+        // slowest single probe. The route layer wraps this call in
+        // `tokio::task::spawn_blocking` so even the parallel
+        // blocking wait does not pin a tokio worker.
+        let summary = git::probe_worktree_summary(&path, resolved.summary.base_sha.as_deref());
+        let git::WorktreeProbeSummary {
+            head_sha,
+            branch,
+            status_lines,
+            ahead_behind,
+        } = summary;
+        let (ahead, behind) = match (resolved.summary.base_sha.as_ref(), head_sha.as_ref()) {
+            (Some(_), Some(_)) => match ahead_behind {
+                Some((behind, ahead)) => (Some(ahead), Some(behind)),
+                None => (None, None),
+            },
             _ => (None, None),
         };
         Ok(WorktreeDetail {

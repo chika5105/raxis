@@ -60,6 +60,13 @@ use crate::server::{AppState, AuthorizedOperator};
 const MAX_NAME_LEN: usize = 128;
 
 /// `GET /api/git/worktrees`.
+///
+/// The data-layer call walks the operator's
+/// `allowed_worktree_roots()` policy bundle plus a read-only
+/// SQL view; the operation is bounded but still touches disk,
+/// so `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01` requires we
+/// run it under `tokio::task::spawn_blocking` rather than on
+/// the async worker.
 pub async fn list<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -68,11 +75,24 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let rows = state.data.list_worktrees()?;
+    let data = std::sync::Arc::clone(&state.data);
+    let rows = tokio::task::spawn_blocking(move || data.list_worktrees())
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("list_worktrees join error: {e}"),
+        })??;
     Ok(Json(rows))
 }
 
 /// `GET /api/git/worktrees/:name`.
+///
+/// Wrapped in `spawn_blocking` per
+/// `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`
+/// (`specs/v2/dashboard-hardening.md §1.9`): even with the
+/// parallel-probe optimisation inside `get_worktree`, the four
+/// `git` subprocesses each block on `Child::try_wait` and would
+/// otherwise pin a tokio runtime worker for tens of ms,
+/// starving every other dashboard request.
 pub async fn detail<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
@@ -82,8 +102,14 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated = validate_name(&name)?;
-    state.data.get_worktree(validated).map(Json)
+    validate_name(&name)?;
+    let data = std::sync::Arc::clone(&state.data);
+    let detail = tokio::task::spawn_blocking(move || data.get_worktree(&name))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("get_worktree join error: {e}"),
+        })??;
+    Ok(Json(detail))
 }
 
 /// Query string for `GET /api/git/worktrees/:name/log`.
@@ -109,9 +135,15 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated = validate_name(&name)?;
+    validate_name(&name)?;
     let limit = q.limit.clamp(1, 200);
-    state.data.worktree_log(validated, limit).map(Json)
+    let data = std::sync::Arc::clone(&state.data);
+    let log = tokio::task::spawn_blocking(move || data.worktree_log(&name, limit))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_log join error: {e}"),
+        })??;
+    Ok(Json(log))
 }
 
 /// `GET /api/git/worktrees/:name/diff` — diff between the
@@ -125,8 +157,14 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated = validate_name(&name)?;
-    state.data.worktree_diff_default(validated).map(Json)
+    validate_name(&name)?;
+    let data = std::sync::Arc::clone(&state.data);
+    let diff = tokio::task::spawn_blocking(move || data.worktree_diff_default(&name))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_diff_default join error: {e}"),
+        })??;
+    Ok(Json(diff))
 }
 
 /// `GET /api/git/worktrees/:name/diff/:range` — diff between
@@ -140,9 +178,14 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated_name = validate_name(&name)?;
+    validate_name(&name)?;
     let (from, to) = parse_range(&range)?;
-    let diff = state.data.worktree_diff_range(validated_name, &from, &to)?;
+    let data = std::sync::Arc::clone(&state.data);
+    let diff = tokio::task::spawn_blocking(move || data.worktree_diff_range(&name, &from, &to))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_diff_range join error: {e}"),
+        })??;
     Ok(Json(diff))
 }
 
@@ -176,12 +219,18 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated = validate_name(&name)?;
+    validate_name(&name)?;
     let sub_path = match q.path.as_deref() {
-        Some(p) if !p.is_empty() => Some(validate_relative_path(p)?),
+        Some(p) if !p.is_empty() => Some(validate_relative_path(p)?.to_owned()),
         _ => None,
     };
-    state.data.worktree_tree(validated, sub_path).map(Json)
+    let data = std::sync::Arc::clone(&state.data);
+    let tree = tokio::task::spawn_blocking(move || data.worktree_tree(&name, sub_path.as_deref()))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_tree join error: {e}"),
+        })??;
+    Ok(Json(tree))
 }
 
 /// `GET /api/git/worktrees/:name/file?path=…` — read one
@@ -196,18 +245,21 @@ where
     D: crate::data::DashboardData,
 {
     require_read(&op)?;
-    let validated_name = validate_name(&name)?;
+    validate_name(&name)?;
     let raw = q.path.as_deref().unwrap_or("");
     if raw.is_empty() {
         return Err(ApiError::BadRequest {
             detail: "path query parameter is required".into(),
         });
     }
-    let file_path = validate_relative_path(raw)?;
-    state
-        .data
-        .worktree_file(validated_name, file_path)
-        .map(Json)
+    let file_path = validate_relative_path(raw)?.to_owned();
+    let data = std::sync::Arc::clone(&state.data);
+    let file = tokio::task::spawn_blocking(move || data.worktree_file(&name, &file_path))
+        .await
+        .map_err(|e| ApiError::Internal {
+            log_only: format!("worktree_file join error: {e}"),
+        })??;
+    Ok(Json(file))
 }
 
 // ---------------------------------------------------------------------------

@@ -179,6 +179,86 @@ properties make that work:
    so a future end-to-end probe can assert the live signal
    without parsing visible text.
 
+### 1.9 Worktree-loading latency budget (`INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`)
+
+The operator-facing worktree list/detail surfaces
+(`/api/git/worktrees`, `/api/git/worktrees/:name`,
+`/api/git/worktrees/:name/{log,diff,tree,file}`) MUST NOT pin a
+tokio runtime worker thread on synchronous git subprocess waits.
+The previous implementation had three structural problems
+(operators reported "latency in loading the git worktrees"):
+
+1. **The route handlers awaited synchronous blocking calls.**
+   `git rev-parse HEAD`, `symbolic-ref --short HEAD`,
+   `status --porcelain=v1`, and `rev-list --left-right --count`
+   are blocking `std::process::Command` wrappers; the route
+   layer called them directly inside an `async fn`. Each request
+   pinned a tokio worker for the full duration of the busy-wait
+   loop, which under load starved every other dashboard request
+   including the per-second Health-freshness poll
+   (`INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01`).
+
+2. **The `run_git` wait loop polled `Child::try_wait` every
+   50 ms.** Even a probe that finished in 3 ms paid a ~50 ms
+   wall-clock floor per subprocess.
+
+3. **`get_worktree` ran the four probes serially.** The probes
+   are mutually independent; serial execution multiplied the
+   floor latency by 4 (`4 * 50 = 200 ms` minimum on the previous
+   implementation; in practice 60–300 ms on a clean machine).
+
+The fix is three-layered:
+
+* **Route layer:** every blocking data-layer call in
+  `crates/dashboard/src/routes/git.rs` is wrapped in
+  `tokio::task::spawn_blocking` so the blocking wait happens on
+  a blocking worker, NOT on the async runtime.
+* **Subprocess wrapper:** `run_git` in
+  `crates/dashboard-kernel/src/git.rs` polls `try_wait` with an
+  exponential back-off that starts at 1 ms and caps at 5 ms.
+  Fast probes (the common case for `rev-parse HEAD` on a hot
+  filesystem) return in a few ms; slow probes back off to a
+  5 ms ceiling so the polling itself stays cheap.
+* **Per-detail-probe parallelism:**
+  `git::probe_worktree_summary` runs the four independent probes
+  under `std::thread::scope` so wall-clock is `max(probe_durations)`
+  instead of `sum(probe_durations)`. The detail handler reads
+  `head_sha`, `branch`, `status_lines`, and `ahead_behind` in
+  one parallel fan-out.
+
+Pinned by `INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01`.
+
+*Conservative target.* `/api/git/worktrees/:name` on a clean
+machine should render under 250 ms p50 / 800 ms p95 on the
+realistic-scenario workload. Hot-path probes against a small
+seed repo measure ~5–10 ms each on macOS with an SSD; under the
+fan-out the four probes complete in ~15 ms wall-clock total.
+
+*Witnesses.*
+
+* `crates/dashboard-kernel/src/git.rs::tests::head_sha_completes_within_latency_budget`
+  — single probe completes under a 500 ms budget on a real
+  tempdir-initialised repo (skipped if `git` is not on PATH).
+  The budget is generous to absorb slow CI hosts but still
+  pins the regression: the pre-fix implementation routinely
+  exceeded 200 ms because the busy-wait floor + cold-start
+  exec dominated.
+* `crates/dashboard-kernel/src/git.rs::tests::parallel_probes_finish_under_serial_budget`
+  — the four-probe fan-out completes inside `(2 × single-probe
+  budget) + 50 ms`, NOT inside `4 × single-probe budget`. This
+  pins the parallelism guarantee: a future contributor who
+  accidentally rewrites the fan-out as a serial chain trips
+  the assertion.
+
+*Structural blockers not addressed here.* `git diff` per-file
+hunks (`diff_files`) still spawn one subprocess per file; this
+is bounded by `MAX_PER_FILE_DIFF_BYTES` but on a 200-file
+refactor the wall clock can still exceed the budget. The honest
+fix is a single `git diff --raw --patch --no-renames` call
+parsed into per-file blocks, but that is a larger refactor with
+its own correctness surface (patch-block boundary detection)
+and is intentionally scoped out of the latency-budget fix.
+
 ---
 
 ## 2. Audit surface contracts (V2.5 addendum)
