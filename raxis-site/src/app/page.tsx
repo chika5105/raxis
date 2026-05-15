@@ -453,9 +453,9 @@ function CreatorSection() {
                 rel="noopener noreferrer"
                 className="text-accent hover:underline underline-offset-4"
               >
-                Aegis
+              Aegis
               </a>{" "}
-              — and asking coding agents to operate at the speed that required.
+              and asking coding agents to operate at the speed that required.
               The architecture that emerged became a paradigm. The paradigm
               became a spec. The spec became an open reference implementation.
             </p>
