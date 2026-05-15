@@ -354,6 +354,46 @@ Bincode IPC path records `(session_id, request_id, url,
 status_code, latency_ms)`. Both anchor into the hash-chained audit
 log (`INV-04`) and are replayable (`INV-05`).
 
+### 6.1 Per-protocol credential-proxy substrate (at a glance)
+
+The "Inject" step above never lets the credential bytes enter the VM.
+The proxies speak each upstream's wire on the host (see
+[`v2/credential-proxy.md`](v2/credential-proxy.md) for the normative
+spec and [`v2/proxy-table-allowlists.md`](v2/proxy-table-allowlists.md)
+for the SQL/BSON-walking allowlist model). Below is the shipped
+substrate as of V2.5:
+
+| `proxy_type` | Wire shape the proxy speaks                                                                 | What the proxy enforces (beyond "agent never sees the secret")                                                                                                            | V2 status                                                          |
+|--------------|---------------------------------------------------------------------------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------|
+| `postgres`   | `StartupMessage` → `AuthenticationOk` → simple-/extended-query                              | SQL parser walks every query; rejects statements touching tables outside `[tasks.credentials.restrictions] allowed_tables` (`v2/proxy-table-allowlists.md`).              | Real upstream forwarding shipped (V2.4 `T1-2`).                    |
+| `mysql`      | `HandshakeV10` → `HandshakeResponse41` (discarded) → `OK_Packet`; loops `COM_QUERY/STMT_*`  | Same SQL allowlist enforcement on every `COM_QUERY` / prepared-statement payload; rejects with a MySQL `ERR_Packet`.                                                      | Real upstream forwarding shipped (V2.4).                           |
+| `mssql`      | TDS `PRELOGIN` → `LOGIN7` (discarded) → `LOGINACK`; loops `SQLBatch` (UTF-16 LE)            | Per-batch SQL classification + table allowlist; rejects with a TDS `ERROR` token.                                                                                         | Real upstream forwarding shipped (V2.4).                           |
+| `mongodb`    | `OP_MSG` (op code 2013); SCRAM-SHA-256 to upstream                                          | `restriction::Restrictions::is_blocked` walks each command document; blocked ops return `{ok:0, code:13, codeName:"Unauthorized"}` — drivers see a clean `MongoServerError`. | Real upstream forwarding shipped (V2.5 `§2.2`).                    |
+| `redis`      | RESP2 (RESP3 / `HELLO` accepted, downgraded to RESP2)                                       | Per-command allow/deny against a configured command-allowlist; proxy issues `AUTH <kernel-creds>` against the upstream when it dials.                                     | Real upstream forwarding shipped (audit upgrade in `0cf013e`).     |
+| `smtp`       | RFC 5321 line-buffered: `EHLO`/`HELO` / `MAIL FROM` / `RCPT TO` / `DATA` / `.` / `QUIT`     | `RCPT TO` domain allowlist; `MAIL FROM` validation; proxy issues `AUTH PLAIN`/`LOGIN` to the upstream relay. Inbound listener does NOT advertise STARTTLS (proxy owns both ends). | Real upstream forwarding shipped (V2.4).                           |
+| `http`       | HTTP/1.1 to a single policy-pinned upstream URL                                             | Method + path allowlist against the pinned upstream; injects `Authorization: Bearer <kernel-resolved>` (or Basic / SigV4 / IMDS via `AuthMode`); rewrites `Host`.         | Generic Bearer ships; per-cloud `AuthMode` variants for k8s + cloud SDKs. |
+| `aws`        | IMDS HTTP/1.1 — agent SDK reads `AWS_CONTAINER_CREDENTIALS_FULL_URI` and dials the proxy   | Returns kernel-resolved STS-shaped JSON (`{AccessKeyId, SecretAccessKey, Token, Expiration, RoleArn}`); the SDK's signed AWS calls then leave through the `http` proxy with method/host enforcement. | Shipped.                                                          |
+| `azure`      | IMDS HTTP/1.1 with mandatory `Metadata: true` header (169.254.169.254 → 127.0.0.1)         | Returns kernel-resolved AAD token JSON; downstream Azure SDK calls likewise leave via `http` proxy.                                                                       | Shipped.                                                          |
+| `gcp`        | `metadata.google.internal` HTTP/1.1 with mandatory `Metadata-Flavor: Google` header         | Returns kernel-resolved access token; downstream Google API calls likewise leave via `http` proxy.                                                                       | Shipped.                                                          |
+
+Two structural notes that apply across the table:
+
+1. **No upstream credential ever transits the VM.** The agent only ever
+   sees a localhost socket. Even `aws` / `azure` / `gcp` — where the
+   "credential" the SDK reads IS a token — return a *short-lived
+   kernel-issued* token shape; the long-lived signing key never leaves
+   the host. The `http` proxy then re-injects `Authorization` on each
+   downstream call, scoped to the per-task policy
+   (`INV-SECRET-02 / INV-SECRET-04`).
+2. **All ten proxies share one observability surface.** Every accepted
+   command emits a `CredentialProxyCommandAdmitted` audit row with
+   `(session_id, proxy_type, command_summary, latency_ms)`; every
+   rejected command emits `CredentialProxyCommandDenied` with the
+   structured reason (e.g. `table_not_in_allowlist`). The same audit
+   row drives the dashboard's per-session "Credentials" tab and the
+   `EgressStallTracker` (repeated denies trip
+   `INV-EGRESS-STALL-01`).
+
 ---
 
 ## 7. What an attacker inside the VM cannot do
