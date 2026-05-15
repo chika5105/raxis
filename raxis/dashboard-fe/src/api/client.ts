@@ -31,6 +31,7 @@ import type {
   NotificationView,
   PolicyAdvancement,
   PolicySnapshotView,
+  SessionCaptureView,
   SessionView,
   SubsystemHealthResponse,
   TaskView,
@@ -335,6 +336,23 @@ export const dashboardApi = {
     },
     get: (id: string, signal?: AbortSignal): Promise<SessionView> =>
       apiFetch<SessionView>(`/api/sessions/${encodeURIComponent(id)}`, signal ? { signal } : {}),
+    // `GET /api/sessions/:id/capture?limit=N` —
+    // INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01.
+    // Backs the SessionDetail page's "Post-mortem" tab — records
+    // remain reachable after the session terminates.
+    capture: (
+      id: string,
+      params: { limit?: number } = {},
+      signal?: AbortSignal,
+    ): Promise<SessionCaptureView[]> => {
+      const qs = new URLSearchParams();
+      if (params.limit !== undefined) qs.set("limit", String(params.limit));
+      const suffix = qs.toString() ? `?${qs}` : "";
+      return apiFetch<SessionCaptureView[]>(
+        `/api/sessions/${encodeURIComponent(id)}/capture${suffix}`,
+        signal ? { signal } : {},
+      );
+    },
   },
 
   escalations: {

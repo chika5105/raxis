@@ -543,6 +543,31 @@ async fn main() {
             }
         };
 
+    // Per-session lifecycle capture (`SessionCapture`) — sibling
+    // of `TaskLlmCapture` for the post-mortem surface. The
+    // dashboard's `GET /api/sessions/:id/capture` endpoint reads
+    // from this ring; the kernel's `SessionLifecycleObserver`
+    // (registered further down on the audit + FSM seams) is the
+    // sole writer. Construction failure (EROFS / ENOSPC) logs
+    // and yields `None` — the dashboard route then surfaces an
+    // empty post-mortem rather than a 500. Pins
+    // `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01` and
+    // `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
+    let session_capture: Option<Arc<raxis_dashboard_kernel::SessionCapture>> =
+        match raxis_dashboard_kernel::SessionCapture::new(
+            &data_dir,
+            raxis_dashboard_kernel::SessionCaptureConfig::default(),
+        ) {
+            Ok(c) => Some(c),
+            Err(e) => {
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"SessionCaptureInitFailed\",\
+                     \"reason\":\"{e}\"}}"
+                );
+                None
+            }
+        };
+
     // Hoist the observability hub construction so the
     // `NotifyingAuditSink` can hold a reference and bridge V3 §3
     // metrics (egress admit/deny/default-grant/stall, credential-proxy
@@ -581,6 +606,22 @@ async fn main() {
             Arc::clone(cap),
         )),
         None => notifying_audit,
+    };
+    // INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01:
+    // when `SessionCapture` is wired (the default — fails only on
+    // EROFS / ENOSPC at boot, see above), bolt the lifecycle
+    // observer onto the audit pipeline AFTER the streaming sink so
+    // every audit event the kernel emits for a session_id is also
+    // mirrored to the per-session post-mortem ring. Decoupled from
+    // `SessionStreamCapture` (which feeds the live SSE) — the
+    // post-mortem surface persists records past session
+    // termination, the streaming sink does not.
+    let audit: Arc<dyn AuditSink> = match session_capture.as_ref() {
+        Some(cap) => Arc::new(raxis_dashboard_kernel::SessionLifecycleObserver::new(
+            audit,
+            Arc::clone(cap),
+        )),
+        None => audit,
     };
 
     // Step 8: Emit the canonical KernelStarted record. This is the very
@@ -1891,6 +1932,15 @@ async fn main() {
                         // (logged at boot); the dashboard route
                         // returns 404 in that case.
                         task_llm_capture.clone(),
+                        // Session-lifecycle capture
+                        // (`session_capture.rs`) — shared with the
+                        // kernel's lifecycle observer so the
+                        // dashboard's Post-mortem tab reads the
+                        // SAME on-disk file ring the observer
+                        // writes. `None` ⇒ early init failed
+                        // (logged at boot); the dashboard surface
+                        // degrades to an empty post-mortem list.
+                        session_capture.clone(),
                     )
                     .await
                     {

@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
 
@@ -12,6 +12,7 @@ import { SessionStream } from "@/components/SessionStream";
 import { StateBadge } from "@/components/StateBadge";
 import { fmtAbsolute, fmtRelative, fmtTokens } from "@/lib/format";
 import { isTerminalFailureState } from "@/lib/state-color";
+import type { SessionCaptureView } from "@/types/api";
 
 export function SessionDetailPage() {
   const { id = "" } = useParams<{ id: string }>();
@@ -146,8 +147,188 @@ export function SessionDetailPage() {
         />
       )}
 
-      <SessionStream sessionId={s.session_id} />
+      <SessionDetailTabs sessionId={s.session_id} />
     </div>
+  );
+}
+
+type DetailTab = "stream" | "postmortem";
+
+/// Tab strip for the bottom of the SessionDetail page. Two
+/// tabs:
+///   * **Live stream** — the existing `<SessionStream>`
+///     subscribes to `/api/sessions/:id/stream` SSE for
+///     active sessions. Replays the on-disk ring's tail then
+///     attaches live frames.
+///   * **Post-mortem** — `<SessionPostmortemPanel>` calls
+///     `/api/sessions/:id/capture` to surface FSM transitions
+///     + audit-event mirrors + KSB snapshots from the
+///     per-session lifecycle ring. Persists after the
+///     session terminates (Completed / Failed / Aborted),
+///     pinned by
+///     `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
+///
+/// We default to the live stream — operators land here while
+/// the session is running 95 % of the time. Only on a fail /
+/// post-mortem dive do they want the capture ring.
+function SessionDetailTabs({ sessionId }: { sessionId: string }) {
+  const [tab, setTab] = useState<DetailTab>("stream");
+  return (
+    <section data-testid="session-detail-tabs" className="space-y-3">
+      <div
+        role="tablist"
+        aria-label="Session views"
+        className="inline-flex rounded-md border border-edge bg-panel-high p-0.5"
+      >
+        <TabButton
+          active={tab === "stream"}
+          onClick={() => setTab("stream")}
+          testId="tab-stream"
+        >
+          Live stream
+        </TabButton>
+        <TabButton
+          active={tab === "postmortem"}
+          onClick={() => setTab("postmortem")}
+          testId="tab-postmortem"
+        >
+          Post-mortem
+        </TabButton>
+      </div>
+      {tab === "stream" ? (
+        <SessionStream sessionId={sessionId} />
+      ) : (
+        <SessionPostmortemPanel sessionId={sessionId} />
+      )}
+    </section>
+  );
+}
+
+function TabButton({
+  active,
+  onClick,
+  children,
+  testId,
+}: {
+  active: boolean;
+  onClick: () => void;
+  children: React.ReactNode;
+  testId?: string;
+}) {
+  return (
+    <button
+      type="button"
+      role="tab"
+      aria-selected={active}
+      data-testid={testId}
+      onClick={onClick}
+      className={
+        "px-3 py-1.5 text-xs rounded-sm transition-colors " +
+        (active
+          ? "bg-accent/15 text-accent border border-accent/30"
+          : "text-ink-muted hover:text-ink hover:bg-panel")
+      }
+    >
+      {children}
+    </button>
+  );
+}
+
+/// Post-mortem capture panel. Reads the per-session lifecycle
+/// ring (`raxis-dashboard-kernel::SessionCapture`) and renders
+/// it as a tabular timeline. The records persist past session
+/// termination — that's the entire point of the surface (the
+/// user's "session data gets deleted once the session is done"
+/// complaint).
+function SessionPostmortemPanel({ sessionId }: { sessionId: string }) {
+  const q = useQuery({
+    queryKey: ["session-capture", sessionId],
+    queryFn: ({ signal }) =>
+      dashboardApi.sessions.capture(sessionId, { limit: 200 }, signal),
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: false,
+    staleTime: 1_000,
+  });
+  if (q.isPending) {
+    return (
+      <div
+        className="card p-4 text-sm text-ink-muted"
+        data-testid="session-capture-loading"
+      >
+        Loading post-mortem capture…
+      </div>
+    );
+  }
+  if (q.error) {
+    return <ErrorBox error={q.error} onRetry={() => q.refetch()} />;
+  }
+  const records = q.data ?? [];
+  if (records.length === 0) {
+    return (
+      <div
+        data-testid="session-capture-empty"
+        className="card p-4 text-sm text-ink-muted leading-relaxed"
+      >
+        <p>
+          No post-mortem records yet for this session. The kernel
+          observer appends FSM transitions, KSB snapshots, and
+          audit-event mirrors to a bounded on-disk ring at{" "}
+          <Mono pill>{`<data_dir>/session-capture/${sessionId}.ndjson`}</Mono>{" "}
+          — records persist after the session terminates
+          (Completed / Failed / Aborted) until the ring rolls.
+        </p>
+        <p className="mt-2 text-xs text-ink-subtle">
+          Pinned by{" "}
+          <Mono>INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01</Mono>
+          .
+        </p>
+      </div>
+    );
+  }
+  return (
+    <div className="card p-0 overflow-hidden" data-testid="session-capture-list">
+      <header className="px-4 py-3 border-b border-edge flex items-center justify-between gap-2">
+        <h3 className="text-sm font-semibold text-ink">
+          Post-mortem capture
+          <span className="text-ink-muted ml-2 font-normal">
+            ({records.length} record{records.length === 1 ? "" : "s"})
+          </span>
+        </h3>
+        <span className="text-[11px] text-ink-subtle">
+          Persists after Completed / Failed / Aborted
+        </span>
+      </header>
+      <ul className="divide-y divide-edge/40">
+        {records.map((r, idx) => (
+          <CaptureRow key={`${r.ts_unix}-${idx}`} record={r} />
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function CaptureRow({ record }: { record: SessionCaptureView }) {
+  return (
+    <li className="px-4 py-2.5 flex items-start gap-3" data-kind={record.kind}>
+      <Mono className="text-[11px] text-ink-subtle w-32 shrink-0 mt-1">
+        {fmtAbsolute(record.ts_unix)}
+      </Mono>
+      <span
+        className={
+          "badge text-[11px] shrink-0 " +
+          (record.kind === "fsm_transition"
+            ? "bg-accent/15 border-accent/30 text-accent"
+            : record.kind === "audit_event"
+              ? "bg-panel border-edge text-ink"
+              : "bg-panel-high border-edge text-ink-muted")
+        }
+      >
+        {record.kind}
+      </span>
+      <pre className="text-[11px] text-ink-muted flex-1 whitespace-pre-wrap break-words leading-snug font-mono">
+        {JSON.stringify(record.payload, null, 0)}
+      </pre>
+    </li>
   );
 }
 

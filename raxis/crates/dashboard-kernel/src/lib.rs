@@ -67,12 +67,17 @@ use raxis_store::Store;
 
 mod git;
 pub mod notification_filter;
+pub mod session_capture;
 pub mod stream_capture;
 pub mod streaming_audit;
 pub mod task_llm_capture;
 
 pub use notification_filter::{
     notification_priority, notification_priority_for_kind_str, NotificationPriority,
+};
+pub use session_capture::{
+    SessionCapture, SessionCaptureConfig, SessionCaptureRecord, SessionLifecycleObserver,
+    SessionStateView,
 };
 pub use stream_capture::{CaptureConfig, SessionStreamCapture};
 pub use streaming_audit::StreamingAuditSink;
@@ -260,6 +265,14 @@ pub struct KernelDashboardData {
     /// fixtures or read-only data dirs) the route returns
     /// `404 NotFound` so the absent capability is observable.
     task_llm_capture: Option<Arc<TaskLlmCapture>>,
+    /// Optional per-session lifecycle capture. When set, the
+    /// `GET /api/sessions/:session_id/capture` route reads from
+    /// the session's bounded file ring; when `None` (older
+    /// test fixtures or pre-iter59 hosts) the route falls back
+    /// to the trait's default `Ok(vec![])` so the absent
+    /// capability surfaces as an empty post-mortem list.
+    /// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
+    session_capture: Option<Arc<SessionCapture>>,
 }
 
 /// Sliding-window rate-limit state for the credential reveal
@@ -317,6 +330,7 @@ impl KernelDashboardData {
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
             task_llm_capture: None,
+            session_capture: None,
         })
     }
 
@@ -345,6 +359,7 @@ impl KernelDashboardData {
             audit_sink: None,
             reveal_rate_limit: parking_lot::Mutex::new(RevealRateLimitState::default()),
             task_llm_capture: None,
+            session_capture: None,
         }
     }
 
@@ -353,6 +368,16 @@ impl KernelDashboardData {
     /// chain the call onto `with_capture(...).with_task_llm_capture(...)`.
     pub fn with_task_llm_capture(mut self, capture: Arc<TaskLlmCapture>) -> Self {
         self.task_llm_capture = Some(capture);
+        self
+    }
+
+    /// Wire the per-session lifecycle capture
+    /// (`session_capture.rs`). Builder-style. Mirror of
+    /// [`Self::with_task_llm_capture`] for the post-mortem
+    /// surface — `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-
+    /// AFTER-TERMINATION-01`.
+    pub fn with_session_capture(mut self, capture: Arc<SessionCapture>) -> Self {
+        self.session_capture = Some(capture);
         self
     }
 
@@ -951,6 +976,31 @@ impl DashboardData for KernelDashboardData {
         let n = (n.min(500)) as usize;
         let records = cap.tail(task_id, n);
         Ok(records.into_iter().map(record_to_view).collect())
+    }
+
+    /// `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01` /
+    /// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`.
+    /// Tail the per-session lifecycle ring and project each
+    /// [`SessionCaptureRecord`] to the dashboard's
+    /// [`raxis_dashboard::data::SessionCaptureView`]. Returns
+    /// `Ok(vec![])` when the kernel did not wire a capture
+    /// (older fixtures, read-only data dir at boot). The
+    /// post-mortem path stays available even after the session
+    /// terminates — the ring is keyed by `session_id`, the
+    /// observer is the kernel (not the planner VM), and
+    /// `tail` reads from disk so an in-memory eviction does
+    /// not lose records.
+    fn tail_session_capture(
+        &self,
+        session_id: &str,
+        n: u32,
+    ) -> Result<Vec<raxis_dashboard::data::SessionCaptureView>, ApiError> {
+        let Some(cap) = self.session_capture.as_ref() else {
+            return Ok(Vec::new());
+        };
+        let n = (n.min(500)) as usize;
+        let records = cap.tail(session_id, n);
+        Ok(records.into_iter().map(session_record_to_view).collect())
     }
 
     fn list_sessions(
@@ -2839,6 +2889,20 @@ fn record_to_view(r: crate::LlmTurnRecord) -> raxis_dashboard::data::TaskLlmTurn
     }
 }
 
+/// Project a [`SessionCaptureRecord`] (kernel-side) to the
+/// dashboard's wire view. `INV-DASHBOARD-SESSION-CAPTURE-
+/// PERSIST-AFTER-TERMINATION-01`.
+fn session_record_to_view(
+    r: crate::SessionCaptureRecord,
+) -> raxis_dashboard::data::SessionCaptureView {
+    raxis_dashboard::data::SessionCaptureView {
+        session_id: r.session_id,
+        kind: r.kind,
+        ts_unix: r.ts_unix,
+        payload: r.payload,
+    }
+}
+
 fn task_row_to_view(
     conn: &raxis_store::ro::RoConn,
     t: &raxis_store::views::tasks::TaskRow,
@@ -3018,6 +3082,7 @@ pub async fn start_dashboard_with_advancer(
     audit_sink: Arc<dyn raxis_audit_tools::AuditSink>,
     observability: Option<Arc<raxis_observability::ObservabilityHub>>,
     task_llm_capture: Option<Arc<TaskLlmCapture>>,
+    session_capture: Option<Arc<SessionCapture>>,
 ) -> Result<ServerHandle, String> {
     let mut data = KernelDashboardData::with_capture(
         store,
@@ -3031,6 +3096,9 @@ pub async fn start_dashboard_with_advancer(
     .with_audit_sink(audit_sink);
     if let Some(cap) = task_llm_capture {
         data = data.with_task_llm_capture(cap);
+    }
+    if let Some(cap) = session_capture {
+        data = data.with_session_capture(cap);
     }
     let data = Arc::new(data);
     let server = DashboardServer::bind_with_observability(cfg, data, observability)

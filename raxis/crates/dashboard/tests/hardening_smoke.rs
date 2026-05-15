@@ -591,3 +591,41 @@ async fn health_routes_emit_no_store_cache_control() {
 
     handle.shutdown().await.expect("shutdown");
 }
+
+// ---------------------------------------------------------------------------
+// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01` — the
+// post-mortem `GET /api/sessions/:id/capture` endpoint MUST be reachable
+// with the standard `read` role and MUST return an empty JSON array (200,
+// not 404) when no records have been captured for that session. This is
+// the user-visible promise: the post-mortem surface exists, is wired, and
+// degrades gracefully when no capture is configured (the in-memory
+// fixture uses the trait's default impl which returns `Ok(vec![])`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn session_capture_route_returns_empty_list_with_no_capture_wired() {
+    let (handle, base, token, _data) = serve_authed_in_memory().await;
+    let client = reqwest::Client::new();
+    let res = client
+        .get(format!("{base}/api/sessions/sess-postmortem/capture"))
+        .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+        .send()
+        .await
+        .expect("send");
+    assert_eq!(
+        res.status(),
+        200,
+        "post-mortem route MUST be reachable with the read role; got {}",
+        res.status()
+    );
+    let body: serde_json::Value = res.json().await.expect("json body");
+    assert!(
+        body.is_array(),
+        "post-mortem body MUST be a JSON array; got {body:?}"
+    );
+    assert!(
+        body.as_array().unwrap().is_empty(),
+        "with no capture wired, the body MUST be []; got {body:?}"
+    );
+    handle.shutdown().await.expect("shutdown");
+}

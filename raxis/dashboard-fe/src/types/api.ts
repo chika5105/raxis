@@ -288,6 +288,29 @@ export interface SessionView {
   failure?: FailureInfo | null;
 }
 
+/// One record from the per-session lifecycle capture ring
+/// (`raxis-dashboard-kernel::SessionCapture`). Surfaced by
+/// `GET /api/sessions/:id/capture?limit=N`. The post-mortem
+/// surface persists past session termination — the file ring
+/// lives in `<data_dir>/session-capture/<session_id>.ndjson`
+/// and is evicted only when the bounded ring rolls.
+/// INV-DASHBOARD-SESSION-CAPTURE-* (specs/v3/session-capture.md).
+export interface SessionCaptureView {
+  /// Owning session id (matches the URL path parameter).
+  session_id: string;
+  /// Record kind discriminator — `fsm_transition`,
+  /// `audit_event`, `ksb_snapshot`, etc. The FE renders unknown
+  /// kinds generically so the kernel can land new kinds
+  /// without an FE bump.
+  kind: string;
+  /// Unix seconds when the observer appended the record.
+  ts_unix: number;
+  /// Free-form payload. Generic object — every audit-event
+  /// mirror has at minimum `{event_kind, seq, event_id, …}`;
+  /// FSM transitions are `{from, to, reason}`; etc.
+  payload: Record<string, unknown>;
+}
+
 export interface EscalationView {
   escalation_id: string;
   initiative_id: string;

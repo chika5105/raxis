@@ -395,6 +395,11 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // Sessions.
         .route("/api/sessions", get(sessions::list::<D>))
         .route("/api/sessions/:id", get(sessions::detail::<D>))
+        // INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01
+        // (`specs/v3/session-capture.md`): post-mortem lifecycle
+        // capture tail. Persists after Completed/Failed/Aborted
+        // so the operator can still drill in.
+        .route("/api/sessions/:id/capture", get(sessions::capture::<D>))
         // Escalations.
         .route("/api/escalations", get(escalations::list::<D>))
         .route("/api/escalations/:id", get(escalations::detail::<D>))

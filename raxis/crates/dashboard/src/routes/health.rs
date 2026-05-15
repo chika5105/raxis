@@ -76,10 +76,7 @@ where
 {
     let full = state.data.health();
     if op.has_role(DashboardRole::Admin) {
-        return Ok((
-            [(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)],
-            Json(full),
-        ));
+        return Ok(([(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)], Json(full)));
     }
     if !op.has_role(DashboardRole::Read) {
         return Err(ApiError::Forbidden {

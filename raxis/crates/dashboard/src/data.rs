@@ -399,6 +399,32 @@ fn is_false(b: &bool) -> bool {
     !*b
 }
 
+/// One on-disk record from the per-session capture ring
+/// (`raxis-dashboard-kernel::SessionCapture`). Surfaced by
+/// `GET /api/sessions/:session_id/capture`. The record kinds
+/// the kernel observer appends are open-ended (`fsm_transition`,
+/// `audit_event`, `ksb_snapshot`, and any future addition);
+/// the FE renders the payload generically so a new kind lands
+/// without a wire-shape bump.
+///
+/// `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01`,
+/// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`,
+/// `INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01`
+/// (`specs/v3/session-capture.md`).
+#[derive(Debug, Clone, Serialize)]
+pub struct SessionCaptureView {
+    /// Owning session id (matches the URL path parameter).
+    pub session_id: String,
+    /// Record kind discriminator — `fsm_transition`,
+    /// `audit_event`, `ksb_snapshot`, etc.
+    pub kind: String,
+    /// Unix seconds when the observer appended the record.
+    pub ts_unix: i64,
+    /// Free-form payload. The kernel observer encodes the
+    /// per-kind shape; the dashboard renders it generically.
+    pub payload: serde_json::Value,
+}
+
 /// Reviewer verdict surface for the dashboard.
 #[derive(Debug, Clone, Serialize)]
 pub struct ReviewerVerdictView {
@@ -1191,6 +1217,29 @@ pub trait DashboardData: Send + Sync + 'static {
 
     /// One session.
     fn get_session(&self, session_id: &str) -> Result<SessionView, ApiError>;
+
+    /// Tail the last `n` records from the per-session lifecycle
+    /// capture ring (`raxis-dashboard-kernel::SessionCapture`).
+    /// Backs `GET /api/sessions/:session_id/capture?limit=N`.
+    ///
+    /// Default impl returns `Ok(vec![])` so older test
+    /// fixtures (and the in-memory data layer used by the
+    /// auth / integration tests) compile without the new
+    /// capability. The kernel-glue impl in
+    /// `raxis-dashboard-kernel` overrides this to call the
+    /// file-ring tail.
+    ///
+    /// `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01`,
+    /// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`,
+    /// `INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01`
+    /// (`specs/v3/session-capture.md`).
+    fn tail_session_capture(
+        &self,
+        _session_id: &str,
+        _n: u32,
+    ) -> Result<Vec<SessionCaptureView>, ApiError> {
+        Ok(Vec::new())
+    }
 
     /// Pending escalations.
     fn list_escalations(&self) -> Result<Vec<EscalationView>, ApiError>;

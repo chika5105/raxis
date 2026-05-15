@@ -25,7 +25,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
-use crate::data::SessionView;
+use crate::data::{SessionCaptureView, SessionView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator, ShutdownSignal};
 use crate::stream::StreamEvent;
@@ -74,6 +74,54 @@ where
     require_read(&op)?;
     let view = state.data.get_session(&id)?;
     Ok(Json(view))
+}
+
+/// Query string for `GET /api/sessions/:id/capture`.
+#[derive(Debug, Deserialize)]
+pub struct CaptureQuery {
+    /// Number of recent records to return. Capped at 500 by
+    /// the data-layer impl. Defaults to 200 — enough to fill
+    /// a typical post-mortem scroll without paging.
+    #[serde(default = "default_capture_limit")]
+    pub limit: u32,
+}
+
+fn default_capture_limit() -> u32 {
+    200
+}
+
+/// `GET /api/sessions/:id/capture?limit=N`.
+///
+/// Returns the last `N` per-session lifecycle records (FSM
+/// transitions, KSB snapshots, audit-event mirrors) from the
+/// kernel's on-disk session-capture ring (see
+/// `raxis-dashboard-kernel::SessionCapture`). The records
+/// persist after the session terminates — operators can pull
+/// the post-mortem until the ring evicts the records (the
+/// user's "session data gets deleted once the session is
+/// done" complaint).
+///
+/// `INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01`
+/// (`specs/v3/session-capture.md`).
+pub async fn capture<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Path(id): Path<String>,
+    Query(q): Query<CaptureQuery>,
+) -> ApiResult<Json<Vec<SessionCaptureView>>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    // The post-mortem path is the canonical reason for this
+    // endpoint, so we MUST NOT touch `get_session` first — a
+    // session that has terminated is precisely the case where
+    // the capture is still on disk but the live session view
+    // may surface a 404 or a coarse "expired" shape. Skipping
+    // the prefetch keeps the post-mortem path open for the
+    // entire lifetime of the on-disk ring.
+    let records = state.data.tail_session_capture(&id, q.limit)?;
+    Ok(Json(records))
 }
 
 /// Query string for `GET /api/sessions/:id/stream`.
