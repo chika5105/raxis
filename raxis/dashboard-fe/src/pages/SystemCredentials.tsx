@@ -23,10 +23,8 @@
  * are Critical-severity audit events.
  */
 
-import {
-  CredentialsView,
-  useOperatorRoles,
-} from "@/components/CredentialsView";
+import { CredentialsView } from "@/components/CredentialsView";
+import { useOperatorRoles } from "@/components/useOperatorRoles";
 
 export function SystemCredentialsPage() {
   const operatorRoles = useOperatorRoles();
@@ -56,10 +54,10 @@ export function SystemCredentialsPage() {
           Critical-severity surface ·{" "}
         </strong>
         Every reveal from this page is recorded against your operator
-        fingerprint, surfaces in the kernel's notifications inbox at the
+        fingerprint, surfaces in the kernel&apos;s notifications inbox at the
         configured priority, and is rate-limited per operator. Treat the
         plaintext as live secrets — copy/paste only into the systems you
-        intend to update; close the page when you're done.
+        intend to update; close the page when you&apos;re done.
       </div>
       {!isAdmin && (
         <div

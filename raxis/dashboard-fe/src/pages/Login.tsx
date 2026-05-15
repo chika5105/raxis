@@ -300,7 +300,7 @@ export function LoginPage() {
           <div className="space-y-3">
             <p className="text-sm text-ink-muted leading-relaxed">
               Click below to request a one-time challenge from the kernel.
-              You'll sign it with your Ed25519 operator key in your terminal —
+              You&apos;ll sign it with your Ed25519 operator key in your terminal —
               the private key never enters the browser.
             </p>
             <button

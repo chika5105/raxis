@@ -23,36 +23,18 @@
 // mounts — see comment block in `index.html`.
 
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
   type ReactNode,
 } from "react";
 
-// ─────────────────────────────────────────────────────────────────
-// Public types
-// ─────────────────────────────────────────────────────────────────
+import { ThemeContext, type Theme, type ThemeContextValue } from "./theme-context";
 
-export type Theme = "dark" | "light";
-
-export interface ThemeContextValue {
-  /** Currently-applied theme. */
-  theme: Theme;
-  /** Explicitly pin the theme (also persists to localStorage). */
-  setTheme: (next: Theme) => void;
-  /** Flip the theme once. */
-  toggleTheme: () => void;
-  /**
-   * `true` when the current value was chosen by the operator;
-   * `false` when it still reflects the system preference. Exposed
-   * mainly for tests and for chrome that wants to surface a
-   * "follow system" affordance later.
-   */
-  hasExplicitPreference: boolean;
-}
+// Re-export the public types so existing `from "@/lib/theme"`
+// imports of `Theme` / `ThemeContextValue` continue to compile.
+export type { Theme, ThemeContextValue };
 
 // ─────────────────────────────────────────────────────────────────
 // Storage / browser helpers
@@ -125,10 +107,8 @@ function applyThemeToDocument(theme: Theme): void {
 }
 
 // ─────────────────────────────────────────────────────────────────
-// Context
+// Provider
 // ─────────────────────────────────────────────────────────────────
-
-const ThemeContext = createContext<ThemeContextValue | null>(null);
 
 interface ThemeProviderProps {
   children: ReactNode;
@@ -211,19 +191,4 @@ export function ThemeProvider({ children }: ThemeProviderProps) {
   return (
     <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
   );
-}
-
-// ─────────────────────────────────────────────────────────────────
-// Consumer hook
-// ─────────────────────────────────────────────────────────────────
-
-export function useTheme(): ThemeContextValue {
-  const ctx = useContext(ThemeContext);
-  if (!ctx) {
-    throw new Error(
-      "useTheme() called outside <ThemeProvider>. Wrap your tree " +
-        "in `<ThemeProvider>` (see src/main.tsx).",
-    );
-  }
-  return ctx;
 }

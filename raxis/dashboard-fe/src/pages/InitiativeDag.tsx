@@ -216,7 +216,7 @@ export function InitiativeDagPage() {
               title="This initiative has no tasks yet."
               hint={
                 <>
-                  The plan hasn't been admitted, or every task has been
+                  The plan hasn&apos;t been admitted, or every task has been
                   garbage-collected. Check the{" "}
                   <Link to={`/initiatives/${id}`} className="text-accent">
                     initiative detail
@@ -283,7 +283,7 @@ export function InitiativeDagPage() {
           ) : (
             <p className="text-xs text-ink-subtle">
               Single-click a node in the graph to focus it here. Double-click
-              (or Enter) opens that task's detail page.
+              (or Enter) opens that task&apos;s detail page.
             </p>
           )}
         </aside>

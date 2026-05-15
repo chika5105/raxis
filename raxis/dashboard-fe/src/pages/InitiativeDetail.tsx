@@ -5,7 +5,8 @@ import clsx from "clsx";
 
 import { dashboardApi } from "@/api/client";
 import { CopyButton } from "@/components/CopyButton";
-import { CredentialsView, useOperatorRoles } from "@/components/CredentialsView";
+import { CredentialsView } from "@/components/CredentialsView";
+import { useOperatorRoles } from "@/components/useOperatorRoles";
 import { DagGraph } from "@/components/DagGraph";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";

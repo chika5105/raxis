@@ -178,7 +178,11 @@ export function NotificationsPage() {
   // calls `useMemo`, React sees a different hook count between
   // renders and tears the page down with "Rendered more hooks
   // than during the previous render".
-  const items = list.data ?? [];
+  // Memoise the `?? []` fallback so `useMemo` below sees a stable
+  // identity for the empty-state — otherwise `items` would be a
+  // freshly-allocated array on every render and the downstream
+  // `visibleItems` memo would invalidate every tick.
+  const items = useMemo(() => list.data ?? [], [list.data]);
   const visibleItems = useMemo(() => {
     const filtered = applyPriorityFilter(items, priorityFilter, snoozeLowPriority);
     return [...filtered].sort(compareByPriorityThenTimeDesc);
@@ -324,7 +328,7 @@ export function NotificationsPage() {
                   All priorities
                 </button>{" "}
                 or clearing the snooze / unread-only toggles. Operator
-                actions you've taken (mark-read, view-diff, …) are in
+                actions you&apos;ve taken (mark-read, view-diff, …) are in
                 the{" "}
                 <Link to="/audit" className="text-accent hover:underline">
                   Audit Chain

@@ -15,7 +15,7 @@ import {
   shortFingerprint,
   shortSha,
 } from "@/lib/format";
-import { useTheme } from "@/lib/theme";
+import { useTheme } from "@/lib/theme-context";
 import type { ApprovalStatus, InitiativePlanView as PlanWire } from "@/types/api";
 
 interface InitiativePlanViewProps {

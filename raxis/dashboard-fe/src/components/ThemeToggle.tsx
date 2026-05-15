@@ -15,7 +15,7 @@
 
 import clsx from "clsx";
 
-import { useTheme } from "@/lib/theme";
+import { useTheme } from "@/lib/theme-context";
 
 interface ThemeToggleProps {
   className?: string;

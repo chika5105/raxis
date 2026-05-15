@@ -279,7 +279,7 @@ function FieldRow({ label, value }: { label: string; value: string }) {
   const isMonoCandidate =
     value.length > 0 &&
     !value.includes("\n") &&
-    /^[/\w.@:!=\-+,()\[\]{}]+$/.test(value);
+    /^[/\w.@:!=\-+,()[\]{}]+$/.test(value);
   return (
     <>
       <dt className="text-ink-muted font-medium">{label}</dt>

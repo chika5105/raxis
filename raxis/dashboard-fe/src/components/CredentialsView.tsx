@@ -37,7 +37,7 @@
  *   * `INV-DASHBOARD-ANTHROPIC-CREDENTIAL-SEVERITY-01`
  */
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import Editor from "@monaco-editor/react";
 import clsx from "clsx";
@@ -48,9 +48,8 @@ import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { Mono } from "@/components/Mono";
 import { Spinner } from "@/components/Spinner";
-import { getStoredProfile } from "@/lib/auth-store";
 import { fmtBytes } from "@/lib/format";
-import { useTheme } from "@/lib/theme";
+import { useTheme } from "@/lib/theme-context";
 import type {
   CredentialListResponse,
   CredentialMetadata,
@@ -780,14 +779,3 @@ function useCountdown(deadlineUnixSec: number): number {
   return value;
 }
 
-// ---------------------------------------------------------------------------
-// Convenience wrapper — used by `<InitiativeDetail>` so the
-// caller doesn't have to thread `operatorRoles` itself.
-// ---------------------------------------------------------------------------
-
-export function useOperatorRoles(): string[] {
-  return useMemo(() => {
-    const p = getStoredProfile();
-    return p?.roles ?? [];
-  }, []);
-}

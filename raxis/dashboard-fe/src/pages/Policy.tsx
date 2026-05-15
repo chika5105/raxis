@@ -9,7 +9,7 @@ import { Mono } from "@/components/Mono";
 import { PageSpinner, Spinner } from "@/components/Spinner";
 import { fmtAbsolute, shortFingerprint, shortSha } from "@/lib/format";
 import { getStoredProfile } from "@/lib/auth-store";
-import { useTheme } from "@/lib/theme";
+import { useTheme } from "@/lib/theme-context";
 import type { PolicyAdvancement } from "@/types/api";
 
 /// Policy page. Shows the parsed snapshot in a read-friendly

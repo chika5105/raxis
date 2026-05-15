@@ -102,7 +102,6 @@ export function SessionStream({
     setStatus("connecting");
     const es = new EventSource(url);
     let backoffTimer: number | undefined;
-    let flushTimer: number | undefined;
     let stopped = false;
 
     const flush = () => {
@@ -118,7 +117,7 @@ export function SessionStream({
       });
     };
 
-    flushTimer = window.setInterval(flush, flushIntervalMs);
+    const flushTimer = window.setInterval(flush, flushIntervalMs);
 
     const pushEnvelope = (envelope: StreamEventEnvelope) => {
       pending.current.push(envelope);
@@ -231,7 +230,7 @@ export function SessionStream({
     return () => {
       stopped = true;
       es.close();
-      if (flushTimer !== undefined) window.clearInterval(flushTimer);
+      window.clearInterval(flushTimer);
       if (backoffTimer !== undefined) window.clearTimeout(backoffTimer);
       flush();
     };

@@ -16,11 +16,11 @@
 import { describe, expect, it } from "vitest";
 import { render, screen } from "@testing-library/react";
 
+import { KernelLifecycleBannerView } from "@/components/KernelLifecycleBanner";
 import {
-  KernelLifecycleBannerView,
   bannerTone,
   headlineFor,
-} from "@/components/KernelLifecycleBanner";
+} from "@/components/KernelLifecycleBanner.helpers";
 import type { KernelLifecycleResponse } from "@/types/api";
 
 function snap(
