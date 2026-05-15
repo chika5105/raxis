@@ -24,6 +24,13 @@ glob             = { workspace = true }
 raxis-types      = { workspace = true }
 sha2             = { workspace = true }
 thiserror        = { workspace = true }
+# iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-04`. The provisioner
+# times its four stages (clone / fetch / checkout / verify) and emits
+# one `raxis.git.worktree.stage.duration` histogram sample per stage
+# when a global `ObservabilityHub` is wired via
+# `set_global_observability_hub`. Optional handle; the crate remains
+# usable without a hub (kernel-less CLI tools, integration fixtures).
+raxis-observability = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

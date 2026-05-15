@@ -4121,6 +4121,7 @@ version = "0.1.0"
 dependencies = [
  "gix",
  "glob",
+ "raxis-observability",
  "raxis-types",
  "sha2 0.10.9",
  "tempfile",

@@ -612,6 +612,18 @@ async fn main() {
     // call exactly once at boot.
     file_audit_sink.set_observability_hub(Arc::clone(&observability_hub));
 
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-04 — pin the worktree
+    // provisioner's process-global hub so every gix-mediated
+    // `clone_local` + per-target `checkout`/`verify` stage emits
+    // a `raxis.git.worktree.stage.duration` sample. The
+    // provisioner crate is the leaf seam every kernel-side
+    // session admission funnels through; wiring the hub once at
+    // boot covers Orchestrator + Executor + Reviewer worktrees
+    // uniformly. Idempotent — `set_global_observability_hub`
+    // discards a second `OnceLock::set` so re-entrant test boots
+    // don't panic.
+    raxis_worktree_provision::set_global_observability_hub(Arc::clone(&observability_hub));
+
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:
     //   1. every audit emit reaches the JSONL writer first

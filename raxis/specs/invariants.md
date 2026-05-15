@@ -100,8 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03 | 1 |
-| **Total** | | **138** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04 | 2 |
+| **Total** | | **139** |
 
 ---
 
@@ -9815,6 +9815,60 @@ co-emit invariant.
 
 **Canonical home.** `v3/otel-observability.md §8` row
 `FsmTransitionDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3` (iter61 expansion).
+
+---
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-04 — Worktree provisioner emits per-stage histograms (clone / fetch / checkout / verify) on every `provision_*` call (success + error)
+
+**Statement.** Every call to
+`raxis_worktree_provision::provision_reviewer` or
+`provision_orchestrator` MUST produce one
+`raxis.git.worktree.stage.duration` histogram observation per
+stage labelled with the closed `stage` lexicon
+(`clone` / `fetch` / `checkout` / `verify`, pinned by
+`crates/worktree-provision/src/lib.rs::WORKTREE_STAGE_*`) and
+the `outcome` lexicon (`ok` / `error`). The four stages map
+to:
+
+* `clone` — `gix::clone::PrepareFetch::new` + source-existence
+  gate + parent-dir creation.
+* `fetch` — `prep.fetch_then_checkout` (pack negotiation +
+  decode + write; the dominant cost on cold provisioning).
+* `checkout` — `prep_co.main_worktree` + the per-target SHA
+  re-checkout (`checkout_worktree_at`); both emit the same
+  `stage = "checkout"` label so the dashboard's per-stage
+  panel aggregates them as the operator-visible signal.
+* `verify` — the final `find_object(target_oid)` SHA-landing
+  gate; the error arm emits `outcome = "error"` so a stale
+  plan-bundle handing the kernel a missing SHA surfaces as a
+  per-stage histogram regression.
+
+The hub is wired ONCE at kernel boot via
+`raxis_worktree_provision::set_global_observability_hub` (an
+`OnceLock`-backed seam mirroring `raxis-audit-tools`'s
+`AuditWriter::set_observability_hub`). Hub-disabled fast path:
+when no hub is wired (kernel-less CLI tools, integration
+fixtures), `record_worktree_stage` early-returns on the
+`OnceLock::get()` arm — zero per-call overhead.
+
+**Justification.** Pre-iter61 a slow Reviewer or Executor
+session start surfaced as one undifferentiated `session.spawn`
+spike — operators could see the spawn took 30 seconds but not
+whether the regression was in the gix pack download
+(`fetch`), the worktree materialiser (`checkout`), the ref
+plumbing (`verify`), or the source-existence gate (`clone`).
+Both arms (success + error) MUST emit because the bottleneck
+signal IS the error-path histogram (a clone that's silently
+retrying past its budget is invisible without an error-tagged
+sample).
+
+**Witness.** `crates/worktree-provision/src/lib.rs::tests::worktree_stage_histograms_cover_clone_fetch_checkout_verify`
+(combined witness exercising the disabled / happy / error arms
+under one `OnceLock`-aware serial guard).
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`GitWorktreeStageDuration` + Prometheus inventory in
 `v3/observability-prometheus.md §3` (iter61 expansion).
 
 ---

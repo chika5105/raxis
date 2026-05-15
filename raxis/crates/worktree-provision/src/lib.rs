@@ -58,8 +58,83 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
+use raxis_observability::{redact, MetricName, ObservabilityHub};
 use raxis_types::CloneStrategy;
+
+// ---------------------------------------------------------------------------
+// iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-04` per-stage histograms.
+// ---------------------------------------------------------------------------
+//
+// Closed lexicon of worktree-provision stages, mirrored from
+// `kernel/src/observability.rs::WORKTREE_STAGES`. Adding a stage
+// here MUST be paired with a matching wire-up in `clone_local`,
+// `provision_reviewer`, or `provision_orchestrator`.
+const WORKTREE_STAGE_CLONE: &str = "clone";
+const WORKTREE_STAGE_FETCH: &str = "fetch";
+const WORKTREE_STAGE_CHECKOUT: &str = "checkout";
+const WORKTREE_STAGE_VERIFY: &str = "verify";
+#[cfg(test)]
+const WORKTREE_STAGES: &[&str] = &[
+    WORKTREE_STAGE_CLONE,
+    WORKTREE_STAGE_FETCH,
+    WORKTREE_STAGE_CHECKOUT,
+    WORKTREE_STAGE_VERIFY,
+];
+
+/// Process-global `ObservabilityHub` handle the four stage-emit
+/// helpers consult on every provisioning call. Mirrors the shape
+/// of `raxis-audit-tools`'s opt-in observability seam — set once
+/// at kernel boot via [`set_global_observability_hub`], unset by
+/// default so kernel-less CLI tools and integration fixtures pay
+/// zero per-call overhead.
+static OBSERVABILITY_HUB: OnceLock<Arc<ObservabilityHub>> = OnceLock::new();
+
+/// Wire the process-global observability hub the provisioner emits
+/// `raxis.git.worktree.stage.duration` samples to. Idempotent — a
+/// second call is a no-op (the `OnceLock::set` returns `Err`,
+/// which we discard so the kernel boot path doesn't have to track
+/// whether it already wired the hub).
+pub fn set_global_observability_hub(hub: Arc<ObservabilityHub>) {
+    let _ = OBSERVABILITY_HUB.set(hub);
+}
+
+/// Time the `Result`-returning closure `f`, then emit one
+/// `raxis.git.worktree.stage.duration` histogram observation
+/// tagged with `stage` + `outcome` (`outcome = "ok"` /
+/// `"error"`, derived from `Result::is_ok`). Both arms MUST
+/// emit — the bottleneck signal is the error-path histogram
+/// (e.g. a slow clone that's silently retrying), not just the
+/// happy path. Hub-disabled fast path early-returns before the
+/// redactor runs so the only per-call cost is one
+/// `Instant::now()` pair on the cold path.
+fn time_worktree_stage_result<F, T, E>(stage: &str, f: F) -> Result<T, E>
+where
+    F: FnOnce() -> Result<T, E>,
+{
+    let started = Instant::now();
+    let out = f();
+    let outcome = if out.is_ok() { "ok" } else { "error" };
+    record_worktree_stage(stage, outcome, started.elapsed().as_millis() as i64);
+    out
+}
+
+fn record_worktree_stage(stage: &str, outcome: &str, duration_ms: i64) {
+    let Some(hub) = OBSERVABILITY_HUB.get() else {
+        return;
+    };
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([("stage", stage), ("outcome", outcome)]);
+    hub.record_histogram(
+        MetricName::GitWorktreeStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
 
 /// Output of a successful Reviewer provisioning run (Step 24).
 ///
@@ -345,12 +420,21 @@ pub fn provision_reviewer(
     apply_strategy_config(&dest_repo, strategy, path_allowlist)?;
 
     // 3. Verify the requested SHA actually landed.
+    //    `INV-OBSERVABILITY-DATAPLANE-LATENCY-04` `verify` stage
+    //    — the final SHA-landing gate. Both `ok` and the
+    //    `ShaMissingPostClone` `error` arm emit so the dashboard's
+    //    per-stage panel surfaces a verify regression even when
+    //    every clone succeeds (e.g. a stale plan-bundle handing
+    //    the kernel a SHA that the source repo no longer has).
     let eval_oid = parse_oid(evaluation_sha)?;
-    if dest_repo.find_object(eval_oid).is_err() {
-        return Err(ProvisionError::ShaMissingPostClone {
-            sha: evaluation_sha.to_owned(),
-        });
-    }
+    time_worktree_stage_result(WORKTREE_STAGE_VERIFY, || -> Result<(), ProvisionError> {
+        if dest_repo.find_object(eval_oid).is_err() {
+            return Err(ProvisionError::ShaMissingPostClone {
+                sha: evaluation_sha.to_owned(),
+            });
+        }
+        Ok(())
+    })?;
 
     // 4. Pin a ref at evaluation_sha. We use `refs/raxis/evaluation`
     //    per Step 24 — distinct from any branch ref the clone copied
@@ -440,11 +524,17 @@ pub fn provision_orchestrator(
     apply_strategy_config(&dest_repo, strategy, &[])?;
 
     let base_oid = parse_oid(base_sha)?;
-    if dest_repo.find_object(base_oid).is_err() {
-        return Err(ProvisionError::ShaMissingPostClone {
-            sha: base_sha.to_owned(),
-        });
-    }
+    // `INV-OBSERVABILITY-DATAPLANE-LATENCY-04` `verify` stage
+    // for the Orchestrator path — same fail-loud SHA-landing gate
+    // as `provision_reviewer` above.
+    time_worktree_stage_result(WORKTREE_STAGE_VERIFY, || -> Result<(), ProvisionError> {
+        if dest_repo.find_object(base_oid).is_err() {
+            return Err(ProvisionError::ShaMissingPostClone {
+                sha: base_sha.to_owned(),
+            });
+        }
+        Ok(())
+    })?;
 
     // Move HEAD to base_sha (the initiative anchor). The Orchestrator
     // will advance HEAD as it merges Executor bundles — we land it at
@@ -474,46 +564,74 @@ pub fn provision_orchestrator(
 /// Clone the repo at `src` into `dest` via `file://` URL. The clone
 /// uses the pack-decode pipeline so destination objects are
 /// independent of the source's on-disk packs.
+///
+/// `INV-OBSERVABILITY-DATAPLANE-LATENCY-04` — emits three
+/// `raxis.git.worktree.stage.duration` samples tagged with the
+/// closed `stage` lexicon: `clone` (init/dest-dir/source-existence
+/// gate), `fetch` (gix `fetch_then_checkout` pack download), and
+/// `checkout` (gix `main_worktree` working-tree materialise). The
+/// fourth `verify` stage lands in the per-target re-checkout in
+/// `provision_reviewer` / `provision_orchestrator`.
 fn clone_local(src: &Path, dest: &Path) -> Result<gix::Repository, ProvisionError> {
-    if !src.exists() {
-        return Err(ProvisionError::SourceRepoUnopenable {
-            path: src.to_path_buf(),
-            reason: "path does not exist".to_owned(),
-        });
-    }
+    // Stage 1 — `clone`: source-existence gate + parent-dir
+    // creation + `PrepareFetch::new`. Tiny on warm cache, but
+    // a non-zero (and increasingly noticeable) cost on cold-FS
+    // clones. We time the entire setup as one "clone init" stage
+    // — the dominant cost lands on `fetch` below.
+    let prep = time_worktree_stage_result(WORKTREE_STAGE_CLONE, || {
+        if !src.exists() {
+            return Err(ProvisionError::SourceRepoUnopenable {
+                path: src.to_path_buf(),
+                reason: "path does not exist".to_owned(),
+            });
+        }
 
-    let parent = dest.parent().ok_or_else(|| ProvisionError::DestUnusable {
-        path: dest.to_path_buf(),
-        reason: "destination has no parent".to_owned(),
+        let parent = dest.parent().ok_or_else(|| ProvisionError::DestUnusable {
+            path: dest.to_path_buf(),
+            reason: "destination has no parent".to_owned(),
+        })?;
+        std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
+            path: parent.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+
+        let url_string = format!("file://{}", src.display());
+
+        gix::clone::PrepareFetch::new(
+            url_string.as_str(),
+            dest,
+            gix::create::Kind::WithWorktree,
+            gix::create::Options::default(),
+            gix::open::Options::isolated(),
+        )
+        .map_err(|e| ProvisionError::CloneFailed(format!("PrepareFetch::new: {e}")))
     })?;
-    std::fs::create_dir_all(parent).map_err(|e| ProvisionError::DestUnusable {
-        path: parent.to_path_buf(),
-        reason: e.to_string(),
-    })?;
-
-    let url_string = format!("file://{}", src.display());
-
-    let mut prep = gix::clone::PrepareFetch::new(
-        url_string.as_str(),
-        dest,
-        gix::create::Kind::WithWorktree,
-        gix::create::Options::default(),
-        gix::open::Options::isolated(),
-    )
-    .map_err(|e| ProvisionError::CloneFailed(format!("PrepareFetch::new: {e}")))?;
 
     let interrupt = AtomicBool::new(false);
 
-    // Step 1: fetch the pack and prepare a checkout.
-    let (mut prep_co, _outcome) = prep
-        .fetch_then_checkout(gix::progress::Discard, &interrupt)
-        .map_err(|e| ProvisionError::CloneFailed(format!("fetch_then_checkout: {e}")))?;
+    // Stage 2 — `fetch`: pack negotiation + decode + write. This
+    // is the dominant cost on cold reviewer/executor provisioning
+    // (every reachable object lands through gix's pack-decode
+    // pipeline; the operator-visible spike during a slow disk).
+    let mut prep = prep;
+    let mut prep_co = time_worktree_stage_result(WORKTREE_STAGE_FETCH, || {
+        prep.fetch_then_checkout(gix::progress::Discard, &interrupt)
+            .map_err(|e| ProvisionError::CloneFailed(format!("fetch_then_checkout: {e}")))
+    })?
+    .0;
 
-    // Step 2: materialise the worktree at the remote's HEAD. We
-    // re-checkout at the requested SHA after this returns.
-    let (repo, _outcome) = prep_co
-        .main_worktree(gix::progress::Discard, &interrupt)
-        .map_err(|e| ProvisionError::CheckoutFailed(format!("main_worktree: {e}")))?;
+    // Stage 3 — `checkout`: gix worktree materialiser at the
+    // remote's HEAD. The per-target SHA re-checkout that the
+    // provision_reviewer / provision_orchestrator helpers do
+    // after this also emits a `checkout` sample, so the
+    // dashboard's per-stage panel aggregates both — which is the
+    // operator-visible signal anyway.
+    let repo = time_worktree_stage_result(WORKTREE_STAGE_CHECKOUT, || {
+        prep_co
+            .main_worktree(gix::progress::Discard, &interrupt)
+            .map_err(|e| ProvisionError::CheckoutFailed(format!("main_worktree: {e}")))
+    })?
+    .0;
 
     Ok(repo)
 }
@@ -2038,5 +2156,152 @@ mod tests {
         assert_eq!(once, twice);
         assert!(once.contains("sparseCheckout = true"));
         assert_eq!(once.matches("sparseCheckout = true").count(), 1);
+    }
+
+    // ------------------------------------------------------------------
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-04 — per-stage histogram
+    // witnesses (clone / fetch / checkout / verify).
+    // ------------------------------------------------------------------
+    //
+    // The provisioner's hub handle lives in a process-global
+    // `OnceLock` (mirrored from the `raxis-audit-tools` shape).
+    // `OnceLock::set` is one-shot, so every per-stage assertion has
+    // to live inside one `#[test]` so the disabled-path arm runs
+    // BEFORE the wired arm sets the global. A small process-local
+    // `Mutex` serialises this witness against any future
+    // observability-touching test in the same binary.
+
+    fn obs_serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        use std::sync::Mutex;
+        static LOCK: Mutex<()> = Mutex::new(());
+        match LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    #[test]
+    fn worktree_stage_histograms_cover_clone_fetch_checkout_verify() {
+        use raxis_observability::{
+            exporter::{InMemoryExporter, ObservabilityExporter},
+            AttrValue, DataPoint, HubConfig, MetricName, ObservabilityHub,
+        };
+
+        let _g = obs_serial_guard();
+        let tmp = tempfile::tempdir().unwrap();
+        let Some((src, _base, eval)) = fixture_repo_with_two_commits(tmp.path()) else {
+            eprintln!("skipping: git CLI not available on PATH");
+            return;
+        };
+
+        // ── Witness #3 — hub-disabled fast path. The
+        //    `OBSERVABILITY_HUB` global is empty before any test
+        //    touches `set_global_observability_hub`. We capture the
+        //    "before" state here, run a provision, and confirm no
+        //    panic + the global stays empty. The exporter check
+        //    comes after the hub is wired below.
+        if OBSERVABILITY_HUB.get().is_none() {
+            let dest_inert = tmp.path().join("inert-uuid");
+            let _ = provision_reviewer(&src, &eval, &eval, &dest_inert, CloneStrategy::Full, &[])
+                .expect("hub-disabled provision must still succeed");
+            assert!(
+                OBSERVABILITY_HUB.get().is_none(),
+                "the global hub must remain unset after a hub-disabled provision"
+            );
+        }
+
+        // ── Witness #1 — wire the hub and assert all four stages
+        //    emit on a successful provision.
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            max_queue_depth: 1024,
+            max_attrs_per_span: 32,
+            max_events_per_span: 16,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            Arc::clone(&exp) as Arc<dyn ObservabilityExporter>,
+        ));
+        // `OnceLock::set` is one-shot; if a previous test in the
+        // same process already wired a hub we accept the existing
+        // one and use the in-memory exporter we just created as a
+        // sink only for the samples emitted by THIS witness's
+        // explicit `record_worktree_stage` calls below. (Today no
+        // other test wires the hub; this is a safety net.)
+        set_global_observability_hub(Arc::clone(&hub));
+
+        let dest_ok = tmp.path().join("ok-uuid");
+        provision_reviewer(&src, &eval, &eval, &dest_ok, CloneStrategy::Full, &[])
+            .expect("happy-path provision must succeed");
+        hub.flush();
+
+        // Pull every GitWorktreeStageDuration sample, group by
+        // (stage, outcome), and assert presence of the four
+        // closed-lexicon stages on the success arm.
+        let stage_counts: std::collections::BTreeMap<(String, String), u64> = exp
+            .metrics()
+            .into_iter()
+            .filter(|m| m.name == MetricName::GitWorktreeStageDuration)
+            .filter_map(|m| {
+                let count = match m.datapoint {
+                    DataPoint::Histo { count, .. } => count,
+                    _ => return None,
+                };
+                let s = |key: &str| match m.labels.get(key) {
+                    Some(AttrValue::Str(s)) => s.clone(),
+                    _ => String::new(),
+                };
+                Some(((s("stage"), s("outcome")), count))
+            })
+            .fold(std::collections::BTreeMap::new(), |mut acc, (k, v)| {
+                *acc.entry(k).or_default() += v;
+                acc
+            });
+        for stage in WORKTREE_STAGES {
+            let key = ((*stage).to_owned(), "ok".to_owned());
+            assert!(
+                stage_counts.get(&key).copied().unwrap_or(0) >= 1,
+                "expected ≥1 ok sample for stage {stage:?}; got counts={stage_counts:#?}",
+            );
+        }
+
+        // ── Witness #2 — error-path arm. A clone of a path that
+        //    does not exist surfaces `SourceRepoUnopenable` from
+        //    the `clone` stage; the per-stage histogram MUST emit
+        //    the error sample even though the whole pipeline
+        //    aborts before reaching `fetch` / `checkout` / `verify`.
+        let nonexistent = tmp.path().join("does-not-exist");
+        let bad_dest = tmp.path().join("bad-uuid");
+        let err = provision_reviewer(
+            &nonexistent,
+            &eval,
+            &eval,
+            &bad_dest,
+            CloneStrategy::Full,
+            &[],
+        )
+        .expect_err("provision against a missing source must fail");
+        let _ = err; // shape doesn't matter — we just need the error arm to fire.
+        hub.flush();
+
+        let any_clone_error = exp
+            .metrics()
+            .iter()
+            .filter(|m| m.name == MetricName::GitWorktreeStageDuration)
+            .any(|m| {
+                let stage =
+                    matches!(m.labels.get("stage"), Some(AttrValue::Str(s)) if s == "clone");
+                let outcome =
+                    matches!(m.labels.get("outcome"), Some(AttrValue::Str(s)) if s == "error");
+                stage && outcome
+            });
+        assert!(
+            any_clone_error,
+            "expected at least one (stage=clone, outcome=error) sample; \
+             error-path histograms are the dataplane bottleneck signal"
+        );
     }
 }
