@@ -100,8 +100,8 @@
 | Executor image offline-first deps surface — V3 (iter56→57) | INV-EXECUTOR-IMAGE-RUST-OFFLINE-01, INV-EXECUTOR-EGRESS-OFFLINE-FIRST-01 | 2 |
 | Observability latency-metric wiring — V3 (iter60) | INV-OBSERVABILITY-LATENCY-METRICS-WIRED-01, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-02, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-03, INV-OBSERVABILITY-LATENCY-METRICS-WIRED-04 | 4 |
 | Canonical image trust anchor — V3 (iter60) | INV-IMAGE-TRUST-ANCHOR-FAIL-LOUD-01, INV-IMAGE-VERIFY-REJECT-MISMATCH-01 | 2 |
-| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05 | 3 |
-| **Total** | | **140** |
+| Dataplane bottleneck instrumentation — V3 (iter61) | INV-OBSERVABILITY-DATAPLANE-LATENCY-03, INV-OBSERVABILITY-DATAPLANE-LATENCY-04, INV-OBSERVABILITY-DATAPLANE-LATENCY-05, INV-OBSERVABILITY-DATAPLANE-LATENCY-06 | 4 |
+| **Total** | | **141** |
 
 ---
 
@@ -9924,6 +9924,60 @@ arms under one `OnceLock`-aware serial guard).
 
 **Canonical home.** `v3/otel-observability.md §8` row
 `IpcFrameStageDuration` + Prometheus inventory in
+`v3/observability-prometheus.md §3` (iter61 expansion).
+
+---
+
+### INV-OBSERVABILITY-DATAPLANE-LATENCY-06 — Transparent-proxy admission emits one `tproxy_admit` stage histogram per verdict (admit / deny)
+
+**Statement.** Every successful `service.admit(...)` call inside
+`raxis_egress_admission::run_admission_loop` (and the
+`_with_stall_tracker` variant) MUST produce one
+`raxis.gateway.stage.duration` histogram observation tagged
+`stage = "tproxy_admit"`, `provider = "tproxy"`, and `outcome ∈
+{"ok", "denied"}` — `ok` for `AdmissionVerdict::Admit`, `denied`
+for every `AdmissionVerdict::Deny(_)` reason. The `stage` and
+`outcome` lexicons are pinned by
+`crates/egress-admission/src/lib.rs::GATEWAY_STAGE_TPROXY_ADMIT`,
+`TPROXY_ADMIT_OUTCOME_OK`, and `TPROXY_ADMIT_OUTCOME_DENIED`.
+
+The hub is wired ONCE at kernel boot via
+`raxis_egress_admission::set_global_observability_hub` (an
+`OnceLock`-backed seam mirroring the worktree-provision /
+IPC-frame crates). Hub-disabled fast path: when no hub is wired
+(stand-alone admission integration tests, planner-side fixtures,
+kernel-less CLI tools), `record_tproxy_admit_stage` early-returns
+on the `OnceLock::get()` arm — zero per-verdict overhead.
+
+**Scope note.** This commit wires only the `tproxy_admit` arm
+of the `raxis.gateway.stage.duration` histogram family. The
+remaining three closed-lexicon stages (`dns`, `tls`,
+`first_byte`) live INSIDE the gateway subprocess. Wiring them
+from the kernel requires either (a) extending the
+`GatewayMessage::FetchResponse` wire shape to surface per-stage
+timings, or (b) standing up an independent `ObservabilityHub`
+inside the gateway process. Both paths are larger than this
+commit's scope and are deferred to a follow-up commit; the
+empty-arm panels in the dataplane-bottlenecks Grafana dashboard
+will populate as soon as the wire seam lands.
+
+**Justification.** The transparent-proxy admission decision is
+the kernel-side dataplane stage every per-VM outbound flow
+funnels through. Without per-verdict timing the operator could
+see "outbound calls are slow" via the gateway-fetch end-to-end
+histogram but could not localise the cost to (a) admission
+policy evaluation (allowlist match cascade against a large
+`[egress] patterns` list), (b) DNS / TLS / upstream first-byte,
+or (c) gateway-internal upstream latency. The `tproxy_admit`
+histogram now carries the first of those four signals.
+
+**Witness.** `crates/egress-admission/src/lib.rs::tests::admission_loop_tproxy_admit_histograms_cover_admit_and_deny_and_disabled`
+(combined witness exercising the disabled / admit / deny arms
+under one `OnceLock`-aware serial guard, mirroring the IPC-frame
+witness pattern).
+
+**Canonical home.** `v3/otel-observability.md §8` row
+`GatewayStageDuration` + Prometheus inventory in
 `v3/observability-prometheus.md §3` (iter61 expansion).
 
 ---

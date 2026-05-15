@@ -3552,6 +3552,7 @@ name = "raxis-egress-admission"
 version = "0.1.0"
 dependencies = [
  "raxis-audit-tools",
+ "raxis-observability",
  "raxis-policy",
  "raxis-test-support",
  "raxis-tproxy-protocol",

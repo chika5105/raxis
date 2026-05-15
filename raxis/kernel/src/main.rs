@@ -636,6 +636,19 @@ async fn main() {
     // `OnceLock::set` so re-entrant test boots don't panic.
     raxis_ipc::frame::set_global_observability_hub(Arc::clone(&observability_hub));
 
+    // INV-OBSERVABILITY-DATAPLANE-LATENCY-06 — pin the egress-
+    // admission loop's process-global hub so every transparent-
+    // proxy admit/deny verdict emits one
+    // `raxis.gateway.stage.duration` sample tagged
+    // `stage="tproxy_admit"` + outcome (`ok` for Admit, `denied`
+    // for Deny). The admission loop runs per VM session; wiring
+    // the hub once at boot covers every spawned session lifetime.
+    // Same `OnceLock` idempotency contract as the worktree /
+    // IPC frame hubs above — a second `set_global_observability_hub`
+    // call returns `Err` from `OnceLock::set` and is discarded
+    // so re-entrant test boots don't panic.
+    raxis_egress_admission::set_global_observability_hub(Arc::clone(&observability_hub));
+
     // Chain the streaming-audit bridge on top of the notifying
     // decorator so:
     //   1. every audit emit reaches the JSONL writer first

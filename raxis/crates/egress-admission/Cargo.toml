@@ -20,6 +20,15 @@ path = "src/lib.rs"
 raxis-tproxy-protocol = { workspace = true }
 raxis-policy          = { workspace = true }
 raxis-audit-tools     = { workspace = true }
+# iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-06`. The
+# admission loop times every `service.admit()` call (the
+# transparent-proxy admit/deny decision) and emits one
+# `raxis.gateway.stage.duration` histogram sample tagged
+# `stage="tproxy_admit"` per verdict when an
+# `ObservabilityHub` is wired via `set_global_observability_hub`.
+# Optional handle; the loop remains usable without a hub
+# (CLI tools, stand-alone integration tests).
+raxis-observability   = { workspace = true }
 
 tokio                 = { workspace = true }
 serde                 = { workspace = true }

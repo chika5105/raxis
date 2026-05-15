@@ -41,15 +41,76 @@ pub use stall_tracker::{
 };
 
 use std::collections::HashSet;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
+use std::time::Instant;
 
 use raxis_audit_tools::{AuditEventKind, AuditSink, AuditWriterError};
+use raxis_observability::{redact, MetricName, ObservabilityHub};
 use raxis_tproxy_protocol::{
     decode_request, encode_response, AdmissionProtocol, DenyReason, FrameError,
     ProxyAdmissionRequest, ProxyAdmissionResponse,
 };
 use thiserror::Error;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+// ---------------------------------------------------------------------------
+// iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-06` per-verdict histogram.
+// ---------------------------------------------------------------------------
+//
+// Closed lexicon mirrored from
+// `kernel/src/observability.rs::GATEWAY_STAGES`. The admission
+// loop only ever emits the `tproxy_admit` stage; the other three
+// (`dns`, `tls`, `first_byte`) live behind the gateway-subprocess
+// wire boundary and ship in a follow-up commit.
+const GATEWAY_STAGE_TPROXY_ADMIT: &str = "tproxy_admit";
+const TPROXY_ADMIT_OUTCOME_OK: &str = "ok";
+const TPROXY_ADMIT_OUTCOME_DENIED: &str = "denied";
+/// Deny verdicts have no upstream provider — the proxy admit
+/// decision is the final stop on the path. We tag them with a
+/// canonical `tproxy` provider so the dashboard pivots stay
+/// total against the closed lexicon.
+const TPROXY_PROVIDER_LABEL: &str = "tproxy";
+
+/// Process-global `ObservabilityHub` handle the admission loop's
+/// per-verdict timer consults. Mirrors `raxis-ipc::frame` and
+/// `raxis-worktree-provision` — set once at kernel boot via
+/// [`set_global_observability_hub`], unset by default so kernel-
+/// less CLI tools, planner-side fixtures, and the standalone
+/// admission round-trip integration tests pay zero per-verdict
+/// overhead.
+static OBSERVABILITY_HUB: OnceLock<Arc<ObservabilityHub>> = OnceLock::new();
+
+/// Wire the process-global observability hub the admission loop
+/// emits `raxis.gateway.stage.duration` samples to. Idempotent —
+/// a second call is a no-op (`OnceLock::set` returns `Err`,
+/// which we discard so re-entrant test boots don't panic).
+pub fn set_global_observability_hub(hub: Arc<ObservabilityHub>) {
+    let _ = OBSERVABILITY_HUB.set(hub);
+}
+
+/// Emit one `raxis.gateway.stage.duration` histogram observation
+/// tagged `stage="tproxy_admit"` + the per-verdict outcome (`ok`
+/// for Admit, `denied` for Deny). Hub-disabled fast path early-
+/// returns on the `OnceLock::get()` arm — zero per-verdict
+/// overhead.
+fn record_tproxy_admit_stage(outcome: &str, duration_ms: i64) {
+    let Some(hub) = OBSERVABILITY_HUB.get() else {
+        return;
+    };
+    if !hub.enabled() {
+        return;
+    }
+    let labels = redact::attrs([
+        ("provider", TPROXY_PROVIDER_LABEL),
+        ("stage", GATEWAY_STAGE_TPROXY_ADMIT),
+        ("outcome", outcome),
+    ]);
+    hub.record_histogram(
+        MetricName::GatewayStageDuration,
+        labels,
+        duration_ms.max(0) as f64,
+    );
+}
 
 // ---------------------------------------------------------------------------
 // Decision types
@@ -377,7 +438,25 @@ where
         full.extend_from_slice(&body);
         let (req, _consumed) = decode_request(&full)?;
 
+        // INV-OBSERVABILITY-DATAPLANE-LATENCY-06 — time the
+        // policy-aware admission decision. `service.admit` is
+        // pure CPU (no I/O), so the histogram sample is the
+        // wall-clock cost of the allowlist + redirected-port
+        // + credential-proxy-bypass match cascade. The hub-
+        // disabled fast path inside `record_tproxy_admit_stage`
+        // collapses this to a single `OnceLock::get` on the
+        // CLI / unit-test path.
+        let admit_started = Instant::now();
         let decision = service.admit(&session_id, &req);
+        let admit_outcome = match &decision.verdict {
+            AdmissionVerdict::Admit => TPROXY_ADMIT_OUTCOME_OK,
+            AdmissionVerdict::Deny(_) => TPROXY_ADMIT_OUTCOME_DENIED,
+        };
+        record_tproxy_admit_stage(
+            admit_outcome,
+            admit_started.elapsed().as_millis().min(i64::MAX as u128) as i64,
+        );
+
         let response_bytes = encode_response(&decision.to_response())?;
         writer.write_all(&response_bytes).await?;
         writer.flush().await?;
@@ -568,5 +647,199 @@ mod tests {
             &req(Some("api.example.com"), 443, AdmissionProtocol::Https),
         );
         assert!(d.is_admit());
+    }
+
+    // ---------------------------------------------------------------------
+    // iter61 — `INV-OBSERVABILITY-DATAPLANE-LATENCY-06` witnesses.
+    // ---------------------------------------------------------------------
+    //
+    // The admission loop's per-verdict timer emits one
+    // `raxis.gateway.stage.duration` histogram observation per
+    // `service.admit()` call (closed-lexicon labels:
+    // `stage="tproxy_admit"`, `outcome ∈ {ok, denied}`). The
+    // module-global `OBSERVABILITY_HUB` is `OnceLock`-backed and
+    // cannot be reset mid-process; one combined witness exercises
+    // the disabled-path → happy-path → deny-path arms in order
+    // under a process-local serial guard, mirroring the same
+    // pattern used by `raxis-ipc::frame` and
+    // `raxis-worktree-provision`.
+
+    use raxis_observability::{
+        exporter::InMemoryExporter, AttrValue, DataPoint, HubConfig, MetricName,
+        ObservabilityExporter, ObservabilityHub,
+    };
+    use raxis_test_support::FakeAuditSink;
+    use raxis_tproxy_protocol::encode_request;
+    use std::sync::Mutex;
+    use tokio::io::duplex;
+
+    fn obs_serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        static LOCK: Mutex<()> = Mutex::new(());
+        match LOCK.lock() {
+            Ok(g) => g,
+            Err(p) => p.into_inner(),
+        }
+    }
+
+    fn tproxy_admit_counts(exp: &InMemoryExporter) -> std::collections::BTreeMap<String, u64> {
+        let mut out: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+        for m in exp.metrics() {
+            if m.name != MetricName::GatewayStageDuration {
+                continue;
+            }
+            let stage_is_tproxy_admit = matches!(
+                m.labels.get("stage"),
+                Some(AttrValue::Str(s)) if s == GATEWAY_STAGE_TPROXY_ADMIT,
+            );
+            if !stage_is_tproxy_admit {
+                continue;
+            }
+            let outcome = match m.labels.get("outcome") {
+                Some(AttrValue::Str(s)) => s.clone(),
+                _ => String::new(),
+            };
+            let count = match m.datapoint {
+                DataPoint::Histo { count, .. } => count,
+                _ => continue,
+            };
+            *out.entry(outcome).or_insert(0) += count;
+        }
+        out
+    }
+
+    /// Drive one `ProxyAdmissionRequest` through `run_admission_loop`
+    /// end-to-end (encode → write into a duplex → loop reads →
+    /// decision → response written → audit emit) using a
+    /// deterministic allowlist. Closes the client write half so
+    /// the loop returns `Ok(())` on the next read EOF rather than
+    /// blocking.
+    async fn drive_loop_with_one_request(
+        svc: Arc<PolicyAdmissionService>,
+        req: ProxyAdmissionRequest,
+    ) -> Arc<FakeAuditSink> {
+        use tokio::io::AsyncWriteExt;
+        let (mut client_w, server_r) = duplex(64 * 1024);
+        let (server_w, mut client_r) = duplex(64 * 1024);
+        let request_bytes = encode_request(&req).unwrap();
+        client_w.write_all(&request_bytes).await.unwrap();
+        drop(client_w);
+
+        let audit: Arc<FakeAuditSink> = Arc::new(FakeAuditSink::new());
+        let audit_dyn: Arc<dyn AuditSink> = audit.clone();
+        let drain = tokio::spawn(async move {
+            use tokio::io::AsyncReadExt;
+            let mut sink = Vec::new();
+            let _ = client_r.read_to_end(&mut sink).await;
+        });
+        run_admission_loop(server_r, server_w, svc, audit_dyn, "sess-obs".to_owned())
+            .await
+            .unwrap();
+        drain.await.ok();
+        audit
+    }
+
+    /// Combined disabled-path / admit-path / deny-path witness.
+    /// The serial guard MutexGuard is held across awaits — see
+    /// the matching note on `raxis-ipc::frame::frame_stage_…`
+    /// for the same single-runtime-no-deadlock argument.
+    #[allow(clippy::await_holding_lock)]
+    #[tokio::test]
+    async fn admission_loop_tproxy_admit_histograms_cover_admit_and_deny_and_disabled() {
+        let _g = obs_serial_guard();
+
+        // ── Witness #1 — hub-disabled fast path. The
+        //    `OBSERVABILITY_HUB` global is empty before any test
+        //    in this binary touches `set_global_observability_hub`.
+        //    Drive one admit through the loop with the global
+        //    unset and confirm no panic + the global remains
+        //    unset.
+        if OBSERVABILITY_HUB.get().is_none() {
+            let svc = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+                exact_hosts: vec!["api.anthropic.com".into()],
+                ..Default::default()
+            }));
+            let audit = drive_loop_with_one_request(
+                svc,
+                ProxyAdmissionRequest {
+                    connection_id: 0,
+                    original_dst_ip: "10.0.0.10".to_owned(),
+                    original_dst_port: 443,
+                    host_or_sni: Some("api.anthropic.com".to_owned()),
+                    protocol: AdmissionProtocol::Https,
+                },
+            )
+            .await;
+            // Functional behaviour unchanged: the audit sink
+            // still receives one `TransparentProxyAdmitted` event.
+            assert_eq!(audit.events().len(), 1);
+            assert!(
+                OBSERVABILITY_HUB.get().is_none(),
+                "the global hub must remain unset after a hub-disabled round-trip",
+            );
+        }
+
+        // ── Witness #2 — wire the hub and exercise the admit
+        //    + deny verdicts. Every `service.admit()` call
+        //    must emit one `GatewayStageDuration` sample under
+        //    `stage="tproxy_admit"`.
+        let exp = Arc::new(InMemoryExporter::new());
+        let cfg = HubConfig {
+            enabled: true,
+            sample_rate: 1.0,
+            ..HubConfig::default()
+        };
+        let hub = Arc::new(ObservabilityHub::new(
+            cfg,
+            Arc::clone(&exp) as Arc<dyn ObservabilityExporter>,
+        ));
+        set_global_observability_hub(Arc::clone(&hub));
+
+        // Admit path: SNI in allowlist, redirected port.
+        let svc_admit = Arc::new(PolicyAdmissionService::new(EgressAllowlist {
+            exact_hosts: vec!["api.anthropic.com".into()],
+            ..Default::default()
+        }));
+        let admit_audit = drive_loop_with_one_request(
+            svc_admit,
+            ProxyAdmissionRequest {
+                connection_id: 1,
+                original_dst_ip: "10.0.0.1".to_owned(),
+                original_dst_port: 443,
+                host_or_sni: Some("api.anthropic.com".to_owned()),
+                protocol: AdmissionProtocol::Https,
+            },
+        )
+        .await;
+        assert_eq!(admit_audit.events().len(), 1);
+
+        // Deny path: SNI not in allowlist.
+        let svc_deny = Arc::new(PolicyAdmissionService::new(EgressAllowlist::default()));
+        let deny_audit = drive_loop_with_one_request(
+            svc_deny,
+            ProxyAdmissionRequest {
+                connection_id: 2,
+                original_dst_ip: "10.0.0.2".to_owned(),
+                original_dst_port: 443,
+                host_or_sni: Some("evil.example.com".to_owned()),
+                protocol: AdmissionProtocol::Https,
+            },
+        )
+        .await;
+        assert_eq!(deny_audit.events().len(), 1);
+
+        hub.flush();
+        let counts = tproxy_admit_counts(&exp);
+        assert!(
+            counts.get(TPROXY_ADMIT_OUTCOME_OK).copied().unwrap_or(0) >= 1,
+            "expected ≥1 tproxy_admit ok sample; got {counts:?}",
+        );
+        assert!(
+            counts
+                .get(TPROXY_ADMIT_OUTCOME_DENIED)
+                .copied()
+                .unwrap_or(0)
+                >= 1,
+            "expected ≥1 tproxy_admit denied sample; got {counts:?}",
+        );
     }
 }
