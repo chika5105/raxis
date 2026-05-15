@@ -535,3 +535,59 @@ async fn sse_authenticated_unknown_session_returns_404_envelope() {
 
     handle.shutdown().await.expect("shutdown");
 }
+
+// ---------------------------------------------------------------------------
+// `INV-DASHBOARD-HEALTH-NO-CACHE-01` — every health route MUST advertise
+// `Cache-Control: no-store, …` so the dashboard FE's 5 s `refetchInterval`
+// reaches a fresh kernel snapshot on every tick. Without this, browser
+// heuristic-caching of header-free 200s makes the Health page appear
+// frozen even while React Query is firing its refetches (the polling
+// hits the cache, not the kernel). Witness for Bug 1
+// (`raxis-dashboard-fe` Health refresh).
+// ---------------------------------------------------------------------------
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn health_routes_emit_no_store_cache_control() {
+    let (handle, base, token, _data) = serve_authed_in_memory().await;
+    let client = reqwest::Client::new();
+
+    for path in &[
+        "/api/health",
+        "/api/health/subsystems",
+        "/api/health/kernel-lifecycle",
+    ] {
+        let res = client
+            .get(format!("{base}{path}"))
+            .header(reqwest::header::AUTHORIZATION, format!("Bearer {token}"))
+            .send()
+            .await
+            .unwrap_or_else(|e| panic!("send {path}: {e}"));
+        assert_eq!(
+            res.status(),
+            200,
+            "{path} must return 200 with the in-memory fixture, got {}",
+            res.status()
+        );
+        let cc = res
+            .headers()
+            .get(reqwest::header::CACHE_CONTROL)
+            .unwrap_or_else(|| panic!("{path} response missing Cache-Control header"))
+            .to_str()
+            .unwrap_or_else(|e| panic!("{path} Cache-Control is not ASCII: {e}"))
+            .to_owned();
+        assert!(
+            cc.contains("no-store"),
+            "{path} Cache-Control MUST include no-store; got {cc:?}",
+        );
+        assert!(
+            cc.contains("max-age=0"),
+            "{path} Cache-Control MUST include max-age=0; got {cc:?}",
+        );
+        assert!(
+            cc.contains("must-revalidate"),
+            "{path} Cache-Control MUST include must-revalidate; got {cc:?}",
+        );
+    }
+
+    handle.shutdown().await.expect("shutdown");
+}

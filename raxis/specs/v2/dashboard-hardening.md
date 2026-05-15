@@ -122,6 +122,63 @@ failure. The kernel main loop logs a structured warn line
 dashboard rather than panicking. The other kernel surfaces
 (operator UDS, audit chain, AVF spawn) are unaffected.
 
+### 1.8 Health surface freshness contract (`INV-DASHBOARD-HEALTH-NO-CACHE-01` + `INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01`)
+
+The operator-facing Health page is a *freshness oracle* — its
+purpose is to tell an on-call operator whether the kernel they
+are looking at right now is healthy right now. Two structural
+properties make that work:
+
+1. **Backend: `Cache-Control: no-store, max-age=0,
+   must-revalidate` on every health response.** Every handler
+   in `crates/dashboard/src/routes/health.rs` (`/api/health`,
+   `/api/health/subsystems`, `/api/health/kernel-lifecycle`)
+   sets the same conservative `Cache-Control` triple via
+   the `HEALTH_CACHE_CONTROL` constant. The trio defeats:
+     * browser memory/disk cache (`no-store`),
+     * in-flight reuse on identical concurrent requests
+       (`max-age=0`),
+     * proxy + service-worker revalidation drift
+       (`must-revalidate`).
+   The previous header-free 200 OK was eligible for browser
+   heuristic caching, which made the Health page appear
+   frozen even while React Query was firing its
+   `refetchInterval` — the polling hit the browser cache,
+   not the kernel. Pinned by
+   `INV-DASHBOARD-HEALTH-NO-CACHE-01`.
+
+   *Witness.* `crates/dashboard/tests/hardening_smoke.rs::health_routes_emit_no_store_cache_control`
+   asserts every health route returns a response whose
+   `Cache-Control` header carries each of the three tokens.
+
+2. **Frontend: 5 s polling cadence with
+   `refetchIntervalInBackground: true` and a visible
+   freshness pill.** The `<HealthPage>` query has
+   `refetchInterval: 5_000` (subsystem cards 10 s), AND
+   `refetchIntervalInBackground: true` so polling continues
+   when the operator backgrounds the tab (multi-monitor
+   workflows are the canonical case). The page renders a
+   `data-testid="health-freshness"` pill — a tiny "Updated
+   Xs ago" badge with a 1 s ticker — so the operator sees
+   that polling IS happening even when consecutive Healthy
+   snapshots carry identical values. Pinned by
+   `INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01`.
+
+   *Witness.* `dashboard-fe/src/test/health-polling.test.tsx`
+   drives the page with fake timers and asserts:
+     * a `health` call fires on initial mount,
+     * a second `health` call fires after advancing 5.1 s,
+     * a third `health` call fires after advancing another
+       5.1 s, AND
+     * the displayed `policy_epoch` updates from `#1` to
+       `#2` across polls (rules out structural-sharing
+       same-reference re-render bugs).
+
+   The freshness pill carries
+   `data-fetching="true|false"` and `data-stale="true|false"`
+   so a future end-to-end probe can assert the live signal
+   without parsing visible text.
+
 ---
 
 ## 2. Audit surface contracts (V2.5 addendum)

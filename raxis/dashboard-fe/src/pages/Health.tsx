@@ -1,3 +1,4 @@
+import { useEffect, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 
 import { dashboardApi } from "@/api/client";
@@ -7,19 +8,34 @@ import { PageSpinner } from "@/components/Spinner";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import type { SubsystemHealthCard } from "@/types/api";
 
+// Polling cadence for the Health page. The kernel emits one
+// `Cache-Control: no-store` response per call so the browser
+// never serves a cached body. `refetchIntervalInBackground: true`
+// keeps the timer running when the operator backgrounds the tab
+// (multi-monitor + tab-switcher workflows are the canonical case)
+// — without it, switching back to a backgrounded Health tab shows
+// a stale snapshot until the next interval tick, which the user
+// experienced as "the health status never refreshes".
+// Pinned by `INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01`
+// (`specs/v2/dashboard-hardening.md §1.7`).
+const HEALTH_POLL_MS = 5_000;
+const SUBSYSTEM_POLL_MS = 10_000;
+
 export function HealthPage() {
   const q = useQuery({
     queryKey: ["health"],
     queryFn: ({ signal }) => dashboardApi.health(signal),
-    refetchInterval: 5_000,
+    refetchInterval: HEALTH_POLL_MS,
+    refetchIntervalInBackground: true,
   });
   // Subsystem cards are a separate endpoint so a slow per-card
   // query never blocks the coarse `/api/health` summary.
   const subQ = useQuery({
     queryKey: ["health", "subsystems"],
     queryFn: ({ signal }) => dashboardApi.subsystemHealth(signal),
-    refetchInterval: 10_000,
-    staleTime: 5_000,
+    refetchInterval: SUBSYSTEM_POLL_MS,
+    refetchIntervalInBackground: true,
+    staleTime: SUBSYSTEM_POLL_MS / 2,
   });
 
   if (q.isPending) return <PageSpinner />;
@@ -28,11 +44,17 @@ export function HealthPage() {
 
   return (
     <div className="space-y-5">
-      <header>
-        <h1 className="text-xl font-semibold text-ink">Kernel Health</h1>
-        <p className="text-sm text-ink-muted">
-          Doctor checklist for the running kernel. Auto-refreshes every 5s.
-        </p>
+      <header className="flex items-start justify-between gap-3 flex-wrap">
+        <div>
+          <h1 className="text-xl font-semibold text-ink">Kernel Health</h1>
+          <p className="text-sm text-ink-muted">
+            Doctor checklist for the running kernel. Auto-refreshes every {Math.round(HEALTH_POLL_MS / 1000)}s.
+          </p>
+        </div>
+        <FreshnessIndicator
+          dataUpdatedAt={q.dataUpdatedAt}
+          isFetching={q.isFetching}
+        />
       </header>
 
       <section className="card p-4">
@@ -232,6 +254,63 @@ function SubsystemCard({ card }: { card: SubsystemHealthCard }) {
         </div>
       </footer>
     </article>
+  );
+}
+
+/// Visible witness that the page IS polling — without this an
+/// operator looking at a Healthy kernel sees identical static
+/// values on every tick and cannot tell whether the page is
+/// refreshing. The badge ticks every second so the `Xs ago`
+/// counter advances even between successful refetches; on a
+/// refetch fire the `isFetching` flash makes the live-refresh
+/// signal unambiguous.
+function FreshnessIndicator({
+  dataUpdatedAt,
+  isFetching,
+}: {
+  dataUpdatedAt: number;
+  isFetching: boolean;
+}) {
+  // Re-render every second so the displayed age advances even
+  // when no refetch has happened. The interval is cleaned up on
+  // unmount.
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const handle = window.setInterval(() => setNow(Date.now()), 1_000);
+    return () => window.clearInterval(handle);
+  }, []);
+  const ageMs = Math.max(0, now - dataUpdatedAt);
+  const ageSec = Math.floor(ageMs / 1_000);
+  const stale = ageMs > HEALTH_POLL_MS * 2;
+  return (
+    <div
+      data-testid="health-freshness"
+      data-fetching={isFetching ? "true" : "false"}
+      data-stale={stale ? "true" : "false"}
+      className={
+        "flex items-center gap-2 text-xs rounded-md px-2.5 py-1.5 border " +
+        (stale
+          ? "border-warn/40 bg-warn/10 text-warn"
+          : "border-edge bg-panel-high text-ink-muted")
+      }
+      role="status"
+      aria-live="polite"
+    >
+      <span
+        aria-hidden="true"
+        className={
+          "inline-block w-2 h-2 rounded-full " +
+          (isFetching
+            ? "bg-accent animate-pulse"
+            : stale
+              ? "bg-warn"
+              : "bg-ok")
+        }
+      />
+      <span className="tabular-nums">
+        {isFetching ? "Refreshing…" : `Updated ${ageSec}s ago`}
+      </span>
+    </div>
   );
 }
 

@@ -31,26 +31,55 @@
 use std::path::PathBuf;
 
 use axum::extract::State;
+use axum::http::header;
+use axum::response::IntoResponse;
 use axum::Json;
 use serde::Serialize;
 
 use crate::auth::DashboardRole;
-use crate::data::{HealthSnapshot, SubsystemHealthResponse};
+use crate::data::HealthSnapshot;
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator};
 
+/// `Cache-Control` header value attached to every health response.
+///
+/// `INV-DASHBOARD-HEALTH-NO-CACHE-01` (`specs/v3/session-capture.md`
+/// adopts the umbrella shape, but this invariant predates it and lives
+/// in `specs/v2/dashboard-hardening.md §1.7`): the health surface is a
+/// freshness oracle for operators. Browser heuristic-caching of a
+/// header-free 200 OK was making the Health page appear "frozen" even
+/// while React Query was firing its `refetchInterval` (the polling
+/// hit the cache, not the kernel). `no-store, max-age=0, must-revalidate`
+/// is the conservative trio that defeats every layer:
+///   * `no-store` — no disk / memory cache,
+///   * `max-age=0` — no in-flight reuse,
+///   * `must-revalidate` — proxies + service workers MUST treat the
+///     response as immediately stale.
+const HEALTH_CACHE_CONTROL: &str = "no-store, max-age=0, must-revalidate";
+
 /// `GET /api/health` — full health snapshot for `admin` operators,
 /// sanitized snapshot for everyone else.
+///
+/// The response carries `Cache-Control: no-store, max-age=0,
+/// must-revalidate` so the dashboard FE's 5-second `refetchInterval`
+/// reaches a fresh kernel snapshot on every tick (the previous
+/// header-free response was eligible for browser heuristic caching,
+/// which made the Health page appear frozen between intervals).
+/// Pinned by `INV-DASHBOARD-HEALTH-NO-CACHE-01`
+/// (`specs/v2/dashboard-hardening.md §1.7`).
 pub async fn health<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
-) -> ApiResult<Json<HealthSnapshot>>
+) -> ApiResult<impl IntoResponse>
 where
     D: crate::data::DashboardData,
 {
     let full = state.data.health();
     if op.has_role(DashboardRole::Admin) {
-        return Ok(Json(full));
+        return Ok((
+            [(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)],
+            Json(full),
+        ));
     }
     if !op.has_role(DashboardRole::Read) {
         return Err(ApiError::Forbidden {
@@ -59,15 +88,18 @@ where
     }
     // Sanitize for non-admins: keep the coarse status + active
     // counts, drop the per-check details.
-    Ok(Json(HealthSnapshot {
-        status: full.status,
-        checks: vec![],
-        kernel_booted_at: full.kernel_booted_at,
-        policy_epoch: full.policy_epoch,
-        active_initiatives: full.active_initiatives,
-        active_sessions: full.active_sessions,
-        pending_escalations: full.pending_escalations,
-    }))
+    Ok((
+        [(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)],
+        Json(HealthSnapshot {
+            status: full.status,
+            checks: vec![],
+            kernel_booted_at: full.kernel_booted_at,
+            policy_epoch: full.policy_epoch,
+            active_initiatives: full.active_initiatives,
+            active_sessions: full.active_sessions,
+            pending_escalations: full.pending_escalations,
+        }),
+    ))
 }
 
 /// `GET /api/health/subsystems` — per-subsystem cards for the
@@ -80,7 +112,7 @@ where
 pub async fn subsystems<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
-) -> ApiResult<Json<SubsystemHealthResponse>>
+) -> ApiResult<impl IntoResponse>
 where
     D: crate::data::DashboardData,
 {
@@ -90,7 +122,13 @@ where
         });
     }
     let snapshot = state.data.subsystem_health()?;
-    Ok(Json(snapshot))
+    // `INV-DASHBOARD-HEALTH-NO-CACHE-01` — same no-store contract as
+    // `/api/health`. The subsystem cards refresh every 10 s and the
+    // FE deliberately polls; a cached response defeats the polling.
+    Ok((
+        [(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)],
+        Json(snapshot),
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -231,7 +269,7 @@ fn default_status_healthy() -> String {
 pub async fn kernel_lifecycle<D>(
     State(state): State<AppState<D>>,
     op: AuthorizedOperator,
-) -> ApiResult<Json<KernelLifecycleResponse>>
+) -> ApiResult<impl IntoResponse>
 where
     D: crate::data::DashboardData,
 {
@@ -241,7 +279,13 @@ where
         });
     }
     let response = read_kernel_lifecycle_response(state.config.data_dir.as_deref());
-    Ok(Json(response))
+    // Same no-store cache contract as the rest of the health surface
+    // — the supervisor sentinel banner polls every 5 s and MUST see
+    // a fresh sentinel snapshot per tick.
+    Ok((
+        [(header::CACHE_CONTROL, HEALTH_CACHE_CONTROL)],
+        Json(response),
+    ))
 }
 
 /// Public-for-tests core: reads the sentinel file at
@@ -433,6 +477,31 @@ fn supervisor_pid_alive(_pid: u32) -> bool {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    /// Witness for `INV-DASHBOARD-HEALTH-NO-CACHE-01`.
+    ///
+    /// Every health route MUST advertise the same conservative
+    /// `Cache-Control` shape that defeats browser heuristic-caching,
+    /// proxy caching, and service-worker caching alike. The constant
+    /// is the wire contract; this test pins it so a future contributor
+    /// who relaxes the header (e.g. drops `must-revalidate`) trips an
+    /// explicit failure rather than silently re-introducing the
+    /// "Health page never refreshes" bug.
+    #[test]
+    fn health_cache_control_header_is_no_store() {
+        assert!(
+            HEALTH_CACHE_CONTROL.contains("no-store"),
+            "Cache-Control MUST include `no-store` (defeats memory + disk caching); got {HEALTH_CACHE_CONTROL:?}"
+        );
+        assert!(
+            HEALTH_CACHE_CONTROL.contains("max-age=0"),
+            "Cache-Control MUST include `max-age=0` (defeats in-flight reuse); got {HEALTH_CACHE_CONTROL:?}"
+        );
+        assert!(
+            HEALTH_CACHE_CONTROL.contains("must-revalidate"),
+            "Cache-Control MUST include `must-revalidate` (forces revalidation through proxies / service workers); got {HEALTH_CACHE_CONTROL:?}"
+        );
+    }
 
     #[test]
     fn missing_sentinel_returns_healthy_fresh() {

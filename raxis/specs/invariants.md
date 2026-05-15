@@ -82,7 +82,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03 | 18 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03, INV-DASHBOARD-HEALTH-NO-CACHE-01, INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01, INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01, INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01, INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01, INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 | 24 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01 | 5 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
@@ -10510,6 +10510,223 @@ which lives in the kernel process; the VM's lifetime is
 unrelated to the file's. The
 `multiple_sessions_of_same_task_share_one_file` test pins the
 key-shape contract that makes this property work.
+
+---
+
+## §11.17 — Health-surface freshness (INV-DASHBOARD-HEALTH-*)
+
+V3 (iter59) pins the freshness contract the dashboard's Health
+page depends on. The operator-facing Health page is a freshness
+oracle: its job is to tell an on-call operator whether the
+kernel they are looking at right now is healthy right now. Two
+structural properties make that work — one on the backend, one
+on the FE. The previous implementation had neither, and operators
+reported "the health status of the kernel is never refreshed"
+because the polling hit the browser cache, not the kernel.
+
+Canonical home: `specs/v2/dashboard-hardening.md §1.8`.
+
+### INV-DASHBOARD-HEALTH-NO-CACHE-01 — Every health response advertises `no-store, max-age=0, must-revalidate`
+
+**Statement.** `GET /api/health`, `GET /api/health/subsystems`,
+and `GET /api/health/kernel-lifecycle` MUST set the
+`Cache-Control` header to a value containing all of
+`no-store`, `max-age=0`, and `must-revalidate`. The constant
+`HEALTH_CACHE_CONTROL` in
+`crates/dashboard/src/routes/health.rs` is the wire contract.
+
+**Why structural.** Without this header, browsers may
+heuristic-cache the 200 OK response (typical heuristic: 10 %
+of the document age), which means the FE's 5 s `refetchInterval`
+hits the browser cache and never the kernel. The page appears
+frozen even while the polling loop fires correctly. The trio
+defeats every layer:
+* `no-store` — no disk / memory cache,
+* `max-age=0` — no in-flight reuse,
+* `must-revalidate` — proxies + service workers MUST treat the
+  response as immediately stale.
+
+**Witness.**
+* `crates/dashboard/src/routes/health.rs::tests::health_cache_control_header_is_no_store`
+  — the constant carries each of the three tokens.
+* `crates/dashboard/tests/hardening_smoke.rs::health_routes_emit_no_store_cache_control`
+  — round-trips through the actual axum router and asserts
+  every response carries the header (rules out a future
+  middleware that strips it).
+
+### INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01 — Health page polls every 5 s, with `refetchIntervalInBackground`, and surfaces a visible freshness pill
+
+**Statement.** The dashboard `<HealthPage>` MUST:
+1. Issue `dashboardApi.health` on a 5 000 ms cadence
+   (`HEALTH_POLL_MS`) and `dashboardApi.subsystemHealth` on a
+   10 000 ms cadence (`SUBSYSTEM_POLL_MS`).
+2. Set `refetchIntervalInBackground: true` on both queries so
+   polling continues when the operator backgrounds the tab
+   (multi-monitor + tab-switcher workflows are the canonical
+   case the user reported broken).
+3. Render a `data-testid="health-freshness"` pill whose
+   `data-fetching` and `data-stale` attributes plus visible
+   `Updated Xs ago` text give the operator an unambiguous
+   witness that polling is alive — without this, identical
+   Healthy snapshots make the page look frozen.
+
+**Why structural.** Background-tab polling and visible refresh
+feedback are the two FE-side affordances that, combined with
+`INV-DASHBOARD-HEALTH-NO-CACHE-01`, make the operator's
+"how fresh is this?" mental model match reality. Skipping
+either re-introduces the bug.
+
+**Witness.** `dashboard-fe/src/test/health-polling.test.tsx`
+drives the page with fake timers, asserts three sequential
+`health` calls land across two interval advances, and
+asserts the displayed `policy_epoch` updates from `#1` to
+`#2` across polls (rules out a structural-sharing
+same-reference re-render bug).
+
+---
+
+## §11.18 — Worktree-loading latency budget (INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01)
+
+V3 (iter59) pins the latency budget the dashboard's worktree
+endpoints MUST honour. The bug surfaced as "latency in loading
+the git worktrees" — operators clicking a worktree saw a
+multi-hundred-ms blocking spinner because `get_worktree`
+serialised four `git` subprocess shell-outs (`rev-parse`,
+`symbolic-ref`, `status`, `rev-list`) AND each shell-out
+busy-polled `child.try_wait()` on a 50 ms sleep loop inside an
+async axum handler — pinning a tokio worker thread for at
+least 200 ms per request even when the subprocesses themselves
+finished in 5 ms.
+
+Canonical home: `specs/v2/dashboard-hardening.md §1.9` (added
+in the worktree-latency commit).
+
+### INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01 — Worktree endpoints do not block the tokio runtime
+
+**Statement.** Every `/api/git/worktrees/*` handler that fans
+out to `git::*` subprocess wrappers MUST:
+1. Run the synchronous data-layer call under
+   `tokio::task::spawn_blocking` so the busy-wait happens on a
+   blocking worker, NOT on the async runtime's worker pool.
+2. Use a poll cadence ≤ 10 ms in the `run_git` wait loop, so
+   the floor latency per subprocess is dominated by the
+   process's own runtime, not by the polling sleep.
+3. Parallelise independent git probes inside `get_worktree`
+   (`head_sha`, `branch`, `status_lines`, `ahead_behind` are
+   four independent reads) via `std::thread::scope` so the
+   wall-clock cost is `max(probe_durations)`, not their sum.
+
+**Why structural.** Without (1), one slow worktree page pins a
+tokio worker for hundreds of ms, starving every other dashboard
+request including the per-second freshness poll
+(`INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01`). Without (2), the
+floor latency is `4 * 50 ms = 200 ms` even on a clean repo.
+Without (3), the four probes serialise their per-process exec
+overhead, multiplying the user-visible latency by 4.
+
+**Witness.**
+* `crates/dashboard-kernel/src/git.rs::tests::head_sha_completes_within_latency_budget`
+  — single git probe completes under a 100 ms budget on a real
+  tempdir-initialised repo (skipped if `git` is not on PATH).
+* `crates/dashboard-kernel/src/git.rs::tests::parallel_probes_finish_under_serial_budget`
+  — the four-probe fan-out completes under the per-probe
+  budget multiplied by 1.5 (NOT 4), pinning the parallelism
+  guarantee.
+
+---
+
+## §11.19 — Dashboard session capture (INV-DASHBOARD-SESSION-CAPTURE-*)
+
+V3 (iter59) ships the per-session post-mortem capture
+(`raxis-dashboard-kernel::session_capture`) so sessions that
+terminate (Completed / Failed / Aborted) remain queryable from
+the dashboard for the lifetime of the file ring. The capture is
+modelled on `task_llm_capture` (same on-disk file ring + the
+same subscribe-fan-out broadcast pattern), differing only in
+record shape and key shape (`session_id` instead of `task_id`).
+
+Canonical home: `specs/v3/session-capture.md`.
+
+### INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01 — The on-disk ring is bounded and self-evicts; old records are dropped, never silently mutated
+
+**Statement.** Each per-session file at
+`<dir>/<session_id>.ndjson` MUST stay within both of the
+`SessionCaptureConfig` ceilings:
+1. `max_bytes_per_session` — when an append would push the file
+   over this size, `SessionCapture::compact_locked` rewrites the
+   file keeping only the most recent ~50 % of records, then
+   appends.
+2. `max_records_per_session` — when the file holds this many
+   records, the next append triggers the same 50 % compaction
+   on the per-record axis.
+
+Evicted records MUST be dropped wholesale; the surviving
+records MUST round-trip byte-for-byte through serde so an
+operator never sees a partial / mutated record.
+
+**Why structural.** Without both ceilings, a chatty session
+(e.g. a long-running orchestrator that emits an
+`OperatorPing` every 100 ms) could fill the operator's data
+dir before the byte ceiling trips. The dual-ceiling design
+gives operators a predictable disk + record budget without
+forcing them to anticipate the worst-case per-record size.
+
+**Witness.**
+* `crates/dashboard-kernel/src/session_capture.rs::tests::compaction_kicks_in_when_max_bytes_exceeded`
+  — file size stays within `max_bytes_per_session + per-record
+  slack` after 200 over-cap appends.
+* `crates/dashboard-kernel/src/session_capture.rs::tests::compaction_kicks_in_when_max_records_exceeded`
+  — record count stays within `max_records_per_session +
+  per-record slack` after 200 over-cap appends.
+* `crates/dashboard-kernel/src/session_capture.rs::tests::compaction_under_write_race`
+  — two concurrent writers cannot tear a record.
+
+### INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01 — Completed / Failed / Aborted sessions remain queryable via the capture API until ring eviction
+
+**Statement.** Records appended for `session_id = S` MUST
+remain readable via `GET /api/sessions/S/capture` after the
+session terminates (Revoked / Expired / VmFailedFinal /
+operator-Abort), until either (a) the file is rotated by the
+next compaction past the byte / record cap, or (b) the
+operator explicitly purges `<dir>/S.ndjson`. The session
+termination path MUST NOT remove the file or any of its
+records.
+
+**Why structural.** The whole point of the capture is the
+post-mortem case. A session-lifetime-only capture would lose
+exactly the records the operator needs at exactly the moment
+they need them — the user's exact complaint
+("the session data gets deleted once the session is done").
+The kernel is the writer; the planner VM's lifetime is
+unrelated to the file's.
+
+**Witness.**
+* `crates/dashboard-kernel/src/session_capture.rs::tests::persistence_across_new_instances`
+  — building a fresh `SessionCapture` against the same dir
+  surfaces the records the previous instance wrote, even
+  after the writer was dropped.
+* `crates/dashboard-kernel/src/session_capture.rs::tests::tail_after_session_state_drop`
+  — `tail` against a session_id whose in-memory state was
+  dropped still returns the on-disk records.
+
+### INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 — Capture for session A never bleeds into session B
+
+**Statement.** `SessionCapture::append(A, _)` MUST NOT cause
+`SessionCapture::tail(B, _)` to surface the A-record, and
+vice versa, for any pair `A != B` (after sanitisation of the
+session_id components). The on-disk path encoding
+(`<dir>/<safe_session_id>.ndjson`) and the in-memory
+`sessions` map MUST both honour the per-id namespace.
+
+**Why structural.** A subtle wire-side bug where session
+`sess-1` and session `sess.1` (or `sess/1` if a future
+contributor relaxed the sanitiser) hashed to the same file
+would silently mix forensic records from two unrelated
+sessions — the worst kind of post-mortem signal pollution.
+
+**Witness.** `crates/dashboard-kernel/src/session_capture.rs::tests::session_ids_are_isolated_per_namespace`
+— appends to three distinct session ids (including ones
+that differ only by punctuation) keep their tails disjoint.
 
 ---
 
