@@ -3,6 +3,7 @@ import { Link, useNavigate } from "react-router-dom";
 
 import { dashboardApi } from "@/api/client";
 import { ErrorBox } from "@/components/ErrorBox";
+import { OrchestratorGapWarningCard } from "@/components/lifecycle/OrchestratorGapWarningCard";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
 import { Mono } from "@/components/Mono";
@@ -61,6 +62,22 @@ export function OverviewPage() {
   });
   const recentActivity = audit.data ?? [];
 
+  // Orchestrator-gap warnings — surfaces every stuck
+  // PendingActivation row whose predecessors all completed.
+  // Front-and-center on the home view so an operator sees
+  // wedged orchestrators immediately.
+  // `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+  const gaps = useQuery({
+    queryKey: ["orchestrator-gaps"],
+    queryFn: ({ signal }) => dashboardApi.orchestratorGaps(signal),
+    refetchInterval: 10_000,
+  });
+  const orchestratorGaps =
+    (gaps.data?.gaps ?? []).filter(
+      (g): g is Extract<typeof g, { kind: "orchestrator_gap" }> =>
+        g.kind === "orchestrator_gap",
+    );
+
   if (health.isPending) return <PageSpinner />;
   if (health.error)
     return <ErrorBox error={health.error} onRetry={() => health.refetch()} />;
@@ -81,6 +98,28 @@ export function OverviewPage() {
           <span>Auto-refresh 5s</span>
         </div>
       </header>
+
+      {orchestratorGaps.length > 0 && (
+        <section
+          data-testid="overview-warnings"
+          className="space-y-3"
+          aria-label="Orchestrator gaps"
+        >
+          <header className="flex items-center justify-between">
+            <h2 className="text-sm font-semibold text-warn">
+              Warnings ({orchestratorGaps.length})
+            </h2>
+            <span className="text-[11px] text-ink-subtle">
+              Auto-refresh 10s
+            </span>
+          </header>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            {orchestratorGaps.map((g, i) => (
+              <OrchestratorGapWarningCard key={`${g.task_id}-${i}`} a={g} />
+            ))}
+          </div>
+        </section>
+      )}
 
       {/* KPI tiles. Each tile is a navigation target — the
           number is the operator's most common drill-in question

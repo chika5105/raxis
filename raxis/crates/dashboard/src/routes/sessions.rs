@@ -25,7 +25,7 @@ use futures_util::stream::{self, Stream, StreamExt};
 use serde::Deserialize;
 
 use crate::auth::DashboardRole;
-use crate::data::{SessionCaptureView, SessionView};
+use crate::data::{OrchestratorGapsResponse, RecentSessionEntry, SessionCaptureView, SessionView};
 use crate::error::{ApiError, ApiResult};
 use crate::server::{AppState, AuthorizedOperator, ShutdownSignal};
 use crate::stream::StreamEvent;
@@ -122,6 +122,58 @@ where
     // entire lifetime of the on-disk ring.
     let records = state.data.tail_session_capture(&id, q.limit)?;
     Ok(Json(records))
+}
+
+/// Query string for `GET /api/recent-sessions`. Mirrors the
+/// active-list shape but the cap is intentionally smaller — the
+/// recent-list is a forensic tail, not a live working set.
+#[derive(Debug, Deserialize)]
+pub struct RecentQuery {
+    /// Page size; clamped to `[1, 200]`. Default 50. The
+    /// dashboard-kernel layer also truncates to its own cap.
+    #[serde(default = "default_recent_limit")]
+    pub limit: u32,
+}
+
+fn default_recent_limit() -> u32 { 50 }
+
+/// `GET /api/recent-sessions`. Returns the last N sessions
+/// regardless of their `revoked` flag, ordered newest-first.
+/// Each entry carries its final `LifecycleAnnotation` so the FE
+/// can render "self-exit (clean)" vs "operator-revoked" without
+/// a per-row drill-down.
+///
+/// `INV-DASHBOARD-RECENT-SESSIONS-RING-01`.
+pub async fn recent<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+    Query(q): Query<RecentQuery>,
+) -> ApiResult<Json<Vec<RecentSessionEntry>>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let rows = state.data.list_recent_sessions(q.limit.clamp(1, 200))?;
+    Ok(Json(rows))
+}
+
+/// `GET /api/orchestrator-gaps`. Surfaces every
+/// `subtask_activations` row in `PendingActivation` whose
+/// predecessors are all `Completed` and whose `created_at` is
+/// older than the lifecycle gap-threshold (120s by default).
+/// Powers the home-view "Warnings" pane.
+///
+/// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+pub async fn orchestrator_gaps<D>(
+    State(state): State<AppState<D>>,
+    op: AuthorizedOperator,
+) -> ApiResult<Json<OrchestratorGapsResponse>>
+where
+    D: crate::data::DashboardData,
+{
+    require_read(&op)?;
+    let resp = state.data.list_orchestrator_gaps()?;
+    Ok(Json(resp))
 }
 
 /// Query string for `GET /api/sessions/:id/stream`.

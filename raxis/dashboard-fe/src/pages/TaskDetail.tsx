@@ -6,6 +6,8 @@ import { CopyButton } from "@/components/CopyButton";
 import { Empty } from "@/components/Empty";
 import { ErrorBox } from "@/components/ErrorBox";
 import { FailureReasonPanel } from "@/components/FailureReasonPanel";
+import { LifecycleTimeline } from "@/components/lifecycle/LifecycleTimeline";
+import { ReviewerVerdictPanel } from "@/components/lifecycle/ReviewerVerdictPanel";
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
@@ -77,6 +79,25 @@ export function TaskDetailPage() {
           heading="Task failure reason"
         />
       )}
+
+      {/* `<ReviewerVerdictPanel>` surfaces tasks.review_verdict +
+          tasks.last_critique above the fold so the operator sees
+          an iter62-style `Rejected` verdict immediately instead
+          of having to drill into per-reviewer rows.
+          `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
+      <ReviewerVerdictPanel
+        verdict={t.review_verdict ?? null}
+        critique={t.last_critique ?? null}
+        entries={t.reviewer_panel_results ?? []}
+      />
+
+      {/* Lifecycle timeline — retries, revokes, gaps in
+          kernel-emit order. `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`. */}
+      <LifecycleTimeline
+        annotations={t.annotations ?? []}
+        showEmpty={false}
+        heading="Lifecycle timeline"
+      />
 
       {t.blocked_downstream && t.blocked_downstream.length > 0 && (
         <section className="card border-warn/40 bg-warn/5 p-3 text-sm">

@@ -131,6 +131,161 @@ export interface TaskView {
   /// Populated only for terminal-failure tasks so the FE can show
   /// the cascade in the DAG side panel.
   blocked_downstream?: string[];
+  /// Lifecycle annotations rendered by `<LifecycleTimeline>`.
+  /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+  annotations?: LifecycleAnnotation[];
+  /// Most recent annotation — surfaced on the global tasks
+  /// index "Lifecycle" column for one-line summaries.
+  latest_annotation?: LifecycleAnnotation | null;
+  /// `tasks.review_verdict` mirror — `"Approved"` /
+  /// `"Rejected"` / null. Powers the colour-coded badge in
+  /// `<ReviewerVerdictPanel>`.
+  review_verdict?: string | null;
+  /// `tasks.last_critique` mirror — multi-reviewer aggregated
+  /// critique text. Rendered as a collapsible block beneath
+  /// the verdict badge.
+  last_critique?: string | null;
+  /// One row per reviewer downstream of this executor task,
+  /// parsed from the audit chain's `SubmitReview` /
+  /// `ReviewAggregationCompleted` events.
+  reviewer_panel_results?: ReviewerPanelEntry[];
+}
+
+/// One reviewer's result against an executor task, surfaced
+/// in `<ReviewerVerdictPanel>` so the operator sees per-
+/// reviewer agreement / disagreement at a glance.
+export interface ReviewerPanelEntry {
+  reviewer_task_id: string;
+  verdict: string;
+  /// First three lines of the reviewer's critique. The full
+  /// text lives on the per-reviewer task detail page.
+  critique_excerpt: string;
+  completed_at: number;
+}
+
+/// Wire shape for `LifecycleAnnotation` (Rust enum with
+/// `#[serde(tag="kind", rename_all="snake_case")]`).
+///
+/// Each variant is a discriminated union over `kind`. The FE
+/// dispatches on `kind` to pick a `<LifecycleAnnotation>`
+/// renderer (one tsx component per variant).
+export type LifecycleAnnotation =
+  | {
+      kind: "retry_review_reject";
+      retry_number: number;
+      triggered_by_reviewer_task_id: string;
+      verdict: string;
+      critique: string;
+      review_reject_count: number;
+      max_review_rejections: number;
+      crash_retry_count: number;
+      max_crash_retries: number;
+      prior_activation_id: string;
+      new_activation_id: string;
+      prior_head_sha?: string | null;
+      new_head_sha?: string | null;
+      ts_unix: number;
+    }
+  | {
+      kind: "retry_crash";
+      retry_number: number;
+      exit_code?: number | null;
+      terminal_tool?: string | null;
+      max_turns_scaled_from?: number | null;
+      max_turns_scaled_to?: number | null;
+      crash_retry_count: number;
+      max_crash_retries: number;
+      ts_unix: number;
+    }
+  | {
+      kind: "retry_validation_reject";
+      retry_number: number;
+      validator_reason: string;
+      validator_detail: unknown;
+      validation_reject_count: number;
+      max_validation_rejections: number;
+      ts_unix: number;
+    }
+  | {
+      kind: "session_revoked_operator";
+      revoked_by: string;
+      revoked_by_display_name?: string | null;
+      intent_kind?: string | null;
+      ts_unix: number;
+    }
+  | {
+      kind: "session_revoked_self_exit";
+      terminal_tool?: string | null;
+      exit_code?: number | null;
+      console_log_path?: string | null;
+      ts_unix: number;
+    }
+  | {
+      kind: "initiative_blocked";
+      block_reason: string;
+      blocking_task_id?: string | null;
+      ts_unix: number;
+    }
+  | {
+      kind: "orchestrator_gap";
+      activation_id: string;
+      task_id: string;
+      predecessors_completed_at: Array<[string, number]>;
+      wait_seconds: number;
+    };
+
+/// Wire shape for `GET /api/orchestrator-gaps`.
+export interface OrchestratorGapsResponse {
+  gaps: LifecycleAnnotation[];
+  generated_at: number;
+}
+
+/// Wire shape for one row of `GET /api/recent-sessions`.
+/// Mirrors `raxis_dashboard::data::RecentSessionEntry`.
+export interface RecentSessionEntry {
+  session_id: string;
+  agent_type: string;
+  task_id?: string | null;
+  initiative_id?: string | null;
+  created_at: number;
+  terminated_at?: number | null;
+  terminated_reason?: string | null;
+  final_annotation?: LifecycleAnnotation | null;
+  capture_bytes: number;
+}
+
+/// Wire shape for one record returned by
+/// `GET /api/tasks/:task_id/llm-turns`.
+export interface TaskLlmTurnView {
+  /// Monotonic turn number — one per call to
+  /// `TaskLlmCapture::append`. Ordered so the FE can render
+  /// "Turn 1", "Turn 2", … without sorting.
+  turn_number: number;
+  /// Unix-seconds timestamp the turn was captured.
+  ts_unix: number;
+  /// Provider model id (e.g. `claude-3-5-sonnet`,
+  /// `gpt-4o`). Empty when the kernel-side tap could not
+  /// resolve it.
+  model: string;
+  /// `"system"` / `"user"` / `"assistant"` / `"tool"`.
+  role: string;
+  /// Raw request payload as JSON. Rendered in a collapsible
+  /// `<details>` block.
+  request: unknown;
+  /// Raw response payload as JSON.
+  response: unknown;
+  /// Per-turn token usage. `cache_hit_ratio` is derived FE-
+  /// side from `cache_read_input_tokens / (cache_read_input_tokens
+  /// + cache_creation_input_tokens + input_tokens)` — the wire
+  /// only carries the raw counts.
+  input_tokens?: number | null;
+  output_tokens?: number | null;
+  cache_creation_input_tokens?: number | null;
+  cache_read_input_tokens?: number | null;
+  /// Wall-clock ms between request issue and response
+  /// completion. Surfaced for prompt-cache effectiveness
+  /// analysis.
+  latency_ms?: number | null;
 }
 
 export interface DagEdge {
@@ -286,6 +441,13 @@ export interface SessionView {
   /// renders this through `<FailureReasonPanel>` on Sessions list +
   /// SessionDetail header.
   failure?: FailureInfo | null;
+  /// Lifecycle annotations rendered inline in the session
+  /// stream timeline. `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+  annotations?: LifecycleAnnotation[];
+  /// Most recent annotation, surfaced in compact session list
+  /// rows so an operator sees self-exit vs operator-revoke
+  /// without drilling in.
+  latest_annotation?: LifecycleAnnotation | null;
 }
 
 /// One record from the per-session lifecycle capture ring

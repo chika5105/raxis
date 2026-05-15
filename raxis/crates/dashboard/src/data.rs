@@ -21,11 +21,284 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use parking_lot::RwLock;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 use crate::auth::DashboardRole;
 use crate::error::ApiError;
 use crate::stream::{SimpleStreamSource, StreamEvent, StreamSubscription};
+
+// ---------------------------------------------------------------------------
+// Lifecycle annotations — INV-DASHBOARD-LIFECYCLE-CAUSALITY-01 (paired)
+// ---------------------------------------------------------------------------
+
+/// One structured causality annotation rendered by the
+/// dashboard's lifecycle timeline. The wire shape uses the
+/// `kind` discriminator so the FE can dispatch to a per-kind
+/// component without re-parsing audit JSON.
+///
+/// The PRODUCTION classifier lives in
+/// `raxis_dashboard_kernel::lifecycle::classify_*` (paired with
+/// Worker 1's `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01` invariant).
+/// The wire enum lives here so the dashboard crate owns the
+/// serialised contract — kernel-glue produces values, route
+/// handlers serialise them, frontend renders them — and the
+/// fixture data layer can synthesise annotations directly for
+/// route-level tests.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum LifecycleAnnotation {
+    /// A retry triggered by a reviewer-panel rejection — paired
+    /// `ReviewAggregationCompleted{verdict=AtLeastOneRejected}`
+    /// / `ExecutorRespawnFromReviewRejection` audit rows.
+    RetryReviewReject {
+        /// One-based retry number (the first retry is `1`).
+        retry_number:                  u32,
+        /// Reviewer task that triggered the rejection
+        /// aggregation.
+        triggered_by_reviewer_task_id: String,
+        /// Aggregated verdict string from the
+        /// `ReviewAggregationCompleted` row.
+        verdict:                       String,
+        /// First-line excerpt of the captured aggregated
+        /// critique (typically `tasks.last_critique`). Empty
+        /// when no critique was captured for this retry.
+        critique:                      String,
+        /// Cumulative review-reject count after this retry.
+        review_reject_count:           u32,
+        /// Per-task max review rejections (V2 default 3).
+        max_review_rejections:         u32,
+        /// Cumulative crash-retry count carried through.
+        crash_retry_count:             u32,
+        /// Per-task max crash retries (V2 default 3).
+        max_crash_retries:             u32,
+        /// Activation id that was just torn down.
+        prior_activation_id:           String,
+        /// Activation id that took its place.
+        new_activation_id:             String,
+        /// Worktree HEAD sha at the prior activation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prior_head_sha:                Option<String>,
+        /// Worktree HEAD sha at the new activation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        new_head_sha:                  Option<String>,
+        /// Unix-seconds timestamp of the
+        /// `ExecutorRespawnFromReviewRejection` audit row.
+        ts_unix:                       i64,
+    },
+    /// A retry triggered by the executor VM's premature exit.
+    RetryCrash {
+        /// One-based retry number.
+        retry_number:           u32,
+        /// Exit code reported by the guest.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code:              Option<i32>,
+        /// Last terminal-tool the agent invoked before crash.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_tool:          Option<String>,
+        /// `max_turns` value the prior activation ran with.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns_scaled_from:  Option<u32>,
+        /// `max_turns` value scaled to for the new activation.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        max_turns_scaled_to:    Option<u32>,
+        /// Cumulative crash-retry count after this retry.
+        crash_retry_count:      u32,
+        /// Per-task max crash retries (V2 default 3).
+        max_crash_retries:      u32,
+        /// Unix-seconds timestamp of the
+        /// `RetrySubTaskAdmitted` audit row.
+        ts_unix:                i64,
+    },
+    /// A retry triggered by the planner's intent-validator
+    /// (Worker 1 C7).
+    RetryValidationReject {
+        /// One-based retry number.
+        retry_number:               u32,
+        /// Validator's short reason string.
+        validator_reason:           String,
+        /// Validator's structured detail blob.
+        validator_detail:           serde_json::Value,
+        /// Cumulative validation-reject count after this retry.
+        validation_reject_count:    u32,
+        /// Per-task max validation rejections.
+        max_validation_rejections:  u32,
+        /// Unix-seconds timestamp of the
+        /// `IntentValidationRejected` audit row.
+        ts_unix:                    i64,
+    },
+    /// Operator-initiated session revocation. Anything whose
+    /// `revoked_by` does NOT start with the `kernel://` marker
+    /// pattern lands here.
+    SessionRevokedOperator {
+        /// Verbatim `revoked_by` field.
+        revoked_by:              String,
+        /// Display name from the audit row, when populated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        revoked_by_display_name: Option<String>,
+        /// Intent kind that drove the revocation
+        /// (`UserCommand` / `IntentEnded` / …) when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        intent_kind:             Option<String>,
+        /// Unix-seconds timestamp of the `SessionRevoked` row.
+        ts_unix:                 i64,
+    },
+    /// Self-exit revocation — the kernel ended the session in
+    /// response to a clean planner exit. Worker 1's C1 marker
+    /// (`revoked_by = "kernel://self-exit/..."`) is the
+    /// authoritative pattern.
+    SessionRevokedSelfExit {
+        /// Last terminal-tool the planner invoked before
+        /// graceful exit.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        terminal_tool:     Option<String>,
+        /// Exit code captured from the guest, when available.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        exit_code:         Option<i32>,
+        /// Path to `kernel.stderr.log` for operator drill-down.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        console_log_path:  Option<String>,
+        /// Unix-seconds timestamp of the `SessionRevoked` row.
+        ts_unix:           i64,
+    },
+    /// Initiative entered the `Blocked` state.
+    InitiativeBlocked {
+        /// Free-form block reason from the
+        /// `InitiativeStateChanged` payload.
+        block_reason:      String,
+        /// Task that triggered the block, when populated.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        blocking_task_id:  Option<String>,
+        /// Unix-seconds timestamp of the audit row.
+        ts_unix:           i64,
+    },
+    /// Stale `PendingActivation` row whose predecessors are all
+    /// `Completed` and whose `created_at` is older than the
+    /// 120-second cutoff. Surfaces orchestrator-side starvation
+    /// or scheduler gaps that would otherwise be invisible.
+    OrchestratorGap {
+        /// Activation id that has been waiting.
+        activation_id:               String,
+        /// Owning task id.
+        task_id:                     String,
+        /// Predecessor task → completion-timestamp pairs. Empty
+        /// when the task is a root.
+        predecessors_completed_at:   Vec<(String, i64)>,
+        /// `now_unix - activation.created_at` in seconds.
+        wait_seconds:                i64,
+    },
+}
+
+impl LifecycleAnnotation {
+    /// Unix-seconds timestamp the FE uses to merge annotations
+    /// into the session live-stream by ordering. Each variant
+    /// exposes its own `ts_unix`; this helper centralises the
+    /// read so route-layer projections don't have to pattern-
+    /// match exhaustively.
+    pub fn ts_unix(&self) -> i64 {
+        match self {
+            Self::RetryReviewReject { ts_unix, .. }
+            | Self::RetryCrash { ts_unix, .. }
+            | Self::RetryValidationReject { ts_unix, .. }
+            | Self::SessionRevokedOperator { ts_unix, .. }
+            | Self::SessionRevokedSelfExit { ts_unix, .. }
+            | Self::InitiativeBlocked { ts_unix, .. } => *ts_unix,
+            Self::OrchestratorGap { .. } => 0,
+        }
+    }
+
+    /// Wire `kind` discriminant — useful for filter knobs (e.g.
+    /// "show retries only") that the FE wants to apply without
+    /// pattern-matching on the typed variants.
+    pub fn kind_str(&self) -> &'static str {
+        match self {
+            Self::RetryReviewReject { .. }     => "retry_review_reject",
+            Self::RetryCrash { .. }            => "retry_crash",
+            Self::RetryValidationReject { .. } => "retry_validation_reject",
+            Self::SessionRevokedOperator { .. } => "session_revoked_operator",
+            Self::SessionRevokedSelfExit { .. } => "session_revoked_self_exit",
+            Self::InitiativeBlocked { .. }     => "initiative_blocked",
+            Self::OrchestratorGap { .. }       => "orchestrator_gap",
+        }
+    }
+}
+
+/// One row in the per-task reviewer-panel results table.
+/// Parsed from the audit chain's `SubmitReview` events for
+/// reviewer tasks downstream of one executor task.
+#[derive(Debug, Clone, Serialize, PartialEq)]
+pub struct ReviewerPanelEntry {
+    /// Reviewer task id (e.g. `review-lint-defect-rust`).
+    pub reviewer_task_id: String,
+    /// Verdict the reviewer issued (`Approved` / `Rejected`).
+    pub verdict:          String,
+    /// First-line excerpt of the reviewer's critique.
+    pub critique_excerpt: String,
+    /// Unix-seconds timestamp the reviewer completed.
+    pub completed_at:     i64,
+}
+
+/// `GET /api/orchestrator-gaps` response envelope. Carries the
+/// list of currently stuck `PendingActivation` rows so the home
+/// view "Warnings" pane can render them without drilling into
+/// per-task pages.
+#[derive(Debug, Clone, Serialize)]
+pub struct OrchestratorGapsResponse {
+    /// One [`LifecycleAnnotation::OrchestratorGap`] per stuck
+    /// activation.
+    pub gaps:        Vec<LifecycleAnnotation>,
+    /// Unix-seconds timestamp the gap detector ran. Mirrors
+    /// `now_unix` from the data-layer call so the FE can show
+    /// staleness when the operator parks the page.
+    pub generated_at: i64,
+}
+
+/// One row in `GET /api/recent-sessions`. Surfaces sessions the
+/// active list filtered out (revoked / expired) so an operator
+/// can replay what the kernel last did before the session ended.
+///
+/// Backed by the `SessionStreamCapture` bounded ring buffer —
+/// the kernel writes one ndjson per session as the agent runs;
+/// when the session terminates the file persists for the ring's
+/// lifetime. The dashboard reads file metadata + the capture's
+/// sidecar lifecycle annotation to populate the row.
+///
+/// `INV-DASHBOARD-RECENT-SESSIONS-RING-01`.
+#[derive(Debug, Clone, Serialize)]
+pub struct RecentSessionEntry {
+    /// Session id (matches `sessions.session_id`).
+    pub session_id: String,
+    /// Session role (`Orchestrator` / `Executor` / `Reviewer`).
+    pub agent_type: String,
+    /// Owning task id, when the kernel recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Owning initiative id, when the kernel recorded one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub initiative_id: Option<String>,
+    /// Unix-seconds timestamp the session was created.
+    pub created_at: u64,
+    /// Unix-seconds timestamp the session terminated.
+    /// `None` when the session is still in the ring but has not
+    /// been observed terminating yet (the capture file's mtime
+    /// is the latest signal; kernel state is the authoritative
+    /// truth and is reflected in `sessions.revoked` once
+    /// `INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01` lands).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_at: Option<u64>,
+    /// Free-form termination reason. `None` until the C1 marker
+    /// pattern lands (Worker 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminated_reason: Option<String>,
+    /// Final lifecycle annotation for this session — typically
+    /// one of `SessionRevokedSelfExit`, `SessionRevokedOperator`,
+    /// or absent when the session is still nominally active.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub final_annotation: Option<LifecycleAnnotation>,
+    /// Total bytes the capture ring is currently holding for
+    /// this session. Useful for the operator to gauge whether
+    /// the capture has been compacted.
+    pub capture_bytes: u64,
+}
 
 // ---------------------------------------------------------------------------
 // Operator failure visibility — INV-DASHBOARD-FAILURE-VISIBILITY-01
@@ -343,6 +616,32 @@ pub struct TaskView {
     /// see the failure cascade without re-walking the graph.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub blocked_downstream: Vec<String>,
+    /// Causality annotations rendered by the dashboard's
+    /// lifecycle timeline (retries, validator rejections,
+    /// initiative-block markers, orchestrator gaps that name
+    /// this task). Ordered by `ts_unix` ascending.
+    /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<LifecycleAnnotation>,
+    /// Most recent annotation, surfaced on the global tasks
+    /// index for the "Lifecycle" column. `None` when the task
+    /// has no annotations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_annotation: Option<LifecycleAnnotation>,
+    /// Most recent reviewer-panel verdict — `Approved`,
+    /// `Rejected`, or absent. Mirrors `tasks.review_verdict`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub review_verdict: Option<String>,
+    /// Captured aggregated reviewer critique. Mirrors
+    /// `tasks.last_critique`. The FE renders this as a
+    /// collapsible block beneath the verdict badge.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_critique: Option<String>,
+    /// Per-reviewer panel results — one row per reviewer task
+    /// downstream of this executor task — parsed from the audit
+    /// chain's `SubmitReview` events.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reviewer_panel_results: Vec<ReviewerPanelEntry>,
 }
 
 /// One captured raw LLM turn surfaced via
@@ -492,6 +791,22 @@ pub struct SessionView {
     ///     `fields` carries `(revoked_by, revoked_by_display_name)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub failure: Option<FailureInfo>,
+    /// Causality annotations from the dashboard's lifecycle
+    /// classifier — every `SessionRevoked{*}` /
+    /// `InitiativeStateChanged{to=Blocked}` row whose
+    /// `session_id` matches this row. The FE merges these
+    /// inline with the live audit stream so an operator sees
+    /// the structured "self-exit" / "operator-revoked by Foo"
+    /// card alongside the raw frames.
+    /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub annotations: Vec<LifecycleAnnotation>,
+    /// Most recent annotation. The Sessions index renders this
+    /// in the "Lifecycle" column so a list of terminated
+    /// sessions immediately discloses self-exit vs operator-
+    /// revoke without a click-through.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latest_annotation: Option<LifecycleAnnotation>,
 }
 
 /// Pending escalation visible to operators.
@@ -1200,6 +1515,37 @@ pub trait DashboardData: Send + Sync + 'static {
         _task_id: &str,
         _n: u32,
     ) -> Result<Vec<TaskLlmTurnView>, ApiError> {
+        Ok(Vec::new())
+    }
+
+    /// List currently-stuck `PendingActivation` rows whose
+    /// predecessors are all `Completed` and whose `created_at`
+    /// is older than the 120-second cutoff. Backed by the pure
+    /// `lifecycle::classify_orchestrator_gaps` classifier.
+    ///
+    /// Default impl returns an empty response so older test
+    /// fixtures + the in-memory data layer compile without the
+    /// new capability. Production wires this through
+    /// `KernelDashboardData`.
+    ///
+    /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
+    fn list_orchestrator_gaps(&self) -> Result<OrchestratorGapsResponse, ApiError> {
+        Ok(OrchestratorGapsResponse {
+            gaps:         Vec::new(),
+            generated_at: 0,
+        })
+    }
+
+    /// List the most-recent N completed / terminated sessions
+    /// the dashboard's `SessionStreamCapture` ring is still
+    /// holding. Powers the Recent Sessions view (C3) so an
+    /// operator sees ended sessions previously dropped from the
+    /// active session list.
+    ///
+    /// Default impl returns `Ok(vec![])` so older fixtures
+    /// continue compiling. Production wires this through the
+    /// kernel-glue layer.
+    fn list_recent_sessions(&self, _limit: u32) -> Result<Vec<RecentSessionEntry>, ApiError> {
         Ok(Vec::new())
     }
 
@@ -2748,6 +3094,11 @@ mod tests {
                     updated_at: 150,
                     failure: None,
                     blocked_downstream: vec![],
+                    annotations: vec![],
+                    latest_annotation: None,
+                    review_verdict: None,
+                    last_critique: None,
+                    reviewer_panel_results: vec![],
                 },
                 TaskView {
                     task_id: format!("{id}-t2"),
@@ -2762,6 +3113,11 @@ mod tests {
                     updated_at: 200,
                     failure: None,
                     blocked_downstream: vec![],
+                    annotations: vec![],
+                    latest_annotation: None,
+                    review_verdict: None,
+                    last_critique: None,
+                    reviewer_panel_results: vec![],
                 },
             ],
             edges: vec![DagEdge {
@@ -2850,10 +3206,20 @@ mod tests {
             updated_at: 0,
             failure: None,
             blocked_downstream: vec![],
+            annotations: vec![],
+            latest_annotation: None,
+            review_verdict: None,
+            last_critique: None,
+            reviewer_panel_results: vec![],
         };
         let s = serde_json::to_string(&t).expect("serialises");
         assert!(!s.contains("\"failure\""));
         assert!(!s.contains("\"blocked_downstream\""));
+        assert!(!s.contains("\"annotations\""));
+        assert!(!s.contains("\"latest_annotation\""));
+        assert!(!s.contains("\"review_verdict\""));
+        assert!(!s.contains("\"last_critique\""));
+        assert!(!s.contains("\"reviewer_panel_results\""));
     }
 
     /// A `failure = Some(_)` carries through to the JSON wire so
@@ -2878,6 +3244,11 @@ mod tests {
                     .with_audit("ev-9", 9),
             ),
             blocked_downstream: vec!["t-2".into()],
+            annotations: vec![],
+            latest_annotation: None,
+            review_verdict: None,
+            last_critique: None,
+            reviewer_panel_results: vec![],
         };
         let v = serde_json::to_value(&t).expect("serialises");
         assert_eq!(v["failure"]["kind"], "WitnessRejected");
