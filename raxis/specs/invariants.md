@@ -13315,3 +13315,186 @@ whole `evaluate_claims` body, not one inlined callee.
    iter63 stack trace; after the fix it returns
    `PendingWitness` (no verifier seeded) or `Pass`.
 
+
+---
+
+## Iter65 — stateless-kernel + paired-write + classifier parity
+
+The iter65 worktree introduced five invariants surfaced by the
+iter64 audit-segment forensics. The pathology root cause was a
+slot-accounting leak in `SessionSpawnService::active_count()`
+(in-memory cache shadowed an immutable DB ledger and diverged on
+the planner-self-exit path), with four downstream
+misclassifications that compounded into an unrecoverable wedge.
+
+### `INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01`
+
+**Statement.** The VM concurrency admission gate
+(`kernel/src/capacity/vm_admission.rs::check_vm_concurrency_cap`)
+MUST read its `current_running` value from the durable
+`sessions` table (`SELECT COUNT(*) FROM sessions WHERE revoked = 0`),
+NOT from any in-process cache. The cap evaluation transaction MUST
+fail closed (refuse admission) on a SQL error rather than fall
+back to a stale in-process value.
+
+**Justification.** Iter64 evidence: the in-memory
+`SessionSpawnService.sessions: Mutex<HashMap<...>>` held 16
+entries against a `cap=16`, while the SQLite `sessions` table
+held 0 un-revoked rows. The leak was on the
+`planner_self_exit` path. The cap evaluator read the cached
+value, refused admission for three consecutive
+`ActivateSubTask` intents, walked the orchestrator's
+no-progress respawn counter to its ceiling, and the initiative
+went terminal-Failed. The DB had abundant capacity available the
+entire time.
+
+**Scenario.** A planner submits a `task_complete` terminal
+intent, the kernel accepts it, the planner calls PowerOff, the
+substrate reaps the VM, the kernel's `revoke_session` SQL UPDATE
+flips `sessions.revoked = 1`, but the in-memory map entry was
+not removed (or removed only on a subset of paths). The next
+admission's `active_count()` reads the stale map and returns the
+pre-revoke count. Multiplied across an initiative's lifetime the
+divergence pins the cap.
+
+**Canonical home.** `crates/session-spawn/src/lib.rs` —
+crate-level docs + `active_count()`.
+
+### `INV-SESSION-SPAWN-LEDGER-MIRRORS-AUDIT-01`
+
+**Statement.** At every kernel state-emit point, the count of
+un-revoked rows in the `sessions` table MUST equal
+`(count of SessionVmSpawned audits) − (count of SessionVmExited
+audits)` for sessions whose `SessionVmSpawned` has been emitted.
+
+**Justification.** Cross-surface conservation law: the audit
+chain is the operator-facing event ledger, the SQLite
+`sessions` table is the kernel-facing live-session ledger, and
+the two MUST agree at every observable instant. A drift between
+them is a paired-write violation
+(`INV-AUDIT-PAIRED-01..07`); a divergence in either direction
+indicates a missed revoke (DB ahead of audit) or a missed
+audit-emit (audit ahead of DB).
+
+**Canonical home.** `crates/session-spawn/src/lib.rs` —
+crate-level docs.
+
+### `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+
+**Statement.** When the planner ships a terminal
+`PlannerExitOutcome::CleanCompletion { tool_name }` over the
+wire, the kernel post-exit hook MUST consult the
+just-revoked session's last-IntentRequest outcome and reclassify
+the exit as `ExitCleanliness::Dirty { tool_name,
+last_rejection_code }` if the matching intent was Rejected.
+The downstream signalling (the `SessionRevoked` audit emit's
+`revoked_by` URN, the orchestrator post-exit respawn's
+`predecessor_was_capacity_pressure` flag) MUST consume the
+reclassified `ExitCleanliness`, not the wire-level
+`PlannerExitOutcome`.
+
+**Justification.** The planner driver in
+`crates/planner-core/src/driver.rs` unconditionally classifies
+any terminal-tool dispatch as
+`DriverOutcome::Completed → CleanCompletion`. A planner that
+shipped `activate_subtask` for which the kernel responded
+`{status:"rejected", error_code:"FailVmConcurrencyAtCap"}`
+still ships `CleanCompletion` over the wire. Without the
+kernel-side reclassification, the audit chain stamps
+`revoked_by_display_name="Planner self-exit (clean disconnect,
+terminal_tool=Some(\"activate_subtask\"))"` even though the
+intent was rejected, and forensic readers cannot disambiguate
+clean-disconnect from
+ship-terminal-intent-the-kernel-refused-and-PowerOff-anyway.
+
+**Canonical home.** `kernel/src/session_activity.rs::classify_planner_exit`.
+
+### `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+
+**Statement.** The orchestrator no-progress respawn counter
+(`initiatives.orchestrator_no_progress_respawn_count`) MUST
+NOT increment when the just-revoked orchestrator session
+exited with a `Dirty` `ExitCleanliness` whose
+`last_rejection_code` is one of the closed-lexicon
+capacity-pressure codes (`FailVmConcurrencyAtCap`,
+`FailAdmissionQueueFull`, plus PascalCase aliases per
+`session_activity::is_capacity_pressure_code`). Capacity
+back-pressure from a peer initiative is structurally distinct
+from orchestrator no-progress and MUST NOT trip the same
+ceiling.
+
+**Justification.** Iter64 evidence: three consecutive
+`FailVmConcurrencyAtCap` rejections fired three
+`orchestrator_no_progress_respawn_count_incremented` events
+(walking the counter from 0 → 3) and then the fourth respawn
+tripped the ceiling and auto-failed the initiative. The
+orchestrator was making honest forward decisions every time
+(it kept submitting valid `ActivateSubTask` intents); the host
+just happened to be saturated by a peer initiative. Bug 0's
+fix removes the artificial saturation; this invariant guards
+against a structurally-similar regression where a real but
+transient capacity-pressure event class spuriously trips the
+ceiling.
+
+**Canonical home.** `kernel/src/session_spawn_orchestrator.rs::respawn_orchestrator_for_initiative` (the `predecessor_was_capacity_pressure` parameter).
+
+### `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
+
+**Statement.** When the orchestrator no-progress respawn
+counter exceeds `MAX_ORCH_NO_PROGRESS_RESPAWNS`, the kernel
+MUST atomically (in one SQLite transaction):
+
+1. INSERT one `escalations` row with
+   `class='LogicalDeadlock'`, `initiator='Kernel'`,
+   `status='Pending'`, justification text including the
+   `OrchestratorRespawnCeilingExceeded` payload, and
+   `idempotency_key` derived from `initiative_id +
+   ceiling_attempt_count` so the same ceiling event cannot
+   double-insert.
+2. UPDATE `initiatives.state = 'Failed'` (the terminal
+   transition the operator dashboard surfaces).
+3. UPDATE matching tasks to `Failed` with a `block_reason`
+   referencing this invariant.
+
+The chain-side audit emit (`EscalationSubmitted` +
+`OrchestratorRespawnCeilingExceeded`) runs post-commit per
+`audit-paired-writes.md §4`. The kernel-initiated escalation
+helper falls back to the most recent Orchestrator session for
+the FK anchor when no worker session ever ran on the
+initiative (the iter64 pathology).
+
+**Justification.** Iter64 evidence: zero `Escalation*` audit
+events and zero rows in the `escalations` table for an
+initiative that walked past the ceiling. The pre-iter65
+helper's tier-1 worker-session JOIN returned `None` (no worker
+ever spawned because the orchestrator's terminal intents were
+all rejected with `FailVmConcurrencyAtCap` before any
+`task_admit` could land), the helper had no fallback path,
+and the escalation never landed. Operator dashboard had
+nothing to surface; the harness eventually SIGTERM'd.
+
+**Canonical home.** `kernel/src/orch_respawn_ceiling.rs::insert_logical_deadlock_escalation_in_tx`.
+
+### `INV-NOTIFICATION-PRIORITY-PARITY-01`
+
+**Statement.** Every `(AuditEventKind, NotificationPriority)`
+pair MUST be classified identically by the typed
+[`notification_priority`] and the string-based
+[`notification_priority_for_kind_str`] classifiers in
+`crates/dashboard-kernel/src/notification_filter.rs`. A drift
+between the two surfaces is a wire-shape regression and is
+caught by the
+`tests::typed_and_string_apis_agree_on_kind_name_parity`
+exhaustive sweep.
+
+**Justification.** Iter64 evidence: the typed classifier sent
+`OrchestratorRespawnCeilingExceeded → Critical`, the string
+classifier sent it to `Medium`, and the kernel's
+`notifications::dispatch` defense-in-depth gate +
+the dashboard's read-side `notifications` projection both
+consult the string surface. A `Critical`-only filter on either
+surface dropped the inbox notification entirely; the operator
+saw no auto-paged signal that the initiative had
+self-failed.
+
+**Canonical home.** `crates/dashboard-kernel/src/notification_filter.rs`.
