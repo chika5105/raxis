@@ -81,6 +81,7 @@
 //!   high-cache-hit-rate shape Anthropic recommends.
 
 use serde::{Deserialize, Serialize};
+#[cfg(any(debug_assertions, test))]
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;

@@ -206,18 +206,15 @@ pub fn resolve_signing_key_pk_hex(
     // build script.
     if let Ok(raw) = std::env::var(RAXIS_KERNEL_SIGNING_KEY_HEX) {
         let trimmed = raw.trim();
-        if !trimmed.is_empty() {
-            if is_lowercase_hex64(trimmed) {
-                return Ok(ResolvedSigningKey {
-                    pk_hex: trimmed.to_owned(),
-                    source: SigningKeySource::EnvHex,
-                    source_path: None,
-                });
-            }
-            // Fall through into the miss path; record this in the
-            // error so the operator sees that we noticed the env
-            // var but rejected it.
+        if !trimmed.is_empty() && is_lowercase_hex64(trimmed) {
+            return Ok(ResolvedSigningKey {
+                pk_hex: trimmed.to_owned(),
+                source: SigningKeySource::EnvHex,
+                source_path: None,
+            });
         }
+        // Fall through into the miss path on empty / malformed values
+        // so the operator sees us notice the env var but reject it.
     }
 
     // Arm 2: RAXIS_KERNEL_SIGNING_KEY_PATH points at a file on
@@ -328,6 +325,16 @@ fn is_lowercase_hex64(s: &str) -> bool {
 /// panic message is the load-bearing diagnostic. Presence of the
 /// token by itself therefore does NOT prove the anchor is broken —
 /// we couple it with a fingerprint check below.
+//
+// `xtask` is a binary crate, so `pub` does not export this symbol
+// outside the binary. The const is forward API consumed by the
+// (in-progress) `verify_kernel_binary_trust_anchor` driver and the
+// iter67/iter68 harness slices that grep release kernel binaries
+// for the token. `dead_code` is silenced rather than the const
+// removed because the constant string MUST remain byte-identical
+// with `kernel/build.rs`'s `assert_trust_anchor_present_or_panic`
+// emit; deleting and re-introducing risks string drift.
+#[allow(dead_code)]
 pub const TRUST_ANCHOR_FATAL_TOKEN: &str = "trust_anchor_unpopulated";
 
 /// Outcome of a [`verify_kernel_binary_trust_anchor`] call.
@@ -348,6 +355,11 @@ pub enum TrustAnchorVerdict {
 }
 
 impl TrustAnchorVerdict {
+    /// `xtask` is a binary crate, so `pub` does not export this
+    /// method. Forward API for the verify driver / harness — see
+    /// the parallel allow on `TRUST_ANCHOR_FATAL_TOKEN` for the
+    /// rationale.
+    #[allow(dead_code)]
     pub fn is_ok(&self) -> bool {
         matches!(self, TrustAnchorVerdict::Populated)
     }

@@ -330,7 +330,7 @@ fn refailure_after_approve_inserts_new_escalation_row_not_dedup() {
 /// approve path and MUST NOT ride this handler.
 #[test]
 fn approve_refuses_planner_initiated_escalation() {
-    let (_tmp, mut conn) = fresh_disk_conn();
+    let (_tmp, conn) = fresh_disk_conn();
     let escalations = Table::Escalations.as_str();
     let initiatives = Table::Initiatives.as_str();
     let sessions = Table::Sessions.as_str();
