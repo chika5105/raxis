@@ -84,21 +84,22 @@ pub fn get_lane_status_in_tx(
     .collect::<Vec<_>>()
     .join(", ");
 
-    let active_tasks: u32 = conn
-        .query_row(
-            &format!("SELECT COUNT(*) FROM {TASKS} WHERE lane_id=?1 AND state NOT IN ({terminal})"),
-            rusqlite::params![lane_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    // INV-SCHED-LANE-STATUS-FAIL-CLOSED-01 — propagate SQL errors instead
+    // of coercing them to `0`. `reserve_budget_in_tx` calls this inside
+    // its admission transaction; a transient `database is locked` or a
+    // corrupted ledger row MUST NOT silently admit work as if the lane
+    // were empty.
+    let active_tasks: u32 = conn.query_row(
+        &format!("SELECT COUNT(*) FROM {TASKS} WHERE lane_id=?1 AND state NOT IN ({terminal})"),
+        rusqlite::params![lane_id],
+        |r| r.get(0),
+    )?;
 
-    let reserved_cost: u64 = conn
-        .query_row(
-            &format!("SELECT COALESCE(SUM(reserved_cost), 0) FROM {BUDGET} WHERE lane_id=?1"),
-            rusqlite::params![lane_id],
-            |r| r.get(0),
-        )
-        .unwrap_or(0);
+    let reserved_cost: u64 = conn.query_row(
+        &format!("SELECT COALESCE(SUM(reserved_cost), 0) FROM {BUDGET} WHERE lane_id=?1"),
+        rusqlite::params![lane_id],
+        |r| r.get(0),
+    )?;
 
     Ok(LaneStatus {
         active_tasks,

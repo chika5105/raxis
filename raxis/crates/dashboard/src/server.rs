@@ -21,7 +21,6 @@ use tokio::net::TcpListener;
 use tower::limit::ConcurrencyLimitLayer;
 use tower_http::compression::predicate::{NotForContentType, Predicate, SizeAbove};
 use tower_http::compression::CompressionLayer;
-use tower_http::cors::CorsLayer;
 use tower_http::limit::RequestBodyLimitLayer;
 use tower_http::timeout::TimeoutLayer;
 use tower_http::trace::TraceLayer;
@@ -511,7 +510,15 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         // BEFORE we allocate per-request handler state.
         .layer(ConcurrencyLimitLayer::new(MAX_INFLIGHT_REQUESTS))
         .layer(TraceLayer::new_for_http())
-        .layer(CorsLayer::permissive())
+        // INV-DASHBOARD-SAME-ORIGIN-ONLY-01 — the dashboard binary
+        // serves both the React SPA and the `/api/*` JSON surface
+        // from the same listener; there is no documented embed
+        // / cross-origin tooling that needs CORS. Removing the
+        // permissive layer eliminates a defense-in-depth gap where
+        // any browser tab that obtains a valid JWT could call the
+        // operator API. Reintroduce CorsLayer with an explicit
+        // origin allowlist if a documented cross-origin client
+        // ever ships.
         .layer(CompressionLayer::new().compress_when(
             SizeAbove::new(512).and(NotForContentType::const_new("text/event-stream")),
         ))

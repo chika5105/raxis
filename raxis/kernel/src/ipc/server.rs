@@ -176,7 +176,20 @@ pub async fn start(
     // step 9 "Signal handler registration"). On non-unix targets we have no
     // SIGTERM equivalent, but the kernel is unix-only by spec
     // (`UnixListener` already gates everything to `cfg(unix)`).
+    //
+    // `wait_for_shutdown` returns the chosen reason AND aborts the
+    // accept loops that did not win the race so they cannot keep
+    // accepting connections during the cleanup window. The unbound
+    // socket files are removed below; we explicitly do NOT rely on
+    // `Drop` order of the `JoinHandle`s for that (a dropped
+    // `JoinHandle` does NOT cancel the underlying task).
+    let op_abort = op_task.abort_handle();
+    let pl_abort = pl_task.abort_handle();
+    let gw_abort = gw_task.abort_handle();
     let reason = wait_for_shutdown(sigterm, sigint, op_task, pl_task, gw_task).await;
+    op_abort.abort();
+    pl_abort.abort();
+    gw_abort.abort();
 
     // Cleanup: unbind sockets by removing files. Best-effort — if the
     // operator wiped `<data_dir>` mid-shutdown the removes will simply ENOENT.

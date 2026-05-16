@@ -33,6 +33,15 @@ use crate::PolicyError;
 /// The raw TOML-mapped policy artifact, before semantic validation.
 /// Parsed by `toml::from_str`; then converted to `PolicyBundle` by
 /// `PolicyBundle::validate`.
+///
+/// NOTE: we deliberately do NOT use `#[serde(deny_unknown_fields)]`
+/// at the top level. `policy.toml` is a shared artifact with
+/// `[dashboard]` and `[observability]` sections owned by other
+/// crates (`raxis-dashboard`, `raxis-otel-pusher`) that re-parse the
+/// same file with their own structs; enforcing strictness here would
+/// reject every operator-installed policy that includes those
+/// sections. Unknown-field typo defense is best handled by a future
+/// top-level lint pass that knows the full section schema.
 #[derive(Debug, Deserialize)]
 pub(crate) struct RawPolicy {
     pub(crate) meta: PolicyMeta,

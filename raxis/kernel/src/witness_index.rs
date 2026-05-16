@@ -224,8 +224,23 @@ pub fn lookup(
 
 fn parse_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<WitnessRecord> {
     let result_class_str: String = row.get(4)?;
-    let result_class =
-        ResultClass::from_str(&result_class_str).unwrap_or(ResultClass::Inconclusive);
+    // INV-WITNESS-INDEX-RESULT-CLASS-EXHAUSTIVE-01 — refuse to coerce an
+    // unknown `result_class` to `Inconclusive`. A corrupt or future-version
+    // string here is a kernel-bug or migration-drift signal, not a
+    // legitimate "treat as inconclusive" verdict. Surfacing the parse
+    // failure as a `FromSqlError` lets the lookup return a real error
+    // instead of silently degrading a possibly-failed witness into the
+    // inconclusive bucket.
+    let result_class = ResultClass::from_str(&result_class_str).ok_or_else(|| {
+        rusqlite::Error::FromSqlConversionFailure(
+            4,
+            rusqlite::types::Type::Text,
+            Box::new(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unknown witness result_class: {result_class_str:?}"),
+            )),
+        )
+    })?;
     Ok(WitnessRecord {
         verifier_run_id: row.get(0)?,
         evaluation_sha: row.get(1)?,

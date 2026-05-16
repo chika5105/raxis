@@ -566,7 +566,21 @@ pub fn load_artifact_if_present(
     };
     validate_artifact_path(path)?;
 
-    let meta = std::fs::metadata(path).map_err(|e| ArtifactError::Io {
+    // INV-VERIFIER-ARTIFACT-BOUNDED-READ-01 — the previous shape ran
+    // `metadata(path)` for the size pre-check and a separate
+    // `std::fs::read(path)` for the bytes. A concurrent writer (or a
+    // symlink swap, on substrates that allow it) could grow the file
+    // between the two syscalls and the read would allocate well past
+    // `artifact_max_bytes`. Bind the read to a single open file and
+    // cap the buffer at `cap + 1`, then treat any byte past `cap` as
+    // `TooLarge` so the verifier sub-process cannot OOM on an
+    // attacker-controlled artefact.
+    use std::io::Read;
+    let mut file = std::fs::File::open(path).map_err(|e| ArtifactError::Io {
+        path: path.display().to_string(),
+        source: e,
+    })?;
+    let meta = file.metadata().map_err(|e| ArtifactError::Io {
         path: path.display().to_string(),
         source: e,
     })?;
@@ -577,10 +591,29 @@ pub fn load_artifact_if_present(
             cap: env.artifact_max_bytes,
         });
     }
-    let bytes = std::fs::read(path).map_err(|e| ArtifactError::Io {
-        path: path.display().to_string(),
-        source: e,
-    })?;
+    // Defensive upper bound: the cap + 1, capped at `usize::MAX`. The
+    // initial `Vec` allocation honours the pre-check size, but we
+    // still cap the read at `cap + 1` bytes so a racing writer can
+    // never push us past the bound.
+    let cap = env.artifact_max_bytes;
+    let read_cap = cap.saturating_add(1);
+    let initial_capacity = usize::try_from(meta.len()).unwrap_or(0);
+    let mut bytes: Vec<u8> = Vec::with_capacity(initial_capacity);
+    let n = file
+        .by_ref()
+        .take(read_cap)
+        .read_to_end(&mut bytes)
+        .map_err(|e| ArtifactError::Io {
+            path: path.display().to_string(),
+            source: e,
+        })?;
+    if (n as u64) > cap {
+        return Err(ArtifactError::TooLarge {
+            path: path.display().to_string(),
+            size: n as u64,
+            cap,
+        });
+    }
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let digest: [u8; 32] = hasher.finalize().into();

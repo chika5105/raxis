@@ -264,6 +264,20 @@ impl TaskLlmCapture {
             record.body_truncated = true;
         }
 
+        // INV-TASK-LLM-CAPTURE-SERIALIZE-OR-FAIL-01. Serialise the
+        // record BEFORE we broadcast or open the file. If
+        // serialisation fails (a future schema regression, a
+        // pathological unicode payload, etc.) we MUST surface the
+        // error instead of writing a `"{}"` placeholder that looks
+        // durable but contains no evidence — the post-mortem corpus
+        // is only useful if the rows on disk are real records.
+        let mut line = serde_json::to_string(&record).map_err(|e| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("task_llm_capture: serialize failed for task {task_id}: {e}"),
+            )
+        })?;
+
         let state = self.task_state(task_id)?;
         // Broadcast first so subscribers aren't blocked on disk.
         let _ = state.sender.send(record.clone());
@@ -287,7 +301,6 @@ impl TaskLlmCapture {
         // 5-50 s Anthropic round-trip we just captured, and
         // load-bearing for post-mortem (iter63 lost the
         // post-`tool_result` turn this exact way).
-        let mut line = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_owned());
         line.push('\n');
         let bytes = line.as_bytes();
         let line_len = bytes.len() as u64;
@@ -316,8 +329,14 @@ impl TaskLlmCapture {
     }
 
     /// Read the last `n` records from the task's ring. Returns
-    /// `Ok(vec![])` when the file is missing (task never had an
-    /// LLM call) — never an error.
+    /// `vec![]` when the file is missing (task never had an LLM
+    /// call) — never an error.
+    ///
+    /// Malformed lines (truncated tail, partial write at crash,
+    /// future-schema unknown) are skipped but counted in the
+    /// `tracing` `warn` log so operators can spot persistent
+    /// corruption rather than seeing it silently as empty
+    /// history.
     pub fn tail(&self, task_id: &str, n: usize) -> Vec<LlmTurnRecord> {
         let path = self.task_path(task_id);
         let Ok(file) = File::open(&path) else {
@@ -329,10 +348,23 @@ impl TaskLlmCapture {
             let cut = lines.len() - n;
             lines.drain(0..cut);
         }
-        lines
-            .into_iter()
-            .filter_map(|l| serde_json::from_str::<LlmTurnRecord>(&l).ok())
-            .collect()
+        let mut records = Vec::with_capacity(lines.len());
+        let mut parse_errors = 0usize;
+        for line in lines {
+            match serde_json::from_str::<LlmTurnRecord>(&line) {
+                Ok(rec) => records.push(rec),
+                Err(_) => parse_errors += 1,
+            }
+        }
+        if parse_errors > 0 {
+            tracing::warn!(
+                task_id = task_id,
+                parse_errors = parse_errors,
+                records = records.len(),
+                "task_llm_capture: tail() skipped malformed lines",
+            );
+        }
+        records
     }
 
     /// Subscribe to live records for a task. Returns `None`
