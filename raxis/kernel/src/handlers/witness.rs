@@ -291,6 +291,24 @@ pub async fn handle(
         CommitOutcome::Rejected(reason) => return Ok(WitnessAck::Rejected { reason }),
     };
 
+    // FOLLOWUP-E / INV-VERIFIER-AUDIT-PAIRED-WRITE-01 — emit the canonical
+    // `VerifierWitnessReceived` audit row once the witness has been
+    // accepted into the SQLite-side audit chain. Pairs with the
+    // `VerifierVmSpawned` row that the verifier-runner emitted at spawn
+    // time (same `verifier_run_id`). Initiative-id is left `None` here
+    // because TaskRowData does not denormalise it today; iter63 can
+    // extend the SELECT in `load_task_row_in_tx` and pass it through
+    // without touching this call site.
+    crate::gates::verifier_audit::emit_witness_received(
+        ctx.audit.as_ref(),
+        &run_id,
+        result_class.as_str(),
+        Some(&blob_sha256),
+        Some(body_bytes.len() as u64),
+        Some(sub.task_id.as_str()),
+        None,
+    );
+
     // Structured audit log (full audit integration is v2; structured stderr for now).
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"WitnessAccepted\",\
