@@ -42,6 +42,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 
 use super::harness_timeout::{
     run_command_output_timeout, BoundedWaitError, DOCKER_BRINGUP_TIMEOUT, DOCKER_PROBE_TIMEOUT,
@@ -61,6 +62,26 @@ pub const ENV_NO_AUTO_DOCKER: &str = "RAXIS_LIVE_E2E_NO_AUTO_DOCKER";
 /// Magic token included in the fail-fast message for grep-friendly
 /// CI scrape pipelines.
 pub const STACK_DOWN_TOKEN: &str = "RAXIS_LIVE_E2E_DOCKER_STACK_DOWN";
+
+/// Operator opt-out env var for the image pre-pull stage. When set
+/// (any non-empty value), [`ensure_compose_images_cached_or_pull`]
+/// short-circuits before any `docker` shell-out — for operators who
+/// pre-pull and manage compose externally.
+pub const ENV_NO_PREPULL: &str = "RAXIS_LIVE_E2E_NO_PREPULL";
+
+/// Override env var for the pre-pull bounded timeout (seconds).
+/// When unset / empty / non-positive / unparseable the default
+/// [`DEFAULT_PULL_TIMEOUT`] is used. See
+/// [`pull_timeout_from_env`] for the parse contract.
+pub const ENV_PULL_TIMEOUT_SECS: &str = "RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS";
+
+/// Default bounded timeout for `docker compose pull` on a cold
+/// image cache. 20 minutes covers a typical operator-laptop pull
+/// of the extended stack (postgres / mongo / redis / smtp /
+/// mysql / mssql / Grafana / Prometheus / OTel collector) over a
+/// residential connection, with generous slack for layer
+/// extraction. Override via [`ENV_PULL_TIMEOUT_SECS`].
+pub const DEFAULT_PULL_TIMEOUT: Duration = Duration::from_secs(1200);
 
 /// Failure surface for the docker-stack preflight.
 #[derive(Debug)]
@@ -84,6 +105,18 @@ pub enum DockerStackError {
 
     /// `docker` binary missing on the host or otherwise un-spawnable.
     DockerMissing { reason: String },
+
+    /// Pre-pull stage failed: either `docker compose ... config
+    /// --images` could not resolve the image list, or
+    /// `docker compose ... pull` exited non-zero / timed out.
+    /// The `Display` impl includes a copy-pastable manual
+    /// pre-pull command and points at the
+    /// [`ENV_PULL_TIMEOUT_SECS`] knob.
+    PullFailed {
+        project: String,
+        compose_file: PathBuf,
+        reason: String,
+    },
 }
 
 impl std::fmt::Display for DockerStackError {
@@ -115,6 +148,29 @@ impl std::fmt::Display for DockerStackError {
                 "[live-e2e docker-stack] `docker` binary not usable: {reason}. \
                  Install Docker Desktop / docker-cli + docker-compose-plugin and re-run.",
             ),
+            Self::PullFailed {
+                project,
+                compose_file,
+                reason,
+            } => {
+                writeln!(f, "[live-e2e docker-stack] image pull failed: {reason}")?;
+                writeln!(f, "Remediation:")?;
+                writeln!(
+                    f,
+                    "  1. Confirm Docker Desktop has network access \
+                     (curl https://registry-1.docker.io/v2/ -I).",
+                )?;
+                writeln!(f, "  2. Manually pre-pull from a network-stable terminal:",)?;
+                writeln!(f, "       docker compose -p {project} \\")?;
+                writeln!(f, "         -f {} pull", compose_file.display())?;
+                write!(
+                    f,
+                    "  3. If pull succeeds outside the harness, set \
+                     {env}=<seconds> to a larger value (default {default}s).",
+                    env = ENV_PULL_TIMEOUT_SECS,
+                    default = DEFAULT_PULL_TIMEOUT.as_secs(),
+                )
+            }
         }
     }
 }
@@ -137,6 +193,17 @@ pub fn extended_compose_file() -> PathBuf {
 /// regression-test consumption.
 pub fn ensure_extended_stack_up_or_panic() {
     let compose_file = extended_compose_file();
+    // INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01: verify (or pull)
+    // every compose-referenced image BEFORE the 240 s up-wait
+    // bound. A cold image cache routinely takes 5-15 minutes to
+    // fill; without this pre-step the `up -d --wait` bounded
+    // wait SIGKILLs the compose process mid-pull and surfaces a
+    // misleading "stack startup failure" panic. Opt out via
+    // `RAXIS_LIVE_E2E_NO_PREPULL=1` if you manage the stack
+    // externally.
+    if let Err(e) = ensure_compose_images_cached_or_pull(COMPOSE_PROJECT, &compose_file) {
+        panic!("{e}");
+    }
     if let Err(e) = ensure_stack_up(COMPOSE_PROJECT, &compose_file) {
         panic!("{e}");
     }
@@ -295,6 +362,299 @@ pub fn parse_compose_ps(stdout: &str) -> StackProbe {
         format!("{ok}/{total} healthy; not-ready=[{}]", bad.join(", "),)
     };
     StackProbe { healthy, summary }
+}
+
+// ─── Image pre-pull stage (INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01) ─────
+//
+// Wraps `docker compose ... pull` under a generous (20 min)
+// bounded wait that runs BEFORE the existing 240 s `up -d --wait`
+// stage. The split matters: pulling a cold image cache routinely
+// takes 5-15 minutes on a residential connection, but once the
+// images are local `up --wait` reliably completes in 30-90 s.
+// Wrapping both phases under a single 240 s bound caused the
+// iter63 launch-attempt panic: `docker system prune --volumes
+// -f` had cleared the cache, the merged `up --wait` ran past
+// the 240 s deadline mid-pull, the bounded-wait machinery
+// SIGKILLed the compose process, and the operator saw a
+// `[bounded-wait:docker-compose-up] child did not exit within
+// 240s; SIGKILLed` panic that misleadingly looked like a stack
+// startup failure rather than a missing image.
+
+/// Decision surface for the pre-pull dispatcher. Factored out as
+/// a value type so witness tests can pin each branch without
+/// shelling out to the real `docker` binary. See
+/// [`decide_prepull_action_with`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PrepullDecision {
+    /// `RAXIS_LIVE_E2E_NO_PREPULL=1` is in effect; the
+    /// dispatcher MUST NOT shell out to docker at all.
+    OptedOut,
+    /// Every compose-referenced image is locally cached; the
+    /// dispatcher MUST skip the pull and return `Ok(())`. The
+    /// `count` is the total number of images verified for the
+    /// operator banner.
+    AllCached { count: usize },
+    /// At least one compose-referenced image is missing locally.
+    /// `all` is every image the compose file declares (for the
+    /// banner / forensic context); `missing` is the subset
+    /// `docker image inspect` reported absent. The dispatcher
+    /// MUST shell out to `docker compose pull` under the bounded
+    /// wait described by [`pull_timeout_from_env`].
+    PullRequired {
+        all: Vec<String>,
+        missing: Vec<String>,
+    },
+}
+
+/// Pure dispatcher: given the env-var opt-out signal and two
+/// closures that resolve the compose-file image list + the local
+/// presence of a single image, return the [`PrepullDecision`]
+/// the runtime path should execute. The opt-out branch is
+/// short-circuit: when `env_no_prepull=true` NEITHER closure is
+/// invoked (witness arm c of `INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01`).
+pub fn decide_prepull_action_with(
+    env_no_prepull: bool,
+    images_provider: impl FnOnce() -> Result<Vec<String>, DockerStackError>,
+    presence_checker: impl Fn(&str) -> bool,
+) -> Result<PrepullDecision, DockerStackError> {
+    if env_no_prepull {
+        return Ok(PrepullDecision::OptedOut);
+    }
+    let images = images_provider()?;
+    if images.is_empty() {
+        // No images means the compose file declares no services
+        // that reference an image tag (or `config --images`
+        // returned an empty list). Treat as "nothing to pull"
+        // and let the downstream `up --wait` stage decide what
+        // to do.
+        return Ok(PrepullDecision::AllCached { count: 0 });
+    }
+    let missing: Vec<String> = images
+        .iter()
+        .filter(|img| !presence_checker(img))
+        .cloned()
+        .collect();
+    if missing.is_empty() {
+        Ok(PrepullDecision::AllCached {
+            count: images.len(),
+        })
+    } else {
+        Ok(PrepullDecision::PullRequired {
+            all: images,
+            missing,
+        })
+    }
+}
+
+/// Parse the `RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS` override into a
+/// [`Duration`]. Unset / empty / non-positive / unparseable
+/// inputs clamp to [`DEFAULT_PULL_TIMEOUT`] rather than disabling
+/// the bound — every external-process spawn in the live-e2e
+/// harness must be bounded
+/// (`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`).
+pub fn pull_timeout_from_env(raw: Option<&str>) -> Duration {
+    match raw
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<u64>().ok())
+        .filter(|n| *n > 0)
+    {
+        Some(n) => Duration::from_secs(n),
+        None => DEFAULT_PULL_TIMEOUT,
+    }
+}
+
+/// Verify that every image referenced by `compose_file` is
+/// locally cached; if any image is missing, pull all of them
+/// under a configurable bounded wait BEFORE the existing
+/// `docker compose ... up -d --wait` stage runs.
+///
+/// **Failure mode this prevents.** The realistic-scenario test
+/// invokes `ensure_extended_stack_up_or_panic`, which wraps
+/// `docker compose ... up -d --wait` under a 240 s
+/// `bounded-wait`. On a cold image cache (e.g. immediately
+/// after `docker system prune --volumes -f`) the pull step
+/// alone exceeds 240 s on a typical machine; the bounded wait
+/// then SIGKILLs the compose process and the test panics with
+/// `[bounded-wait:docker-compose-up] child did not exit within
+/// 240s; SIGKILLed` — a misleading "stack startup failure"
+/// message that hides the real root cause (missing images).
+/// This pre-step verifies presence cheaply via `docker image
+/// inspect` and falls back to a 20-minute (configurable via
+/// [`ENV_PULL_TIMEOUT_SECS`]) `docker compose pull` only when
+/// genuinely needed, so the downstream 240 s `up --wait` bound
+/// stays tight against the actual stack-startup phase.
+///
+/// **Opt-out.** `RAXIS_LIVE_E2E_NO_PREPULL=1` short-circuits
+/// the entire stage (for operators who pre-pull and manage
+/// compose externally).
+pub fn ensure_compose_images_cached_or_pull(
+    project: &str,
+    compose_file: &std::path::Path,
+) -> Result<(), DockerStackError> {
+    let env_no_prepull = std::env::var(ENV_NO_PREPULL)
+        .map(|v| !v.is_empty())
+        .unwrap_or(false);
+
+    let decision = decide_prepull_action_with(
+        env_no_prepull,
+        || compose_image_list(project, compose_file),
+        image_present_locally,
+    )?;
+
+    match decision {
+        PrepullDecision::OptedOut => {
+            eprintln!(
+                "[live-e2e docker-stack] {env}=1 set; skipping image pre-pull                  (operator-managed)",
+                env = ENV_NO_PREPULL,
+            );
+            Ok(())
+        }
+        PrepullDecision::AllCached { count } => {
+            eprintln!(
+                "[live-e2e docker-stack] images cached locally: {count}                  images verified, skipping pull",
+            );
+            Ok(())
+        }
+        PrepullDecision::PullRequired { all: _, missing } => {
+            let n = missing.len();
+            eprintln!(
+                "[live-e2e docker-stack] cold image cache; pulling {n}                  missing images (this can take 5-15 minutes on a fresh                  machine)...",
+            );
+            for m in &missing {
+                eprintln!("    - {m}");
+            }
+            pull_compose_images(project, compose_file)
+        }
+    }
+}
+
+/// Shell-out to `docker compose -p <project> -f <compose_file>
+/// config --images` and return one image per line. Bounded by
+/// [`DOCKER_PROBE_TIMEOUT`] — `config --images` is a pure
+/// YAML-resolution pass with no network or container IO, so 30 s
+/// is ample. Non-zero exit / missing-binary / timeout all surface
+/// as [`DockerStackError::PullFailed`] (we conflate config-failure
+/// with pull-failure in the operator-facing remediation message
+/// because the remediation step — re-run the same compose
+/// invocation manually — is identical).
+fn compose_image_list(
+    project: &str,
+    compose_file: &std::path::Path,
+) -> Result<Vec<String>, DockerStackError> {
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose")
+        .arg("-p")
+        .arg(project)
+        .arg("-f")
+        .arg(compose_file)
+        .arg("config")
+        .arg("--images");
+    let out = match run_command_output_timeout(
+        &mut cmd,
+        DOCKER_PROBE_TIMEOUT,
+        "docker-compose-config-images",
+    ) {
+        Ok(o) => o,
+        Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
+            return Err(DockerStackError::DockerMissing { reason });
+        }
+        Err(e) => {
+            return Err(DockerStackError::PullFailed {
+                project: project.to_owned(),
+                compose_file: compose_file.to_path_buf(),
+                reason: format!("docker compose config --images: {e}"),
+            });
+        }
+    };
+    if !out.status.success() {
+        return Err(DockerStackError::PullFailed {
+            project: project.to_owned(),
+            compose_file: compose_file.to_path_buf(),
+            reason: format!(
+                "docker compose config --images exit {:?}: stderr={}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim_end(),
+            ),
+        });
+    }
+    Ok(parse_compose_images(&String::from_utf8_lossy(&out.stdout)))
+}
+
+/// Parse `docker compose config --images` stdout into one image
+/// per line, dropping blanks. Pure (testable without `docker`).
+pub fn parse_compose_images(stdout: &str) -> Vec<String> {
+    stdout
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .map(str::to_owned)
+        .collect()
+}
+
+/// Check whether `image` (e.g. `postgres:16-alpine`) is locally
+/// cached. Implemented as `docker image inspect <image>` — exit 0
+/// iff present. Bounded by [`DOCKER_PROBE_TIMEOUT`] for parity
+/// with the rest of the docker-stack helpers; a healthy inspect
+/// returns in tens of milliseconds.
+fn image_present_locally(image: &str) -> bool {
+    let mut cmd = Command::new("docker");
+    cmd.arg("image").arg("inspect").arg(image);
+    match run_command_output_timeout(&mut cmd, DOCKER_PROBE_TIMEOUT, "docker-image-inspect") {
+        Ok(out) => out.status.success(),
+        Err(_) => false,
+    }
+}
+
+/// Run `docker compose -p <project> -f <compose_file> pull`
+/// under [`pull_timeout_from_env`] (default 20 minutes via
+/// [`DEFAULT_PULL_TIMEOUT`]). Reuses the shared
+/// `harness_timeout::run_command_output_timeout` machinery so
+/// the pre-pull stage satisfies the same
+/// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01` bound as every
+/// other live-e2e harness shell-out.
+fn pull_compose_images(
+    project: &str,
+    compose_file: &std::path::Path,
+) -> Result<(), DockerStackError> {
+    let timeout = pull_timeout_from_env(std::env::var(ENV_PULL_TIMEOUT_SECS).ok().as_deref());
+    eprintln!(
+        "[live-e2e docker-stack] pre-pull: docker compose -p {project}          -f {file} pull (timeout: {timeout:?}; override via {env}=<seconds>)",
+        file = compose_file.display(),
+        env = ENV_PULL_TIMEOUT_SECS,
+    );
+    let mut cmd = Command::new("docker");
+    cmd.arg("compose")
+        .arg("-p")
+        .arg(project)
+        .arg("-f")
+        .arg(compose_file)
+        .arg("pull");
+    let out = match run_command_output_timeout(&mut cmd, timeout, "docker-compose-pull") {
+        Ok(o) => o,
+        Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
+            return Err(DockerStackError::DockerMissing { reason });
+        }
+        Err(e) => {
+            return Err(DockerStackError::PullFailed {
+                project: project.to_owned(),
+                compose_file: compose_file.to_path_buf(),
+                reason: format!("{e}"),
+            });
+        }
+    };
+    if !out.status.success() {
+        return Err(DockerStackError::PullFailed {
+            project: project.to_owned(),
+            compose_file: compose_file.to_path_buf(),
+            reason: format!(
+                "docker compose pull exit {:?}: stderr={}",
+                out.status.code(),
+                String::from_utf8_lossy(&out.stderr).trim_end(),
+            ),
+        });
+    }
+    Ok(())
 }
 
 fn bring_stack_up(project: &str, compose_file: &std::path::Path) -> Result<(), DockerStackError> {
@@ -681,6 +1041,190 @@ mod tests {
     fn parse_compose_ps_empty_means_not_healthy() {
         let p = parse_compose_ps("");
         assert!(!p.healthy);
+    }
+
+    // ─── Pre-pull stage witnesses (INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01) ─
+
+    /// Witness arm (b): when `docker image inspect` reports any
+    /// image absent, the dispatcher MUST return
+    /// `PrepullDecision::PullRequired` carrying the missing
+    /// subset. Drives the pure dispatcher
+    /// [`decide_prepull_action_with`] with closures so the test
+    /// stays green on a developer laptop without `docker`.
+    #[test]
+    fn prepull_any_missing_triggers_pull() {
+        let images = vec![
+            "postgres:16-alpine".to_owned(),
+            "mongo:7".to_owned(),
+            "redis:7-alpine".to_owned(),
+        ];
+        let missing_target = "mongo:7";
+        let decision =
+            decide_prepull_action_with(false, || Ok(images.clone()), |img| img != missing_target)
+                .expect("dispatcher must not error");
+        match decision {
+            PrepullDecision::PullRequired { all, missing } => {
+                assert_eq!(all, images, "PullRequired must carry the full image list");
+                assert_eq!(missing, vec![missing_target.to_owned()]);
+            }
+            other => panic!("expected PullRequired, got: {other:?}"),
+        }
+    }
+
+    /// Witness arm (a): when `docker image inspect` reports every
+    /// image present, the dispatcher MUST return
+    /// `PrepullDecision::AllCached` and the runtime path MUST
+    /// skip the pull. Pins the fast path so a future maintainer
+    /// who flips the gate to "always pull" trips here.
+    #[test]
+    fn prepull_all_cached_skips_pull() {
+        let images = vec!["postgres:16-alpine".to_owned(), "mongo:7".to_owned()];
+        let decision = decide_prepull_action_with(false, || Ok(images.clone()), |_| true)
+            .expect("dispatcher must not error");
+        assert_eq!(decision, PrepullDecision::AllCached { count: 2 });
+    }
+
+    /// Witness arm (c): `RAXIS_LIVE_E2E_NO_PREPULL=1` MUST
+    /// short-circuit before ANY docker shell-out. We assert this
+    /// at the dispatcher level by passing closures that panic if
+    /// invoked — if either fires the env-var gate has regressed.
+    #[test]
+    fn prepull_opt_out_skips_all_docker_shell_outs() {
+        let decision = decide_prepull_action_with(
+            true,
+            || panic!("images_provider MUST NOT be invoked under opt-out"),
+            |_| panic!("presence_checker MUST NOT be invoked under opt-out"),
+        )
+        .expect("dispatcher must not error on opt-out");
+        assert_eq!(decision, PrepullDecision::OptedOut);
+    }
+
+    /// Edge case: empty compose file (no images declared) MUST
+    /// short-circuit as `AllCached { count: 0 }` and NOT crash.
+    /// Documents the contract for the
+    /// `docker compose config --images returned empty list` path.
+    #[test]
+    fn prepull_empty_image_list_is_all_cached_zero() {
+        let decision = decide_prepull_action_with(
+            false,
+            || Ok(Vec::new()),
+            |_| panic!("presence_checker MUST NOT be invoked when image list is empty"),
+        )
+        .expect("dispatcher must not error on empty image list");
+        assert_eq!(decision, PrepullDecision::AllCached { count: 0 });
+    }
+
+    /// Errors from the `images_provider` (e.g. compose-file
+    /// parse failure) MUST propagate verbatim, NOT be swallowed
+    /// as `AllCached { count: 0 }`. Pins the error-bubble so a
+    /// future maintainer who reorders the early-return doesn't
+    /// silently hide a broken compose file.
+    #[test]
+    fn prepull_images_provider_error_propagates() {
+        let r = decide_prepull_action_with(
+            false,
+            || {
+                Err(DockerStackError::PullFailed {
+                    project: "test-project".to_owned(),
+                    compose_file: PathBuf::from("/dev/null/no-such.yml"),
+                    reason: "synthetic error".to_owned(),
+                })
+            },
+            |_| true,
+        );
+        match r {
+            Err(DockerStackError::PullFailed { reason, .. }) => {
+                assert!(
+                    reason.contains("synthetic error"),
+                    "reason MUST surface verbatim: {reason}",
+                );
+            }
+            other => panic!("expected PullFailed to propagate; got: {other:?}"),
+        }
+    }
+
+    /// Pure-parse witness for `docker compose config --images`
+    /// output: one image per line, blanks dropped, no
+    /// transformation. Pins the contract so a future maintainer
+    /// who switches to a different parse strategy (e.g. JSON)
+    /// reflects the change in this test.
+    #[test]
+    fn parse_compose_images_one_per_line_skipping_blanks() {
+        let out = "postgres:16-alpine\nmongo:7\n\n  redis:7-alpine  \n";
+        let images = parse_compose_images(out);
+        assert_eq!(
+            images,
+            vec![
+                "postgres:16-alpine".to_owned(),
+                "mongo:7".to_owned(),
+                "redis:7-alpine".to_owned(),
+            ],
+        );
+    }
+
+    /// `pull_timeout_from_env` MUST clamp to
+    /// [`DEFAULT_PULL_TIMEOUT`] for every input that is not a
+    /// strictly-positive integer — every external-process spawn
+    /// in the live-e2e harness must be bounded per
+    /// `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`.
+    #[test]
+    fn pull_timeout_env_clamps_invalid_inputs_to_default() {
+        assert_eq!(pull_timeout_from_env(None), DEFAULT_PULL_TIMEOUT);
+        assert_eq!(pull_timeout_from_env(Some("")), DEFAULT_PULL_TIMEOUT);
+        assert_eq!(pull_timeout_from_env(Some("   ")), DEFAULT_PULL_TIMEOUT);
+        assert_eq!(pull_timeout_from_env(Some("0")), DEFAULT_PULL_TIMEOUT);
+        assert_eq!(pull_timeout_from_env(Some("-15")), DEFAULT_PULL_TIMEOUT);
+        assert_eq!(
+            pull_timeout_from_env(Some("not-a-number")),
+            DEFAULT_PULL_TIMEOUT
+        );
+        // Positive integer (in seconds) MUST be honoured verbatim.
+        assert_eq!(pull_timeout_from_env(Some("90")), Duration::from_secs(90),);
+        // Leading + trailing whitespace MUST not defeat the parse.
+        assert_eq!(
+            pull_timeout_from_env(Some("  600 ")),
+            Duration::from_secs(600),
+        );
+    }
+
+    /// PullFailed rendering MUST include both the operator
+    /// remediation steps and the literal manual `docker compose
+    /// pull` command (with the project + compose-file path
+    /// substituted in). Pins the copy-pastable contract — a
+    /// regression that drops either field re-creates the
+    /// misleading-error UX the pre-pull stage exists to fix.
+    #[test]
+    fn pull_failed_display_carries_manual_remediation_command() {
+        let e = DockerStackError::PullFailed {
+            project: "raxis-live-e2e-test".to_owned(),
+            compose_file: PathBuf::from("/path/to/docker-compose.extended.e2e.yml"),
+            reason: "docker compose pull exit Some(1): stderr=connection refused".to_owned(),
+        };
+        let rendered = format!("{e}");
+        assert!(
+            rendered.contains("image pull failed"),
+            "must lead with failure summary: {rendered}",
+        );
+        assert!(
+            rendered.contains("Remediation:"),
+            "must include remediation block: {rendered}",
+        );
+        assert!(
+            rendered.contains("docker compose -p raxis-live-e2e-test"),
+            "must include manual pre-pull command with project: {rendered}",
+        );
+        assert!(
+            rendered.contains("/path/to/docker-compose.extended.e2e.yml"),
+            "must include compose file path: {rendered}",
+        );
+        assert!(
+            rendered.contains(ENV_PULL_TIMEOUT_SECS),
+            "must mention the timeout-override env var: {rendered}",
+        );
+        assert!(
+            rendered.contains(&format!("default {}s", DEFAULT_PULL_TIMEOUT.as_secs())),
+            "must mention the default timeout: {rendered}",
+        );
     }
 
     fn docker_binary_present() -> bool {

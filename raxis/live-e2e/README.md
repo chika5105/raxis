@@ -584,6 +584,62 @@ firewall blocking image pulls all surface as a typed error
 within seconds to a few minutes rather than hanging the test
 runner indefinitely.
 
+### Cold image cache → pre-pull stage
+
+Before the harness reaches the `docker compose ... up -d --wait`
+bounded-wait it runs an image pre-pull stage
+(`ensure_compose_images_cached_or_pull` in
+`kernel/tests/extended_e2e_support/docker_stack.rs`,
+`INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01`). The stage:
+
+1. Resolves the image list via `docker compose ... config --images`.
+2. Checks each image with `docker image inspect` (sub-second
+   per image when cached).
+3. If every image is cached locally, logs `[live-e2e docker-stack]
+   images cached locally: N images verified, skipping pull` and
+   continues to the up-wait stage.
+4. If any image is missing, logs `[live-e2e docker-stack] cold
+   image cache; pulling N missing images (this can take 5-15
+   minutes on a fresh machine)...` and shells out to
+   `docker compose ... pull` under a generous bounded wait
+   (default **20 minutes**).
+
+**Failure mode this prevents.** The 240 s bound on
+`docker compose ... up -d --wait` is sized for actual
+healthcheck convergence (30-90 s once images are local). On a
+cold image cache — e.g. immediately after
+`docker system prune --volumes -f` — the pull alone exceeds
+240 s on a typical operator machine; the bounded wait then
+SIGKILLs the compose process mid-pull and surfaces a
+`[bounded-wait:docker-compose-up] child did not exit within
+240s; SIGKILLed` panic that misleadingly looks like a stack
+startup failure rather than a missing image. The iter63 launch
+attempt on 2026-05-15 burned a full operator iteration on
+exactly this trap; the pre-pull stage closes it.
+
+**Env vars:**
+
+| Env var                                  | Default | Behaviour                                                                                                                                                                          |
+| ---------------------------------------- | ------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS`       | 1200    | Bounded-wait ceiling for `docker compose pull` (seconds). Unset / empty / non-positive / unparseable values clamp to 1200 (no way to disable the bound — every harness shell-out is bounded per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`). |
+| `RAXIS_LIVE_E2E_NO_PREPULL=1`            | unset   | Skip the pre-pull stage entirely. Use when you manage `docker compose pull` externally (CI pipelines that warm the cache as a separate step). The dispatcher MUST NOT shell out to `docker` at all under this opt-out — witnessed by `prepull_opt_out_skips_all_docker_shell_outs`. |
+
+On pull failure (non-zero `docker compose pull` exit OR timeout)
+the harness panics with a structured remediation block:
+
+```text
+[live-e2e docker-stack] image pull failed: <reason>
+Remediation:
+  1. Confirm Docker Desktop has network access (curl https://registry-1.docker.io/v2/ -I).
+  2. Manually pre-pull from a network-stable terminal:
+       docker compose -p raxis-live-e2e-test \
+         -f live-e2e/docker-compose.extended.e2e.yml pull
+  3. If pull succeeds outside the harness, set RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS=<seconds> to a larger value (default 1200s).
+```
+
+The remediation lines are copy-pastable — substituting your
+own compose-file path / project name where appropriate.
+
 ### Opting out of auto-bring-up
 
 Set `RAXIS_LIVE_E2E_NO_AUTO_DOCKER=1` to disable the harness

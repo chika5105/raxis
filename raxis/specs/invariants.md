@@ -84,7 +84,7 @@
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
 | Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03, INV-DASHBOARD-HEALTH-NO-CACHE-01, INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01, INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01, INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01, INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01, INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 | 24 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
-| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01, INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01 | 6 |
+| Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01, INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01 | 7 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
 | Universal airgap (Path A3) — V2 | INV-NETISO-A3-UNIVERSAL-NO-NIC-01, INV-NETISO-A3-VSOCK-CHOKEPOINT-01, INV-NETISO-A3-DNS-MEDIATED-01, INV-NETISO-A3-IPV6-DISABLED-01, INV-AUDIT-TPROXY-ADMIT-01, INV-AUDIT-DNS-RESOLVE-01 | 6 |
 | Self-healing supervisor — V2.5 | INV-SUPERVISOR-RESTART-AUDIT-01, INV-SUPERVISOR-CIRCUIT-BREAKER-01, INV-SUPERVISOR-OPT-IN-01, INV-SUPERVISOR-SIGTERM-RESPECT-01, INV-SUPERVISOR-SIGINT-RESPECT-01, INV-SUPERVISOR-EXIT-CODE-CLASSIFICATION-01, INV-SUPERVISOR-SHUTDOWN-GRACE-01, INV-SUPERVISOR-OPERATOR-CONTINUITY-01, INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01 | 9 |
@@ -7845,6 +7845,83 @@ up + opt-out gate);
 (`poll_for_dual_lifecycle_completion` + the
 `orchestrator_spawn_failed` scanner that satisfies the audit-
 poll fast-fail half of this invariant);
+`live-e2e/README.md` (operator-facing recipe + env-var
+documentation).
+
+---
+
+### INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01 — Image pre-pull before bounded `up -d --wait`
+
+**Statement.** Before `docker compose ... up -d --wait`, the
+live-e2e harness MUST verify that every image referenced by the
+compose file is locally cached. If any image is absent, the
+harness MUST pull all referenced images under a configurable
+timeout (default 20 minutes via
+`RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS`) BEFORE entering the
+240-second up-wait bound. On pull failure (non-zero exit OR
+timeout) the harness MUST panic with a structured remediation
+message including the manual pre-pull command. The pre-pull
+stage MUST be skippable via `RAXIS_LIVE_E2E_NO_PREPULL=1` for
+operators managing compose externally.
+
+**Justification.** The 240 s bounded-wait on
+`docker compose ... up -d --wait` (per
+`INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`) is sized for the
+actual stack-startup phase, not for cold image pulls. On a cold
+image cache (e.g. immediately after
+`docker system prune --volumes -f`) the pull step alone exceeds
+240 s on a typical operator machine; the merged
+"pull + healthcheck + wait" sequence under one 240 s bound
+gets SIGKILLed mid-pull and surfaces a
+`[bounded-wait:docker-compose-up] child did not exit within
+240s; SIGKILLed` panic that misleadingly looks like a stack
+startup failure rather than a missing image. The iter63 launch
+attempt on 2026-05-15 burned one full operator iteration on
+exactly this trap. Splitting the pull into a generous 20 min
+bounded stage upstream keeps the 240 s up-wait bound tight
+against actual healthcheck convergence (which routinely
+completes in 30-90 s once images are local) AND fail-fast with a
+copy-pastable remediation command on pull failure.
+
+**Scenario.** Operator runs `docker system prune --volumes -f`
+to clean disk, then `cargo test -p raxis-kernel --test
+extended_e2e_realistic_scenario`. With this invariant in force
+the harness logs `[live-e2e docker-stack] cold image cache;
+pulling N missing images (this can take 5-15 minutes on a fresh
+machine)...`, runs `docker compose pull` under the 20 min
+bound, then hands off to the 240 s `up --wait` stage and
+proceeds. Without it the harness panics misleadingly inside the
+240 s up-wait mid-pull.
+
+**Witness.**
+[`extended_e2e_support::docker_stack::tests::prepull_any_missing_triggers_pull`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(arm b: any-missing path triggers pull),
+[`…::prepull_all_cached_skips_pull`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(arm a: all-cached fast path skips pull),
+[`…::prepull_opt_out_skips_all_docker_shell_outs`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(arm c: `RAXIS_LIVE_E2E_NO_PREPULL=1` short-circuits before any
+docker shell-out — the closures both panic if invoked),
+[`…::prepull_empty_image_list_is_all_cached_zero`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(edge case: empty compose file does not crash),
+[`…::prepull_images_provider_error_propagates`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(error-bubble: `config --images` failure surfaces as
+`PullFailed`),
+[`…::pull_timeout_env_clamps_invalid_inputs_to_default`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(invalid timeout env clamps to default — bound stays in force
+per `INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01`),
+[`…::pull_failed_display_carries_manual_remediation_command`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(panic message includes the copy-pastable manual pre-pull
+command + the `RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS` knob), plus
+[`…::parse_compose_images_one_per_line_skipping_blanks`](../kernel/tests/extended_e2e_support/docker_stack.rs)
+(pure parse contract for `docker compose config --images`).
+
+**Canonical home.**
+`kernel/tests/extended_e2e_support/docker_stack.rs`
+(`ensure_compose_images_cached_or_pull` + dispatcher / parsers +
+witnesses);
+`kernel/tests/extended_e2e_support/harness_timeout.rs`
+(shared bounded-wait machinery the pre-pull stage routes
+through);
 `live-e2e/README.md` (operator-facing recipe + env-var
 documentation).
 

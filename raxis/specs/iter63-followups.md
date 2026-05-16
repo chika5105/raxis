@@ -192,3 +192,32 @@ expected file-ownership boundary for the iter63 fix.
 
   **Priority**: HIGH — this is a kernel-stability invariant, not an
   enhancement.
+
+## Closed inline during iter63
+
+* **Live-e2e harness: pre-pull compose images before bounded-wait**
+  (`INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01`, CLOSED 2026-05-15).
+  Gap identified during the iter63 launch attempt on 2026-05-15:
+  after `docker system prune --volumes -f` the cold-image-cache
+  cycle hit the harness's 240 s `up -d --wait` bounded-wait
+  (`kernel/tests/extended_e2e_support/docker_stack.rs::bring_stack_up`)
+  while still pulling images; the bounded wait SIGKILLed the
+  compose process and the test panicked with
+  `[bounded-wait:docker-compose-up] child did not exit within
+  240s; SIGKILLed` — a misleading "stack startup failure"
+  message that hid the real root cause (missing images).
+  **Closure**: new `ensure_compose_images_cached_or_pull(...)`
+  stage runs BEFORE the `up -d --wait` bound; verifies every
+  compose-referenced image is locally cached via
+  `docker compose ... config --images` + `docker image inspect`,
+  pulls missing images under a configurable 20 min timeout
+  (`RAXIS_LIVE_E2E_PULL_TIMEOUT_SECS`, default 1200), and
+  panics with a copy-pastable manual pre-pull command on
+  failure. Skippable for operator-managed cases via
+  `RAXIS_LIVE_E2E_NO_PREPULL=1`. The 240 s `up --wait` bound
+  stays — once images are local, it routinely completes in
+  30-90 s, so the bound remains tight against actual
+  healthcheck convergence. Witnessed by 8 new tests in
+  `extended_e2e_support::docker_stack::tests::` (`prepull_*`,
+  `parse_compose_images_*`, `pull_timeout_env_*`,
+  `pull_failed_display_*`).
