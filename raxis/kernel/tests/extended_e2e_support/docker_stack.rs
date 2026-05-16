@@ -749,17 +749,15 @@ mod tests {
     // `harness_drop_skips_teardown_when_keep_running` pattern in
     // `kernel/tests/common/keep_alive.rs::tests`.
 
-    use std::sync::Mutex;
-
     /// Serialise every witness that mutates the
     /// `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT` env var so parallel
     /// `cargo test` runs in the same binary cannot poison each
-    /// other.
-    static KEEP_ALIVE_ENV_LOCK: Mutex<()> = Mutex::new(());
+    /// other. Reuses the cross-`mod` lock declared in
+    /// `kernel/tests/common/keep_alive.rs` so docker-stack
+    /// witnesses serialise against the keep-alive module's own
+    /// `tests::lock()`-protected witnesses.
     fn keep_alive_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        KEEP_ALIVE_ENV_LOCK
-            .lock()
-            .unwrap_or_else(|p| p.into_inner())
+        crate::common::keep_alive::lock_keep_running_env()
     }
 
     const KEEP_RUNNING_ENV: &str = "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT";

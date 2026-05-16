@@ -1139,6 +1139,14 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn inv_live_e2e_otel_pusher_present_01_supervisor_kills_child_on_drop() {
+        // Take the cross-binary keep-running env lock + force the
+        // env var off; the OtelPusherSupervisor's `Drop` consults
+        // the same env var and would `mem::forget` the child on
+        // any sibling test that left it set, leaving the spawned
+        // `sleep` orphan and breaking the pid-alive assertion.
+        let _g = crate::common::keep_alive::lock_keep_running_env();
+        let prior = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
         // Spawn `sleep 9999` directly so we avoid depending on a
         // built `raxis-otel-pusher` for the supervision witness.
         // The supervisor's contract is process-supervision, not
@@ -1178,6 +1186,9 @@ mod tests {
             "supervisor drop MUST SIGKILL the child within 5s (pid={pid} still alive)",
         );
         let _ = std::fs::remove_file(&log_path);
+        if let Some(v) = prior {
+            std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
+        }
     }
 
     /// Pure-classifier witness for the smoke-probe "no metrics"

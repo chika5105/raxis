@@ -114,6 +114,24 @@ pub const KEEP_RUNNING_TOUCH_FILE: &str = "KEEP_RUNNING";
 /// the spelling is single-sourced.
 pub const CLI_FLAG_KEEP_RUNNING_AFTER_EXIT: &str = "--keep-running-after-exit";
 
+// ─── Cross-binary env-var serialization ──────────────────────────
+
+/// Module-level mutex that serialises every test (in any sibling
+/// `mod` of the same test binary) that mutates the
+/// `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT` env var. `set_var` /
+/// `remove_var` are process-global, so without a single shared
+/// lock the keep-alive witnesses in `keep_alive::tests` and the
+/// docker-stack `should_run_compose_teardown` witnesses race each
+/// other under `--test-threads >= 2`.
+pub static KEEP_RUNNING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Take the cross-binary env-var lock, recovering from poison so
+/// a panicking sibling test cannot wedge the suite.
+pub fn lock_keep_running_env() -> std::sync::MutexGuard<'static, ()> {
+    KEEP_RUNNING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+}
+
+
 // ─── CLI-flag override (for future test-binary callers) ──────────
 //
 // Test binaries that DO take args (e.g. a future `live-e2e`
@@ -332,10 +350,8 @@ mod tests {
     /// `cargo test` runs in the same binary cannot poison each
     /// other. Mirrors the discipline in `docker_stack.rs::tests`
     /// (RAII `SetEnvGuard`).
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
-
     fn lock() -> std::sync::MutexGuard<'static, ()> {
-        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        super::lock_keep_running_env()
     }
 
     /// RAII env-var guard: snapshot prior value, set / unset for

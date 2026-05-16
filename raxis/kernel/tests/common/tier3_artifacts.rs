@@ -587,20 +587,47 @@ mod tests {
         assert!(r.fired, "emit_block must set fired=true");
     }
 
+    /// Serialise the two `RAXIS_E2E_KEEP`-sensitive tests against
+    /// each other (and any sibling test in this binary that reads
+    /// the env var). `set_var`/`remove_var` are process-global, so
+    /// without this guard sibling tests racing the same env var
+    /// flap pass/fail under `--test-threads >= 2`.
+    static KEEP_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     fn reporter_keeps_when_failure() {
+        let _g = KEEP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _gk = crate::common::keep_alive::lock_keep_running_env();
+        // Force the keep-running flag off — a sibling test could
+        // have left it set, and Tier3Reporter::Drop honours it.
+        let prior_kr = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
+        // Force the keep-on-success default for the duration of the
+        // test in case a sibling left RAXIS_E2E_KEEP=0 leaked.
+        let prior = std::env::var("RAXIS_E2E_KEEP").ok();
+        std::env::remove_var("RAXIS_E2E_KEEP");
         {
             let _r = Tier3Reporter::new("smoke", tmp.path(), &data);
             // do NOT mark_success — Drop must KEEP the dir.
+        }
+        if let Some(v) = prior { std::env::set_var("RAXIS_E2E_KEEP", v); }
+        if let Some(v) = prior_kr {
+            std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
         }
         assert!(data.exists(), "data dir must be kept on the failure path");
     }
 
     #[test]
     fn reporter_deletes_when_keep_zero_and_success() {
+        let _g = KEEP_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let _gk = crate::common::keep_alive::lock_keep_running_env();
+        // Force the keep-running flag off — a sibling test could
+        // have left it set, and Tier3Reporter::Drop honours it.
+        let prior_kr = std::env::var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT").ok();
+        std::env::remove_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT");
         let tmp = tempfile::tempdir().unwrap();
         let data = tmp.path().join("data");
         std::fs::create_dir_all(&data).unwrap();
@@ -613,6 +640,9 @@ mod tests {
         match prior {
             Some(v) => std::env::set_var("RAXIS_E2E_KEEP", v),
             None => std::env::remove_var("RAXIS_E2E_KEEP"),
+        }
+        if let Some(v) = prior_kr {
+            std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
         }
         assert!(
             !data.exists(),
