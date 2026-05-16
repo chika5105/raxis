@@ -532,7 +532,9 @@ impl Drop for ComposeStackGuard {
             if let Ok(mut g) = self
                 .last_drop_decision
                 .lock()
-                .or_else(|p| -> Result<_, std::sync::PoisonError<_>> { Ok(p.into_inner()) })
+                .or_else(|p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
+                    Ok::<std::sync::MutexGuard<'_, Option<bool>>, std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>>(p.into_inner())
+                })
             {
                 *g = Some(false);
             }
@@ -562,7 +564,9 @@ impl Drop for ComposeStackGuard {
         if let Ok(mut g) = self
             .last_drop_decision
             .lock()
-            .or_else(|p| -> Result<_, std::sync::PoisonError<_>> { Ok(p.into_inner()) })
+            .or_else(|p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
+                Ok::<std::sync::MutexGuard<'_, Option<bool>>, std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>>(p.into_inner())
+            })
         {
             *g = Some(true);
         }
