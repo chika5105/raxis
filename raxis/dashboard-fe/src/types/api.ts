@@ -255,24 +255,32 @@ export interface RecentSessionEntry {
 }
 
 /// Wire shape for one record returned by
-/// `GET /api/tasks/:task_id/llm-turns`.
+/// `GET /api/tasks/:task_id/llm-turns`. Mirrors
+/// `raxis_dashboard::data::TaskLlmTurnView` field-for-field
+/// post-iter64. `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`.
 export interface TaskLlmTurnView {
-  /// Monotonic turn number — one per call to
+  /// Monotonic 1-indexed turn number — one per call to
   /// `TaskLlmCapture::append`. Ordered so the FE can render
   /// "Turn 1", "Turn 2", … without sorting.
   turn_number: number;
   /// Unix-seconds timestamp the turn was captured.
   ts_unix: number;
-  /// Provider model id (e.g. `claude-3-5-sonnet`,
-  /// `gpt-4o`). Empty when the kernel-side tap could not
-  /// resolve it.
+  /// Provider model id (e.g. `claude-sonnet-4-5-20250929`,
+  /// `gpt-4o`). Empty when the response body was non-JSON or
+  /// the field was absent.
   model: string;
-  /// `"system"` / `"user"` / `"assistant"` / `"tool"`.
+  /// `"system"` / `"user"` / `"assistant"` / `"tool"`. Empty
+  /// when the response body envelope does not carry a top-
+  /// level `role` (e.g. OpenAI's `chat.completion`, where
+  /// `role` lives inside `choices[]`).
   role: string;
-  /// Raw request payload as JSON. Rendered in a collapsible
-  /// `<details>` block.
+  /// Fully-parsed request payload (typed `unknown` so the FE
+  /// renders it generically). `null` when the kernel-side tap
+  /// could not capture or parse the bytes.
   request: unknown;
-  /// Raw response payload as JSON.
+  /// Fully-parsed response payload. On parse failure the BE
+  /// falls back to a JSON string of the raw body so the
+  /// operator still sees the bytes.
   response: unknown;
   /// Per-turn token usage. `cache_hit_ratio` is derived FE-
   /// side from `cache_read_input_tokens / (cache_read_input_tokens
@@ -286,6 +294,26 @@ export interface TaskLlmTurnView {
   /// completion. Surfaced for prompt-cache effectiveness
   /// analysis.
   latency_ms?: number | null;
+  /// Carry-overs from the BE wire view — useful for global
+  /// "recent LLM activity" cross-task views and for
+  /// surfacing transport / truncation metadata in the per-
+  /// turn panel.
+  task_id: string;
+  session_id?: string | null;
+  fetch_id: string;
+  status_code?: number | null;
+  /// Original response body length, before per-record body
+  /// cap truncation. Rendered alongside the truncation
+  /// badge.
+  original_body_bytes?: number;
+  /// `true` when the response body was truncated at the
+  /// kernel-side cap. The panel renders a suffix on the
+  /// Response payload header.
+  body_truncated?: boolean;
+  /// Structured upstream error category from the gateway
+  /// (e.g. `"transport_timeout"`). When set the panel
+  /// renders an "upstream error" badge.
+  error?: string | null;
 }
 
 export interface DagEdge {

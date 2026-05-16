@@ -104,6 +104,15 @@ function TurnCard({ turn }: TurnCardProps) {
               role {turn.role}
             </span>
           )}
+          {turn.error && (
+            <span
+              data-testid="task-llm-turns-error-badge"
+              className="badge bg-bad-muted/30 border-bad text-bad"
+              title="Upstream gateway error category"
+            >
+              upstream error: {turn.error}
+            </span>
+          )}
         </div>
         {turn.latency_ms !== null && turn.latency_ms !== undefined && (
           <span
@@ -168,6 +177,14 @@ function TurnCard({ turn }: TurnCardProps) {
         >
           <summary className="text-[11px] text-accent cursor-pointer">
             Response payload
+            {turn.body_truncated && (
+              <span
+                data-testid="task-llm-turns-truncation-badge"
+                className="ml-2 text-[10px] text-warn"
+              >
+                (truncated, original size {turn.original_body_bytes ?? 0} bytes)
+              </span>
+            )}
           </summary>
           <pre className="mt-1 max-h-64 overflow-auto scroll-thin text-[10px] font-mono text-ink-muted whitespace-pre-wrap">
             {safeStringify(turn.response)}
