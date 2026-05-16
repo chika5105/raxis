@@ -12111,6 +12111,91 @@ task_id, AND asserts a fresh request with no matching
 not invoked, fetch still succeeds — the capture is
 best-effort).
 
+### INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01 — Every captured LLM turn is durable on disk before `append` returns
+
+**Statement.** Every `TaskLlmCapture::append` call MUST
+durably persist the captured turn to
+`<data_dir>/llm-turns/<task_id>.jsonl` before returning.
+The writer MUST open the file with `O_APPEND`
+(`OpenOptions::new().append(true).create(true)`), emit the
+full JSON line + trailing `\n` via a single `write_all`
+syscall (so the POSIX O_APPEND atomic-append guarantee
+holds for sub-PIPE_BUF lines and concurrent writers
+cannot interleave halves of a record), and then call
+`file.sync_all()` (fdatasync + metadata) before returning.
+A kernel panic, SIGKILL, `std::process::abort()`, or
+machine power loss occurring at ANY point AFTER `append`
+returns MUST NOT lose that turn from the on-disk file.
+
+The kernel's graceful-shutdown path MUST additionally
+call `TaskLlmCapture::drain_and_shutdown()` to flush
+in-memory metadata (file-handle map, broadcast senders).
+The kernel SHOULD install a `std::panic::set_hook` that
+invokes `TaskLlmCapture::flush_all()` as defense in depth
+for the narrow window where a panic fires AFTER
+`write_all` but BEFORE `sync_all`.
+
+**Why structural.** Iter63 crashed on the first
+`IntegrationMerge` intent. Forensics confirmed the
+planner's NEXT `planner_fetch_response` — the one
+carrying the `tool_result` for the materialize script and
+Claude's follow-up — DID return from Anthropic ~0 ms
+before the kernel panic, AND the on-disk worktree at
+`<data_dir>/worktrees/146d2937-…/out/{postgres,mongo}/`
+proves the script executed (25+25 JSON files written).
+But the per-task `llm-turns/materialize-records.jsonl`
+file held ONLY the prior turn — the post-`tool_result`
+turn never made it from OS page cache to physical disk.
+Pre-fix the writer called `f.flush()` (a no-op on
+`std::fs::File`, which has no userspace buffering) and
+relied on `close(2)` at process teardown to flush page
+cache — a sequence that loses the most recent record
+exactly when the operator needs it most (kernel panic
+mid-pipeline = post-mortem-critical capture lost).
+
+Cost is negligible: ~1-5 ms `sync_all` on macOS APFS,
+~0.5-2 ms on Linux ext4, against 5-50 s Anthropic
+round-trips per turn.
+
+**Witness.** `crates/dashboard-kernel/src/task_llm_capture.rs::tests`:
+
+* `record_turn_survives_process_exit_101` — multi-process
+  test that re-execs the test binary with an env-var
+  marker so the child calls `append` then
+  `std::process::exit(101)` (no Rust destructors, no
+  buffer flush — simulates kernel panic / abort). The
+  parent process then reads
+  `<tmpdir>/llm-turns/task-fsync.jsonl` and asserts the
+  captured line is present and parses cleanly as
+  `LlmTurnRecord`. Pre-fix this test failed because the
+  page-cache bytes were lost when the child process
+  exited without `sync_all`; post-fix the line is on
+  physical disk before `append` returns.
+* `record_turn_visible_to_fresh_capture_at_same_path` —
+  in-process companion that appends through one
+  `TaskLlmCapture`, drops it, opens a second at the same
+  path, and asserts `tail` returns the prior record.
+* `drain_and_shutdown_flushes_and_clears_map` — pins the
+  graceful-shutdown drain API: after `drain_and_shutdown`
+  the per-task state map is empty, a fresh capture sees
+  every prior record, and a post-drain `append` reopens
+  the file lazily and is also durable.
+* `concurrent_writes_per_task_never_interleave` — 8
+  threads × 100 appends against the same `task_id`. Post
+  join + drain the file MUST contain exactly 800
+  newline-terminated lines, each parsing as
+  `LlmTurnRecord`, with the per-thread `(thread_idx, seq)`
+  body markers forming the expected 800-element set.
+  Pins the single-`write_all`-per-line + O_APPEND
+  atomic-append contract.
+
+Kernel wiring witness: `kernel/src/main.rs` installs the
+panic hook that calls `TaskLlmCapture::flush_all` after
+constructing the capture, and the shutdown sequence
+(post-IPC-drain, pre-`observability_hub.shutdown`) calls
+`TaskLlmCapture::drain_and_shutdown` then emits the
+`task_llm_capture_drained` info event.
+
 ### INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01 — `review_reject_count` is non-decreasing across activation_id sequence
 
 **Statement.** For any single `task_id`, the
