@@ -827,6 +827,29 @@ pub trait Session: Send + 'static {
     /// MUST be idempotent.
     fn shutdown(&mut self, grace: Duration) -> Result<ExitStatus, IsolationError>;
 
+    /// iter63-followups.md Item 2 #4 — explicit
+    /// graceful-then-force kill path used by the kernel's
+    /// `verifier_runner` wall-clock / idle / cumulative-budget
+    /// guards.
+    ///
+    /// Contract: issue a graceful shutdown request, wait up to
+    /// `grace`, then issue the substrate's forced-kill API. On
+    /// substrates where `shutdown(grace)` already implements the
+    /// graceful-then-force dance internally (Apple-VZ via
+    /// `runtime.stop(actual_grace)`), the default impl below simply
+    /// delegates. Substrates that want a tighter forced-kill
+    /// path (e.g. issuing an explicit `vmm.shutdown()` after the
+    /// graceful window closes) can override the method.
+    ///
+    /// MUST be idempotent. Pinned by
+    /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`.
+    fn shutdown_grace_then_force(
+        &mut self,
+        grace: Duration,
+    ) -> Result<ExitStatus, IsolationError> {
+        self.shutdown(grace)
+    }
+
     /// Transport-level identity of this session for diagnostic logs.
     /// MUST be stable for the lifetime of the session.
     fn session_identity(&self) -> SessionTransportId;

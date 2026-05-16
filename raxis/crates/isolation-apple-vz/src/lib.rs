@@ -395,6 +395,64 @@ impl Session for AppleVzSession {
         Ok(ExitStatus::GracefulExit { code: 0 })
     }
 
+    /// iter63-followups.md Item 2 #4 — explicit
+    /// graceful-then-force kill path. Issues `runtime.stop(grace)`
+    /// (which already does a SIGTERM-equivalent shutdown request
+    /// inside the AVF runtime); if that returns a non-graceful
+    /// exit, no further action is needed because AVF’s
+    /// `stop` impl always reaps the VM — the `graceful: false`
+    /// return shape simply means the watchdog had to escalate.
+    ///
+    /// The method exists separately from `shutdown` so the kernel
+    /// can emit `VerifierVmForcedShutdown` on the escalation path
+    /// without ambiguity about whether the graceful path was even
+    /// attempted (it always is, on this substrate). Pinned by
+    /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`.
+    fn shutdown_grace_then_force(
+        &mut self,
+        grace: Duration,
+    ) -> Result<ExitStatus, IsolationError> {
+        if self.terminated {
+            return Ok(ExitStatus::GracefulExit { code: 0 });
+        }
+        self.terminated = true;
+        let actual_grace = if grace > self.stop_grace {
+            grace
+        } else {
+            self.stop_grace
+        };
+        if let Some(mut runtime) = self.runtime.take() {
+            // Step 1: issue the graceful stop request inside the
+            // configured grace window. `runtime.stop(grace)`
+            // returns `AvfExit { graceful, reason, .. }`; graceful
+            // = true means the VM honoured the shutdown signal.
+            let graceful_exit = runtime.stop(actual_grace).map_err(|e| {
+                IsolationError::BackendInternal(format!(
+                    "{BACKEND_ID}: shutdown_grace_then_force: graceful stop: {e}"
+                ))
+            })?;
+            if graceful_exit.graceful {
+                return Ok(ExitStatus::GracefulExit { code: 0 });
+            }
+            // Step 2: AVF’s stop dance ALREADY escalates to a
+            // forced kill internally when the graceful window
+            // closes — the `graceful: false` return is the
+            // signal that the escalation fired. We surface a
+            // distinct `ExitStatus` so the kernel’s audit
+            // emit (`VerifierVmForcedShutdown`) records the
+            // outcome rather than conflating with the clean exit
+            // case.
+            return Ok(ExitStatus::BackendError(format!(
+                "{BACKEND_ID}: forced shutdown after {}s graceful window: {}",
+                actual_grace.as_secs(),
+                graceful_exit
+                    .reason
+                    .unwrap_or_else(|| "AVF watchdog escalation".to_owned()),
+            )));
+        }
+        Ok(ExitStatus::GracefulExit { code: 0 })
+    }
+
     fn session_identity(&self) -> SessionTransportId {
         SessionTransportId::Vsock {
             cid: self.vsock_cid,
