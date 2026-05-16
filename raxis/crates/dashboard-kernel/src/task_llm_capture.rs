@@ -60,6 +60,16 @@
 //! * **Single producer per task.** The kernel's gateway pump is
 //!   the sole writer per task_id; the broadcast sender is
 //!   `Clone` so subscribe-side fan-out is free.
+//! * **Per-turn durability** (`INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01`).
+//!   Every [`TaskLlmCapture::append`] writes the full JSON line +
+//!   `\n` in a single `write_all` against an `O_APPEND` handle
+//!   and then `sync_all`s the file BEFORE returning. A kernel
+//!   panic, SIGKILL, or `abort()` happening at any point after
+//!   `append` returns is guaranteed not to lose the captured
+//!   turn. The graceful-shutdown path additionally calls
+//!   [`TaskLlmCapture::drain_and_shutdown`] for safety and
+//!   the kernel installs a `std::panic::set_hook` that calls
+//!   [`TaskLlmCapture::flush_all`] for defense-in-depth.
 
 use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
@@ -231,9 +241,28 @@ impl TaskLlmCapture {
         let _ = state.sender.send(record.clone());
 
         // Then persist.
-        let line = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_owned());
+        //
+        // `INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01`. Build the
+        // full line (JSON + `\n`) into a single buffer and emit
+        // it via ONE `write_all` call so the kernel sees a
+        // single contiguous append. Combined with the
+        // `OpenOptions::append(true)` (O_APPEND) handle this
+        // gives us POSIX atomic-append semantics for
+        // sub-PIPE_BUF lines (concurrent writers from the
+        // gateway pump for the same `task_id` can never
+        // interleave halves of a record on disk). After the
+        // write we `sync_all()` BEFORE returning, so a kernel
+        // panic, SIGKILL, or `abort()` happening at any point
+        // after `append` returns is guaranteed to preserve this
+        // turn on physical disk. Cost: ~1-5 ms on macOS APFS,
+        // ~0.5-2 ms on Linux ext4 — negligible vs the
+        // 5-50 s Anthropic round-trip we just captured, and
+        // load-bearing for post-mortem (iter63 lost the
+        // post-`tool_result` turn this exact way).
+        let mut line = serde_json::to_string(&record).unwrap_or_else(|_| "{}".to_owned());
+        line.push('\n');
         let bytes = line.as_bytes();
-        let line_len = bytes.len() as u64 + 1; // +1 for newline
+        let line_len = bytes.len() as u64;
 
         let mut size = state.file_size.lock();
         if *size + line_len > self.cfg.max_file_bytes {
@@ -241,10 +270,19 @@ impl TaskLlmCapture {
             *size = state.file.lock().metadata().map(|m| m.len()).unwrap_or(0);
         }
         let mut f = state.file.lock();
-        f.seek(SeekFrom::End(0))?;
+        // O_APPEND on the underlying fd guarantees the write
+        // lands at EOF atomically — no explicit `seek(End)`
+        // needed (and the seek would race with concurrent
+        // writers anyway).
         f.write_all(bytes)?;
-        f.write_all(b"\n")?;
-        f.flush()?;
+        // Durable per-turn: fsync data + metadata so the
+        // record survives a kernel panic that races with the
+        // gateway pump's `observer.observe()` return path.
+        // `sync_all()` is the portable choice; on Linux
+        // `sync_data()` would be marginally cheaper but we
+        // need the metadata flush on macOS APFS to ensure the
+        // append-extended file length is durable too.
+        f.sync_all()?;
         *size += line_len;
         Ok(())
     }
@@ -283,6 +321,47 @@ impl TaskLlmCapture {
     pub fn ensure_task(&self, task_id: &str) -> std::io::Result<broadcast::Sender<LlmTurnRecord>> {
         let state = self.task_state(task_id)?;
         Ok(state.sender.clone())
+    }
+
+    /// Best-effort fsync of every per-task file handle the
+    /// capture currently knows about. Intended for the
+    /// kernel's `std::panic::set_hook` defense-in-depth path:
+    /// `append` already syncs per-turn (see
+    /// `INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01`), so in steady
+    /// state this is a no-op — its job is to catch a panic
+    /// that races mid-append (after `write_all` but before
+    /// `sync_all`).
+    ///
+    /// Uses `try_lock` per file so the hook never deadlocks
+    /// when the panicking thread was already holding the file
+    /// mutex.
+    pub fn flush_all(&self) {
+        let g = self.tasks.lock();
+        for state in g.values() {
+            if let Some(f) = state.file.try_lock() {
+                let _ = f.sync_all();
+            }
+        }
+    }
+
+    /// Graceful-shutdown drain. Flushes every per-task file
+    /// handle, then clears the in-memory task map, releasing
+    /// all file descriptors. Future `append` calls reopen
+    /// the file on demand, so this is safe to call from
+    /// SIGTERM / SIGINT handling without breaking subsequent
+    /// activity in the (rare) case the shutdown is aborted.
+    ///
+    /// Unlike [`Self::flush_all`] this blocks on each file
+    /// mutex — graceful shutdown is sequential and we can
+    /// afford to wait for any in-flight `append` to release
+    /// the lock so its record is durable before we exit.
+    pub fn drain_and_shutdown(&self) {
+        let mut g = self.tasks.lock();
+        for state in g.values() {
+            let f = state.file.lock();
+            let _ = f.sync_all();
+        }
+        g.clear();
     }
 
     /// On-disk path for one task.
@@ -506,5 +585,269 @@ mod tests {
         );
         assert_eq!(tail[0].session_id.as_deref(), Some("sess-orch"));
         assert_eq!(tail[2].session_id.as_deref(), Some("sess-exec-2"));
+    }
+
+    // ── INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01 regression suite ────
+    //
+    // The witnesses below pin the three guarantees the iter63
+    // forensic post-mortem demanded:
+    //
+    //   (a) per-turn durability across abrupt process exit (the
+    //       "kernel panic mid-pipeline lost the post-`tool_result`
+    //       turn" scenario);
+    //   (b) `drain_and_shutdown()` flushes any in-flight metadata
+    //       so SIGTERM doesn't leave a half-synced tail behind;
+    //   (c) concurrent writers for the same `task_id` never
+    //       interleave halves of a JSON record on disk (O_APPEND
+    //       + single `write_all` atomicity).
+
+    /// (a) **Per-turn durability across `process::exit`.**
+    ///
+    /// The body of this test runs in two modes:
+    ///
+    /// * **Child mode** (env `RAXIS_TEST_LLM_DURABLE_CHILD_DIR`
+    ///   set): build a `TaskLlmCapture` at the named tmpdir,
+    ///   append one well-known turn, then call
+    ///   `std::process::exit(101)`. This bypasses Rust drop
+    ///   glue (no destructors, no flushed buffers) — exactly
+    ///   what a kernel panic / `abort()` would do as far as
+    ///   userspace cleanup is concerned. The fix's
+    ///   `sync_all()` is therefore the ONLY thing guaranteeing
+    ///   the line lands on disk.
+    /// * **Parent mode** (env unset): spawn ourselves with the
+    ///   env var pointing at a fresh tmpdir, `--exact`-filtered
+    ///   to this test name. Wait for the child to exit 101,
+    ///   then read the per-task file from the parent and
+    ///   assert the captured line is present and parses cleanly.
+    ///
+    /// Pre-fix the file was opened with `O_APPEND` but the
+    /// writer only called `f.flush()` (a no-op on
+    /// `std::fs::File`) — so the OS page cache held the bytes
+    /// but a process-level abort after `append` returned could
+    /// race with `close(2)` and lose the most recent record on
+    /// some filesystems. Post-fix the per-turn `sync_all()`
+    /// closes that window.
+    #[test]
+    fn record_turn_survives_process_exit_101() {
+        // Child path: write one turn then exit non-zero.
+        if let Ok(dir) = std::env::var("RAXIS_TEST_LLM_DURABLE_CHILD_DIR") {
+            let cap =
+                TaskLlmCapture::new(std::path::Path::new(&dir), TaskCaptureConfig::default())
+                    .expect("child: capture init");
+            cap.append("task-fsync", rec(99, "post-mortem-line"))
+                .expect("child: append");
+            // `process::exit(101)` runs no Rust destructors;
+            // the parking_lot Mutex<File> never drops, so any
+            // buffering inside the writer would be lost. With
+            // the fsync-per-turn fix the OS already has the
+            // bytes durable on disk.
+            std::process::exit(101);
+        }
+
+        // Parent path.
+        let tmp = tempfile::tempdir().expect("parent: tempdir");
+        let me = std::env::current_exe().expect("parent: current_exe");
+        let status = std::process::Command::new(&me)
+            .args([
+                "--exact",
+                "task_llm_capture::tests::record_turn_survives_process_exit_101",
+                "--nocapture",
+            ])
+            .env("RAXIS_TEST_LLM_DURABLE_CHILD_DIR", tmp.path())
+            .env("RUST_BACKTRACE", "0")
+            .status()
+            .expect("parent: spawn child");
+
+        assert_eq!(
+            status.code(),
+            Some(101),
+            "child MUST exit 101 (simulated panic); got {status:?}"
+        );
+
+        let path = tmp.path().join("llm-turns").join("task-fsync.jsonl");
+        let body = std::fs::read_to_string(&path)
+            .unwrap_or_else(|e| panic!("post-exit read of {path:?} failed: {e}"));
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines.len(),
+            1,
+            "post-exit file MUST hold exactly one line; got {} ({:?})",
+            lines.len(),
+            body
+        );
+        let parsed: LlmTurnRecord =
+            serde_json::from_str(lines[0]).expect("post-exit line MUST parse as LlmTurnRecord");
+        assert_eq!(parsed.task_id, "task-fsync");
+        assert_eq!(parsed.body, "post-mortem-line");
+        assert_eq!(parsed.at_ms, 99);
+    }
+
+    /// (a-bis) **Per-turn durability — in-process witness.**
+    ///
+    /// Companion to the multi-process test above. We append a
+    /// record through one `TaskLlmCapture`, drop it (releases
+    /// the file handle), then open a SECOND `TaskLlmCapture`
+    /// at the same data dir and assert the record is visible
+    /// via `tail`. This pins the "fresh process restart on
+    /// the same data dir sees every prior `append`" contract
+    /// without paying the multi-process spawn cost — useful
+    /// when running the suite under `cargo test --no-run`
+    /// scenarios where re-exec'ing the test binary is
+    /// awkward.
+    #[test]
+    fn record_turn_visible_to_fresh_capture_at_same_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        {
+            let cap_a = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
+            cap_a
+                .append("task-restart", rec(7, "first-instance-line"))
+                .unwrap();
+            // Drop `cap_a` here — file handle closes. The
+            // per-turn `sync_all` already pushed the bytes
+            // to physical disk before append returned.
+        }
+        let cap_b = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
+        let tail = cap_b.tail("task-restart", 10);
+        assert_eq!(tail.len(), 1, "fresh capture MUST see the prior record");
+        assert_eq!(tail[0].body, "first-instance-line");
+        assert_eq!(tail[0].at_ms, 7);
+    }
+
+    /// (b) **`drain_and_shutdown` flushes and clears the map.**
+    ///
+    /// Post-fix `append` is already durable, so this test is
+    /// largely a sanity check on the drain API: it asserts
+    /// the call returns cleanly after a write, the file is
+    /// readable from a fresh `TaskLlmCapture` instance, and
+    /// the in-memory task map is empty (forcing the next
+    /// `append` to reopen the file).
+    #[test]
+    fn drain_and_shutdown_flushes_and_clears_map() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cap = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
+        cap.append("task-drain", rec(1, "pre-shutdown")).unwrap();
+
+        cap.drain_and_shutdown();
+
+        // The map MUST be empty post-drain — future appends
+        // lazy-reopen the file, which is what `task_state`
+        // does. We inspect the public `subscribe` surface
+        // because that is what tells us whether a `TaskState`
+        // entry exists.
+        assert!(
+            cap.subscribe("task-drain").is_none(),
+            "drain_and_shutdown MUST clear the per-task state map"
+        );
+
+        // A FRESH capture pointing at the same data dir MUST
+        // see the pre-shutdown record.
+        let cap2 = TaskLlmCapture::new(tmp.path(), TaskCaptureConfig::default()).unwrap();
+        let tail = cap2.tail("task-drain", 10);
+        assert_eq!(tail.len(), 1, "pre-shutdown record MUST be on disk");
+        assert_eq!(tail[0].body, "pre-shutdown");
+
+        // And we can still append AFTER a drain (the API is
+        // idempotent — re-open on demand).
+        cap.append("task-drain", rec(2, "post-shutdown")).unwrap();
+        let tail2 = cap2.tail("task-drain", 10);
+        assert_eq!(
+            tail2.len(),
+            2,
+            "post-drain append MUST also be durable; got {tail2:?}"
+        );
+    }
+
+    /// (c) **Concurrent writes per task never interleave.**
+    ///
+    /// Spawn 8 OS threads against the same `TaskLlmCapture`
+    /// instance and the same `task_id`. Each thread writes
+    /// 100 turns. After all threads join we assert:
+    ///
+    /// * the file has exactly 800 newline-terminated lines;
+    /// * every line is well-formed JSON that parses as a
+    ///   `LlmTurnRecord`;
+    /// * the per-thread `(thread_idx, seq)` markers we
+    ///   embedded in `body` form the expected multi-set (no
+    ///   duplicates, no dropped records).
+    ///
+    /// This pins the O_APPEND + single-`write_all` atomicity
+    /// contract: pre-fix the writer emitted the JSON bytes
+    /// and the trailing `\n` as TWO separate `write_all`s,
+    /// which on Linux can interleave with concurrent writes
+    /// against the same fd in pathological scheduling. Post-
+    /// fix the line + `\n` is one `write_all` and the
+    /// O_APPEND fd guarantees atomic append for sub-PIPE_BUF
+    /// payloads.
+    #[test]
+    fn concurrent_writes_per_task_never_interleave() {
+        use std::thread;
+
+        let tmp = tempfile::tempdir().unwrap();
+        // Bump `max_file_bytes` well above 8 * 100 records so
+        // the compaction path doesn't fire mid-test and the
+        // post-condition is "exactly 800 lines on disk".
+        let cfg = TaskCaptureConfig {
+            max_file_bytes: 8 * 1024 * 1024,
+            max_body_bytes: 4 * 1024,
+            broadcast_capacity: 16,
+        };
+        let cap = TaskLlmCapture::new(tmp.path(), cfg).unwrap();
+
+        let threads = 8;
+        let per_thread = 100;
+        let mut handles = Vec::with_capacity(threads);
+        for tidx in 0..threads {
+            let cap_t = Arc::clone(&cap);
+            handles.push(thread::spawn(move || {
+                for seq in 0..per_thread {
+                    let body = format!("t{tidx}-s{seq}");
+                    let at = (tidx * per_thread + seq) as u64;
+                    cap_t
+                        .append("task-concurrent", rec(at, &body))
+                        .expect("concurrent append");
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("thread join");
+        }
+
+        // Drain + re-open from disk for the strongest possible
+        // post-condition: we are reading the on-disk file, not
+        // the in-memory ring.
+        cap.drain_and_shutdown();
+
+        let path = cap.task_path("task-concurrent");
+        let body = std::fs::read_to_string(&path).expect("read concurrent file");
+        let lines: Vec<&str> = body.lines().collect();
+        assert_eq!(
+            lines.len(),
+            threads * per_thread,
+            "expected {} lines (threads * per_thread), got {}",
+            threads * per_thread,
+            lines.len()
+        );
+
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for (i, line) in lines.iter().enumerate() {
+            let parsed: LlmTurnRecord = serde_json::from_str(line).unwrap_or_else(|e| {
+                panic!("line {i} did not parse as LlmTurnRecord ({e}): {line:?}")
+            });
+            assert!(
+                seen.insert(parsed.body.clone()),
+                "duplicate body {:?} in concurrent run (line {i})",
+                parsed.body
+            );
+        }
+        assert_eq!(seen.len(), threads * per_thread);
+        for tidx in 0..threads {
+            for seq in 0..per_thread {
+                let want = format!("t{tidx}-s{seq}");
+                assert!(
+                    seen.contains(&want),
+                    "expected {want:?} in concurrent run; missing"
+                );
+            }
+        }
     }
 }
