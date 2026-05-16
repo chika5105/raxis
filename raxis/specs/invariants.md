@@ -14070,3 +14070,185 @@ and not secret material).
 `cli/src/commands/doctor.rs::EXPECTED_MODES` (operator-visible audit) +
 `kernel/tests/data_dir_bootstrap.rs::canonical_layout_complete_on_boot`
 (regression net).
+
+
+---
+
+## Iter66 — Recovery preserves safety invariants (panic taxonomy)
+
+iter63 and iter66.1 both took live E2E runs to the floor when a
+single sync `Store::lock_sync` from an async context panicked the
+kernel daemon. The naive cure ("don't panic, recover via
+`block_in_place`") trades a loud crash for a quiet corruption when
+applied without discipline. Iter66 introduces a layered recovery
+model that preserves liveness AND safety, with the umbrella
+invariant below as the single contract that every recovery layer
+MUST honour.
+
+### `INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01`
+
+**Statement.** The kernel's recovery layers (Layer 1 site-specific
+`block_in_place` recovery, Layer 2 per-handler `catch_unwind`
+boundary, Layer 3 global `panic_hook`) MUST NOT weaken any of the
+kernel's existing safety invariants. A recovery that observably
+weakens a safety invariant is itself an invariant violation
+classified as `FatalForInitiative` at minimum, and `SafetyCritical`
+when the weakened invariant guards trust / audit / capability /
+schema integrity.
+
+**Three-way panic taxonomy** (`kernel/src/safety.rs::KernelPanicCategory`):
+
+  * `SafetyCritical` — trust-anchor mismatch, canonical-image
+    signature mismatch, audit-chain hash drift, plan-bundle seal
+    failure, schema corruption detected mid-transaction,
+    capability-check inconsistency. These MUST crash the daemon.
+    Reach via `safety::fatal_safety_critical(invariant_id, detail)`
+    which calls `std::process::abort` — bypasses every
+    `catch_unwind`, every panic hook, and skips unwind. Supervisor
+    restarts cleanly, nothing observed mid-corrupt. We TRUST these
+    aborts; they are a deliberate refusal to keep running.
+    `panic!()` is INSUFFICIENT for this class — a future
+    `catch_unwind` boundary could swallow it. `abort` is the only
+    reliable contract.
+
+  * `FatalForInitiative` — corruption scoped to one initiative
+    (orphan lane reservation, lineage hash mismatch,
+    terminal-criteria contradiction). Mark the initiative
+    `Failed { reason: KernelInvariantViolated }`, refuse all new
+    work on its lane, daemon keeps serving everyone else, operator
+    must inspect manually. NOT auto-recoverable. Layer 2 routes
+    this category to the "fail-this-initiative-but-keep-the-daemon"
+    path; iter66 does not yet implement Layer 2, so today this
+    category routes through `RecoverableHandlerBug` at the global
+    panic hook.
+
+  * `RecoverableHandlerBug` — programming errors (lock_sync
+    misuse, deserialization off-by-one, unwrap on a None that
+    "couldn't happen"). Layer 2 catches and downgrades to a typed
+    `HandlerError::HandlerPanicked`; daemon continues. Operator
+    can re-queue from the last clean witness via the iter65
+    `OperatorApprove` recovery path. The Layer 3 global panic hook
+    classifies an *uncategorised* panic as this — i.e. any plain
+    `panic!()` whose payload is not wrapped in `FatalKernelPanic`
+    is assumed to be a recoverable handler bug. The hook still
+    emits the `KernelPanicCaught` audit row + Critical
+    notification + structured stderr line, then chains to the
+    default panic hook so the unwind continues and the supervisor
+    restarts. The daemon is replaced cleanly; recovery picks up
+    state from SQL.
+
+**Recovery contract.** For every recovery site (Layer 1's
+`block_in_place` fallback, Layer 2's `catch_unwind` boundary,
+Layer 3's panic hook), the following MUST hold:
+
+  1. **Telemetry before recovery.** The structured log emit + the
+     audit row + the counter increment MUST land BEFORE the
+     `block_in_place` / catch / chain returns. If telemetry itself
+     fails (audit sink unreachable, counter registry not
+     initialized), the recovery still executes (so the daemon
+     survives) but an additional structured fallback stderr line
+     is emitted. We never silently recover.
+
+  2. **Audit-chain totality.** A recovered handler-bug panic emits
+     a `KernelPanicCaught` paired-write entry BEFORE the boundary
+     returns control. Layer 2's catch-side handler then emits a
+     paired `TaskStateChanged` (or `InitiativeStateChanged`) row
+     for the affected session/initiative's transition to the
+     terminal state. The audit chain has no gaps; downstream
+     forensics can always reconstruct what failed and how it was
+     contained.
+
+  3. **No half-committed transactions.** Open SQL transactions
+     roll back via `Drop` when the panic unwinds. A regression
+     test under `crates/store/src/db.rs` MUST pin this for every
+     transaction-shaped recovery path.
+
+  4. **Affected-scope quarantine.** The session, lane, or
+     initiative that owned the panicking handler is moved to a
+     typed terminal state (NOT left in `Running` or
+     `GatesPending`) so the scheduler does not re-admit work that
+     depends on the corrupt context.
+
+  5. **No safety-invariant downgrade.** The recovery path does
+     NOT touch the kernel-stateless invariants
+     (`active_count` keeps reading from SQL), the paired-write
+     invariants, the iter65 NNSP-counter classifier, the
+     escalation coverage invariant, or the notification priority
+     parity. Recovery is a thin shell on top of the kernel; it
+     CANNOT re-introduce class iter65 fixed.
+
+**`SafetyCritical` siting.** New uses of
+`safety::fatal_safety_critical` are appropriate at integrity
+checkpoints whose violation means continuing would corrupt
+operator-observable state. Initial sites identified for migration
+(future iters):
+
+  * Trust-anchor mismatch in
+    `crates/canonical-images/src/lib.rs::verify_image_trust_anchor`.
+  * Canonical-image signature mismatch on the boot path.
+  * Audit-chain hash linearity break in
+    `raxis_audit_tools::audit_writer` per
+    `INV-AUDIT-CHAIN-HASH-LINEARITY-01`.
+  * Plan-bundle seal verification failure in
+    `crates/plan-bundles/src/seal.rs`.
+  * Capability-check inconsistency mid-transaction in
+    `kernel/src/authority/delegation.rs`.
+
+These migrations are tracked separately and not part of iter66's
+ship surface; the helper exists today so the migrations can
+happen in any order.
+
+**Witnesses.**
+
+  1. `kernel/src/safety.rs::tests::category_as_str_is_pinned` —
+     pins the wire strings for the three categories.
+
+  2. `kernel/src/safety.rs::tests::fatal_kernel_panic_display_includes_all_fields`
+     — pins the `Display` shape of the payload sentinel so Layer 2
+     can pattern-match without reflection.
+
+  3. `kernel/src/safety.rs::tests::install_safety_audit_sink_signature_is_idempotent_safe`
+     — pins the boot contract: only the first audit-sink install
+     wins; subsequent installs are no-ops to prevent accidental
+     mid-flight swap. Compile-time signature check guards against
+     a future refactor that breaks boot.
+
+  4. `kernel/src/panic_hook.rs::tests::truncate_*` — pin the 4 KiB
+     payload + 16 KiB backtrace truncation discipline so a
+     pathologically-large panic message does not blow out the
+     audit row.
+
+  5. The Layer 1 boundary defense in `crates/store/src/db.rs` is
+     covered by its own invariant
+     `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` — the
+     boundary's positive / negative / recovery-functional /
+     no-false-positive contracts are pinned there. The umbrella
+     invariant on this page references those witnesses without
+     duplicating them.
+
+**Layer 2 deferred.** Per-handler `catch_unwind` boundaries are
+substantive — they touch every IPC dispatch entry, the scheduler
+poll loop, and every `tokio::spawn(async move {...})` background
+task — and warrant their own design pass + bake. Tracked as the
+headline initiative for iter67. Until then, an uncaught
+recoverable handler-bug panic still tears the calling stack down;
+Layer 3's panic hook enriches it with the `KernelPanicCaught`
+audit row + Critical notification, then chains to the default
+hook so the supervisor sees the exit and restarts. The daemon is
+replaced cleanly; recovery picks up state from SQL. Liveness is
+preserved across the restart boundary, just not within the
+single panicking stack.
+
+**Canonical home.**
+`kernel/src/safety.rs` (taxonomy + `fatal_safety_critical` +
+process-global audit-sink registry) +
+`kernel/src/panic_hook.rs` (Layer 3 hook + `NotificationSinkApi`
++ payload classification) +
+`kernel/src/main.rs` post-`task_llm_capture` install block (boot
+wiring: `safety::install_safety_audit_sink` +
+`panic_hook::install_kernel_panic_hook`) +
+`crates/audit/src/event.rs` `KernelPanicCaught` +
+`KernelSafetyInvariantViolated` event variants +
+`crates/dashboard-kernel/src/notification_filter.rs` Critical
+priority arms (typed + string surfaces, both per
+`INV-NOTIFICATION-PRIORITY-PARITY-01`).

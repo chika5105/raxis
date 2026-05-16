@@ -148,6 +148,12 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         | "OperatorRevealedSystemCredential"
         | "KernelDeadlockDetected"
         | "KernelRestartHaltedCircuitOpen"
+        // INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01 — string
+        // surface mirrors the typed `K::KernelPanicCaught` /
+        // `K::KernelSafetyInvariantViolated` arms below per
+        // INV-NOTIFICATION-PRIORITY-PARITY-01.
+        | "KernelPanicCaught"
+        | "KernelSafetyInvariantViolated"
         // `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — pre-iter65
         // this kind classified as `Medium` here while the typed
         // `notification_priority` classified it as `Critical`. The
@@ -320,6 +326,19 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // — supervisor refused further restarts; manual
         // intervention required (raxis-supervisor reset-circuit-breaker).
         K::KernelRestartHaltedCircuitOpen { .. } => Some(Critical),
+        // INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01 —
+        // every panic the global hook catches is operator-attention.
+        // Sustained `KernelPanicCaught` events with the same
+        // `location` are kernel-bug telemetry that warrants an
+        // iter-bake fix.
+        K::KernelPanicCaught { .. } => Some(Critical),
+        // INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01 —
+        // safety-critical refusals (`safety::fatal_safety_critical`)
+        // are P0 by definition. The kernel `abort`ed before this
+        // notification was queued; the operator MUST inspect the
+        // named invariant before re-enabling whatever subsystem it
+        // guarded.
+        K::KernelSafetyInvariantViolated { .. } => Some(Critical),
 
         // ── High: operator attention required, but not yet a P0 ──
         //
@@ -1312,6 +1331,8 @@ mod tests {
             ("OrchestratorRespawnCeilingExceeded", Critical),
             ("InitiativePermanentFailureEscalated", Critical),
             ("KernelStoreLockSyncFromAsyncDetected", Critical),
+            ("KernelPanicCaught", Critical),
+            ("KernelSafetyInvariantViolated", Critical),
             // High
             ("EscalationSubmitted", High),
             ("EscalationRateLimitExceeded", High),

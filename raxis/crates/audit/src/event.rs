@@ -285,6 +285,94 @@ pub enum AuditEventKind {
         last_failure_reason: String,
     },
 
+    /// `INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` —
+    /// Layer 3 of the kernel's recovery taxonomy (the global panic
+    /// hook in `kernel/src/panic_hook.rs`) caught a panic that
+    /// escaped Layer 1 (site-specific recovery) and Layer 2
+    /// (per-handler `catch_unwind` boundary, iter67). Emitted
+    /// synchronously from the panic hook BEFORE chaining to the
+    /// previously installed hook (which runs the
+    /// `TaskLlmCapture::flush_all` durability defense + the Rust
+    /// default panic banner + the unwind that ends the process).
+    ///
+    /// The hook does NOT swallow panics — the unwind still
+    /// proceeds. This row is the structured surface paired with
+    /// the unwind / `process::exit` / supervisor restart so the
+    /// next-boot `KernelRestartInitiated { reason: "PanicAbort" }`
+    /// audit row has a precise predecessor that names the panic
+    /// site, payload, and category.
+    ///
+    /// **Routes at `Critical` notification priority** — every
+    /// caught panic is operator-attention. Sustained
+    /// `KernelPanicCaught` events with the same `location` are
+    /// kernel-bug telemetry that warrants an iter-bake fix.
+    KernelPanicCaught {
+        /// PascalCase one of `SafetyCritical` /
+        /// `FatalForInitiative` / `RecoverableHandlerBug`.
+        /// `SafetyCritical` payloads SHOULD be unreachable here —
+        /// `safety::fatal_safety_critical` calls
+        /// `std::process::abort` which bypasses every panic hook.
+        /// If this row carries `SafetyCritical`, the operator
+        /// should investigate why a `FatalKernelPanic` payload was
+        /// constructed and `panic!`'d instead of routed through
+        /// `fatal_safety_critical`.
+        category: String,
+        /// `file:line:column` of the panic site, from
+        /// `PanicHookInfo::location()`. `<unknown>` if the panic
+        /// macro elided location (rare).
+        location: String,
+        /// `std::thread::current().name()` or `<unnamed>` for
+        /// unnamed threads (most spawned tokio workers are
+        /// unnamed today; this is informational).
+        thread: String,
+        /// Truncated panic payload string (downcast first to
+        /// `&'static str`, then `String`, then a type-name
+        /// fallback). Capped at 4 KiB; truncation appends a
+        /// `(truncated, full was N bytes)` marker.
+        payload: String,
+        /// `std::backtrace::Backtrace::force_capture()`. Always
+        /// captured (does not require `RUST_BACKTRACE=1`). Capped
+        /// at 16 KiB; truncation appends the same marker as
+        /// `payload`.
+        backtrace: String,
+    },
+
+    /// `INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` —
+    /// emitted synchronously from `safety::fatal_safety_critical`
+    /// BEFORE `std::process::abort`. The audit row + the matching
+    /// structured stderr line are the kernel's last words before
+    /// the supervisor sees a hard exit.
+    ///
+    /// Best-effort emit: the helper acquires the audit sink via a
+    /// `OnceLock<Arc<dyn AuditSink>>` (lock-free read) so a panic
+    /// during emit does NOT recurse into the helper. If the audit
+    /// sink itself errors or panics, the abort still fires — the
+    /// abort is the durable signal; this row is the structured
+    /// decoration.
+    ///
+    /// **Routes at `Critical` notification priority** — every
+    /// safety-critical refusal is a P0. Operators MUST inspect
+    /// before re-enabling whatever subsystem the invariant
+    /// guarded.
+    KernelSafetyInvariantViolated {
+        /// The `INV-...` identifier of the violated invariant
+        /// (e.g. `INV-CANONICAL-IMAGE-SIGNATURE-VERIFIED-01`,
+        /// `INV-AUDIT-CHAIN-HASH-LINEARITY-01`,
+        /// `INV-PLAN-BUNDLE-SEAL-VERIFIED-01`). Stable string
+        /// keyed off the invariant's specs/invariants.md ID.
+        invariant_id: String,
+        /// `file:line:column` of the
+        /// `safety::fatal_safety_critical` call site, captured via
+        /// `#[track_caller]` so it points at the kernel module
+        /// that detected the violation, not at the helper.
+        location: String,
+        /// Operator-readable detail describing the specific
+        /// violation (e.g. "trust anchor mismatch: expected
+        /// abc..., got def..."). The kernel formats this at the
+        /// call site; the helper does not synthesise it.
+        detail: String,
+    },
+
     /// V2.5 `self-healing-supervisor.md §3.5` /
     /// `INV-SUPERVISOR-AUTO-RESUME-ON-CLEAN-RESTART-01` — the kernel
     /// transparently re-admitted a task that the boot-time recovery
@@ -4442,6 +4530,8 @@ impl AuditEventKind {
             Self::KernelRestartInitiated { .. } => "KernelRestartInitiated",
             Self::KernelRestartCompleted { .. } => "KernelRestartCompleted",
             Self::KernelRestartHaltedCircuitOpen { .. } => "KernelRestartHaltedCircuitOpen",
+            Self::KernelPanicCaught { .. } => "KernelPanicCaught",
+            Self::KernelSafetyInvariantViolated { .. } => "KernelSafetyInvariantViolated",
             Self::TaskAutoResumedAfterSupervisorRestart { .. } => {
                 "TaskAutoResumedAfterSupervisorRestart"
             }

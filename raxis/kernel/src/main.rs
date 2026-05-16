@@ -61,6 +61,7 @@ mod notifications;
 mod observability;
 mod observability_boot;
 mod orch_respawn_ceiling;
+mod panic_hook;
 mod path_scope;
 mod policy_manager;
 mod prompt;
@@ -68,6 +69,7 @@ mod push;
 mod recovery;
 mod restart_lifecycle;
 mod runtime;
+mod safety;
 mod scheduler;
 mod session_activity;
 mod session_spawn_orchestrator;
@@ -651,6 +653,40 @@ async fn main() {
             prev_hook(info);
         }));
     }
+
+    // `INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` —
+    // Layer 3 panic hook + safety-critical audit-sink registration.
+    //
+    // Two sites composed here, both keyed off the audit sink that
+    // was just constructed above:
+    //
+    //   (a) `safety::install_safety_audit_sink` — registers the
+    //       process-global sink the `safety::fatal_safety_critical`
+    //       helper uses for its best-effort
+    //       `KernelSafetyInvariantViolated` audit emit before
+    //       `std::process::abort`. Idempotent; only the first
+    //       install wins.
+    //
+    //   (b) `panic_hook::install_kernel_panic_hook` — Layer 3 of
+    //       the recovery taxonomy. Composes ON TOP of the
+    //       `TaskLlmCapture::flush_all` hook above so both fire
+    //       (the chain runs my structured `KernelPanicCaught`
+    //       enrichment first, then delegates to the previous hook
+    //       which fires the capture flush + the Rust default
+    //       banner + unwind). The notification sink is `None` here
+    //       because the dashboard sink is constructed further down
+    //       in boot; early-boot panics fire only the audit +
+    //       eprintln paths.
+    //
+    // The Layer 1 boundary defense at `Store::lock_sync` lives in
+    // `crates/store/src/db.rs` (delivered by the parallel
+    // worker/iter66-async-store-lock-sweep work) and is wired via
+    // its own `install_lock_sync_from_async_emitter` call at boot;
+    // see `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` for the
+    // boundary contract. Both lanes share the same `inner_audit`
+    // sink so all kernel-recovery telemetry lands on one chain.
+    safety::install_safety_audit_sink(Arc::clone(&inner_audit));
+    panic_hook::install_kernel_panic_hook(Arc::clone(&inner_audit), None);
 
     // Per-session lifecycle capture (`SessionCapture`) — sibling
     // of `TaskLlmCapture` for the post-mortem surface. The
