@@ -204,6 +204,20 @@ fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
             | AuditEventKind::VerifierImageDigestMismatch { .. }
             | AuditEventKind::VerifierTimeout { .. }
             | AuditEventKind::VerifierArtifactRejected { .. }
+            // === iter63 bounded-runtime + operator-hint variants ===
+            // Bridge every new kill-path so the dashboard SSE stream
+            // surfaces verifier reaps as soon as they happen. Same
+            // rationale as the iter62 family: short-circuits of the
+            // `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair need to be
+            // visible to operators in real time. No counter bump in
+            // `bridge_audit_to_metric` — the per-event audit row
+            // is the signal.
+            | AuditEventKind::VerifierWallClockTimeout { .. }
+            | AuditEventKind::VerifierIdleTimeout { .. }
+            | AuditEventKind::VerifierBudgetExhausted { .. }
+            | AuditEventKind::VerifierVmForcedShutdown { .. }
+            | AuditEventKind::WitnessHandlerTimeout { .. }
+            | AuditEventKind::WitnessOperatorHintSpoofingDetected { .. }
     )
     .then(|| kind.clone())
 }
