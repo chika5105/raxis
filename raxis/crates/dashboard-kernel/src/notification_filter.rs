@@ -147,7 +147,18 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         | "LineageQuarantined"
         | "OperatorRevealedSystemCredential"
         | "KernelDeadlockDetected"
-        | "KernelRestartHaltedCircuitOpen" => Some(Critical),
+        | "KernelRestartHaltedCircuitOpen"
+        // `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — pre-iter65
+        // this kind classified as `Medium` here while the typed
+        // `notification_priority` classified it as `Critical`. The
+        // typed surface is correct: the orchestrator respawn ceiling
+        // is a structural backstop, an `Exceeded` event means the
+        // initiative is now terminal-Failed and the operator MUST
+        // intervene. The kernel `notifications::dispatch` gate and
+        // the dashboard `notifications` projection both consult the
+        // string surface; without parity, Critical-only filters
+        // missed the iter64 ceiling event entirely.
+        | "OrchestratorRespawnCeilingExceeded" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -197,7 +208,6 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         | "WitnessAccepted"
         | "ReviewAggregationCompleted"
         | "ExecutorRespawnFromReviewRejection"
-        | "OrchestratorRespawnCeilingExceeded"
         | "OperatorApprovedRespawnEscalation"
         | "OperatorDeniedRespawnEscalation"
         | "GitConsistencyRepaired"
@@ -1168,6 +1178,20 @@ mod tests {
                 escalation_id: None,
                 target_ref: "refs/heads/main".into(),
             },
+            // `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — the
+            // exact regression witness for the iter64 evidence:
+            // the typed classifier sent
+            // `OrchestratorRespawnCeilingExceeded` to `Critical`,
+            // the string classifier sent it to `Medium`, and a
+            // Critical-only filter on the dispatch gate dropped
+            // the inbox notification entirely. Constructing this
+            // case here makes the parity test fail loudly the
+            // moment the two surfaces drift again.
+            AuditEventKind::OrchestratorRespawnCeilingExceeded {
+                initiative_id: "init".into(),
+                attempts: 4,
+                max_attempts: 3,
+            },
         ];
         for kind in cases {
             let typed = notification_priority(&kind);
@@ -1181,6 +1205,130 @@ mod tests {
                 kind.as_str(),
                 typed,
                 from_str,
+            );
+        }
+    }
+
+    /// `INV-NOTIFICATION-PRIORITY-PARITY-01` (iter65) — exhaustive
+    /// kind-name parity sweep. The typed
+    /// [`notification_priority`] is the canonical source of
+    /// truth; the string-based classifier MUST agree on every
+    /// kind name that has a typed arm.
+    ///
+    /// Why this lives next to the cross-API test above: the
+    /// kitchen-sink `cases` list above checks parity for ~20
+    /// representative variants, but cannot prove parity for the
+    /// other ~100 kinds without constructing one of each (most
+    /// have non-trivial fields). This test walks the kind-name
+    /// space declaratively — every entry is a kind_str the typed
+    /// classifier promises to handle, and the string classifier
+    /// MUST return the same priority for it.
+    ///
+    /// Adding a new typed-Critical (etc.) arm without updating
+    /// the string classifier flips this test; the compile-time
+    /// `match` exhaustiveness in `notification_priority` ensures
+    /// the maintainer can't forget the typed side.
+    #[test]
+    fn typed_and_string_apis_agree_on_kind_name_parity() {
+        use NotificationPriority::{Critical, High, Low, Medium};
+        // Every `(kind_str, expected_priority)` the spec
+        // declares. The typed classifier's arms are the source
+        // of truth; this list is a string-shaped mirror that
+        // the regression test can sweep without constructing the
+        // variants.
+        let expected: &[(&str, NotificationPriority)] = &[
+            // Critical
+            ("IsolationSubstrateRefused", Critical),
+            ("IsolationFallbackBypass", Critical),
+            ("SessionVmFailedFinal", Critical),
+            ("SecurityViolationDetected", Critical),
+            ("SecurityViolation", Critical),
+            ("EmergencyOperatorUsed", Critical),
+            ("BreakglassActivated", Critical),
+            ("BreakglassDeactivated", Critical),
+            ("BreakglassAction", Critical),
+            ("OperatorCertExpiredOpDenied", Critical),
+            ("OperatorCertRevokedOpDenied", Critical),
+            ("OperatorCertRevoked", Critical),
+            ("DelegationSignatureUnverifiable", Critical),
+            ("DiskFullHaltEntered", Critical),
+            ("GitStateInconsistent", Critical),
+            ("ReplayRejected", Critical),
+            ("ReconciliationGap", Critical),
+            ("OperatorQuarantineSwept", Critical),
+            ("InitiativeQuarantined", Critical),
+            ("LineageQuarantined", Critical),
+            ("OperatorRevealedSystemCredential", Critical),
+            ("KernelDeadlockDetected", Critical),
+            ("KernelRestartHaltedCircuitOpen", Critical),
+            ("OrchestratorRespawnCeilingExceeded", Critical),
+            // High
+            ("EscalationSubmitted", High),
+            ("EscalationRateLimitExceeded", High),
+            ("EscalationTimedOut", High),
+            ("OperatorAttentionRequired", High),
+            ("SessionEgressStallDetected", High),
+            ("WitnessRejected", High),
+            ("VerifierProcessFailed", High),
+            ("CredentialProxyUpstreamFailed", High),
+            ("PolicyAdvanceRejected", High),
+            ("PolicyAdvanceFailed", High),
+            ("MergeFastForwardFailed", High),
+            ("PushFailed", High),
+            ("GatewayCrashed", High),
+            ("GatewayQuarantined", High),
+            ("GatewaySignalFailed", High),
+            ("TaskBlockedForRecovery", High),
+            ("AdmissionQueueFull", High),
+            ("OperatorCertMisconfigBypassed", High),
+            ("OperatorCertExpiringSoon", High),
+            ("OperatorCertInGracePeriod", High),
+            ("NotificationDeliveryFailed", High),
+            ("CircuitBreakerStateChanged", High),
+            ("PlanRejected", High),
+            ("InitiativeAborted", High),
+            ("OperatorRevealedCredential", High),
+            ("KernelRestartInitiated", High),
+            // Medium
+            ("KernelStarted", Medium),
+            ("KernelStopped", Medium),
+            ("IsolationSubstrateSelected", Medium),
+            ("PolicyEpochAdvanced", Medium),
+            ("PolicyUpdatedViaDashboard", Medium),
+            ("OperatorCertInstalled", Medium),
+            ("InitiativeCreated", Medium),
+            ("PlanApproved", Medium),
+            ("InitiativeStateChanged", Medium),
+            ("IntegrationMergeCompleted", Medium),
+            ("PushCompleted", Medium),
+            ("KernelRestartCompleted", Medium),
+            ("TaskAutoResumedAfterSupervisorRestart", Medium),
+            ("EscalationApproved", Medium),
+            ("EscalationDenied", Medium),
+            ("EscalationConsumed", Medium),
+            ("WitnessAccepted", Medium),
+            ("ReviewAggregationCompleted", Medium),
+            ("ExecutorRespawnFromReviewRejection", Medium),
+            ("OperatorApprovedRespawnEscalation", Medium),
+            ("OperatorDeniedRespawnEscalation", Medium),
+            ("GitConsistencyRepaired", Medium),
+            ("DryRunAdmitted", Medium),
+            ("PathScopeOverrideApplied", Medium),
+            // Low
+            ("DiskHealthyAfterFull", Low),
+            ("AdmissionDeferredAtCap", Low),
+            ("GatewaySpawned", Low),
+            ("GitConsistencyVerified", Low),
+        ];
+        for (kind_str, expected_priority) in expected {
+            let actual = notification_priority_for_kind_str(kind_str);
+            assert_eq!(
+                actual,
+                Some(*expected_priority),
+                "INV-NOTIFICATION-PRIORITY-PARITY-01 violation: \
+                 string classifier returned {actual:?} for {kind_str}, \
+                 expected {expected_priority:?}. Update \
+                 notification_priority_for_kind_str.",
             );
         }
     }
