@@ -345,7 +345,6 @@ pub fn print_keep_alive_banner(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use std::sync::Mutex;
 
     /// Serialise every test that mutates the env var so parallel
     /// `cargo test` runs in the same binary cannot poison each
