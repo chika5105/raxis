@@ -12,33 +12,49 @@
 //     workspace member's `Cargo.toml` and asserts `raxis-test-support`
 //     appears ONLY under `[dev-dependencies]`. Catches misuse at
 //     `cargo test --workspace` (i.e. CI) regardless of build profile.
-//     This is the strongest enforcement — it fires in every CI run
-//     and pinpoints the offending Cargo.toml.
+//     This is the SOLE enforcement mechanism today — it fires in every
+//     CI run and pinpoints the offending Cargo.toml.
 //
-//   Layer 2 (release-build noise, this file): the crate root carries
-//     `#![cfg_attr(not(debug_assertions), deprecated)]` so any release
-//     build that does manage to depend on this crate emits a clearly
-//     worded deprecation warning at every use site.
+// Historical Layer 2 was a crate-root
+// `#![cfg_attr(not(debug_assertions), deprecated = "...")]` that
+// emitted a warning at every use site when any consumer compiled this
+// crate in release profile. It was retired during the iter67 pipeline
+// phase (Sat 2026-05-16) because:
 //
-// Historical note: an earlier "Layer 1" pattern gated every public item
-// on `#[cfg(any(debug_assertions, test))]` so release builds would
-// fail to find the symbols. That broke the legitimate
+//   * The legitimate `cargo build --release --tests`,
+//     `cargo build --release --all-targets`, and
+//     `cargo clippy --release --all-targets -- -D warnings` workflows
+//     all build dev-deps in release profile without the consumer's
+//     `cfg(test)` propagating, so the deprecation fired on every test
+//     consumer — turning into a fatal error under `-D warnings`.
+//   * The lib.rs comment in the original Layer 2 declaration already
+//     documented that "the workspace_guard test (now Layer 1) gives
+//     strictly stronger guarantees and works in every profile" — i.e.
+//     Layer 2 was acknowledged as redundant noise even at the time of
+//     its introduction.
+//   * No mechanism inside the test-support crate itself can
+//     differentiate "dev-dep used by a consumer's test target" from
+//     "production dep wired into a release binary" — `cfg(test)` is
+//     evaluated per-crate, dev-deps don't see the consumer's test cfg,
+//     and there is no `cfg(consumer_is_test)` available.
+//
+// The workspace_guard test remains the canonical enforcement; it
+// asserts every member's `Cargo.toml` lists `raxis-test-support` under
+// `[dev-dependencies]` (or not at all) on every CI `cargo test`
+// invocation. A stray `[dependencies] raxis-test-support = ...` is
+// caught at PR time.
+
+// Historical note: an earlier "Layer 1" pattern (different from the
+// current Layer 1 above) gated every public item on
+// `#[cfg(any(debug_assertions, test))]` so release builds would fail
+// to find the symbols. That broke the legitimate
 // `cargo build --release --tests` workflow used by the live-e2e
 // pre-build (dev-deps are compiled in release mode without the
 // downstream consumer's `cfg(test)` set, so the gate evaluated to
 // `false` and the items disappeared from the dep's surface even though
 // the consumer's test target legitimately needed them). The
-// workspace_guard test (now Layer 1) gives strictly stronger guarantees
-// and works in every profile.
-
-#![cfg_attr(
-    not(debug_assertions),
-    deprecated = "raxis-test-support is dev-dep-only. \
-                  If this warning fires in a release build, you have moved \
-                  the crate into [dependencies] or [build-dependencies] \
-                  somewhere. See specs/v1/philosophy.md §1.6 \
-                  `crates/test-support/` for the rationale."
-)]
+// workspace_guard test (Layer 1 above) gives strictly stronger
+// guarantees and works in every profile.
 //
 // What lives here:
 //
