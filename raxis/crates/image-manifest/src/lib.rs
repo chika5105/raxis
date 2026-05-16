@@ -1105,11 +1105,16 @@ mod tests {
             role: Role,
         }
 
-        let s = toml::to_string(&Wrapper { role: Role::Verifier }).unwrap();
+        let s = toml::to_string(&Wrapper {
+            role: Role::Verifier,
+        })
+        .unwrap();
         let back: Wrapper = toml::from_str(&s).unwrap();
         assert_eq!(
             back,
-            Wrapper { role: Role::Verifier },
+            Wrapper {
+                role: Role::Verifier
+            },
             "Verifier must round-trip"
         );
 

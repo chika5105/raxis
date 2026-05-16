@@ -128,9 +128,10 @@ pub static KEEP_RUNNING_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new((
 /// Take the cross-binary env-var lock, recovering from poison so
 /// a panicking sibling test cannot wedge the suite.
 pub fn lock_keep_running_env() -> std::sync::MutexGuard<'static, ()> {
-    KEEP_RUNNING_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    KEEP_RUNNING_ENV_LOCK
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
 }
-
 
 // ─── CLI-flag override (for future test-binary callers) ──────────
 //

@@ -53,12 +53,12 @@ use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
     EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeView, NotificationView, OperatorAuthResolution,
-    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
-    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, StructuredOutputView,
-    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
-    WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
-    WorktreeTreeEntry, SUBSYSTEM_CATALOG,
+    InitiativeView, NotificationView, OperatorAuthResolution, OrchestratorGapsResponse,
+    PolicyAdvancement, PolicyOperatorView, PolicySnapshotView, RecentSessionEntry,
+    ReviewerPanelEntry, ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
+    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail, WorktreeDiff,
+    WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree, WorktreeTreeEntry,
+    SUBSYSTEM_CATALOG,
 };
 use raxis_dashboard::error::ApiError;
 use raxis_dashboard::server::{DashboardServer, ServerHandle};

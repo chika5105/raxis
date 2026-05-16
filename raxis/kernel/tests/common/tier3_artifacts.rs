@@ -613,7 +613,9 @@ mod tests {
             let _r = Tier3Reporter::new("smoke", tmp.path(), &data);
             // do NOT mark_success — Drop must KEEP the dir.
         }
-        if let Some(v) = prior { std::env::set_var("RAXIS_E2E_KEEP", v); }
+        if let Some(v) = prior {
+            std::env::set_var("RAXIS_E2E_KEEP", v);
+        }
         if let Some(v) = prior_kr {
             std::env::set_var("RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT", v);
         }
