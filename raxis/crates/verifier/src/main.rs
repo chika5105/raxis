@@ -32,8 +32,8 @@ use raxis_ipc::{read_frame, write_frame, IpcMessage};
 use raxis_types::WitnessResultClass;
 use raxis_verifier::{
     build_submission, load_artifact_if_present, map_exit_to_result_class,
-    parse_verifier_env_from_process, run_verifier_command, ArtifactError, CommandOutcome,
-    ExitCode, VerifierEnv, VerifierEnvError,
+    parse_verifier_env_from_process, run_builtin_symbol_index, run_verifier_command, ArtifactError,
+    CommandOutcome, ExitCode, VerifierBuiltin, VerifierEnv, VerifierEnvError,
 };
 use tokio::net::UnixStream;
 
@@ -64,13 +64,29 @@ async fn run() -> Result<ExitCode, ExitCode> {
         }
     };
 
-    // ── Step 2: run the command ────────────────────────────────────────────
-    let outcome = match run_verifier_command(&env).await {
-        Ok(o) => o,
-        Err(e) => {
-            eprintln!("raxis-verifier: run_verifier_command: {e}");
-            return Err(ExitCode::IoError);
-        }
+    // ── Step 2: run the command (or built-in pipeline) ─────────────────────
+    //
+    // iter62 verifier-runtime D7 dispatch: when the spawn envelope
+    // sets `RAXIS_VERIFIER_BUILTIN = "symbol-index"` the kernel-
+    // canonical `verifier-symbol-index` image executes the in-process
+    // pipeline instead of `sh -lc $RAXIS_VERIFIER_COMMAND`. Both
+    // paths produce a `CommandOutcome` with the same shape so the
+    // downstream classifier / submission builder is unchanged.
+    let outcome = match env.builtin {
+        Some(VerifierBuiltin::SymbolIndex) => match run_builtin_symbol_index(&env).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("raxis-verifier: run_builtin_symbol_index: {e}");
+                return Err(ExitCode::IoError);
+            }
+        },
+        None => match run_verifier_command(&env).await {
+            Ok(o) => o,
+            Err(e) => {
+                eprintln!("raxis-verifier: run_verifier_command: {e}");
+                return Err(ExitCode::IoError);
+            }
+        },
     };
 
     // ── Step 3: load artefact (optional) ───────────────────────────────────

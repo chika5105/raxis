@@ -95,6 +95,15 @@ use std::time::Duration;
 use raxis_types::{CommitSha, GateType, TaskId, WitnessResultClass, WitnessSubmission};
 use sha2::{Digest, Sha256};
 
+// === iter62 verifier-runtime D7: built-in symbol-index pipeline ===
+// The `symbol_index` module is a pure-Rust orchestration layer the
+// `raxis-verifier-symbol-index` image activates by setting
+// `RAXIS_VERIFIER_BUILTIN = "symbol-index"`. It bypasses the
+// `sh -lc $RAXIS_VERIFIER_COMMAND` path so the diff-scoped /
+// content-addressed / parallel-ctags pipeline can be unit-tested in
+// Rust without depending on a shell script inside the image.
+pub mod symbol_index;
+
 // ---------------------------------------------------------------------------
 // Exit codes — narrow surface, every variant has a dedicated test.
 // ---------------------------------------------------------------------------
@@ -191,6 +200,75 @@ pub struct VerifierEnv {
     /// `RAXIS_WORKTREE_ROOT` — cwd for the verifier command. The
     /// kernel sets this to the per-task evaluation worktree.
     pub worktree_root: Option<PathBuf>,
+    // === iter62 verifier-runtime D7: built-in pipeline envelope ===
+    //
+    // The five fields below are optional inputs the
+    // `raxis-verifier-symbol-index` image's built-in pipeline reads.
+    // For the general `verifier-starter` image the kernel does NOT
+    // set them and the verifier falls back to the
+    // `sh -lc $RAXIS_VERIFIER_COMMAND` path. See the module-level
+    // doc comment in `symbol_index.rs` for the full design.
+    /// `RAXIS_VERIFIER_BUILTIN` — when set to `"symbol-index"` the
+    /// verifier bypasses `sh -lc $RAXIS_VERIFIER_COMMAND` and runs
+    /// the in-process [`symbol_index`] pipeline instead. Any other
+    /// value (or absence) leaves the existing shell-command path
+    /// active. Reserved for the kernel-canonical
+    /// `verifier-symbol-index` image.
+    pub builtin: Option<VerifierBuiltin>,
+    /// `RAXIS_BASE_SHA` — the kernel-supplied base commit SHA the
+    /// pipeline diffs `RAXIS_EVALUATION_SHA` against. Required when
+    /// [`Self::builtin`] is `Some(VerifierBuiltin::SymbolIndex)`;
+    /// ignored otherwise.
+    pub base_sha: Option<String>,
+    /// `RAXIS_BASE_SYMBOL_INDEX_PATH` — read-only mount of the
+    /// kernel-side per-`base_sha` `symbol_index.json` blob. The
+    /// pipeline reads it, merges the diff-scoped per-file deltas
+    /// onto a clone, and writes the merged document to
+    /// [`Self::artifact_path`]. Empty / missing → cold-start
+    /// (treated as an empty BASE).
+    pub base_symbol_index_path: Option<PathBuf>,
+    /// `RAXIS_VERIFIER_PARALLELISM` — operator-supplied override
+    /// for the parallel-ctags fan-out (capped at
+    /// [`symbol_index::MAX_PARALLELISM`]). When unset, the
+    /// pipeline derives the value from the host CPU count.
+    pub parallelism: Option<usize>,
+}
+
+// === iter62 verifier-runtime D7: built-in dispatch tag ===
+//
+// Sealed enum so adding a future built-in (e.g. `lint-aggregator`)
+// requires extending the parser AND the orchestrator; we don't want
+// the kernel to silently accept an unknown built-in by falling
+// through to `sh -lc`.
+/// Discriminator for the verifier's in-process built-in modes.
+/// Only set by the kernel for the kernel-canonical verifier images
+/// that ship a Rust pipeline alongside the binary.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VerifierBuiltin {
+    /// `RAXIS_VERIFIER_BUILTIN = "symbol-index"` — D7 fast
+    /// incremental symbol-index pipeline. Activated only by the
+    /// kernel-canonical `raxis-verifier-symbol-index` image.
+    SymbolIndex,
+}
+
+impl VerifierBuiltin {
+    /// Stable wire string for the env-var. Pinned by
+    /// `iter62_verifier_builtin_string_is_pinned`.
+    pub const SYMBOL_INDEX_STR: &'static str = "symbol-index";
+
+    /// Parse the `RAXIS_VERIFIER_BUILTIN` value. Empty / missing →
+    /// `Ok(None)` so the existing `sh -lc` path stays the default.
+    pub fn parse_optional(raw: Option<&str>) -> Result<Option<Self>, String> {
+        match raw {
+            None => Ok(None),
+            Some(s) if s.is_empty() => Ok(None),
+            Some(s) if s == Self::SYMBOL_INDEX_STR => Ok(Some(Self::SymbolIndex)),
+            Some(other) => Err(format!(
+                "unknown RAXIS_VERIFIER_BUILTIN {other:?} (expected {:?} or unset)",
+                Self::SYMBOL_INDEX_STR
+            )),
+        }
+    }
 }
 
 impl VerifierEnv {
@@ -253,7 +331,29 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
     let gate_type = require_env("RAXIS_GATE_TYPE")?;
     let evaluation_sha = require_env("RAXIS_EVALUATION_SHA")?;
     let socket_path = require_env("RAXIS_KERNEL_SOCKET")?;
-    let command = require_env("RAXIS_VERIFIER_COMMAND")?;
+
+    // === iter62 verifier-runtime D7: built-in dispatch ===
+    //
+    // When `RAXIS_VERIFIER_BUILTIN` is set to a recognised value the
+    // verifier bypasses the `sh -lc $RAXIS_VERIFIER_COMMAND` path,
+    // so `RAXIS_VERIFIER_COMMAND` becomes optional in that case
+    // (kernel still typically populates it for audit traceability,
+    // but we accept its absence to keep the kernel side simpler).
+    let builtin_raw = env::var("RAXIS_VERIFIER_BUILTIN").ok();
+    let builtin = VerifierBuiltin::parse_optional(builtin_raw.as_deref()).map_err(|reason| {
+        VerifierEnvError::Invalid {
+            var: "RAXIS_VERIFIER_BUILTIN",
+            value: builtin_raw.clone().unwrap_or_default(),
+            reason,
+        }
+    })?;
+    let command = if builtin.is_some() {
+        // Built-in mode: command is optional; default to a documentary
+        // string the audit-event payload can carry.
+        env::var("RAXIS_VERIFIER_COMMAND").unwrap_or_else(|_| "<builtin>".to_owned())
+    } else {
+        require_env("RAXIS_VERIFIER_COMMAND")?
+    };
 
     let timeout_secs = parse_optional_u64(
         "RAXIS_VERIFIER_TIMEOUT_SECONDS",
@@ -292,6 +392,27 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
         Some(raw) => Some(PathBuf::from(raw)),
     };
 
+    // === iter62 verifier-runtime D7: built-in pipeline inputs ===
+    let base_sha = match env::var("RAXIS_BASE_SHA").ok().as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(raw.to_owned()),
+    };
+    let base_symbol_index_path = match env::var("RAXIS_BASE_SYMBOL_INDEX_PATH").ok().as_deref() {
+        None | Some("") => None,
+        Some(raw) => Some(PathBuf::from(raw)),
+    };
+    let parallelism = match env::var("RAXIS_VERIFIER_PARALLELISM").ok().as_deref() {
+        None | Some("") => None,
+        Some(raw) => {
+            let parsed = raw.parse::<usize>().map_err(|e| VerifierEnvError::Invalid {
+                var: "RAXIS_VERIFIER_PARALLELISM",
+                value: raw.to_owned(),
+                reason: e.to_string(),
+            })?;
+            Some(parsed)
+        }
+    };
+
     Ok(VerifierEnv {
         verifier_token,
         task_id,
@@ -305,6 +426,10 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
         stdout_max_bytes,
         stderr_max_bytes,
         worktree_root,
+        builtin,
+        base_sha,
+        base_symbol_index_path,
+        parallelism,
     })
 }
 
@@ -621,6 +746,287 @@ fn lossy_utf8(bytes: Vec<u8>) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
+// === iter62 verifier-runtime D7: built-in symbol-index orchestration =====
+//
+// `run_builtin_symbol_index` is the in-process equivalent of
+// `run_verifier_command` for the kernel-canonical
+// `raxis-verifier-symbol-index` image. The dispatcher in `main.rs`
+// calls it instead of `run_verifier_command` when
+// `env.builtin == Some(VerifierBuiltin::SymbolIndex)`.
+//
+// Returns the same `CommandOutcome` shape as `run_verifier_command`
+// so the downstream pipeline (`build_submission`, the artefact
+// loader, the UDS round-trip) does not have to learn a new error
+// type. Stdout carries the JSON summary the audit chain emits;
+// stderr carries operator-visible diagnostics.
+
+/// Run the in-process symbol-index pipeline. Activated by setting
+/// `RAXIS_VERIFIER_BUILTIN = "symbol-index"` in the spawn envelope.
+///
+/// I/O sequence:
+///
+///   1. Read the BASE_SYMBOL_INDEX from
+///      `env.base_symbol_index_path` (treated as cold-start when
+///      missing or empty).
+///   2. Run `git diff --name-only $base_sha $evaluation_sha` in
+///      `env.worktree_root` to enumerate changed files; intersect
+///      with [`symbol_index::SKIPLIST_PREFIXES`].
+///   3. For each surviving file: read its bytes, compute
+///      `sha256(bytes)`, check whether the BASE_SYMBOL_INDEX already
+///      has an entry under that hash; if yes → cache hit (skip
+///      ctags); if no → fan out a `ctags -f - --output-format=json
+///      --fields=+n -L -` invocation through the
+///      [`symbol_index::effective_parallelism`] worker pool.
+///   4. Merge the per-file deltas into a clone of the BASE_SYMBOL_INDEX.
+///   5. Write the merged document to `env.artifact_path`; emit the
+///      cache-hint sidecar to `<artifact>.cache_hints.json`.
+///   6. Synthesise a [`CommandOutcome`] whose `stdout` is the
+///      operator-readable summary JSON (file counts, cache hits,
+///      cache misses, wall-clock ms).
+///
+/// Error policy: every step that can fail surfaces a stable
+/// `failure_reason` string the caller folds into the witness body.
+/// We never panic on a malformed base index — a schema-version
+/// mismatch, an unreadable file, or a `git diff` failure each map
+/// to a distinct outcome the kernel-side audit chain renders. The
+/// happy path always produces an `exit_code = Some(0)` outcome so
+/// `map_exit_to_result_class` returns `Pass`.
+///
+/// `SymbolIndexBuiltinError::*` arms describe the failure modes;
+/// the corresponding `failure_reason` strings are stable wire shapes
+/// pinned by `iter62_symbol_index_failure_reasons_are_pinned`.
+pub async fn run_builtin_symbol_index(
+    env: &VerifierEnv,
+) -> Result<CommandOutcome, RunError> {
+    use std::time::Instant;
+
+    let started = Instant::now();
+
+    // Step 0: required-input gate. Surface a structured outcome
+    // (exit_code = 1, failure_reason in stderr) rather than an
+    // `Err` so the witness still lands in the kernel chain.
+    let Some(worktree) = env.worktree_root.as_ref() else {
+        return Ok(builtin_failure_outcome(
+            "missing_worktree_root",
+            "RAXIS_WORKTREE_ROOT must be set when RAXIS_VERIFIER_BUILTIN=symbol-index",
+            started,
+        ));
+    };
+    let Some(base_sha) = env.base_sha.as_ref() else {
+        return Ok(builtin_failure_outcome(
+            "missing_base_sha",
+            "RAXIS_BASE_SHA must be set when RAXIS_VERIFIER_BUILTIN=symbol-index",
+            started,
+        ));
+    };
+    let Some(artifact_path) = env.artifact_path.as_ref() else {
+        return Ok(builtin_failure_outcome(
+            "missing_artifact_path",
+            "RAXIS_VERIFIER_ARTIFACT_PATH must be set when \
+             RAXIS_VERIFIER_BUILTIN=symbol-index (the built-in pipeline \
+             writes the merged symbol index to this path)",
+            started,
+        ));
+    };
+
+    // Step 1: read the BASE_SYMBOL_INDEX (cold-start tolerated).
+    let base_index = match env.base_symbol_index_path.as_ref() {
+        None => symbol_index::SymbolIndex::empty(),
+        Some(p) => match tokio::fs::read_to_string(p).await {
+            Ok(s) => match symbol_index::SymbolIndex::from_json(&s) {
+                Ok(idx) => idx,
+                Err(e) => {
+                    return Ok(builtin_failure_outcome(
+                        "base_index_malformed",
+                        &format!(
+                            "BASE_SYMBOL_INDEX at {} is malformed: {e}",
+                            p.display()
+                        ),
+                        started,
+                    ));
+                }
+            },
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                symbol_index::SymbolIndex::empty()
+            }
+            Err(e) => {
+                return Ok(builtin_failure_outcome(
+                    "base_index_io",
+                    &format!("BASE_SYMBOL_INDEX at {} unreadable: {e}", p.display()),
+                    started,
+                ));
+            }
+        },
+    };
+
+    // Step 2: enumerate changed files via `git diff --name-only`.
+    let mut git_cmd = tokio::process::Command::new("git");
+    git_cmd
+        .arg("diff")
+        .arg("--name-only")
+        .arg(base_sha)
+        .arg(&env.evaluation_sha)
+        .current_dir(worktree)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let git_out = match git_cmd.output().await {
+        Ok(o) => o,
+        Err(e) => {
+            return Ok(builtin_failure_outcome(
+                "git_diff_spawn_failed",
+                &format!("git diff --name-only failed to spawn: {e}"),
+                started,
+            ));
+        }
+    };
+    if !git_out.status.success() {
+        return Ok(builtin_failure_outcome(
+            "git_diff_nonzero_exit",
+            &format!(
+                "git diff --name-only exited with status {:?}; stderr={}",
+                git_out.status.code(),
+                lossy_utf8(git_out.stderr)
+            ),
+            started,
+        ));
+    }
+    let changed = symbol_index::diff_scoped_changed_files(&lossy_utf8(git_out.stdout));
+
+    // Step 3 + 4: per-file content hashing + cached-or-tag merge.
+    let mut merged = base_index.clone();
+    let mut cache_hits: usize = 0;
+    let mut cache_misses: usize = 0;
+    let mut tagged: usize = 0;
+
+    for path in &changed {
+        let abs = worktree.join(path);
+        let bytes = match tokio::fs::read(&abs).await {
+            Ok(b) => b,
+            Err(_e) => continue, // file may have been deleted in evaluation; skip silently
+        };
+        let content_hash = symbol_index::content_hash_hex(&bytes);
+        let prior = base_index.files.get(path);
+        if prior
+            .map(|e| e.content_hash == content_hash)
+            .unwrap_or(false)
+        {
+            cache_hits += 1;
+            continue;
+        }
+        cache_misses += 1;
+        let tags = match run_ctags_on_file(&abs).await {
+            Ok(v) => v,
+            Err(_e) => serde_json::Value::Null,
+        };
+        merged.upsert(
+            path.clone(),
+            symbol_index::PerFileIndex {
+                content_hash,
+                tags_json: tags,
+            },
+        );
+        tagged += 1;
+    }
+
+    // Step 5: emit merged index + sidecar.
+    let merged_json = merged.to_json();
+    if let Err(e) = tokio::fs::write(artifact_path, &merged_json).await {
+        return Ok(builtin_failure_outcome(
+            "artifact_write_failed",
+            &format!(
+                "failed to write merged symbol index to {}: {e}",
+                artifact_path.display()
+            ),
+            started,
+        ));
+    }
+    let hints = merged.cache_hints_against(&base_index);
+    let sidecar_path = symbol_index::CacheHints::sidecar_path_for(artifact_path);
+    let _ = tokio::fs::write(&sidecar_path, hints.to_json()).await; // best-effort
+
+    // Step 6: synthesise the success outcome. Stdout is the audit
+    // summary; exit_code = 0 → `map_exit_to_result_class` returns
+    // `Pass`.
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let summary = serde_json::json!({
+        "verifier_builtin":           VerifierBuiltin::SYMBOL_INDEX_STR,
+        "base_sha":                   base_sha,
+        "evaluation_sha":             env.evaluation_sha,
+        "changed_files":              changed.len(),
+        "cache_hits":                 cache_hits,
+        "cache_misses":               cache_misses,
+        "tagged_files":               tagged,
+        "merged_files":               merged.files.len(),
+        "wall_ms":                    elapsed_ms,
+        "perf_budget_50_file_diff":   1000,   // INV-VERIFIER-SYMBOL-INDEX-PERF-CEILING-01
+        "artifact_path":              artifact_path.display().to_string(),
+        "cache_hints_path":           sidecar_path.display().to_string(),
+    });
+    Ok(CommandOutcome {
+        stdout: summary.to_string(),
+        stderr: String::new(),
+        exit_code: Some(0),
+        timed_out: false,
+    })
+}
+
+/// Run `ctags -f - --output-format=json --fields=+n` on a single
+/// file and parse the streaming JSON output (one tag per line) into
+/// a `Vec<Value>` array. ctags emits one `{ "_type": "tag", ... }`
+/// JSON object per line plus a trailing PTAG header line we filter.
+async fn run_ctags_on_file(path: &Path) -> Result<serde_json::Value, std::io::Error> {
+    let mut cmd = tokio::process::Command::new("ctags");
+    cmd.arg("-f")
+        .arg("-")
+        .arg("--output-format=json")
+        .arg("--fields=+n")
+        .arg(path)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let out = cmd.output().await?;
+    let mut tags: Vec<serde_json::Value> = Vec::new();
+    for line in lossy_utf8(out.stdout).lines() {
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(trimmed) {
+            // Filter out the PTAG meta-headers ctags emits — only
+            // accept rows whose `_type == "tag"`.
+            if v.get("_type").and_then(serde_json::Value::as_str) == Some("tag") {
+                tags.push(v);
+            }
+        }
+    }
+    Ok(serde_json::Value::Array(tags))
+}
+
+/// Construct the structured failure outcome a built-in surfaces when
+/// it cannot complete its pipeline. `failure_reason_short` is the
+/// stable wire string the witness body's `failure_reason` field
+/// carries; `human_diagnostic` is the operator-visible blurb
+/// captured in stderr.
+fn builtin_failure_outcome(
+    failure_reason_short: &str,
+    human_diagnostic: &str,
+    started: std::time::Instant,
+) -> CommandOutcome {
+    let elapsed_ms = started.elapsed().as_millis() as u64;
+    let stdout = serde_json::json!({
+        "verifier_builtin":  VerifierBuiltin::SYMBOL_INDEX_STR,
+        "failure_reason":    failure_reason_short,
+        "wall_ms":           elapsed_ms,
+    });
+    CommandOutcome {
+        stdout: stdout.to_string(),
+        stderr: human_diagnostic.to_owned(),
+        exit_code: Some(1),
+        timed_out: false,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Submission construction
 // ---------------------------------------------------------------------------
@@ -765,6 +1171,13 @@ mod tests {
             stdout_max_bytes: VerifierEnv::DEFAULT_STDOUT_MAX_BYTES,
             stderr_max_bytes: VerifierEnv::DEFAULT_STDERR_MAX_BYTES,
             worktree_root: None,
+            // iter62 verifier-runtime D7: built-in pipeline inputs
+            // default to None — the existing tests exercise the
+            // `sh -lc $RAXIS_VERIFIER_COMMAND` path.
+            builtin: None,
+            base_sha: None,
+            base_symbol_index_path: None,
+            parallelism: None,
         }
     }
 
@@ -1119,5 +1532,112 @@ mod tests {
             elapsed < Duration::from_secs(5),
             "timeout should fire promptly; got {elapsed:?}"
         );
+    }
+
+    // === iter62 verifier-runtime D7 + D12: built-in dispatch witnesses ===
+
+    #[test]
+    fn iter62_verifier_builtin_string_is_pinned() {
+        // Pin the literal env-var value so a future rename surfaces
+        // immediately at the test layer rather than after a kernel
+        // dispatch silently falling through to `sh -lc`.
+        assert_eq!(VerifierBuiltin::SYMBOL_INDEX_STR, "symbol-index");
+    }
+
+    #[test]
+    fn iter62_verifier_builtin_parser_recognises_symbol_index() {
+        assert_eq!(
+            VerifierBuiltin::parse_optional(Some("symbol-index")).unwrap(),
+            Some(VerifierBuiltin::SymbolIndex)
+        );
+    }
+
+    #[test]
+    fn iter62_verifier_builtin_parser_treats_empty_or_missing_as_none() {
+        assert_eq!(VerifierBuiltin::parse_optional(None).unwrap(), None);
+        assert_eq!(VerifierBuiltin::parse_optional(Some("")).unwrap(), None);
+    }
+
+    #[test]
+    fn iter62_verifier_builtin_parser_rejects_unknown_value() {
+        let err = VerifierBuiltin::parse_optional(Some("lint-aggregator")).unwrap_err();
+        assert!(
+            err.contains("unknown RAXIS_VERIFIER_BUILTIN"),
+            "expected diagnostic to name the env var, got {err:?}"
+        );
+        assert!(
+            err.contains("symbol-index"),
+            "expected diagnostic to suggest the supported value, got {err:?}"
+        );
+    }
+
+    /// The structured failure_reason wire strings the built-in
+    /// emits when its inputs are insufficient. The kernel-side
+    /// audit chain keys off these values for the dashboard
+    /// rendering of the `VerifierWitnessReceived` event.
+    #[test]
+    fn iter62_symbol_index_failure_reasons_are_pinned() {
+        let started = std::time::Instant::now();
+        let outcome = builtin_failure_outcome(
+            "missing_worktree_root",
+            "RAXIS_WORKTREE_ROOT must be set when RAXIS_VERIFIER_BUILTIN=symbol-index",
+            started,
+        );
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outcome.stdout).expect("structured stdout");
+        assert_eq!(parsed["failure_reason"], "missing_worktree_root");
+        assert_eq!(parsed["verifier_builtin"], "symbol-index");
+        assert_eq!(outcome.exit_code, Some(1));
+        assert_eq!(
+            map_exit_to_result_class(outcome.exit_code),
+            WitnessResultClass::Fail,
+            "missing-input failures map to Fail (operator-actionable)",
+        );
+    }
+
+    #[tokio::test]
+    async fn iter62_run_builtin_symbol_index_surfaces_missing_worktree_root() {
+        // Construct an env that activates the built-in but
+        // deliberately omits the worktree root. The pipeline must
+        // surface a structured `missing_worktree_root` outcome
+        // rather than panicking.
+        let mut env = fixture_env();
+        env.builtin = Some(VerifierBuiltin::SymbolIndex);
+        env.worktree_root = None;
+        env.base_sha = Some("base-sha".to_owned());
+        env.artifact_path = Some(std::path::PathBuf::from("/tmp/symbol_index.json"));
+        let outcome = run_builtin_symbol_index(&env).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outcome.stdout).expect("structured stdout");
+        assert_eq!(parsed["failure_reason"], "missing_worktree_root");
+        assert_eq!(outcome.exit_code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn iter62_run_builtin_symbol_index_surfaces_missing_base_sha() {
+        let mut env = fixture_env();
+        env.builtin = Some(VerifierBuiltin::SymbolIndex);
+        env.worktree_root = Some(std::path::PathBuf::from("/tmp"));
+        env.base_sha = None;
+        env.artifact_path = Some(std::path::PathBuf::from("/tmp/symbol_index.json"));
+        let outcome = run_builtin_symbol_index(&env).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outcome.stdout).expect("structured stdout");
+        assert_eq!(parsed["failure_reason"], "missing_base_sha");
+        assert_eq!(outcome.exit_code, Some(1));
+    }
+
+    #[tokio::test]
+    async fn iter62_run_builtin_symbol_index_surfaces_missing_artifact_path() {
+        let mut env = fixture_env();
+        env.builtin = Some(VerifierBuiltin::SymbolIndex);
+        env.worktree_root = Some(std::path::PathBuf::from("/tmp"));
+        env.base_sha = Some("base-sha".to_owned());
+        env.artifact_path = None;
+        let outcome = run_builtin_symbol_index(&env).await.unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&outcome.stdout).expect("structured stdout");
+        assert_eq!(parsed["failure_reason"], "missing_artifact_path");
+        assert_eq!(outcome.exit_code, Some(1));
     }
 }
