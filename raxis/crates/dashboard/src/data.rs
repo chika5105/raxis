@@ -647,48 +647,81 @@ pub struct TaskView {
 /// One captured raw LLM turn surfaced via
 /// `GET /api/tasks/:task_id/llm-turns`.
 ///
-/// Mirrors `raxis_dashboard_kernel::LlmTurnRecord`. Lives in the
-/// dashboard crate so the trait + route layer can name the type
-/// without importing the kernel-glue crate (which would close a
-/// dep cycle).
+/// Iter64 wire shape — matches `dashboard-fe/src/types/api.ts ::
+/// TaskLlmTurnView` field-for-field so the dashboard's per-task
+/// LLM turns panel renders without an FE-side mapper. Pre-iter64
+/// the wire emitted `at_ms` + `body: String` + no
+/// `model`/`role`/`request`/usage breakdown, which left every
+/// FE field except `latency_ms` rendering empty / `undefined`
+/// / `0` even though the kernel was capturing real data on
+/// disk.
 ///
-/// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`.
+/// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`,
+/// `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`.
 #[derive(Debug, Clone, Serialize)]
 pub struct TaskLlmTurnView {
-    /// Unix milliseconds when the gateway returned the upstream
-    /// response.
-    pub at_ms: u64,
-    /// Owning task id (matches the URL path parameter — carried
-    /// in the body so global "recent LLM activity" views can
-    /// merge across tasks).
+    /// 1-indexed monotonic turn number per task (position in
+    /// the per-task ring file). The dashboard renders this as
+    /// "Turn 1", "Turn 2", … without sorting client-side.
+    pub turn_number: u32,
+    /// Unix-seconds capture timestamp (= `at_ms / 1000`).
+    pub ts_unix: u64,
+    /// Provider model id, lifted from the parsed response body
+    /// (`body.model` for Anthropic; OpenAI / others follow the
+    /// same field name). Empty string when the body is non-JSON
+    /// or the field is absent.
+    pub model: String,
+    /// Role assignment: `"system"` / `"user"` / `"assistant"` /
+    /// `"tool"`. Lifted from `body.role` for Anthropic; empty
+    /// string when unknown.
+    pub role: String,
+    /// Fully-parsed REQUEST payload as a `serde_json::Value`.
+    /// `Value::Null` when the kernel-side tap could not parse
+    /// the bytes (or when no request was captured for this
+    /// record — e.g. pre-iter64 records reloaded from disk).
+    pub request: serde_json::Value,
+    /// Fully-parsed RESPONSE payload as a `serde_json::Value`.
+    /// On parse failure the projection falls back to
+    /// `Value::String(raw_body)` so the operator still sees
+    /// the bytes (e.g. an SSE stream that only partially
+    /// arrived, or a transport error string).
+    pub response: serde_json::Value,
+    /// Per-turn token usage, lifted from `body.usage.*`.
+    /// Anthropic: `input_tokens` / `output_tokens` /
+    /// `cache_creation_input_tokens` / `cache_read_input_tokens`.
+    /// OpenAI: `prompt_tokens` / `completion_tokens` (mapped
+    /// onto `input_tokens` / `output_tokens`); cache fields
+    /// remain `None`. Absent / non-JSON bodies leave all four
+    /// fields `None`.
+    pub input_tokens: Option<u32>,
+    pub output_tokens: Option<u32>,
+    pub cache_creation_input_tokens: Option<u32>,
+    pub cache_read_input_tokens: Option<u32>,
+    /// Wall-clock latency from gateway outbound write to first
+    /// response byte. Optional only because future capture
+    /// shapes (e.g. streaming inference where the kernel
+    /// records partial-completion turns) may not have a single
+    /// "round-trip done" instant. Today the kernel always sets
+    /// it.
+    pub latency_ms: Option<u32>,
+    /// Carry-overs that are useful for the dashboard but not
+    /// in the FE TaskLlmTurnView contract today; serialise
+    /// them so future FE views can pick them up without
+    /// another wire bump (global "recent LLM activity" cross-
+    /// task views are the canonical consumer).
     pub task_id: String,
-    /// Session that issued the upstream request. Multiple
-    /// sessions per task is the canonical case
-    /// (orchestrator + executor + reviewer); retries on
-    /// premature exit also bump this.
     pub session_id: Option<String>,
-    /// Gateway-minted fetch identifier, useful for cross-
-    /// referencing with `audit.fetch_completed.fetch_id`.
     pub fetch_id: String,
-    /// Upstream HTTP status code. `None` when the gateway
-    /// never got a response (transport / DNS / timeout).
     pub status_code: Option<u16>,
-    /// Observed end-to-end latency (gateway outbound write →
-    /// first response byte received).
-    pub latency_ms: u32,
-    /// Raw response body, decoded as UTF-8. Bodies above
-    /// `TaskCaptureConfig::max_body_bytes` are truncated; see
-    /// `body_truncated`.
-    pub body: String,
-    /// `true` when [`Self::body`] was truncated to fit the per-
-    /// record body cap.
-    #[serde(default, skip_serializing_if = "is_false")]
-    pub body_truncated: bool,
-    /// Original body length in bytes, before truncation.
+    /// Original response body length, before per-record body
+    /// cap truncation. `body_truncated` flips when the
+    /// projection saw the kernel-side truncation marker.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub original_body_bytes: u64,
-    /// Structured upstream error category from the gateway.
-    /// `None` on success.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub body_truncated: bool,
+    /// Structured upstream error category from the gateway
+    /// (e.g. `"transport_timeout"`). `None` on success.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error: Option<String>,
 }
