@@ -1534,7 +1534,13 @@ fn emit_repaired(
     previous_git_sha: &str,
     target_ref: &str,
 ) {
-    let _ = audit.emit(
+    // INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01.
+    // The git-apply-pending repair is the only durable signal that
+    // recovery moved the on-disk ref to match the SQL `commit_sha`;
+    // a silent audit-emit failure would strand the operator with
+    // a stderr "info" line that mentions a repair but no audit-chain
+    // anchor an auditor can later cite.
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyRepaired {
             initiative_id: initiative_id.to_owned(),
             db_sha: db_sha.to_owned(),
@@ -1544,7 +1550,15 @@ fn emit_repaired(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitConsistencyRepaired\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+             \"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyRepaired\",\
          \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
@@ -1558,7 +1572,7 @@ fn emit_verified(
     sha: &str,
     target_ref: &str,
 ) {
-    let _ = audit.emit(
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyVerified {
             initiative_id: initiative_id.to_owned(),
             sha: sha.to_owned(),
@@ -1567,7 +1581,15 @@ fn emit_verified(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitConsistencyVerified\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"sha\":\"{sha}\",\
+             \"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyVerified\",\
          \"initiative_id\":\"{initiative_id}\",\"sha\":\"{sha}\",\
@@ -1583,7 +1605,7 @@ fn emit_inconsistent(
     target_ref: &str,
     reason: &str,
 ) {
-    let _ = audit.emit(
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitStateInconsistent {
             initiative_id: initiative_id.to_owned(),
             db_sha: db_sha.to_owned(),
@@ -1594,7 +1616,15 @@ fn emit_inconsistent(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitStateInconsistent\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+             \"git_sha\":\"{git_sha}\",\"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"warn\",\"event\":\"GitStateInconsistent\",\
          \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
