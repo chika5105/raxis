@@ -1773,7 +1773,7 @@ fn run_phase_c(
                         commit_sha: pre_state.head_sha_raw.clone(),
                         target_ref: initiative_target_ref.clone(),
                         category: category.to_owned(),
-                        reason,
+                        reason: reason.clone(),
                     },
                     Some(session_id_str.as_str()),
                     Some(task_id_owned.as_str()),
@@ -1784,6 +1784,34 @@ fn run_phase_c(
                          \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
                     );
                 }
+                // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+                // (iter65-review). The fast-forward failure cascades the
+                // initiative to `Failed` (the SQL UPDATE above already
+                // ran); fire the generalised permanent-failure
+                // helper so the operator inbox surfaces a Critical-
+                // priority paired-write escalation in addition to the
+                // High-priority `MergeFastForwardFailed` audit event.
+                // The helper is fire-and-forget (`.spawn`) so the
+                // intent handler does not block on the SQLite
+                // round-trip + audit emit; failure to escalate is
+                // logged structurally but never propagated to the
+                // intent caller.
+                let ctx_for_escalation = Arc::clone(ctx);
+                let init_for_escalation = initiative_id_owned.clone();
+                let category_for_escalation = category.to_owned();
+                let reason_for_escalation = reason.clone();
+                let target_ref_for_escalation = initiative_target_ref.clone();
+                tokio::spawn(async move {
+                    let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
+                        ctx_for_escalation,
+                        init_for_escalation,
+                        crate::initiative_escalation::PermanentFailureCause::MergeFastForwardFailed {
+                            target_ref: target_ref_for_escalation,
+                            category: format!("{category_for_escalation}: {reason_for_escalation}"),
+                        },
+                    )
+                    .await;
+                });
                 false
             }
         };
@@ -1958,6 +1986,28 @@ fn run_phase_c(
                          \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
                     );
                 }
+                // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+                // (iter65-review). Push deferred past the 5s deadline
+                // because git_apply_pending didn't clear — treat as a
+                // permanent push failure for inbox surfacing
+                // (recoverable: operator can retry once the pending
+                // git-apply resolves).
+                let ctx_for_escalation = Arc::clone(ctx);
+                let init_for_escalation = initiative_id_owned.clone();
+                let remote_for_escalation = remote.clone();
+                let refspec_for_escalation = refspec.clone();
+                tokio::spawn(async move {
+                    let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
+                        ctx_for_escalation,
+                        init_for_escalation,
+                        crate::initiative_escalation::PermanentFailureCause::PushFailed {
+                            remote: remote_for_escalation,
+                            refspec: refspec_for_escalation,
+                            reason: "git_apply_pending did not clear within 5s deadline".to_owned(),
+                        },
+                    )
+                    .await;
+                });
                 return Ok(IntentResponse {
                     sequence_number: seq,
                     task_state: if !pending_gates.is_empty() {
@@ -2047,7 +2097,7 @@ fn run_phase_c(
                             remote: remote.clone(),
                             refspec: refspec.clone(),
                             category: category.to_owned(),
-                            reason,
+                            reason: reason.clone(),
                         },
                         Some(session_id_str.as_str()),
                         Some(task_id_owned.as_str()),
@@ -2058,6 +2108,31 @@ fn run_phase_c(
                              \"audit_emit_failed\":\"{e}\",\"initiative_id\":\"{initiative_id_owned}\"}}",
                         );
                     }
+                    // `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+                    // (iter65-review). Real push failure (network /
+                    // permission / unrelated histories) — fire the
+                    // generalised permanent-failure helper so the
+                    // operator inbox surfaces a Critical-priority
+                    // anchor + paired-write escalation in addition
+                    // to the High-priority `PushFailed` event.
+                    let ctx_for_escalation = Arc::clone(ctx);
+                    let init_for_escalation = initiative_id_owned.clone();
+                    let remote_for_escalation = remote.clone();
+                    let refspec_for_escalation = refspec.clone();
+                    let category_for_escalation = category.to_owned();
+                    let reason_for_escalation = reason.clone();
+                    tokio::spawn(async move {
+                        let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
+                            ctx_for_escalation,
+                            init_for_escalation,
+                            crate::initiative_escalation::PermanentFailureCause::PushFailed {
+                                remote: remote_for_escalation,
+                                refspec: refspec_for_escalation,
+                                reason: format!("{category_for_escalation}: {reason_for_escalation}"),
+                            },
+                        )
+                        .await;
+                    });
                 }
             }
         }
