@@ -319,13 +319,36 @@ pub fn insert_logical_deadlock_escalation_in_tx(
     let sessions = Table::Sessions.as_str();
     let escalations = Table::Escalations.as_str();
 
-    // Resolve a (task_id, session_id, lineage_id) triple from the
-    // most recently FSM-touched task on the initiative whose
-    // session_id is non-NULL. The JOIN against `sessions` enforces
-    // the FK on `escalations.session_id`. If no row matches the
-    // initiative carries no live task with a session — defensive
-    // path; auto-escalation skipped.
-    let triple: Option<(String, String, String)> = tx
+    // Resolve a (task_id, session_id, lineage_id) triple satisfying
+    // the `escalations` table's NOT NULL + FK constraints
+    // (`escalations.session_id REFERENCES sessions.session_id`,
+    // `escalations.task_id REFERENCES tasks.task_id`). Two-tier
+    // resolution:
+    //
+    //   * **Tier 1 (preferred): worker-session-anchored.** The
+    //     most-recently FSM-touched task on the initiative whose
+    //     `session_id` is non-NULL. This is the natural anchor
+    //     when a worker (executor / reviewer) actually ran on the
+    //     initiative — the `task_id` is the exact subject of the
+    //     deadlock in operator forensics.
+    //
+    //   * **Tier 2 (iter65 fallback): orchestrator-anchored.**
+    //     Iter64 evidence reproduced a ceiling-trip on an
+    //     initiative whose orchestrator's terminal intents
+    //     (RetrySubTask / ActivateSubTask) were rejected with
+    //     `FailVmConcurrencyAtCap` BEFORE any worker session
+    //     could spawn. Tier 1 returned `None`, the helper
+    //     fell through to the no-eligible-FK skip path
+    //     (`Ok(None)`), the escalation row never landed, and
+    //     `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
+    //     silently broke (zero rows in `escalations` for the
+    //     failed initiative; zero `EscalationSubmitted` audit
+    //     events). The fallback joins to ANY task on the
+    //     initiative + the most recent Orchestrator session row
+    //     (which always exists because the ceiling trip itself
+    //     fires from the post-orchestrator-exit hook), satisfying
+    //     the FK without depending on a worker ever having run.
+    let triple: Option<(String, String, String)> = match tx
         .query_row(
             &format!(
                 "SELECT t.task_id, s.session_id, s.lineage_id
@@ -345,7 +368,45 @@ pub fn insert_logical_deadlock_escalation_in_tx(
                 ))
             },
         )
-        .optional()?;
+        .optional()?
+    {
+        Some(t) => Some(t),
+        None => {
+            // Tier 2: any task on the initiative + the most recent
+            // Orchestrator session for the initiative. The
+            // Orchestrator session is the FK anchor; its
+            // `lineage_id` carries the forensic chain.
+            let any_task: Option<String> = tx
+                .query_row(
+                    &format!(
+                        "SELECT task_id FROM {tasks}
+                          WHERE initiative_id = ?1
+                       ORDER BY transitioned_at DESC
+                          LIMIT 1"
+                    ),
+                    rusqlite::params![initiative_id],
+                    |r| r.get::<_, String>(0),
+                )
+                .optional()?;
+            let orch_session: Option<(String, String)> = tx
+                .query_row(
+                    &format!(
+                        "SELECT session_id, lineage_id FROM {sessions}
+                          WHERE initiative_id     = ?1
+                            AND session_agent_type = 'Orchestrator'
+                       ORDER BY created_at DESC
+                          LIMIT 1"
+                    ),
+                    rusqlite::params![initiative_id],
+                    |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+                )
+                .optional()?;
+            match (any_task, orch_session) {
+                (Some(t), Some((s, l))) => Some((t, s, l)),
+                _ => None,
+            }
+        }
+    };
 
     let Some((task_id, session_id, lineage_id)) = triple else {
         return Ok(None);
@@ -381,7 +442,21 @@ pub fn insert_logical_deadlock_escalation_in_tx(
          preserve the Failed terminal state."
     );
 
-    let idem_key = format!("kernel-orch-respawn-ceiling:{initiative_id}");
+    // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01` (iter65)
+    // — the idempotency key is keyed on `(initiative_id,
+    // ceiling_attempt_count)` so the same ceiling event can't
+    // double-insert (a re-fire of the same ceiling-exceeded path
+    // observes an `ON CONFLICT(session_id, idempotency_key) DO
+    // NOTHING` and the helper returns `Ok(None)`), but a re-trip
+    // of the ceiling AFTER the operator approved + reset the
+    // counter (`approve_logical_deadlock_escalation_in_tx`,
+    // counter back to 0, fresh re-deadlock walks counter back up
+    // to MAX+1) gets a fresh row keyed on the new
+    // `attempts` value. Pre-iter65 the key was just the
+    // initiative_id, which deduplicated EVERY ceiling re-trip on
+    // the same initiative across the operator's lifetime —
+    // that's wrong.
+    let idem_key = format!("kernel-orch-respawn-ceiling:{initiative_id}:{attempts}");
 
     let inserted = tx.execute(
         &format!(
@@ -848,5 +923,335 @@ mod tests {
             }
             other => panic!("expected OrchestratorRespawnCeilingExceeded, got {other:?}"),
         }
+    }
+
+    // ── `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01` ──
+    // (iter65) regression suite for
+    // `insert_logical_deadlock_escalation_in_tx`.
+
+    fn seed_orch_session(
+        conn: &Connection,
+        session_id: &str,
+        initiative_id: &str,
+        lineage_id: &str,
+    ) {
+        let sessions = Table::Sessions.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions}
+                    (session_id, role_id, session_token, lineage_id, fetch_quota,
+                     created_at, expires_at, revoked, session_agent_type,
+                     can_delegate, initiative_id)
+                 VALUES (?1, 'Planner', ?2, ?3, 0,
+                         strftime('%s','now'),
+                         strftime('%s','now') + 3600, 0,
+                         'Orchestrator', 1, ?4)"
+            ),
+            rusqlite::params![
+                session_id,
+                format!("tok-{session_id}"),
+                lineage_id,
+                initiative_id,
+            ],
+        )
+        .expect("seed orch session");
+    }
+
+    fn seed_worker_session(
+        conn: &Connection,
+        session_id: &str,
+        lineage_id: &str,
+    ) {
+        let sessions = Table::Sessions.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {sessions}
+                    (session_id, role_id, session_token, lineage_id, fetch_quota,
+                     created_at, expires_at, revoked, session_agent_type,
+                     can_delegate)
+                 VALUES (?1, 'Executor', ?2, ?3, 0,
+                         strftime('%s','now'),
+                         strftime('%s','now') + 3600, 0,
+                         'Executor', 0)"
+            ),
+            rusqlite::params![session_id, format!("tok-{session_id}"), lineage_id],
+        )
+        .expect("seed worker session");
+    }
+
+    fn seed_task_with_session(
+        conn: &Connection,
+        task_id: &str,
+        initiative_id: &str,
+        state: &str,
+        session_id: Option<&str>,
+    ) {
+        let tasks = Table::Tasks.as_str();
+        conn.execute(
+            &format!(
+                "INSERT INTO {tasks}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, session_id)
+                 VALUES (?1, ?2, 'lane-test', ?3, 'kernel',
+                         0, strftime('%s','now'),
+                         strftime('%s','now'), ?4)"
+            ),
+            rusqlite::params![task_id, initiative_id, state, session_id],
+        )
+        .expect("seed task");
+    }
+
+    fn count_escalations(conn: &Connection, initiative_id: &str) -> usize {
+        let escalations = Table::Escalations.as_str();
+        let n: i64 = conn
+            .query_row(
+                &format!(
+                    "SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"
+                ),
+                rusqlite::params![initiative_id],
+                |r| r.get(0),
+            )
+            .expect("count escalations");
+        usize::try_from(n).unwrap_or(usize::MAX)
+    }
+
+    fn read_escalation_meta(
+        conn: &Connection,
+        escalation_id: &str,
+    ) -> (String, String, String, String) {
+        let escalations = Table::Escalations.as_str();
+        conn.query_row(
+            &format!(
+                "SELECT class, initiator, status, idempotency_key
+                   FROM {escalations} WHERE escalation_id = ?1"
+            ),
+            rusqlite::params![escalation_id],
+            |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, String>(3)?,
+                ))
+            },
+        )
+        .expect("read escalation meta")
+    }
+
+    /// Tier-1 path: a worker session + a task bound to it. The
+    /// helper anchors on the worker (the natural deadlock subject)
+    /// and a single LogicalDeadlock row lands.
+    #[test]
+    fn tier_1_worker_anchored_insert_lands_one_row() {
+        let conn = fresh_conn_with_initiative("init-tier1");
+        let lineage = "lin-tier1".to_owned();
+        seed_orch_session(&conn, "sess-orch-1", "init-tier1", &lineage);
+        seed_worker_session(&conn, "sess-worker-1", &lineage);
+        seed_task_with_session(
+            &conn,
+            "task-running-1",
+            "init-tier1",
+            "Running",
+            Some("sess-worker-1"),
+        );
+
+        let tx = conn.unchecked_transaction().expect("begin");
+        let now = 1_715_700_000_i64;
+        let res = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-tier1",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("helper");
+        tx.commit().expect("commit");
+
+        let escalation_id = res.expect("tier-1 anchor MUST resolve when worker exists");
+        assert_eq!(count_escalations(&conn, "init-tier1"), 1);
+        let (class, initiator, status, idem) =
+            read_escalation_meta(&conn, &escalation_id);
+        assert_eq!(class, "LogicalDeadlock");
+        assert_eq!(initiator, "Kernel");
+        assert_eq!(status, "Pending");
+        assert_eq!(idem, "kernel-orch-respawn-ceiling:init-tier1:4");
+    }
+
+    /// Tier-2 fallback: orchestrator session + a task with no
+    /// session_id (no worker ever spawned). Pre-iter65 the helper
+    /// returned `Ok(None)` here and the escalation never landed;
+    /// iter65 falls back to the orchestrator session.
+    #[test]
+    fn tier_2_fallback_lands_when_no_worker_session_exists() {
+        let conn = fresh_conn_with_initiative("init-tier2");
+        let lineage = "lin-tier2".to_owned();
+        seed_orch_session(&conn, "sess-orch-1", "init-tier2", &lineage);
+        seed_task_with_session(&conn, "task-pending-1", "init-tier2", "Admitted", None);
+
+        let tx = conn.unchecked_transaction().expect("begin");
+        let now = 1_715_700_000_i64;
+        let res = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-tier2",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("helper");
+        tx.commit().expect("commit");
+
+        let escalation_id =
+            res.expect("tier-2 fallback MUST resolve when only orch session exists");
+        assert_eq!(count_escalations(&conn, "init-tier2"), 1);
+        let (class, initiator, status, idem) =
+            read_escalation_meta(&conn, &escalation_id);
+        assert_eq!(class, "LogicalDeadlock");
+        assert_eq!(initiator, "Kernel");
+        assert_eq!(status, "Pending");
+        assert_eq!(idem, "kernel-orch-respawn-ceiling:init-tier2:4");
+    }
+
+    /// Idempotency on the same `(initiative_id, attempts)` pair:
+    /// the second call's
+    /// `ON CONFLICT(session_id, idempotency_key) DO NOTHING`
+    /// short-circuits; the helper returns `Ok(None)`.
+    #[test]
+    fn same_attempts_count_does_not_double_insert() {
+        let conn = fresh_conn_with_initiative("init-idem");
+        let lineage = "lin-idem".to_owned();
+        seed_orch_session(&conn, "sess-orch-1", "init-idem", &lineage);
+        seed_task_with_session(&conn, "task-pending-1", "init-idem", "Admitted", None);
+
+        let now = 1_715_700_000_i64;
+        let tx = conn.unchecked_transaction().expect("begin1");
+        let first = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-idem",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("first");
+        tx.commit().expect("commit1");
+        assert!(first.is_some(), "first insert MUST land");
+
+        let tx = conn.unchecked_transaction().expect("begin2");
+        let second = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-idem",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("second");
+        tx.commit().expect("commit2");
+        assert!(
+            second.is_none(),
+            "second insert with same (initiative_id, attempts) MUST be deduped"
+        );
+        assert_eq!(count_escalations(&conn, "init-idem"), 1);
+    }
+
+    /// Distinct `attempts` value (the operator approved + reset,
+    /// the counter walked back up past the ceiling, the kernel
+    /// surfaces a higher counter value) inserts a fresh row.
+    /// Pre-iter65 the key was just the initiative_id, which
+    /// silently deduplicated this re-trip.
+    #[test]
+    fn distinct_attempts_count_inserts_a_separate_row() {
+        let conn = fresh_conn_with_initiative("init-retrip");
+        let lineage = "lin-retrip".to_owned();
+        seed_orch_session(&conn, "sess-orch-1", "init-retrip", &lineage);
+        seed_task_with_session(
+            &conn,
+            "task-pending-1",
+            "init-retrip",
+            "Admitted",
+            None,
+        );
+
+        let now = 1_715_700_000_i64;
+        let tx = conn.unchecked_transaction().expect("begin1");
+        let first = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-retrip",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("first");
+        tx.commit().expect("commit1");
+        assert!(first.is_some());
+
+        let tx = conn.unchecked_transaction().expect("begin2");
+        let second = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-retrip",
+            8,
+            360,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 7200,
+            now + 100,
+            1,
+        )
+        .expect("second");
+        tx.commit().expect("commit2");
+        assert!(
+            second.is_some(),
+            "distinct attempts value MUST land a fresh row"
+        );
+        assert_eq!(count_escalations(&conn, "init-retrip"), 2);
+    }
+
+    /// Empty initiative — neither orchestrator session nor task
+    /// rows. The helper returns `Ok(None)` (no FK anchor); the
+    /// caller surfaces the structurally-rare path via a structured
+    /// log emit.
+    #[test]
+    fn no_anchor_returns_none_without_inserting() {
+        let conn = fresh_conn_with_initiative("init-empty");
+
+        let tx = conn.unchecked_transaction().expect("begin");
+        let now = 1_715_700_000_i64;
+        let res = insert_logical_deadlock_escalation_in_tx(
+            &tx,
+            "init-empty",
+            4,
+            180,
+            "RetrySubTask",
+            "FailVmConcurrencyAtCap",
+            now + 3600,
+            now,
+            1,
+        )
+        .expect("helper");
+        tx.commit().expect("commit");
+
+        assert!(
+            res.is_none(),
+            "no anchor MUST surface as Ok(None) — caller fail-closes the path"
+        );
+        assert_eq!(count_escalations(&conn, "init-empty"), 0);
     }
 }
