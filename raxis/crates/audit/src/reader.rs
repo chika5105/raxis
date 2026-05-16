@@ -518,9 +518,9 @@ impl<'a> Iterator for ChainRecordIter<'a> {
     }
 }
 
-/// Quick chain-check verdict — first + last record only. Used by
-/// `raxis status` so the status command stays sub-100ms even on a
-/// large segment.
+/// Quick chain-check verdict — used by `raxis status` to summarise
+/// the audit chain without paying the cost of a full hash-chain
+/// recomputation.
 ///
 /// `ChainReadError` is intentionally NOT `Clone` (it wraps
 /// `std::io::Error`), so this enum cannot be `Clone` either. Callers
@@ -528,7 +528,7 @@ impl<'a> Iterator for ChainRecordIter<'a> {
 /// stringify on the fly.
 #[derive(Debug)]
 pub enum ChainQuickCheck {
-    /// Walk-stub completed cleanly. `last_seq` is the highest seq
+    /// Walk completed cleanly. `last_seq` is the highest seq
     /// observed across all segments.
     Ok { last_seq: u64, segment_count: usize },
     /// No segment files present.
@@ -538,12 +538,17 @@ pub enum ChainQuickCheck {
     Broken { error: ChainReadError },
 }
 
-/// O(1) chain check: walk only the first record (genesis structural
-/// check) and the last record (parse-only) of the LATEST segment.
-/// Suitable for cron-style polling.
+/// Stream every record through the chain reader to confirm each line
+/// is syntactically valid JSONL and the per-record schema parses
+/// cleanly. Cost is O(records) — proportional to the size of the
+/// audit chain on disk, not constant. For "audit chain is well-formed"
+/// polling on small/medium kernels this is fast enough (~ms on
+/// multi-MiB segments); for cron-style polling on multi-GiB segments
+/// callers should sample the latest segment tail or invoke this off
+/// the hot path.
 ///
-/// Note: this does NOT verify the full prev_sha256 chain — only the
-/// reader's per-record syntactic validity. For full verification use
+/// This does NOT verify the full `prev_sha256` chain — only per-record
+/// reader validity. For full hash-chain verification use
 /// [`verify_chain_full`].
 pub fn quick_chain_check(audit_dir: &Path) -> ChainQuickCheck {
     let reader = match ChainReader::open(audit_dir) {

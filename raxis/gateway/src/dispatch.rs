@@ -50,13 +50,15 @@ pub enum DispatchError {
     /// This indicates either kernel/gateway desync or a hostile sender on
     /// the gateway socket. The gateway closes the connection after
     /// emitting one `FetchResponse { error: "InvalidToken" }`.
-    #[error("gateway_token mismatch: expected={expected_prefix}, got={got_prefix}")]
-    InvalidToken {
-        /// We log only the first 8 chars of either token so the rest of
-        /// the secret never lands in stderr or in audit logs.
-        expected_prefix: String,
-        got_prefix: String,
-    },
+    ///
+    /// We deliberately do NOT carry any token-derived material in this
+    /// variant. Even an 8-char prefix is observable credential leakage
+    /// when the `Display` text lands in stderr / audit logs / shared
+    /// CI artefacts. Operators correlating kernel ↔ gateway logs
+    /// should rely on the handshake fingerprint already emitted at
+    /// startup instead.
+    #[error("gateway_token mismatch")]
+    InvalidToken,
     /// URL hostname not in `egress_domains` ∪ `egress_patterns`.
     #[error("domain not allowed: {host}")]
     DomainNotAllowed { host: String },
@@ -82,7 +84,7 @@ impl DispatchError {
     /// stable across minor refactors.
     pub fn as_wire_string(&self) -> &'static str {
         match self {
-            Self::InvalidToken { .. } => "InvalidToken",
+            Self::InvalidToken => "InvalidToken",
             Self::DomainNotAllowed { .. } => "DomainNotAllowed",
             Self::UnknownProviderForHost { .. } => "UnknownProviderForHost",
             Self::TimeoutAboveCap { .. } => "TimeoutExceeded",
@@ -183,12 +185,17 @@ async fn dispatch(
     backend: &dyn Backend,
 ) -> Result<GatewayMessage, DispatchError> {
     // 1. Token check FIRST — refuses to do any further work for a
-    //    sender we cannot authenticate.
-    if got_token != expected_token {
-        return Err(DispatchError::InvalidToken {
-            expected_prefix: token_prefix(expected_token),
-            got_prefix: token_prefix(got_token),
-        });
+    //    sender we cannot authenticate. INV-GATEWAY-TOKEN-CONST-TIME-01:
+    //    use `ConstantTimeEq` so a same-host attacker that can time
+    //    individual handshakes cannot recover the token byte-by-byte.
+    use subtle::ConstantTimeEq;
+    if expected_token
+        .as_bytes()
+        .ct_eq(got_token.as_bytes())
+        .unwrap_u8()
+        == 0
+    {
+        return Err(DispatchError::InvalidToken);
     }
 
     // 2. Policy view must be loaded. If the last reload failed, every
@@ -305,13 +312,6 @@ fn error_response(fetch_id: Uuid, err: DispatchError) -> GatewayMessage {
 // ─────────────────────────────────────────────────────────────────────────
 // Helpers
 // ─────────────────────────────────────────────────────────────────────────
-
-/// Trim a token to its first 8 chars for logging. NEVER log the full
-/// 64-char value — operators tail stderr in shared environments.
-fn token_prefix(token: &str) -> String {
-    let n = token.len().min(8);
-    format!("{}...", &token[..n])
-}
 
 /// Extract the URL's host. Mirrors `policy_view::extract_host` (kept
 /// private there) — duplicated here rather than re-exported because the

@@ -305,7 +305,15 @@ async fn handle_inner(
 
     // Hash the raw JSON body bytes to get the content-address for the blob.
     // Pure compute — no SQL, runs on the async thread.
-    let body_bytes = serde_json::to_vec(&sub.body).unwrap_or_default();
+    //
+    // INV-WITNESS-BODY-SERIALIZE-OR-FAIL-01 — `unwrap_or_default()` here
+    // used to hash `[]` whenever `serde_json::to_vec` failed, which both
+    // (a) collided every failed witness onto the empty-blob hash and
+    // (b) produced an audit row claiming durable content-address for a
+    // body that was never actually written. Surface the failure so the
+    // verifier surface keeps its content-address invariant.
+    let body_bytes = serde_json::to_vec(&sub.body)
+        .map_err(|e| HandlerError::WitnessWrite(format!("witness body serialize failed: {e}")))?;
     let blob_sha256 = raxis_crypto::token::sha256_hex(&body_bytes);
 
     // Map WitnessResultClass → witness_index::ResultClass (same semantics,

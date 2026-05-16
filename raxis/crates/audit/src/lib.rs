@@ -57,5 +57,5 @@ pub use reader::{
 };
 pub use sink::{AuditSink, FileAuditSink};
 pub use writer::{
-    last_chain_state, AuditWriter, AuditWriterError, AuditWriterOptions, ChainResumeInfo,
+    last_chain_state, AuditWriter, AuditWriterError, ChainResumeInfo,
 };

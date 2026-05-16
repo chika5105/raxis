@@ -122,10 +122,22 @@ pub async fn run_gateway_with_backend(
     write_frame(&mut stream, &ready)
         .await
         .map_err(|e| GatewayRunError::HandshakeWrite(format!("{e}")))?;
+    // INV-GATEWAY-NO-TOKEN-IN-LOGS-01 — the raw `gateway_token` is
+    // the shared secret guarding the kernel-gateway UDS. Logging
+    // ANY substring of it (even an 8-char prefix) leaks credential
+    // material to journald / log shippers / shared CI artefacts.
+    // Emit a SHA-256 fingerprint instead so operators can still
+    // correlate handshakes across the kernel and gateway logs.
+    let token_fp = {
+        use sha2::Digest as _;
+        let mut hasher = sha2::Sha256::new();
+        hasher.update(env.gateway_token.as_bytes());
+        let digest = hasher.finalize();
+        hex::encode(&digest[..8])
+    };
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"handshake_sent\",\
-         \"token_prefix\":\"{}\"}}",
-        &env.gateway_token[..8.min(env.gateway_token.len())],
+         \"token_fingerprint\":\"{token_fp}\"}}",
     );
 
     // Step 4: dispatch loop.

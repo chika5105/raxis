@@ -472,12 +472,44 @@ async fn serve_one(
         }
     };
 
-    // Step 7: write response back.
+    // Step 7: write response back. INV-CREDPROXY-HTTP-BOUNDED-RESPONSE-01 —
+    // stream the upstream body in chunks and bound the total at
+    // `MAX_REQUEST_BYTES`. The previous shape called `resp.bytes()` which
+    // buffers the full body in memory regardless of size, so a hostile or
+    // buggy upstream returning a multi-GiB body could OOM the proxy on
+    // behalf of a single in-VM caller.
     let status = resp.status();
     let headers = resp.headers().clone();
-    let body_bytes = match resp.bytes().await {
-        Ok(b) => b.to_vec(),
-        Err(_) => Vec::new(),
+    let body_bytes: Vec<u8> = {
+        let mut buf: Vec<u8> = Vec::new();
+        let mut response_stream = resp;
+        let mut oversize = false;
+        loop {
+            match response_stream.chunk().await {
+                Ok(Some(chunk)) => {
+                    if buf.len().saturating_add(chunk.len()) > MAX_REQUEST_BYTES {
+                        oversize = true;
+                        break;
+                    }
+                    buf.extend_from_slice(&chunk);
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!(error = %e, target = %target,
+                        "http proxy upstream chunked read failed");
+                    return write_error(&mut client_stream, 502, "upstream read failed").await;
+                }
+            }
+        }
+        if oversize {
+            tracing::warn!(
+                target = %target,
+                cap = MAX_REQUEST_BYTES,
+                "http proxy upstream response exceeded cap"
+            );
+            return write_error(&mut client_stream, 502, "upstream response too large").await;
+        }
+        buf
     };
     stats.requests_forwarded.fetch_add(1, Ordering::Relaxed);
     stats

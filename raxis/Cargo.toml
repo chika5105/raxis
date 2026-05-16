@@ -131,6 +131,11 @@ rand_core     = "0.6"
 # (required for `#[from]` on our thiserror enum).
 getrandom   = { version = "0.2", features = ["std"] }
 sha2        = "0.10"
+# Constant-time byte slice equality for any secret comparison (gateway
+# token handshake, per-request authentication, etc.). The `subtle`
+# crate is the RustCrypto-canonical primitive for `ConstantTimeEq` and
+# pairs naturally with the `sha2` / `ed25519-dalek` pins above.
+subtle      = "2"
 # HMAC-SHA256 for the C5 sidecar protocol's per-request authentication
 # (extensibility-traits.md §9A.7A). Pinned to the RustCrypto-aligned
 # 0.12 line which uses the same `digest::Mac` traits as `sha2`.
