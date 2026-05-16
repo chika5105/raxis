@@ -21,10 +21,20 @@ Scope: iter62 deep-sweep dimensions D3..D10 plus a net-new D1 reservation-leak f
 
 ## Commit list
 
-(Commits land on `worker/iter62-deep-sweep-2`; SHAs below are pushed to that ref.)
+(Pushed to `worker/iter62-deep-sweep-2`.)
 
-1. `D1` — lane-reservation recovery sweep + main.rs boot-log line + 4 witness tests + INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01.
-2. `D6` — convert silent `let _ = audit.emit(...)` to logged audit-emit failure across disk_watchdog, recovery.rs git-event helpers, and gateway/supervisor.rs (12 sites) + INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01.
+1. `8577d80` — `D1` — lane-reservation recovery sweep
+   (`reconcile_orphan_lane_reservations` in `kernel/src/recovery.rs`)
+   + main.rs boot-log line + bootstrap.rs assertion + 5 witness
+   tests + INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01 in
+   `specs/invariants.md §12.62`. Closes the iter62 forensic finding
+   "Completed task `019e2dc0-3160-7a52-919b-e18785a3ec1e` still
+   holds a 100-unit `lane_budget_reservations` row".
+2. `7b83974` — `D6` — convert 12 silent `let _ = audit.emit(...)`
+   sites to logged audit-emit failure across `disk_watchdog.rs`
+   (3 sites), `recovery.rs` git-event helpers (3 sites), and
+   `gateway/supervisor.rs` (6 sites) + INV-DEEP-SWEEP-D6-CRITICAL-
+   AUDIT-EMIT-NEVER-SILENT-01.
 
 ## Cross-worker routing requests (deferred fixes)
 
@@ -83,6 +93,14 @@ No audit event in the iter62 chain has `latency_ms > 60000`. Maximum I saw was 5
 ### D8 — Low-confidence: `tokio::spawn` post-approval respawn at `ipc/operator.rs:2345`
 
 The respawn-orchestrator-after-approve path spawns a fire-and-forget tokio task whose result is silently discarded with `let _ = …`. If the respawn fails, the operator's UI shows "approved" but the kernel never re-enters `Executing` and no audit event fires. Not a TOCTOU per se; flagging as a potential UX bug. Parent territory.
+
+### D10 — `task_credential_proxies` rows have no terminated-at column
+
+13 `task_credential_proxies` rows in `kernel.db` exactly mirror the 13 `CredentialProxyStarted` audit events, but the schema has no `terminated_at` / `revoked_at` column — the row is effectively eternal once written. This isn't a bug per se (the audit chain carries the lifecycle), but combined with D4 above (no `Stopped` events from kernel-kill), the SQL state is permanently "13 proxies bound" with no way to query "which are still bound". If a future operator dashboard wants to render live proxies, the source-of-truth has to be the audit chain delta, not the SQL row. Flag for iter63+ schema decision; no fix here.
+
+### D10 — Schema-version count = 20, matches origin/main
+
+Forensic `kernel.db` has `schema_version` rows 1..20, which is exactly the migration set on `origin/main`. Worker 1's new 0021 + 0022 are not yet present in the iter62 dump, so backwards-compat across iter62 → iter63 is just "apply 0021 + 0022 on top of a 20-version baseline" — no rollback hazard from anything in this branch.
 
 ## Notes on parent's iter62 deep-sweep evidence
 
