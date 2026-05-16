@@ -1796,7 +1796,7 @@ fn run_phase_c(
                 // round-trip + audit emit; failure to escalate is
                 // logged structurally but never propagated to the
                 // intent caller.
-                let ctx_for_escalation = Arc::clone(ctx);
+                let ctx_for_escalation = Arc::clone(&ctx);
                 let init_for_escalation = initiative_id_owned.clone();
                 let category_for_escalation = category.to_owned();
                 let reason_for_escalation = reason.clone();
@@ -1992,7 +1992,7 @@ fn run_phase_c(
                 // permanent push failure for inbox surfacing
                 // (recoverable: operator can retry once the pending
                 // git-apply resolves).
-                let ctx_for_escalation = Arc::clone(ctx);
+                let ctx_for_escalation = Arc::clone(&ctx);
                 let init_for_escalation = initiative_id_owned.clone();
                 let remote_for_escalation = remote.clone();
                 let refspec_for_escalation = refspec.clone();
@@ -2115,7 +2115,7 @@ fn run_phase_c(
                     // operator inbox surfaces a Critical-priority
                     // anchor + paired-write escalation in addition
                     // to the High-priority `PushFailed` event.
-                    let ctx_for_escalation = Arc::clone(ctx);
+                    let ctx_for_escalation = Arc::clone(&ctx);
                     let init_for_escalation = initiative_id_owned.clone();
                     let remote_for_escalation = remote.clone();
                     let refspec_for_escalation = refspec.clone();
