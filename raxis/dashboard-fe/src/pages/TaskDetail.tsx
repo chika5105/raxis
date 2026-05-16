@@ -11,6 +11,7 @@ import { ReviewerVerdictPanel } from "@/components/lifecycle/ReviewerVerdictPane
 import { Mono } from "@/components/Mono";
 import { PageSpinner } from "@/components/Spinner";
 import { StateBadge } from "@/components/StateBadge";
+import { TaskLlmTurns } from "@/components/TaskLlmTurns";
 import { fmtAbsolute, fmtRelative } from "@/lib/format";
 import {
   isTerminalFailureState,
@@ -190,6 +191,15 @@ export function TaskDetailPage() {
           )}
         </section>
       </div>
+
+      {/* `<TaskLlmTurns>` consumes
+          `GET /api/tasks/:task_id/llm-turns` and renders one
+          collapsible card per turn with usage + cache-hit
+          ratio colour coding. The endpoint exists today;
+          rows arrive once Worker 1 wires the kernel-side tap
+          to pass `Some(task_id)` to `gateway.fetch(...)`
+          (see RETURN_NOTE_TO_PARENT.md §1). */}
+      <TaskLlmTurns taskId={t.task_id} />
 
       <section className="card p-4">
         <h2 className="text-sm font-semibold text-ink mb-3">Path scope (allowlist)</h2>
