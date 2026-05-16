@@ -47,6 +47,7 @@ mod elastic;
 mod gates;
 mod gateway;
 mod handlers;
+mod initiative_escalation;
 mod initiatives;
 mod ipc;
 mod isolation_select;
