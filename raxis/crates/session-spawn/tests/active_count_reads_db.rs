@@ -59,6 +59,28 @@ fn insert_session_row(conn: &rusqlite::Connection, session_id: &str, revoked: bo
 }
 
 fn build_service(store: Option<Arc<Store>>) -> Arc<SessionSpawnService> {
+    // `SubprocessIsolation::new` refuses to construct unless
+    // `RAXIS_TEST_HARNESS=1` is set on the process — the substrate
+    // is test-only and self-reports `IsolationLevel::TestOnly`. The
+    // mirror tests in `spawn_round_trip.rs` do this opt-in
+    // explicitly; without it the `unwrap()` below panicked with
+    // `BackendInternal("SubprocessIsolation requires
+    // RAXIS_TEST_HARNESS=1 …")` and the `active_count` regression
+    // suite never reached its first assertion. The flag is
+    // process-wide; calling `set_var` once per test is harmless
+    // (idempotent overwrite to the same value).
+    //
+    // SAFETY: `std::env::set_var` is `unsafe` from Rust 1.86 because
+    // env mutation across threads is not synchronised. The tests in
+    // this file are independent `#[tokio::test]` cases each owning
+    // a fresh `Store` and `SessionSpawnService`; the only shared
+    // mutable state across tests is the env, and we only ever write
+    // the same value (`"1"`). The race-narrowing pattern matches
+    // what `spawn_round_trip.rs` does at the top of every test.
+    #[allow(unsafe_code)]
+    unsafe {
+        std::env::set_var("RAXIS_TEST_HARNESS", "1");
+    }
     let creds_dir = tempfile::tempdir().unwrap();
     let backend = Arc::new(
         raxis_credentials_file::FileCredentialBackend::open_without_uid_check(creds_dir.path()),
