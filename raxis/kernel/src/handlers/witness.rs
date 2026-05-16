@@ -406,10 +406,23 @@ async fn gate_recheck(
     match gate_result {
         GateEvalResult::Pass { .. } | GateEvalResult::BreakglassPass { .. } => {
             // All gates satisfied — transition GatesPending → Admitted.
-            // Uses scheduler::transition_to_admitted which enforces the FSM edge
-            // and calls evaluate_terminal_criteria (INV-INIT-04).
-            crate::scheduler::transition_to_admitted(task_id, ctx.store.as_ref())
-                .map_err(|e| HandlerError::Store(e.to_string()))?;
+            // Uses scheduler::transition_to_admitted which delegates to
+            // task_transitions::transition_task_with_audit so the
+            // paired-write `AuditEventKind::TaskStateChanged` audit row
+            // lands post-commit per
+            // `INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01` /
+            // `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`.
+            // Pre-fix the gate-recheck-clear path UPDATE'd the row but
+            // never emitted the audit event, leaving the dashboard's
+            // per-task lifecycle timeline stuck on "GatesPending"
+            // even though the SQL state had flipped to Admitted.
+            crate::scheduler::transition_to_admitted(
+                task_id,
+                ctx.store.as_ref(),
+                ctx.audit.as_ref(),
+                task_row.session_id.as_deref(),
+            )
+            .map_err(|e| HandlerError::Store(e.to_string()))?;
 
             eprintln!(
                 "{{\"level\":\"info\",\"event\":\"TaskGatesCleared\",\
