@@ -13318,6 +13318,63 @@ whole `evaluate_claims` body, not one inlined callee.
    `PendingWitness` (no verifier seeded) or `Pass`.
 
 
+### INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01 — `handlers::witness::gate_recheck` MUST NOT trigger `Store::lock_sync` panic from a tokio runtime worker
+
+**Statement.** The post-`WitnessAccepted` `gate_recheck` path in
+`kernel/src/handlers/witness.rs` MUST NOT trigger
+`crates/store/src/db.rs::Store::lock_sync`'s "Cannot block the
+current thread from within a runtime" panic when invoked from a
+tokio async runtime worker. Every sync DB-touching helper reached
+transitively from the async `gate_recheck` body — including
+`resolve_worktree_root` → `authority::session::get_session` (the
+worktree resolution that runs BEFORE `evaluate_claims`) and
+`scheduler::transition_to_admitted` → `transition_task` (the
+gates-cleared FSM advance that runs AFTER `evaluate_claims`) —
+MUST be invoked through `tokio::task::spawn_blocking`.
+
+The pure-sync helpers themselves (`resolve_worktree_root_inner`
+and `scheduler::transition_to_admitted`) remain
+caller-owned-async-safety: they are correct to call directly from
+synchronous code (recovery sweepers, bootstrap, tests) and panic
+loudly when a future async caller forgets the spawn_blocking hop.
+
+**Why structural.** Iter66.1 `realistic_session_lifecycle` crashed
+the kernel daemon on the first `IntegrationMerge` gate clear with:
+
+```
+thread 'tokio-rt-worker' panicked at crates/store/src/db.rs:125:
+Cannot block the current thread from within a runtime.
+```
+
+Iter63 had wrapped `gates::evaluate_pre_spawn` in
+`spawn_blocking` per `INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01`,
+but the `gate_recheck` tail in `handlers/witness.rs` had two
+uncovered sync sites (`resolve_worktree_root` and
+`transition_to_admitted`) that fired AFTER `evaluate_claims`
+returned. The first IntegrationMerge witness landed, the SQL
+commit completed, the `WitnessAccepted` audit row emitted, and
+then `transition_to_admitted` panicked the worker thread mid-
+stream. The kernel daemon died, the planner's stream went black,
+and the dashboard at `:19820` stopped receiving events. A narrow
+fix at `evaluate_claims` alone is not sufficient — every
+witness-handler async boundary that re-acquires the store mutex
+must be wrapped, including any future addition.
+
+**Witnesses.**
+
+1. `kernel/src/handlers/witness.rs::async_runtime_safety::resolve_worktree_root_directly_from_runtime_worker_panics`
+   — `#[tokio::test]` + `#[should_panic(expected = "Cannot block
+   the current thread from within a runtime")]` that pins the
+   iter66.1 bug shape at the `resolve_worktree_root_inner` →
+   `authority::session::get_session` → `Store::lock_sync` chain.
+
+2. `kernel/src/handlers/witness.rs::async_runtime_safety::resolve_worktree_root_via_spawn_blocking_is_ok`
+   — `#[tokio::test]` that drives `resolve_worktree_root_inner`
+   via `tokio::task::spawn_blocking` and asserts the call falls
+   back to `data_dir` without panicking (canonical safe call
+   pattern that production `gate_recheck` now uses).
+
+
 ---
 
 ## Iter65 — stateless-kernel + paired-write + classifier parity

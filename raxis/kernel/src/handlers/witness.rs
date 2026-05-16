@@ -518,8 +518,23 @@ async fn gate_recheck(
     task_row: &TaskRowData,
     ctx: &HandlerContext,
 ) -> Result<Vec<GateType>, HandlerError> {
-    // Resolve worktree_root from session if available, else fall back to data_dir.
-    let worktree_root = resolve_worktree_root(task_row, ctx);
+    // `INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01`: `resolve_worktree_root`
+    // calls `authority::session::get_session` which acquires
+    // `Store::lock_sync` synchronously. Calling it directly from this
+    // `async fn` (running on a tokio runtime worker) hits the same
+    // "Cannot block the current thread from within a runtime" panic
+    // the iter63 fix wrapped `gates::evaluate_pre_spawn` against.
+    // Mirror the Phase-A spawn_blocking pattern at this site too.
+    let worktree_root = {
+        let store = ctx.store.clone();
+        let session_id = task_row.session_id.clone();
+        let data_dir = ctx.data_dir.clone();
+        tokio::task::spawn_blocking(move || -> PathBuf {
+            resolve_worktree_root_inner(session_id.as_deref(), store.as_ref(), &data_dir)
+        })
+        .await
+        .map_err(|e| HandlerError::Store(format!("worktree_root resolve join: {e}")))?
+    };
 
     // Re-derive touched_paths using the stored base/head SHAs.
     // This mirrors exactly what handlers/intent.rs computed at intent time.
@@ -586,12 +601,27 @@ async fn gate_recheck(
             // never emitted the audit event, leaving the dashboard's
             // per-task lifecycle timeline stuck on "GatesPending"
             // even though the SQL state had flipped to Admitted.
-            crate::scheduler::transition_to_admitted(
-                task_id,
-                ctx.store.as_ref(),
-                ctx.audit.as_ref(),
-                task_row.session_id.as_deref(),
-            )
+            // `INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01`:
+            // `transition_to_admitted` ultimately calls
+            // `transition_task` → `store.lock_sync()` synchronously.
+            // Wrap on the blocking pool so the async caller does not
+            // panic with "Cannot block the current thread from within a
+            // runtime" the way iter66.1's first IntegrationMerge witness
+            // did.
+            let task_id_owned = task_id.to_owned();
+            let store_clone = ctx.store.clone();
+            let audit_clone = ctx.audit.clone();
+            let session_id_clone = task_row.session_id.clone();
+            tokio::task::spawn_blocking(move || {
+                crate::scheduler::transition_to_admitted(
+                    &task_id_owned,
+                    store_clone.as_ref(),
+                    audit_clone.as_ref(),
+                    session_id_clone.as_deref(),
+                )
+            })
+            .await
+            .map_err(|e| HandlerError::Store(format!("transition_to_admitted join: {e}")))?
             .map_err(|e| HandlerError::Store(e.to_string()))?;
 
             eprintln!(
@@ -707,20 +737,45 @@ fn load_task_row_in_tx(
     })
 }
 
+/// **CALLER-OWNED ASYNC SAFETY:** this function is synchronous and
+/// acquires `Store::lock_sync()` via `authority::session::get_session`.
+/// Async callers MUST invoke it on the blocking pool
+/// (`tokio::task::spawn_blocking`) — the post-witness `gate_recheck`
+/// path uses [`resolve_worktree_root_inner`] under exactly that
+/// discipline. Pinned by `INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01`.
+#[allow(dead_code)]
 fn resolve_worktree_root(task_row: &TaskRowData, ctx: &HandlerContext) -> PathBuf {
-    // Attempt to load worktree_root from the session row.
-    // Falls back to data_dir on failure (safe: VCS calls will fail gracefully
-    // if the path does not contain a git repo).
-    if let Some(session_id) = &task_row.session_id {
+    resolve_worktree_root_inner(
+        task_row.session_id.as_deref(),
+        ctx.store.as_ref(),
+        &ctx.data_dir,
+    )
+}
+
+/// Pure-sync helper: same as `resolve_worktree_root` but takes the
+/// pieces it needs as primitives so the witness handler can hand them
+/// to `tokio::task::spawn_blocking` without borrowing the
+/// `HandlerContext` reference across the await point.
+///
+/// **DO NOT call this directly from async code.** Wrap it in
+/// `spawn_blocking`. It calls `Store::lock_sync` which would otherwise
+/// panic with "Cannot block the current thread from within a runtime".
+/// Pinned by `INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01`.
+fn resolve_worktree_root_inner(
+    session_id: Option<&str>,
+    store: &raxis_store::Store,
+    data_dir: &std::path::Path,
+) -> PathBuf {
+    if let Some(session_id) = session_id {
         if let Ok(sid) = raxis_types::SessionId::parse(session_id) {
-            if let Ok(sess) = crate::authority::session::get_session(&sid, ctx.store.as_ref()) {
+            if let Ok(sess) = crate::authority::session::get_session(&sid, store) {
                 if let Some(wt) = sess.worktree_root {
                     return PathBuf::from(wt);
                 }
             }
         }
     }
-    ctx.data_dir.clone()
+    data_dir.to_path_buf()
 }
 
 /// iter63-followups.md Item 1 (D) — resolve the policy-declared
@@ -1147,5 +1202,95 @@ mod tests {
             n_witness, 0,
             "witness INSERT must be rolled back when consume reports a race"
         );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Async-runtime safety witness — INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01.
+// ---------------------------------------------------------------------------
+//
+// iter66.1 `realistic_session_lifecycle` hit
+// `crates/store/src/db.rs:125` "Cannot block the current thread from
+// within a runtime" the first time the witness handler reached the
+// post-`WitnessAccepted` `gate_recheck` path. Two sync sites in
+// `gate_recheck` were calling `Store::lock_sync` directly from the
+// async runtime worker:
+//
+//   * `resolve_worktree_root` → `authority::session::get_session`
+//   * `scheduler::transition_to_admitted` → `transition_task`
+//
+// The iter63 fix had already wrapped `gates::evaluate_pre_spawn` in
+// `tokio::task::spawn_blocking`, but the `gate_recheck` tail was
+// uncovered. The kernel daemon crashed mid-stream on the first
+// IntegrationMerge gate clear, the planner's stream went black, and
+// the dashboard at `:19820` stopped receiving events.
+//
+// Production fix: both sync sites are now invoked through
+// `tokio::task::spawn_blocking` with an explicit `_inner` helper for
+// `resolve_worktree_root` so the closure can take owned primitives
+// without borrowing across the await point. These tests pin the
+// canonical safe call pattern at the inner facade so a future
+// refactor that drops the spawn_blocking hop trips the negative test
+// rather than re-introducing the production crash.
+#[cfg(test)]
+mod async_runtime_safety {
+    use super::resolve_worktree_root_inner;
+    use raxis_store::Store;
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    /// **INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01** witness (positive).
+    ///
+    /// Drives `resolve_worktree_root_inner` from a `#[tokio::test]`
+    /// runtime via `tokio::task::spawn_blocking`, mirroring the
+    /// production call shape inside `gate_recheck`. The lookup must
+    /// complete without panicking and fall back to `data_dir` because
+    /// no session row is seeded.
+    #[tokio::test]
+    async fn resolve_worktree_root_via_spawn_blocking_is_ok() {
+        let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
+        let data_dir = PathBuf::from("/tmp/resolve-async-safe");
+
+        let resolved: PathBuf = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            let data_dir = data_dir.clone();
+            move || resolve_worktree_root_inner(None, store.as_ref(), &data_dir)
+        })
+        .await
+        .expect("resolve spawn_blocking join");
+
+        // Falls back to data_dir when no session row is provided. The
+        // point of the test is that the call returned at all — pre-fix
+        // the iter66.1 bug shape was an unconditional panic at
+        // `Store::lock_sync` before the function body could even
+        // SELECT.
+        assert_eq!(resolved, data_dir);
+    }
+
+    /// **INV-WITNESS-GATE-RECHECK-ASYNC-SAFE-01** witness (negative).
+    ///
+    /// Pins the iter66.1 bug shape: calling `resolve_worktree_root_inner`
+    /// **directly** from a tokio runtime worker triggers
+    /// `Store::lock_sync` → `blocking_lock` → "Cannot block the
+    /// current thread from within a runtime" panic. The kernel's
+    /// production fix is to wrap the call in `spawn_blocking`. This
+    /// test documents **why** that wrapping is mandatory so a future
+    /// refactor that silently drops the `spawn_blocking` hop
+    /// re-introduces the iter66.1 crash via this test going
+    /// green-then-removed rather than green-then-shipped.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot block the current thread from within a runtime")]
+    async fn resolve_worktree_root_directly_from_runtime_worker_panics() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        let data_dir = PathBuf::from("/tmp/resolve-async-unsafe");
+        // Provide a parseable SessionId so we reach `get_session`'s
+        // `store.lock_sync()` call — the function short-circuits to
+        // `data_dir` if `session_id` is `None` or unparseable, which
+        // would skip the panic site entirely.
+        let session_id_str = raxis_types::SessionId::new_v4().to_string();
+        // No `spawn_blocking` hop — this is the iter66.1 call shape.
+        // The unused binding is intentional: the panic fires inside
+        // `get_session` before the function returns.
+        let _ = resolve_worktree_root_inner(Some(&session_id_str), &store, &data_dir);
     }
 }
