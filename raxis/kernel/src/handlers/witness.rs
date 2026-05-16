@@ -468,13 +468,14 @@ async fn gate_recheck(
                     gate_type_str,
                     &ctx.data_dir,
                 ) {
-                    let _ = crate::gates::verifier_runner::spawn_verifier(
+                    let _ = crate::gates::verifier_runner::spawn_verifier_with_audit(
                         task_id,
                         gate_type_str,
                         evaluation_sha,
                         &worktree_root,
                         &vconfig,
                         ctx.store.as_ref(),
+                        Some(ctx.audit.clone()),
                     )
                     .await;
                 }

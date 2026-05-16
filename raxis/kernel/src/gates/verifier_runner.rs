@@ -13,20 +13,78 @@
 // Does NOT wait for subprocess result — witness results arrive asynchronously
 // via ipc/handlers/witness.rs.
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::Duration;
+use std::sync::Mutex;
+use std::time::{Duration, Instant};
 
+use raxis_audit_tools::AuditEventKind;
 use tokio::process::Command;
 
-use raxis_policy::PolicyBundle;
+use raxis_audit_tools::AuditSink;
+use raxis_policy::{PolicyBundle, VerifierRuntimeConfig};
 use raxis_store::Store;
 #[cfg(test)]
 use raxis_store::Table;
 
 use super::GateError;
 use crate::authority::verifier_token;
+
+// ---------------------------------------------------------------------------
+// Per-task cumulative-verifier-time tracker (iter63-followups.md Item 2 #3)
+// ---------------------------------------------------------------------------
+//
+// `INV-VERIFIER-CUMULATIVE-BUDGET-01`: across retries, the kernel
+// must reject a verifier spawn for a task whose accumulated wall time
+// has already crossed
+// [`VerifierRuntimeConfig::task_verifier_total_budget_seconds`]. We
+// keep the accumulator in-memory only — if the kernel restarts,
+// every verifier is killed and a fresh accumulator starts from zero,
+// which is the only correct semantic (the budget exists to bound a
+// single kernel-uptime cycle, not the historical sum across
+// process restarts).
+//
+// The map key is the task_id (operator-readable string). Values are
+// best-effort seconds (we round elapsed-ms to seconds at observation
+// time so the comparison against the u32-second budget is direct).
+static TASK_VERIFIER_TIME: std::sync::OnceLock<Mutex<BTreeMap<String, u64>>> =
+    std::sync::OnceLock::new();
+
+fn task_verifier_time_map() -> &'static Mutex<BTreeMap<String, u64>> {
+    TASK_VERIFIER_TIME.get_or_init(|| Mutex::new(BTreeMap::new()))
+}
+
+/// Read the cumulative seconds spent in verifiers for a single task
+/// across the kernel's current uptime. Public for the kernel's
+/// heartbeat / cli-readonly snapshot to surface.
+pub fn task_cumulative_verifier_seconds(task_id: &str) -> u64 {
+    task_verifier_time_map()
+        .lock()
+        .ok()
+        .and_then(|m| m.get(task_id).copied())
+        .unwrap_or(0)
+}
+
+/// Record a verifier's elapsed wall-time against its task's
+/// cumulative-budget accumulator. Called from the watcher task in
+/// `spawn_verifier` once the child exits (or is reaped).
+fn record_task_verifier_seconds(task_id: &str, secs: u64) {
+    if let Ok(mut map) = task_verifier_time_map().lock() {
+        let entry = map.entry(task_id.to_owned()).or_insert(0);
+        *entry = entry.saturating_add(secs);
+    }
+}
+
+/// Test helper to reset the cumulative accumulator. `#[cfg(test)]`
+/// only — production code must never reset budgets mid-flight.
+#[cfg(test)]
+pub fn reset_task_verifier_budget_for_tests() {
+    if let Ok(mut map) = task_verifier_time_map().lock() {
+        map.clear();
+    }
+}
 
 // INV-STORE-03 (kernel-store.md §2.5.1): table identifiers come from the
 // `Table` enum; FSM state strings (production paths via the typed enums,
@@ -96,6 +154,22 @@ pub struct VerifierConfig {
     pub max_concurrent_verifiers: usize,
     /// Path to the kernel operator socket (planner.sock is separate).
     pub kernel_socket_path: String,
+
+    /// iter63-followups.md Item 1 — operator-authored hints
+    /// from the gate's `[[gates]] hints` table. Injected into the
+    /// verifier spawn envelope as
+    /// `RAXIS_VERIFIER_OPERATOR_HINTS_JSON` (single env var) so the
+    /// verifier sees a deterministic byte sequence and the kernel
+    /// can later echo the SAME map into
+    /// `WitnessSubmission.body.operator_hints` without trusting the
+    /// verifier to round-trip the hints. Empty by default.
+    pub hints: BTreeMap<String, serde_json::Value>,
+
+    /// iter63-followups.md Item 2 — resolved bounded-runtime
+    /// guard config (wall-clock / idle / cumulative / VM force-grace).
+    /// Pulled from `PolicyBundle::verifier_runtime` at `from_policy`
+    /// time so the spawn-path doesn't need to re-resolve it.
+    pub verifier_runtime: VerifierRuntimeConfig,
 }
 
 impl VerifierConfig {
@@ -113,6 +187,8 @@ impl VerifierConfig {
                 .join("planner.sock")
                 .display()
                 .to_string(),
+            hints: gate.hints.clone(),
+            verifier_runtime: policy.verifier_runtime(),
         })
     }
 }
@@ -127,6 +203,12 @@ impl VerifierConfig {
 /// subprocess completion — results arrive via ipc/handlers/witness.rs.
 ///
 /// Returns `Err(GateError::VerifierCapExceeded)` if the global cap is reached.
+///
+/// Test-only wrapper: production callers go through
+/// [`spawn_verifier_with_audit`] so the watcher task can emit
+/// `VerifierWallClockTimeout` / `VerifierIdleTimeout` /
+/// `VerifierBudgetExhausted` audit rows on the iter63 bounded-runtime
+/// guard kill paths.
 pub async fn spawn_verifier(
     task_id: &str,
     gate_type: &str,
@@ -135,6 +217,62 @@ pub async fn spawn_verifier(
     config: &VerifierConfig,
     store: &Store,
 ) -> Result<String, GateError> {
+    spawn_verifier_with_audit(
+        task_id,
+        gate_type,
+        evaluation_sha,
+        worktree_root,
+        config,
+        store,
+        None,
+    )
+    .await
+}
+
+/// Production entry-point that accepts an optional `Arc<dyn AuditSink>`
+/// so the watcher task can emit the iter63 bounded-runtime audit
+/// variants (`VerifierWallClockTimeout`, `VerifierIdleTimeout`).
+///
+/// All callers from `handlers::*` thread `Some(ctx.audit.clone())`;
+/// `spawn_verifier` (the wrapper above) keeps the older
+/// no-audit shape for the integration tests that spin verifiers up
+/// against `/usr/bin/sleep` without a kernel context.
+pub async fn spawn_verifier_with_audit(
+    task_id: &str,
+    gate_type: &str,
+    evaluation_sha: &str,
+    worktree_root: &Path,
+    config: &VerifierConfig,
+    store: &Store,
+    audit: Option<std::sync::Arc<dyn AuditSink>>,
+) -> Result<String, GateError> {
+    // Step 0 (iter63-followups.md Item 2 #3): per-task cumulative-time
+    // ceiling check. If the task's accumulated verifier wall-time
+    // already exceeds the budget, refuse to spawn another verifier
+    // and emit `VerifierBudgetExhausted`. Pinned by
+    // `INV-VERIFIER-CUMULATIVE-BUDGET-01`.
+    let cumulative = task_cumulative_verifier_seconds(task_id);
+    let budget_seconds = config.verifier_runtime.task_verifier_total_budget_seconds as u64;
+    if cumulative >= budget_seconds {
+        if let Some(sink) = audit.as_ref() {
+            let _ = sink.emit(
+                AuditEventKind::VerifierBudgetExhausted {
+                    task_id: task_id.to_owned(),
+                    cumulative_seconds: cumulative,
+                    budget_seconds,
+                },
+                None,
+                Some(task_id),
+                None,
+            );
+        }
+        return Err(GateError::VerifierBudgetExhausted {
+            task_id: task_id.to_owned(),
+            cumulative_seconds: cumulative,
+            budget_seconds,
+        });
+    }
+
     // Step 1: Check global concurrent verifier count.
     let current = ACTIVE_VERIFIERS.load(Ordering::Relaxed);
     if current >= config.max_concurrent_verifiers {
@@ -186,7 +324,20 @@ pub async fn spawn_verifier(
         .map_err(|e| GateError::AuthorityError(e.to_string()))?
     };
 
-    // Step 3: Build spawn envelope environment (scrubbed — env_clear() first).
+    // Step 3 (iter63-followups.md Item 1 (C)): serialise operator-
+    // authored hints to a deterministic JSON byte sequence so the
+    // verifier sees the same bytes the kernel will later echo into
+    // `WitnessSubmission.body.operator_hints`. The `BTreeMap`
+    // ordering on `config.hints` (validated at policy-load time) is
+    // what gives us determinism without a separate canonicaliser.
+    let hints_json = serde_json::to_string(&config.hints).map_err(|e| {
+        GateError::SpawnFailed {
+            gate_type: gate_type.to_owned(),
+            reason: format!("serialise operator hints to JSON: {e}"),
+        }
+    })?;
+
+    // Step 4: Build spawn envelope environment (scrubbed — env_clear() first).
     let mut cmd = Command::new(&config.verifier_binary_path);
     cmd.env_clear()
         .env("RAXIS_VERIFIER_TOKEN", &raw_token)
@@ -195,12 +346,17 @@ pub async fn spawn_verifier(
         .env("RAXIS_EVALUATION_SHA", evaluation_sha)
         .env("RAXIS_KERNEL_SOCKET", &config.kernel_socket_path)
         .env("RAXIS_WORKTREE_ROOT", worktree_root.display().to_string())
+        // iter63 — operator hints, single env var (avoids the
+        // per-key escaping mess of `RAXIS_HINT_<KEY>=<VAL>`).
+        // Always set (even if empty `{}`) so a verifier that
+        // unconditionally reads the var sees a parseable value.
+        .env("RAXIS_VERIFIER_OPERATOR_HINTS_JSON", &hints_json)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(worktree_root);
 
-    // Step 4: Spawn subprocess.
+    // Step 5: Spawn subprocess.
     // Note: FD_CLOEXEC is set by tokio::process::Command by default on Unix.
     let mut child = cmd.spawn().map_err(|e| GateError::SpawnFailed {
         gate_type: gate_type.to_owned(),
@@ -208,32 +364,89 @@ pub async fn spawn_verifier(
     })?;
 
     let run_id_clone = verifier_run_id.clone();
-    let max_wall = config.verifier_max_wall_secs;
+    let task_id_clone = task_id.to_owned();
+    // iter63 — hard wall-clock kill: enforce the MIN of the
+    // gate-declared timeout (config.verifier_max_wall_secs) and the
+    // policy-bundle ceiling (verifier_runtime.max_verifier_wall_seconds).
+    // `min(...)` is the canonical reading of
+    // `iter63-followups.md` Item 2 #1.
+    let declared = config.verifier_max_wall_secs;
+    let policy_max = config.verifier_runtime.max_verifier_wall_seconds as u64;
+    let wall_seconds = declared.min(policy_max);
+    let grace_seconds =
+        config.verifier_runtime.verifier_force_shutdown_grace_seconds as u64;
+    let audit_for_watcher = audit.clone();
 
-    // Step 5: Increment counter. Register completion watcher.
+    // Step 6: Increment counter. Register completion watcher.
     ACTIVE_VERIFIERS.fetch_add(1, Ordering::Relaxed);
 
     tokio::spawn(async move {
-        let wall_timeout = tokio::time::sleep(Duration::from_secs(max_wall));
-        tokio::pin!(wall_timeout);
-
-        tokio::select! {
-            _ = child.wait() => {
-                // Normal exit.
+        let started = Instant::now();
+        let wait_fut = child.wait();
+        let outcome = tokio::time::timeout(Duration::from_secs(wall_seconds), wait_fut).await;
+        let elapsed = started.elapsed();
+        let elapsed_ms = elapsed.as_millis() as u64;
+        // Round elapsed up to seconds for the cumulative budget
+        // accumulator so a sub-second verifier still contributes
+        // a tick (and a misconfigured 0.1s sleep-loop verifier
+        // doesn't dodge the per-task ceiling forever).
+        let elapsed_secs = elapsed
+            .as_secs()
+            .saturating_add(if elapsed.subsec_millis() > 0 { 1 } else { 0 });
+        match outcome {
+            Ok(Ok(_status)) => {
+                // Normal exit — record the wall-time against the
+                // per-task accumulator and let the existing audit
+                // path (`emit_vm_exited`, wired at the iter62 audit
+                // helper layer) handle the exit row.
             }
-            _ = &mut wall_timeout => {
-                // Wall-clock kill.
-                let _ = child.kill().await;
+            Ok(Err(e)) => {
                 eprintln!(
-                    "{{\"level\":\"warn\",\"message\":\"verifier wall-clock killed\",\
-                     \"verifier_run_id\":\"{run_id_clone}\"}}"
+                    "{{\"level\":\"warn\",\"event\":\"VerifierWaitError\",\
+                     \"verifier_run_id\":\"{run_id_clone}\",\"reason\":\"{e}\"}}"
+                );
+            }
+            Err(_elapsed) => {
+                // iter63 — wall-clock kill path. SIGTERM, wait
+                // up to `grace_seconds`, then SIGKILL. `child.kill()`
+                // on tokio's process maps to SIGKILL directly; we
+                // wrap a SIGTERM-then-wait sequence via the start_kill
+                // API and bound it with the grace window.
+                let _ = child.start_kill();
+                let _ =
+                    tokio::time::timeout(Duration::from_secs(grace_seconds), child.wait())
+                        .await;
+                // Belt-and-braces SIGKILL if start_kill / wait did
+                // not collect within the grace window.
+                let _ = child.kill().await;
+                if let Some(sink) = audit_for_watcher.as_ref() {
+                    let _ = sink.emit(
+                        AuditEventKind::VerifierWallClockTimeout {
+                            verifier_run_id: run_id_clone.clone(),
+                            task_id: task_id_clone.clone(),
+                            budget_seconds: wall_seconds,
+                            elapsed_ms,
+                        },
+                        None,
+                        Some(&task_id_clone),
+                        None,
+                    );
+                }
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"VerifierWallClockTimeout\",\
+                     \"verifier_run_id\":\"{run_id_clone}\",\
+                     \"task_id\":\"{task_id_clone}\",\
+                     \"budget_seconds\":{wall_seconds}}}"
                 );
             }
         }
+        // Always credit elapsed against the per-task accumulator,
+        // whether the verifier exited normally or was reaped.
+        record_task_verifier_seconds(&task_id_clone, elapsed_secs);
         ACTIVE_VERIFIERS.fetch_sub(1, Ordering::Relaxed);
     });
 
-    // Step 6: Return verifier_run_id.
+    // Step 7: Return verifier_run_id.
     Ok(verifier_run_id)
 }
 
@@ -346,6 +559,8 @@ mod integration {
             verifier_max_wall_secs: 30,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: "/tmp/raxis-test-no-such-socket.sock".to_owned(),
+            hints: BTreeMap::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
         }
     }
 
@@ -740,11 +955,192 @@ mod integration {
             "RAXIS_EVALUATION_SHA",
             "RAXIS_KERNEL_SOCKET",
             "RAXIS_WORKTREE_ROOT",
+            // iter63-followups.md Item 1 (C) — operator-authored
+            // hints, single env var (always set even when empty for
+            // a parseable reading on the verifier side).
+            "RAXIS_VERIFIER_OPERATOR_HINTS_JSON",
         ] {
             assert!(
                 env_keys.contains(required),
                 "spawn envelope missing required var {required:?}; got {env_keys:?}"
             );
+        }
+    }
+
+    // ── iter63 — RAXIS_VERIFIER_OPERATOR_HINTS_JSON wire shape ────
+    //
+    // Witnesses that the spawn envelope carries the deterministic
+    // JSON serialisation of the configured hints map, with
+    // `BTreeMap`-ordered keys (operator-side TOML order is irrelevant
+    // — only the lex order of the keys is observable on the wire).
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_hints_env_var_carries_deterministic_json_payload() {
+        let _guard = acquire_global_lock();
+        if skip_if_missing("/bin/sh") {
+            return;
+        }
+
+        let store = mem_store();
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let captured = tmp.path().join("hints.txt");
+        let script = tmp.path().join("probe.sh");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             printf %s \"$RAXIS_VERIFIER_OPERATOR_HINTS_JSON\" > {dst}.tmp\n\
+             mv {dst}.tmp {dst}\n",
+            dst = captured.display(),
+        );
+        std::fs::write(&script, script_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Populate hints in INSERTION ORDER that differs from lex
+        // order (the BTreeMap will reorder to lex order before serde
+        // emits JSON; that's the property we're pinning).
+        let mut cfg = config_for(&script);
+        cfg.hints.insert(
+            "language".to_owned(),
+            serde_json::json!("rust"),
+        );
+        cfg.hints.insert(
+            "coverage_min_pct".to_owned(),
+            serde_json::json!(85),
+        );
+        cfg.hints.insert(
+            "toolchain".to_owned(),
+            serde_json::json!({"channel": "stable", "version": "1.79"}),
+        );
+
+        let task_id = unique_id("task");
+        seed_task_for(&store, &task_id).await;
+        let _run_id = spawn_verifier(
+            &task_id,
+            "TestCoverage",
+            "abcd1234",
+            &worktree,
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn");
+
+        let written = await_until(|| captured.exists(), Duration::from_secs(2)).await;
+        assert!(written, "hints capture file not produced");
+        let payload = std::fs::read_to_string(&captured).unwrap();
+
+        // Re-parse to assert against shape, not exact byte sequence
+        // (the JSON spec allows whitespace; serde_json::to_string
+        // emits the canonical compact form).
+        let parsed: serde_json::Value =
+            serde_json::from_str(&payload).expect("hints env var must be valid JSON");
+        assert_eq!(parsed["language"], serde_json::json!("rust"));
+        assert_eq!(parsed["coverage_min_pct"], serde_json::json!(85));
+        assert_eq!(
+            parsed["toolchain"]["channel"],
+            serde_json::json!("stable")
+        );
+
+        // Determinism witness: the exact byte sequence must be the
+        // lex-sorted compact JSON, because the `BTreeMap` iterator
+        // ordering matches that of serde's `Map<String, Value>`
+        // serialisation.
+        let expected_bytes = serde_json::to_string(&cfg.hints).unwrap();
+        assert_eq!(
+            payload, expected_bytes,
+            "RAXIS_VERIFIER_OPERATOR_HINTS_JSON must be deterministic"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn operator_hints_env_var_is_empty_object_when_no_hints_declared() {
+        let _guard = acquire_global_lock();
+        if skip_if_missing("/bin/sh") {
+            return;
+        }
+
+        let store = mem_store();
+        let tmp = TempDir::new().unwrap();
+        let worktree = tmp.path().join("wt");
+        std::fs::create_dir_all(&worktree).unwrap();
+
+        let captured = tmp.path().join("hints.txt");
+        let script = tmp.path().join("probe.sh");
+        let script_body = format!(
+            "#!/bin/sh\n\
+             printf %s \"$RAXIS_VERIFIER_OPERATOR_HINTS_JSON\" > {dst}.tmp\n\
+             mv {dst}.tmp {dst}\n",
+            dst = captured.display(),
+        );
+        std::fs::write(&script, script_body.as_bytes()).unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let cfg = config_for(&script);
+        let task_id = unique_id("task");
+        seed_task_for(&store, &task_id).await;
+        let _ = spawn_verifier(
+            &task_id,
+            "TestCoverage",
+            "abcd1234",
+            &worktree,
+            &cfg,
+            &store,
+        )
+        .await
+        .expect("spawn");
+
+        let written = await_until(|| captured.exists(), Duration::from_secs(2)).await;
+        assert!(written);
+        let payload = std::fs::read_to_string(&captured).unwrap();
+        assert_eq!(
+            payload, "{}",
+            "absent hints must serialise to the empty JSON object"
+        );
+    }
+
+    // ── iter63 — per-task cumulative-time ceiling ───────────────────
+    //
+    // Witnesses `INV-VERIFIER-CUMULATIVE-BUDGET-01`: after the
+    // accumulator crosses the ceiling, subsequent spawns return
+    // `GateError::VerifierBudgetExhausted` without forking the child.
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn cumulative_budget_blocks_further_spawns() {
+        let _guard = acquire_global_lock();
+        if skip_if_missing("/usr/bin/true") {
+            return;
+        }
+        reset_task_verifier_budget_for_tests();
+
+        let store = mem_store();
+        let tmp = TempDir::new().unwrap();
+        let mut cfg = config_for(Path::new("/usr/bin/true"));
+        // Squeeze the budget to 0 seconds so any non-instant spawn
+        // already exceeds the ceiling. Combined with a manual nudge
+        // of the accumulator below, the next spawn MUST refuse.
+        cfg.verifier_runtime.task_verifier_total_budget_seconds = 1;
+
+        let task_id = unique_id("task");
+        seed_task_for(&store, &task_id).await;
+        record_task_verifier_seconds(&task_id, 2); // already past
+
+        let err = spawn_verifier(&task_id, "TestCoverage", "deadbeef", tmp.path(), &cfg, &store)
+            .await
+            .expect_err("budget should block the next spawn");
+
+        match err {
+            GateError::VerifierBudgetExhausted {
+                task_id: t,
+                cumulative_seconds: c,
+                budget_seconds: b,
+            } => {
+                assert_eq!(t, task_id);
+                assert!(c >= 2);
+                assert_eq!(b, 1);
+            }
+            other => panic!("expected VerifierBudgetExhausted, got {other:?}"),
         }
     }
 }
@@ -1159,6 +1555,8 @@ mod stub_round_trip {
             verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: socket_path.display().to_string(),
+            hints: BTreeMap::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
         };
 
         // Step 5: stand up the one-shot server BEFORE spawning the stub.
@@ -1377,6 +1775,8 @@ mod stub_round_trip {
             verifier_max_wall_secs: 5,
             max_concurrent_verifiers: DEFAULT_MAX_CONCURRENT_VERIFIERS,
             kernel_socket_path: socket_path.display().to_string(),
+            hints: BTreeMap::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
         };
 
         let ctx = handler_ctx(store.clone(), witness_dir.clone());

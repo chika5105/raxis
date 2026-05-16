@@ -53,6 +53,19 @@ pub enum GateError {
     #[error("verifier cap exceeded for task {task_id} gate {gate_type}")]
     VerifierCapExceeded { task_id: String, gate_type: String },
 
+    /// iter63-followups.md Item 2 #3 — the task's cumulative
+    /// verifier wall-time has already crossed
+    /// `task_verifier_total_budget_seconds`; the kernel refuses to
+    /// spawn another verifier and the gate is failed with
+    /// `WitnessRejected { reason: TimeBudgetExhausted }` upstream.
+    /// Pinned by `INV-VERIFIER-CUMULATIVE-BUDGET-01`.
+    #[error("verifier budget exhausted for task {task_id} ({cumulative_seconds}s spent, budget {budget_seconds}s)")]
+    VerifierBudgetExhausted {
+        task_id: String,
+        cumulative_seconds: u64,
+        budget_seconds: u64,
+    },
+
     #[error("verifier spawn failed for gate {gate_type}: {reason}")]
     SpawnFailed { gate_type: String, reason: String },
 
@@ -291,13 +304,14 @@ pub async fn evaluate_claims(
             verifier_runner::VerifierConfig::from_policy(policy, gate_type, &ctx.data_dir);
         let Some(vconfig) = vconfig else { continue };
 
-        match verifier_runner::spawn_verifier(
+        match verifier_runner::spawn_verifier_with_audit(
             task_id,
             gate_type,
             evaluation_sha,
             worktree_root,
             &vconfig,
             store,
+            Some(ctx.audit.clone()),
         )
         .await
         {
@@ -306,6 +320,19 @@ pub async fn evaluate_claims(
                 eprintln!(
                     "{{\"level\":\"info\",\"event\":\"VerifierCapExceeded\",\
                      \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\"}}",
+                );
+            }
+            Err(GateError::VerifierBudgetExhausted { cumulative_seconds, budget_seconds, .. }) => {
+                // iter63-followups.md Item 2 #3 —
+                // INV-VERIFIER-CUMULATIVE-BUDGET-01. The spawn was
+                // refused because the task already burnt through its
+                // cumulative budget; surface a structured stderr
+                // entry mirroring the audit emit on the spawn side.
+                eprintln!(
+                    "{{\"level\":\"warn\",\"event\":\"VerifierBudgetExhausted\",\
+                     \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\",\
+                     \"cumulative_seconds\":{cumulative_seconds},\
+                     \"budget_seconds\":{budget_seconds}}}",
                 );
             }
             Err(GateError::SpawnFailed { gate_type, reason }) => {
