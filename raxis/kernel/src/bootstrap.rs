@@ -1099,6 +1099,11 @@ mod integration {
             report.folded_integration_merge_attempts, 0,
             "fresh genesis has no in-flight integration_merge_attempts rows",
         );
+        assert_eq!(
+            report.orphan_lane_reservations_freed, 0,
+            "fresh genesis has no orphan lane reservations to free \
+             (INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01 backstop)",
+        );
     }
 
     #[test]

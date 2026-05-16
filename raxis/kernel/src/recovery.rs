@@ -59,6 +59,7 @@ const VERIFIER_RUN_TOKENS: &str = Table::VerifierRunTokens.as_str();
 const INITIATIVES: &str = Table::Initiatives.as_str();
 const INTEGRATION_MERGE_ATTEMPTS: &str = Table::IntegrationMergeAttempts.as_str();
 const WITNESS_RECORDS: &str = Table::WitnessRecords.as_str();
+const LANE_BUDGET_RESERVATIONS: &str = Table::LaneBudgetReservations.as_str();
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -99,6 +100,19 @@ pub struct ReconciliationResult {
     /// earlier pipeline phase (candidate-merge-tree → pre-merge-verifier)
     /// than the eventual main advance the V1 task FSM tracks.
     pub folded_integration_merge_attempts: usize,
+    /// V2.6 (`INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01`,
+    /// iter62 deep-sweep finding) — number of
+    /// `lane_budget_reservations` rows deleted by the boot-time
+    /// `reconcile_orphan_lane_reservations` sweep. A non-zero
+    /// count means the previous kernel exited with one or more
+    /// terminal tasks still holding a reservation row, which
+    /// would otherwise leak admission-unit budget against the
+    /// lane cap until the row was manually cleared. INV-STORE-02
+    /// pairs the terminal-state flip with the reservation DELETE
+    /// inside one transaction, so this sweep is a backstop for
+    /// the crash-between-commits window only — it must report 0
+    /// in steady-state clean shutdowns.
+    pub orphan_lane_reservations_freed: usize,
     /// Whether the audit chain verified cleanly.
     pub chain_ok: bool,
     /// V2.5 (`self-healing-supervisor.md §3.5`) per-task swept
@@ -127,6 +141,20 @@ pub struct IntegrationMergeReconciliationReport {
     /// `PreMergeVerifiersPassed` to `DiscardedCrashRecovery`
     /// (`integration-merge.md §11.10.4`).
     pub folded_attempts: usize,
+}
+
+/// Report from [`reconcile_orphan_lane_reservations`]. The single
+/// counter is exposed on [`ReconciliationResult`] so the boot-log
+/// line and the iter63 deep-sweep regression test can both assert
+/// on it.
+#[derive(Debug, Default)]
+pub struct OrphanLaneReservationReport {
+    /// Number of `lane_budget_reservations` rows whose owning
+    /// task was already terminal at recovery time and which the
+    /// sweep deleted. A non-zero value is the signal an
+    /// in-tx INV-STORE-02 paired write missed its DELETE before
+    /// the previous kernel exited.
+    pub freed: usize,
 }
 
 // ---------------------------------------------------------------------------
@@ -162,14 +190,29 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
 
     let task_report = reconcile_tasks(store);
     let imerge_report = reconcile_integration_merge_attempts(store);
+    // V2.6 (iter62 deep-sweep D1) — backstop the INV-STORE-02
+    // paired "terminal task ⇒ no reservation row" invariant. The
+    // canonical write path
+    // (`scheduler::budget::release_budget_in_tx`) folds the row
+    // DELETE into the same tx as the terminal-state flip, so a
+    // clean shutdown can never leave a row behind. This sweep
+    // closes the crash-between-commits window: any
+    // `lane_budget_reservations` row whose `task_id` resolves to
+    // a terminal task is deleted bulk-style inside one tx so the
+    // freed budget is observable atomically to the post-recovery
+    // admission loop. See INV-DEEP-SWEEP-D1-LANE-RESERVATION-
+    // LEAK-01.
+    let lane_res_report = reconcile_orphan_lane_reservations(store);
 
     eprintln!(
         "{{\"level\":\"info\",\"step\":\"recovery\",\
          \"swept_tasks\":{},\"expired_tokens\":{},\
-         \"folded_integration_merge_attempts\":{},\"chain_ok\":{}}}",
+         \"folded_integration_merge_attempts\":{},\
+         \"orphan_lane_reservations_freed\":{},\"chain_ok\":{}}}",
         task_report.swept_tasks,
         task_report.expired_tokens,
         imerge_report.folded_attempts,
+        lane_res_report.freed,
         chain_ok,
     );
 
@@ -177,6 +220,7 @@ pub fn reconcile(store: &Store, audit_dir: &Path) -> Result<ReconciliationResult
         swept_tasks: task_report.swept_tasks,
         expired_tokens: task_report.expired_tokens,
         folded_integration_merge_attempts: imerge_report.folded_attempts,
+        orphan_lane_reservations_freed: lane_res_report.freed,
         chain_ok,
         swept_tasks_detail: task_report.swept_tasks_detail,
     })
@@ -912,6 +956,104 @@ fn reconcile_integration_merge_attempts(store: &Store) -> IntegrationMergeReconc
 }
 
 // ---------------------------------------------------------------------------
+// Step 4b — Orphan lane-reservation backstop
+// (INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01).
+// ---------------------------------------------------------------------------
+
+/// Delete every `lane_budget_reservations` row whose owning task
+/// is already in a terminal FSM state
+/// (`Completed`/`Failed`/`Aborted`/`Cancelled`).
+///
+/// **Why this exists.** INV-STORE-02 (`kernel-store.md §2.5.1`)
+/// folds the lane-reservation DELETE into the same transaction
+/// as the terminal-state flip on `tasks.state` via
+/// `scheduler::budget::release_budget_in_tx`. The canonical
+/// terminal-state handlers (`CompleteTask`, `ReportFailure`,
+/// `abort_task`, `abort_initiative`, and the
+/// activation-cascade terminator) all route through that
+/// transactional helper, so a clean kernel exit can never leave
+/// a row behind.
+///
+/// iter62's forensic dump (deep-sweep dimension D1) found ONE
+/// `Completed` task — `019e2dc0-3160-7a52-919b-e18785a3ec1e` on
+/// lane `e2e-realistic-sibling-lane` — still holding a
+/// `reserved_cost = 100` row. That row would persist forever
+/// without a sweep, double-booking the lane cap against any
+/// future task on the same lane. The bug class is `kernel
+/// crashed between the in-tx DELETE and the COMMIT, or a
+/// non-canonical write site flipped the task state without
+/// routing through `release_budget_in_tx``. Either way, the
+/// recovery sweep is the only durable backstop.
+///
+/// **Mechanism.** Single bulk DELETE inside one `BEGIN`/`COMMIT`
+/// — INV-STORE-02. The WHERE clause references the typed
+/// `Table::Tasks` identifier and the same terminal-state list
+/// the `reconcile_tasks` sweep uses
+/// (`terminal_task_states_sql`), so a future TaskState variant
+/// addition is a compile-error not silent drift.
+///
+/// Idempotent: re-running this sweep after a fresh kernel start
+/// is a 0-row no-op because the canonical terminal-state flip
+/// path has by then released the row in-tx.
+fn reconcile_orphan_lane_reservations(store: &Store) -> OrphanLaneReservationReport {
+    let mut report = OrphanLaneReservationReport::default();
+
+    let mut conn = store.lock_sync();
+    let terminal = terminal_task_states_sql();
+
+    let tx = match conn.transaction() {
+        Ok(t) => t,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"begin_lane_reservation_tx_failed\",\"error\":\"{e}\"}}",
+            );
+            return report;
+        }
+    };
+
+    let freed = match tx.execute(
+        &format!(
+            "DELETE FROM {LANE_BUDGET_RESERVATIONS}
+              WHERE task_id IN (
+                  SELECT task_id FROM {TASKS} WHERE state IN ({terminal})
+              )"
+        ),
+        [],
+    ) {
+        Ok(rows) => rows,
+        Err(e) => {
+            eprintln!(
+                "{{\"level\":\"error\",\"step\":\"recovery\",\
+                 \"action\":\"bulk_free_orphan_lane_reservations_failed\",\"error\":\"{e}\"}}",
+            );
+            return report;
+        }
+    };
+
+    if let Err(e) = tx.commit() {
+        eprintln!(
+            "{{\"level\":\"error\",\"step\":\"recovery\",\
+             \"action\":\"commit_lane_reservation_failed\",\"error\":\"{e}\"}}",
+        );
+        return report;
+    }
+
+    report.freed = freed;
+
+    if freed > 0 {
+        eprintln!(
+            "{{\"level\":\"warn\",\"step\":\"recovery\",\
+             \"action\":\"freed_orphan_lane_reservations\",\
+             \"count\":{freed},\
+             \"invariant\":\"INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01\"}}",
+        );
+    }
+
+    report
+}
+
+// ---------------------------------------------------------------------------
 // Step 5 — git_apply_pending recovery (integration-merge.md §11.3).
 //
 // Walks every initiative with `git_apply_pending = 1` (the partial
@@ -1392,7 +1534,13 @@ fn emit_repaired(
     previous_git_sha: &str,
     target_ref: &str,
 ) {
-    let _ = audit.emit(
+    // INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01.
+    // The git-apply-pending repair is the only durable signal that
+    // recovery moved the on-disk ref to match the SQL `commit_sha`;
+    // a silent audit-emit failure would strand the operator with
+    // a stderr "info" line that mentions a repair but no audit-chain
+    // anchor an auditor can later cite.
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyRepaired {
             initiative_id: initiative_id.to_owned(),
             db_sha: db_sha.to_owned(),
@@ -1402,7 +1550,15 @@ fn emit_repaired(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitConsistencyRepaired\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+             \"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyRepaired\",\
          \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
@@ -1416,7 +1572,7 @@ fn emit_verified(
     sha: &str,
     target_ref: &str,
 ) {
-    let _ = audit.emit(
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitConsistencyVerified {
             initiative_id: initiative_id.to_owned(),
             sha: sha.to_owned(),
@@ -1425,7 +1581,15 @@ fn emit_verified(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitConsistencyVerified\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"sha\":\"{sha}\",\
+             \"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"GitConsistencyVerified\",\
          \"initiative_id\":\"{initiative_id}\",\"sha\":\"{sha}\",\
@@ -1441,7 +1605,7 @@ fn emit_inconsistent(
     target_ref: &str,
     reason: &str,
 ) {
-    let _ = audit.emit(
+    if let Err(e) = audit.emit(
         raxis_audit_tools::AuditEventKind::GitStateInconsistent {
             initiative_id: initiative_id.to_owned(),
             db_sha: db_sha.to_owned(),
@@ -1452,7 +1616,15 @@ fn emit_inconsistent(
         None,
         None,
         Some(initiative_id),
-    );
+    ) {
+        eprintln!(
+            "{{\"level\":\"error\",\"event\":\"GitStateInconsistent\",\
+             \"audit_emit_failed\":{},\
+             \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
+             \"git_sha\":\"{git_sha}\",\"target_ref\":\"{target_ref}\"}}",
+            serde_json::Value::String(e.to_string()),
+        );
+    }
     eprintln!(
         "{{\"level\":\"warn\",\"event\":\"GitStateInconsistent\",\
          \"initiative_id\":\"{initiative_id}\",\"db_sha\":\"{db_sha}\",\
@@ -3402,6 +3574,205 @@ mod supervisor_auto_resume_witness {
             !by_task.contains_key("t-quarantined"),
             "quarantined-initiative task must NOT emit TaskAutoResumed*"
         );
+    }
+
+    // ─────────────────────────────────────────────────────────────────
+    // INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01 — orphan
+    // `lane_budget_reservations` row backstop.
+    // iter62 deep-sweep dimension D1 witness suite.
+    // ─────────────────────────────────────────────────────────────────
+
+    /// Seed one task in the given state with an attached
+    /// `lane_budget_reservations` row. Lane id defaults to "lane-x" so
+    /// every reservation in a test shares the same aggregate and the
+    /// `SUM` aggregate after sweep is trivially comparable.
+    fn seed_task_with_reservation(
+        store: &Store,
+        task_id: &str,
+        state: TaskState,
+        lane: &str,
+        cost: i64,
+    ) {
+        let conn = store.lock_sync();
+        let now = unix_now_secs();
+        // Initiative row is FK-target shared across all seeded tasks.
+        conn.execute(
+            &format!(
+                "INSERT OR IGNORE INTO {INITIATIVES}
+                    (initiative_id, state, terminal_criteria_json,
+                     plan_artifact_sha256, created_at)
+                 VALUES ('init-lanesweep', ?1, '{{}}', 'deadbeef', ?2)"
+            ),
+            rusqlite::params![InitiativeState::Executing.as_sql_str(), now],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {TASKS}
+                    (task_id, initiative_id, lane_id, state, actor,
+                     policy_epoch, admitted_at, transitioned_at, actual_cost)
+                 VALUES (?1, 'init-lanesweep', ?2, ?3, 'kernel', 1, ?4, ?4, 0)"
+            ),
+            rusqlite::params![task_id, lane, state.as_sql_str(), now],
+        )
+        .unwrap();
+        conn.execute(
+            &format!(
+                "INSERT INTO {LANE_BUDGET_RESERVATIONS}
+                    (lane_id, task_id, reserved_cost, reserved_at)
+                 VALUES (?1, ?2, ?3, ?4)"
+            ),
+            rusqlite::params![lane, task_id, cost, now],
+        )
+        .unwrap();
+    }
+
+    fn reservation_count_for(store: &Store, task_id: &str) -> i64 {
+        let conn = store.lock_sync();
+        conn.query_row(
+            &format!(
+                "SELECT COUNT(*) FROM {LANE_BUDGET_RESERVATIONS} WHERE task_id=?1"
+            ),
+            rusqlite::params![task_id],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Reservations whose owning task is in any of the four terminal
+    /// states (`Completed`/`Failed`/`Aborted`/`Cancelled`) MUST be
+    /// deleted. Reservations whose owning task is still
+    /// `Admitted`/`Running`/`GatesPending`/`BlockedRecoveryPending`
+    /// MUST be preserved. Pins the iter62 forensic finding — a
+    /// `Completed` task held a 100-unit reservation that the
+    /// terminal-state handler failed to release in-tx.
+    #[test]
+    fn lane_reservation_sweep_frees_terminal_orphans_and_preserves_in_flight() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task_with_reservation(&store, "t-completed", TaskState::Completed, "lane-x", 100);
+        seed_task_with_reservation(&store, "t-failed", TaskState::Failed, "lane-x", 50);
+        seed_task_with_reservation(&store, "t-aborted", TaskState::Aborted, "lane-x", 25);
+        seed_task_with_reservation(&store, "t-cancelled", TaskState::Cancelled, "lane-x", 10);
+        seed_task_with_reservation(&store, "t-running", TaskState::Running, "lane-x", 30);
+        seed_task_with_reservation(&store, "t-admitted", TaskState::Admitted, "lane-x", 20);
+        seed_task_with_reservation(
+            &store,
+            "t-brp",
+            TaskState::BlockedRecoveryPending,
+            "lane-x",
+            5,
+        );
+
+        let report = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(
+            report.freed, 4,
+            "exactly the four terminal-state reservations must be freed"
+        );
+
+        for tid in ["t-completed", "t-failed", "t-aborted", "t-cancelled"] {
+            assert_eq!(
+                reservation_count_for(&store, tid),
+                0,
+                "terminal task {tid} must have its reservation deleted"
+            );
+        }
+        for tid in ["t-running", "t-admitted", "t-brp"] {
+            assert_eq!(
+                reservation_count_for(&store, tid),
+                1,
+                "in-flight task {tid} must keep its reservation"
+            );
+        }
+    }
+
+    /// The sweep is a no-op on a clean store (the steady-state case
+    /// after a graceful kernel shutdown).
+    #[test]
+    fn lane_reservation_sweep_is_zero_when_no_orphans() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task_with_reservation(&store, "t-live", TaskState::Running, "lane-x", 42);
+        let report = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(report.freed, 0);
+        assert_eq!(reservation_count_for(&store, "t-live"), 1);
+    }
+
+    /// Re-running the sweep after a non-zero pass is idempotent: the
+    /// second run sees 0 orphans and the freed counter is 0. Pins
+    /// INV-STORE-02 (mid-recovery re-crash leaves a consistent set).
+    #[test]
+    fn lane_reservation_sweep_is_idempotent() {
+        let store = Store::open_in_memory().unwrap();
+        seed_task_with_reservation(&store, "t-completed", TaskState::Completed, "lane-x", 100);
+        seed_task_with_reservation(&store, "t-running", TaskState::Running, "lane-x", 30);
+
+        let r1 = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(r1.freed, 1);
+        let r2 = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(r2.freed, 0);
+        assert_eq!(reservation_count_for(&store, "t-completed"), 0);
+        assert_eq!(reservation_count_for(&store, "t-running"), 1);
+    }
+
+    /// The reservation aggregate (`SUM(reserved_cost)` over the lane)
+    /// MUST reflect the post-sweep state — a leaked 100-unit row
+    /// would double-book the lane cap; pin that the freed row's cost
+    /// is no longer in the aggregate. This is the operator-facing
+    /// outcome of the sweep: subsequent admission decisions on the
+    /// same lane see the corrected reserved_cost.
+    #[test]
+    fn lane_reservation_sweep_releases_aggregate_cost() {
+        let store = Store::open_in_memory().unwrap();
+        // Two completed tasks (orphans) + one running task on the
+        // same lane. Pre-sweep aggregate = 100 + 50 + 30 = 180.
+        // Post-sweep aggregate must be 30 (only the running task's
+        // reservation survives).
+        seed_task_with_reservation(&store, "t-c1", TaskState::Completed, "lane-x", 100);
+        seed_task_with_reservation(&store, "t-c2", TaskState::Completed, "lane-x", 50);
+        seed_task_with_reservation(&store, "t-r", TaskState::Running, "lane-x", 30);
+
+        let pre = {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT COALESCE(SUM(reserved_cost),0)
+                       FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id='lane-x'"
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(pre, 180);
+
+        let report = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(report.freed, 2);
+
+        let post = {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT COALESCE(SUM(reserved_cost),0)
+                       FROM {LANE_BUDGET_RESERVATIONS} WHERE lane_id='lane-x'"
+                ),
+                [],
+                |r| r.get::<_, i64>(0),
+            )
+            .unwrap()
+        };
+        assert_eq!(
+            post, 30,
+            "lane aggregate must reflect the freed orphan reservations"
+        );
+    }
+
+    /// Empty input → no-op (no tasks, no reservations). Witness for
+    /// the early-return-on-empty-set path through the DELETE
+    /// statement.
+    #[test]
+    fn lane_reservation_sweep_on_empty_store_is_zero() {
+        let store = Store::open_in_memory().unwrap();
+        let report = reconcile_orphan_lane_reservations(&store);
+        assert_eq!(report.freed, 0);
     }
 
     /// Empty input → no-op (the supervisor restarted but the recovery

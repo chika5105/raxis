@@ -130,7 +130,12 @@ pub async fn spawn_and_supervise(
                 "{{\"level\":\"error\",\"event\":\"gateway_embedded_materialize_failed\",\
                  \"reason\":\"{e}\"}}"
             );
-            let _ = audit.emit(
+            // INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01.
+            // Gateway quarantine is one of `SupervisorShutdown`'s
+            // terminal outcomes — `main.rs` translates it into a
+            // structured boot-fail; the audit chain entry is the
+            // only durable record. Log on emit failure.
+            if let Err(audit_err) = audit.emit(
                 AuditEventKind::GatewayQuarantined {
                     reason: reason.clone(),
                     total_attempts: 0,
@@ -138,7 +143,13 @@ pub async fn spawn_and_supervise(
                 None,
                 None,
                 None,
-            );
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"GatewayQuarantined\",\
+                     \"audit_emit_failed\":{},\"reason\":\"{reason}\"}}",
+                    serde_json::Value::String(audit_err.to_string()),
+                );
+            }
             return SupervisorShutdown::Quarantined {
                 reason,
                 total_attempts: 0,
@@ -178,17 +189,25 @@ pub async fn spawn_and_supervise(
                 // We cannot mint a token, so we cannot spawn. Treat
                 // this exactly like a max-respawns event so `main.rs`
                 // gets a clean Quarantined.
-                let _ = audit.emit(
+                let reason = format!("token mint failure: {e}");
+                if let Err(audit_err) = audit.emit(
                     AuditEventKind::GatewayQuarantined {
-                        reason: format!("token mint failure: {e}"),
+                        reason: reason.clone(),
                         total_attempts: attempt,
                     },
                     None,
                     None,
                     None,
-                );
+                ) {
+                    eprintln!(
+                        "{{\"level\":\"error\",\"event\":\"GatewayQuarantined\",\
+                         \"audit_emit_failed\":{},\"reason\":\"{reason}\",\
+                         \"total_attempts\":{attempt}}}",
+                        serde_json::Value::String(audit_err.to_string()),
+                    );
+                }
                 return SupervisorShutdown::Quarantined {
-                    reason: format!("token mint failure: {e}"),
+                    reason,
                     total_attempts: attempt,
                 };
             }
@@ -209,7 +228,7 @@ pub async fn spawn_and_supervise(
                 consecutive_crashes += 1;
                 if consecutive_crashes > cfg.max_consecutive_respawns {
                     let reason = format!("repeated spawn failure: {e}");
-                    let _ = audit.emit(
+                    if let Err(audit_err) = audit.emit(
                         AuditEventKind::GatewayQuarantined {
                             reason: reason.clone(),
                             total_attempts: attempt,
@@ -217,7 +236,14 @@ pub async fn spawn_and_supervise(
                         None,
                         None,
                         None,
-                    );
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"error\",\"event\":\"GatewayQuarantined\",\
+                             \"audit_emit_failed\":{},\"reason\":\"{reason}\",\
+                             \"total_attempts\":{attempt}}}",
+                            serde_json::Value::String(audit_err.to_string()),
+                        );
+                    }
                     return SupervisorShutdown::Quarantined {
                         reason,
                         total_attempts: attempt,
@@ -241,7 +267,7 @@ pub async fn spawn_and_supervise(
             attempt,
             child.id().unwrap_or(0),
         );
-        let _ = audit.emit(
+        if let Err(audit_err) = audit.emit(
             AuditEventKind::GatewaySpawned {
                 token_prefix: token_prefix.clone(),
                 binary_path: cfg.binary_path.clone(),
@@ -250,7 +276,15 @@ pub async fn spawn_and_supervise(
             None,
             None,
             None,
-        );
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"GatewaySpawned\",\
+                 \"audit_emit_failed\":{},\"token_prefix\":\"{}\",\"attempt\":{}}}",
+                serde_json::Value::String(audit_err.to_string()),
+                token_prefix,
+                attempt,
+            );
+        }
 
         // Wait for either child exit OR kernel shutdown.
         let exit_status = tokio::select! {
@@ -294,7 +328,10 @@ pub async fn spawn_and_supervise(
         // (now dead) stream installed when the fresh gateway sends
         // its `GatewayReady`.
         client.disconnect().await;
-        let _ = audit.emit(
+        // Clone the token_prefix for the audit-emit-failed fallback
+        // log line — the AuditEventKind constructor moves it.
+        let token_prefix_for_log = token_prefix.clone();
+        if let Err(audit_err) = audit.emit(
             AuditEventKind::GatewayCrashed {
                 token_prefix,
                 exit_code,
@@ -303,7 +340,19 @@ pub async fn spawn_and_supervise(
             None,
             None,
             None,
-        );
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"GatewayCrashed\",\
+                 \"audit_emit_failed\":{},\"token_prefix\":\"{}\",\
+                 \"exit_code\":{},\"attempt\":{}}}",
+                serde_json::Value::String(audit_err.to_string()),
+                token_prefix_for_log,
+                exit_code
+                    .map(|c| c.to_string())
+                    .unwrap_or_else(|| "null".to_owned()),
+                attempt,
+            );
+        }
 
         // Decide: respawn or quarantine?
         consecutive_crashes += 1;
@@ -315,7 +364,7 @@ pub async fn spawn_and_supervise(
                     .map(|c| c.to_string())
                     .unwrap_or_else(|| "null".to_owned()),
             );
-            let _ = audit.emit(
+            if let Err(audit_err) = audit.emit(
                 AuditEventKind::GatewayQuarantined {
                     reason: reason.clone(),
                     total_attempts: attempt,
@@ -323,7 +372,14 @@ pub async fn spawn_and_supervise(
                 None,
                 None,
                 None,
-            );
+            ) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"GatewayQuarantined\",\
+                     \"audit_emit_failed\":{},\"reason\":\"{reason}\",\
+                     \"total_attempts\":{attempt}}}",
+                    serde_json::Value::String(audit_err.to_string()),
+                );
+            }
             eprintln!(
                 "{{\"level\":\"error\",\"event\":\"gateway_quarantined\",\
                  \"reason\":\"{reason}\",\"total_attempts\":{attempt}}}"

@@ -192,7 +192,13 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
     inner.state.store(next as u8, Ordering::Release);
 
     if entered_halt {
-        let _ = audit.emit(
+        // INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01.
+        // Disk-full halt entry is one of the kernel's most
+        // operator-critical events; if audit emission fails (chain
+        // broken, segment rotation deadlock, the disk-full state
+        // itself racing the audit segment write), the only durable
+        // signal is this structured stderr fallback.
+        if let Err(e) = audit.emit(
             AuditEventKind::DiskFullHaltEntered {
                 free_mb: observed,
                 cap_mb: inner.min_free_mb,
@@ -201,8 +207,16 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
             None,
             None,
             None,
-        );
-        let _ = audit.emit(
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"DiskFullHaltEntered\",\
+                 \"audit_emit_failed\":{},\"free_mb\":{},\"cap_mb\":{}}}",
+                serde_json::Value::String(e.to_string()),
+                observed,
+                inner.min_free_mb,
+            );
+        }
+        if let Err(e) = audit.emit(
             AuditEventKind::OperatorAttentionRequired {
                 attention_kind: "DiskFull".into(),
                 details: format!(
@@ -213,9 +227,15 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
             None,
             None,
             None,
-        );
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"OperatorAttentionRequired\",\
+                 \"audit_emit_failed\":{},\"attention_kind\":\"DiskFull\"}}",
+                serde_json::Value::String(e.to_string()),
+            );
+        }
     } else if exited_halt {
-        let _ = audit.emit(
+        if let Err(e) = audit.emit(
             AuditEventKind::DiskHealthyAfterFull {
                 previous_free_mb: 0, // V2: we do not track previous-free duration; V3 will.
                 current_free_mb: observed,
@@ -224,7 +244,14 @@ fn poll_once(inner: &Inner, audit: &dyn AuditSink) {
             None,
             None,
             None,
-        );
+        ) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"DiskHealthyAfterFull\",\
+                 \"audit_emit_failed\":{},\"current_free_mb\":{}}}",
+                serde_json::Value::String(e.to_string()),
+                observed,
+            );
+        }
     }
 }
 
