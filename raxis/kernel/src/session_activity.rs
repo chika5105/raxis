@@ -250,6 +250,190 @@ impl SessionActivityTracker {
             .ok()
             .and_then(|g| g.get(session_id).cloned())
     }
+
+    /// **`INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+    /// (iter65)** — read the entry without consuming it. Used by
+    /// the orchestrator post-exit hook
+    /// (`session_spawn_orchestrator::spawn_planner_dispatcher`
+    /// Mode A) which needs to inspect the most-recent intent
+    /// outcome BEFORE the `SessionRevoked` audit emit so the
+    /// `revoked_by` URN can distinguish a true clean disconnect
+    /// from a "DirtyCompletion" — a planner that submitted a
+    /// terminal tool, observed the kernel reject the intent
+    /// (e.g. with `FailVmConcurrencyAtCap`), and called PowerOff
+    /// anyway. The planner-side `PlannerExitOutcome` is
+    /// `CleanCompletion { tool_name }` regardless of the kernel's
+    /// response — the only authoritative reclassification source
+    /// is the kernel-observed last intent status.
+    ///
+    /// Distinct from [`Self::take`] because Mode A still wants
+    /// Mode B's downstream consumer (the worker premature-exit
+    /// synthesiser) to see a non-empty entry on the same
+    /// session_id; Mode A reads + Mode B takes is the canonical
+    /// consumer order.
+    pub fn get(&self, session_id: &str) -> Option<SessionActivity> {
+        self.inner
+            .lock()
+            .ok()
+            .and_then(|g| g.get(session_id).cloned())
+    }
+}
+
+/// **`INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+/// (iter65)** — the kernel-side effective classification of a
+/// planner exit, accounting for both the planner-shipped
+/// `PlannerExitOutcome` (P3 signal) AND the kernel-observed last
+/// IntentRequest outcome (P2 breadcrumb).
+///
+/// The planner driver in `crates/planner-core/src/driver.rs`
+/// builds a `DriverOutcome::Completed` whenever the dispatch loop
+/// fires a terminal tool, **regardless** of whether the kernel
+/// accepted the matching `IntentRequest`. The audit chain pre-
+/// iter65 carried this misclassification verbatim: a session that
+/// observed `intent_response.status = "rejected"` (e.g.
+/// `FailVmConcurrencyAtCap`) still surfaced as a `SessionRevoked`
+/// with `revoked_by_display_name = "Planner self-exit (clean
+/// disconnect, terminal_tool = activate_subtask)"`. Downstream
+/// consumers (orchestrator NNSP counter, respawn classification,
+/// operator-facing failure-reason synthesis) treated the
+/// "CleanCompletion" claim as gospel and burned the no-progress
+/// counter against capacity-pressure intents that the operator
+/// never told the planner to retry.
+///
+/// This classifier folds the two signals together: the planner's
+/// notice is "clean" only when the most-recent kernel-observed
+/// IntentRequest was `Accepted`. A `Rejected` last intent
+/// downgrades the exit to [`ExitCleanliness::Dirty`] regardless of
+/// what the planner shipped.
+#[derive(Debug, Clone)]
+pub enum ExitCleanliness {
+    /// Either:
+    ///   * the planner shipped `CleanCompletion { tool_name }` AND
+    ///     the kernel-observed last intent was `Accepted`, OR
+    ///   * the planner did not ship a `CleanCompletion` notice
+    ///     (the Mode-B premature-exit synthesiser handles that
+    ///     case via the structured `PlannerExitOutcome` already).
+    /// In both cases the orchestrator post-exit hook treats the
+    /// exit as a normal clean disconnect.
+    Clean,
+    /// The planner shipped `CleanCompletion { tool_name }` but the
+    /// kernel-observed last IntentRequest was `Rejected`. The
+    /// planner exited "cleanly" only by walking off the cliff:
+    /// the kernel told it the terminal tool's intent failed, and
+    /// it called PowerOff anyway without the operator ever telling
+    /// it to retry. Downstream signalling (the
+    /// `SessionRevoked.revoked_by` URN, the orchestrator NNSP
+    /// counter — `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`,
+    /// respawn-decision logging) MUST treat this as Dirty so a
+    /// forensic chain replay can distinguish "planner shipped a
+    /// terminal intent that landed" from "planner shipped a
+    /// terminal intent that the kernel refused".
+    Dirty {
+        /// The terminal tool name from the
+        /// `PlannerExitOutcome::CleanCompletion`. Stamped into the
+        /// `SessionRevoked.revoked_by_display_name` for forensic
+        /// readers.
+        tool_name: String,
+        /// The stable [`raxis_types::PlannerErrorCode`] short
+        /// string (e.g. `"FAIL_VM_CONCURRENCY_AT_CAP"`,
+        /// `"FAIL_POLICY_VIOLATION"`) the kernel returned for
+        /// the rejected last intent. Surfaces in the
+        /// `revoked_by_display_name` and (per
+        /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`)
+        /// gates whether the orchestrator NNSP counter
+        /// increments.
+        last_rejection_code: String,
+    },
+}
+
+impl ExitCleanliness {
+    /// Whether the rejection error_code on a `Dirty` exit names a
+    /// capacity-pressure surface (the orchestrator NNSP counter
+    /// SHOULD NOT increment for these per
+    /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`).
+    /// Returns `false` for `Clean` exits.
+    ///
+    /// The closed lexicon below tracks
+    /// `crates/types/src/error.rs::PlannerErrorCode` Display impl;
+    /// every variant whose semantics are "the kernel's resource
+    /// gate pushed back; retry after the gate clears" rather than
+    /// "the planner's intent was structurally invalid" lands here.
+    /// Adding a new capacity-class error code requires updating
+    /// this list.
+    pub fn is_capacity_pressure(&self) -> bool {
+        match self {
+            ExitCleanliness::Clean => false,
+            ExitCleanliness::Dirty {
+                last_rejection_code,
+                ..
+            } => is_capacity_pressure_code(last_rejection_code.as_str()),
+        }
+    }
+}
+
+/// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+/// — closed lexicon of [`raxis_types::PlannerErrorCode`] Display
+/// strings that name capacity-pressure rejections. The orchestrator
+/// no-progress respawn counter MUST NOT increment when the
+/// just-exited session's last rejection lands in this set; a peer
+/// initiative consuming the cap is back-pressure, not orchestrator
+/// no-progress, and burning the NNSP ceiling against capacity
+/// contention causes the kernel to mark a healthy initiative
+/// `Failed` for a transient host-resource shortfall (the iter64
+/// failure mode).
+///
+/// Adding a new capacity-class code requires updating the lexicon
+/// here AND the matching test in
+/// `kernel/src/session_spawn_orchestrator.rs::tests::nnsp_capacity_pressure*`.
+pub fn is_capacity_pressure_code(code: &str) -> bool {
+    matches!(
+        code,
+        "FAIL_VM_CONCURRENCY_AT_CAP"
+            | "FailVmConcurrencyAtCap"
+            | "FAIL_ADMISSION_QUEUE_FULL"
+            | "FailAdmissionQueueFull"
+    )
+}
+
+/// **`INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+/// (iter65)** — fold the planner-side
+/// [`raxis_types::PlannerExitOutcome`] and the kernel-side
+/// last-intent breadcrumb [`SessionActivity`] into the effective
+/// [`ExitCleanliness`] classification.
+///
+/// The classifier returns [`ExitCleanliness::Clean`] when:
+///   * the planner did not ship a `CleanCompletion` notice (Mode-B
+///     handles non-clean exits via the structured notice itself),
+///     OR
+///   * the planner shipped `CleanCompletion` AND the most-recent
+///     kernel-observed IntentRequest was `Accepted` (or the
+///     activity tracker has no entry, which is itself a clean-
+///     disconnect signal: the planner exited before submitting
+///     any intent at all — see
+///     `session_activity::render_clean_exit_without_activity`).
+///
+/// Returns [`ExitCleanliness::Dirty`] when the planner shipped
+/// `CleanCompletion` but the most-recent kernel-observed
+/// IntentRequest was `Rejected`. The dirty form carries the
+/// terminal-tool name (for forensic display) and the rejection
+/// error_code (which gates `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`).
+pub fn classify_planner_exit(
+    exit_notice: Option<&raxis_types::PlannerExitOutcome>,
+    last_activity: Option<&SessionActivity>,
+) -> ExitCleanliness {
+    let Some(notice) = exit_notice else {
+        return ExitCleanliness::Clean;
+    };
+    let raxis_types::PlannerExitOutcome::CleanCompletion { tool_name } = notice else {
+        return ExitCleanliness::Clean;
+    };
+    match last_activity.map(|a| &a.last_intent_outcome) {
+        Some(LastIntentOutcome::Rejected { error_code }) => ExitCleanliness::Dirty {
+            tool_name: tool_name.clone(),
+            last_rejection_code: error_code.clone(),
+        },
+        _ => ExitCleanliness::Clean,
+    }
 }
 
 /// Operator-facing rendering of a captured activity, woven into
@@ -425,6 +609,147 @@ mod tests {
             s.contains("Rejected/FAIL_POLICY_VIOLATION"),
             "rejection error code MUST be inlined: {s}"
         );
+    }
+
+    /// `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+    /// — `CleanCompletion` over an `Accepted` last intent reads
+    /// as `Clean`. The orchestrator post-exit hook treats this
+    /// as a normal clean disconnect.
+    #[test]
+    fn classify_clean_completion_with_accepted_last_intent_is_clean() {
+        let activity = act(IntentKind::CompleteTask, 7, true);
+        let notice = raxis_types::PlannerExitOutcome::CleanCompletion {
+            tool_name: "task_complete".to_owned(),
+        };
+        match classify_planner_exit(Some(&notice), Some(&activity)) {
+            ExitCleanliness::Clean => {}
+            other => panic!(
+                "CleanCompletion + Accepted last intent must classify as Clean; got {other:?}"
+            ),
+        }
+    }
+
+    /// `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+    /// — the regression witness. `CleanCompletion` over a
+    /// `Rejected` last intent reads as `Dirty`, carrying the
+    /// terminal-tool name AND the rejection error_code so the
+    /// kernel-side `SessionRevoked` emit + the orchestrator NNSP
+    /// counter logic can disambiguate from a genuine clean
+    /// disconnect.
+    #[test]
+    fn classify_clean_completion_with_rejected_last_intent_is_dirty() {
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::ActivateSubTask,
+            last_intent_seq: 3,
+            last_intent_outcome: LastIntentOutcome::Rejected {
+                error_code: "FAIL_VM_CONCURRENCY_AT_CAP".to_owned(),
+            },
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let notice = raxis_types::PlannerExitOutcome::CleanCompletion {
+            tool_name: "activate_subtask".to_owned(),
+        };
+        let classification = classify_planner_exit(Some(&notice), Some(&activity));
+        match &classification {
+            ExitCleanliness::Dirty {
+                tool_name,
+                last_rejection_code,
+            } => {
+                assert_eq!(tool_name, "activate_subtask");
+                assert_eq!(last_rejection_code, "FAIL_VM_CONCURRENCY_AT_CAP");
+            }
+            other => panic!(
+                "CleanCompletion + Rejected last intent must classify as Dirty; got {other:?}",
+            ),
+        }
+        assert!(
+            classification.is_capacity_pressure(),
+            "FAIL_VM_CONCURRENCY_AT_CAP must be classified as capacity-pressure \
+             so INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01 \
+             can short-circuit the NNSP increment",
+        );
+    }
+
+    /// `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+    /// — non-clean exit notices route through the Mode-B path
+    /// regardless of last_activity; the classifier surfaces
+    /// `Clean` so the orchestrator post-exit hook does not
+    /// double-up the dirty signalling on top of the structured
+    /// `MaxTurnsReached` / `MaxTokensReached` / etc. handling.
+    #[test]
+    fn classify_non_clean_completion_is_clean_regardless_of_activity() {
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::ActivateSubTask,
+            last_intent_seq: 3,
+            last_intent_outcome: LastIntentOutcome::Rejected {
+                error_code: "FAIL_POLICY_VIOLATION".to_owned(),
+            },
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let notice = raxis_types::PlannerExitOutcome::MaxTurnsReached {
+            used: 60,
+            limit: 60,
+        };
+        match classify_planner_exit(Some(&notice), Some(&activity)) {
+            ExitCleanliness::Clean => {}
+            other => panic!(
+                "MaxTurnsReached must classify as Clean (Mode-B handles it); got {other:?}",
+            ),
+        }
+    }
+
+    /// Non-capacity rejection codes do NOT short-circuit the NNSP
+    /// counter — only the closed-lexicon capacity codes per
+    /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`.
+    #[test]
+    fn dirty_classification_with_policy_violation_is_not_capacity_pressure() {
+        let activity = SessionActivity {
+            last_intent_kind: IntentKind::ActivateSubTask,
+            last_intent_seq: 3,
+            last_intent_outcome: LastIntentOutcome::Rejected {
+                error_code: "FAIL_POLICY_VIOLATION".to_owned(),
+            },
+            recorded_at_unix: 1_715_694_342_i64,
+        };
+        let notice = raxis_types::PlannerExitOutcome::CleanCompletion {
+            tool_name: "activate_subtask".to_owned(),
+        };
+        let classification = classify_planner_exit(Some(&notice), Some(&activity));
+        assert!(
+            !classification.is_capacity_pressure(),
+            "FAIL_POLICY_VIOLATION is structural — NNSP counter MUST \
+             increment to surface it via the LogicalDeadlock auto-escalation",
+        );
+    }
+
+    /// The closed lexicon — pinned per
+    /// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`.
+    /// Adding a new code requires updating both this test and the
+    /// `is_capacity_pressure_code` body in lockstep.
+    #[test]
+    fn capacity_pressure_lexicon_pinned() {
+        for c in [
+            "FAIL_VM_CONCURRENCY_AT_CAP",
+            "FailVmConcurrencyAtCap",
+            "FAIL_ADMISSION_QUEUE_FULL",
+            "FailAdmissionQueueFull",
+        ] {
+            assert!(
+                is_capacity_pressure_code(c),
+                "{c} must be capacity-pressure",
+            );
+        }
+        for c in [
+            "FAIL_POLICY_VIOLATION",
+            "FAIL_DELEGATION_REQUIRED",
+            "DEPENDENCY_NOT_MET",
+            "",
+        ] {
+            assert!(
+                !is_capacity_pressure_code(c),
+                "{c} must NOT be capacity-pressure",
+            );
+        }
     }
 
     #[test]

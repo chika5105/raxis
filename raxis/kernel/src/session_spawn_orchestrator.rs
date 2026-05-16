@@ -1577,6 +1577,44 @@ pub fn spawn_planner_dispatcher(
             let console_log_path_str = Some(console_log_path.display().to_string());
             let terminal_tool = scrape_terminal_tool_from_console_log(&console_log_path);
 
+            // `INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01`
+            // (iter65) — fold the planner-side
+            // `PlannerExitOutcome` and the kernel-observed last
+            // IntentRequest outcome into the effective exit
+            // classification BEFORE the SessionRevoked emit. The
+            // planner driver in `crates/planner-core/src/driver.rs`
+            // unconditionally classifies any terminal-tool
+            // submission as `DriverOutcome::Completed` (which
+            // wires through to `CleanCompletion` on the wire),
+            // regardless of whether the kernel's response was
+            // `Accepted` or `Rejected`. The audit chain pre-iter65
+            // carried the misclassification verbatim — a session
+            // that observed
+            // `intent_response.status="rejected"` with
+            // `error_code="FailVmConcurrencyAtCap"` still surfaced
+            // as `revoked_by_display_name="Planner self-exit
+            // (clean disconnect, terminal_tool=...)"`. The
+            // kernel-side classifier reads the
+            // `SessionActivityTracker` (the canonical
+            // last-IntentRequest projection) and reclassifies
+            // CleanCompletion-over-Rejected as Dirty so a forensic
+            // replay can disambiguate from a true clean
+            // disconnect.
+            //
+            // We `get` rather than `take` here so Mode B's
+            // worker premature-exit synthesiser can still consume
+            // the entry on the same session_id. (This branch only
+            // fires for `Orchestrator` sessions which don't reach
+            // Mode B — but keeping the read non-consuming preserves
+            // the invariant that any post-exit reader can observe
+            // the activity until the session_id is fully drained.)
+            let last_activity_for_classify =
+                ctx.session_activity.get(&session_id);
+            let cleanliness = crate::session_activity::classify_planner_exit(
+                exit_notice_for_post_exit.as_ref(),
+                last_activity_for_classify.as_ref(),
+            );
+
             // SessionVmExited — emit FIRST (matches the
             // substrate-side ordering: VM-exit-then-revoke is
             // the spec-mandated audit-replay order in
@@ -1607,15 +1645,46 @@ pub fn spawn_planner_dispatcher(
             // forensic discriminator — operators investigating an
             // initiative replay `jq 'select(.revoked_by |
             // startswith("kernel://"))'` to filter to the
-            // self-exit class.
-            let revoked_by_display_name = Some(format!(
-                "Planner self-exit (clean disconnect, terminal_tool={:?})",
-                terminal_tool,
-            ));
+            // self-exit class. Iter65 added a third URN tier
+            // `kernel://planner_self_exit_dirty` for the
+            // CleanCompletion-over-Rejected case so a forensic
+            // replay can split:
+            //   * `kernel://planner_self_exit`        — true
+            //     clean disconnect (intent accepted).
+            //   * `kernel://planner_self_exit_dirty`  — planner
+            //     observed an `IntentResponse::Rejected` and
+            //     called PowerOff anyway. The
+            //     `revoked_by_display_name` carries the
+            //     terminal_tool + the rejection error_code so a
+            //     `jq 'select(.revoked_by | endswith("_dirty"))'`
+            //     filter suffices to surface the iter65 pathology.
+            //   * Operator session id                 —
+            //     interactive operator-driven revoke.
+            let (revoked_by_urn, revoked_by_display_name) = match &cleanliness {
+                crate::session_activity::ExitCleanliness::Clean => (
+                    "kernel://planner_self_exit".to_owned(),
+                    Some(format!(
+                        "Planner self-exit (clean disconnect, terminal_tool={:?})",
+                        terminal_tool,
+                    )),
+                ),
+                crate::session_activity::ExitCleanliness::Dirty {
+                    tool_name,
+                    last_rejection_code,
+                } => (
+                    "kernel://planner_self_exit_dirty".to_owned(),
+                    Some(format!(
+                        "Planner self-exit (DirtyCompletion: terminal_tool={:?} \
+                         submitted but kernel rejected with {}; \
+                         INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01)",
+                        tool_name, last_rejection_code,
+                    )),
+                ),
+            };
             if let Err(e) = ctx.audit.emit(
                 raxis_audit_tools::AuditEventKind::SessionRevoked {
                     session_id: session_id.to_string(),
-                    revoked_by: "kernel://planner_self_exit".to_owned(),
+                    revoked_by: revoked_by_urn,
                     revoked_by_display_name,
                 },
                 Some(session_id.as_str()),
@@ -1629,6 +1698,29 @@ pub fn spawn_planner_dispatcher(
                 );
             }
         }
+
+        // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+        // (iter65) — surface the kernel-side cleanliness classification
+        // computed inside the `revoke_committed` block above as a
+        // boolean flag the Mode A respawn dispatch consumes verbatim.
+        // We re-derive it here (rather than threading the variable
+        // out of the conditional) to keep the
+        // `revoke_committed = false` path (already-revoked due to
+        // operator-driven prior revoke) symmetric — that path also
+        // exits the planner and may immediately enter a Mode-A
+        // respawn, and we do NOT want the operator-driven revoke
+        // to be treated as a capacity-pressure event.
+        let predecessor_was_capacity_pressure = if revoke_committed {
+            let last_activity =
+                ctx.session_activity.get(&session_id);
+            crate::session_activity::classify_planner_exit(
+                exit_notice_for_post_exit.as_ref(),
+                last_activity.as_ref(),
+            )
+            .is_capacity_pressure()
+        } else {
+            false
+        };
 
         // ── V2 §Step 6 — post-exit recovery dispatch. ─────────────
         //
@@ -2154,7 +2246,12 @@ pub fn spawn_planner_dispatcher(
                     crate::observability::RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS,
                     1,
                 );
-                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+                respawn_orchestrator_for_initiative(
+                    &initiative_id,
+                    Arc::clone(&ctx),
+                    predecessor_was_capacity_pressure,
+                )
+                .await;
             }
             Ok(Some(PostExitAction::WorkerFailureRespawn {
                 initiative_id,
@@ -2179,7 +2276,17 @@ pub fn spawn_planner_dispatcher(
                     crate::observability::RESPAWN_KIND_ORCHESTRATOR_NO_PROGRESS,
                     1,
                 );
-                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx)).await;
+                // Mode B (worker failure synthesis) never carries a
+                // capacity-pressure predecessor — the worker (executor /
+                // reviewer) intent isn't subject to the orchestrator's
+                // VM-concurrency cap; only the orchestrator-spawn path
+                // is. Always pass `false`.
+                respawn_orchestrator_for_initiative(
+                    &initiative_id,
+                    Arc::clone(&ctx),
+                    false,
+                )
+                .await;
             }
             Ok(None) => { /* nothing to do */ }
             Err(e) => {
@@ -2277,9 +2384,32 @@ async fn terminate_orchestrator(
 ///
 /// Returns `Ok(Some(session_id))` on a successful spawn, `Ok(None)`
 /// when the precondition checks elected to skip, and never panics.
+///
+/// ## `predecessor_was_capacity_pressure` — iter65
+///
+/// Set to `true` when the just-revoked session reaches this respawn
+/// path with a `Dirty` exit cleanliness whose
+/// `last_rejection_code` is one of the closed-lexicon
+/// capacity-pressure codes (see
+/// `crate::session_activity::is_capacity_pressure_code`). When
+/// true, the no-progress respawn counter ceiling check is
+/// short-circuited per
+/// `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`:
+/// capacity back-pressure from a peer initiative's slot contention
+/// is not orchestrator no-progress, and the iter64 evidence
+/// reproduced exactly this misclassification (3 consecutive
+/// `FailVmConcurrencyAtCap` rejections walked the counter from 0
+/// → 3 and tripped the ceiling, escalating an initiative whose
+/// orchestrator's only sin was running on a saturated host).
+///
+/// All non-Mode-A callers (handlers/intent.rs::handle_intent
+/// EarlyResponse dispatch, ipc/operator.rs operator-driven respawn,
+/// etc.) pass `false` because they have no preceding session whose
+/// last intent could have been a capacity-pressure rejection.
 pub async fn respawn_orchestrator_for_initiative(
     initiative_id: &str,
     ctx: Arc<crate::ipc::context::HandlerContext>,
+    predecessor_was_capacity_pressure: bool,
 ) -> Option<String> {
     use raxis_store::Table;
     use raxis_types::SessionAgentType;
@@ -2375,11 +2505,57 @@ pub async fn respawn_orchestrator_for_initiative(
     // operator-actionable surface lands before the terminal-state
     // marker. A crash between either pair leaves the store internally
     // consistent — both rolled back, never half-applied.
-    let policy_epoch_for_escalation: i64 = ctx.policy.load_full().epoch() as i64;
-    let escalation_timeout_secs = ctx.policy.load_full().escalation_timeout().as_secs() as i64;
-    let store_for_ceiling = Arc::clone(&ctx.store);
-    let init_for_ceiling = initiative_id.to_owned();
-    let ceiling_outcome = tokio::task::spawn_blocking(move || -> Result<
+    // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+    // (iter65). When the predecessor session exited because the
+    // kernel rejected its terminal intent with a capacity-pressure
+    // error code (`FailVmConcurrencyAtCap` /
+    // `FailAdmissionQueueFull`), the respawn is structurally
+    // necessary (the orchestrator must retry the intent once a
+    // slot frees) but is NOT a no-progress event — the orchestrator
+    // is making honest forward progress, the host just happens to
+    // be saturated by a peer initiative. Incrementing the
+    // no-progress counter on this path conflates external
+    // back-pressure with structural deadlock, and the iter64
+    // evidence reproduced the misclassification exactly: three
+    // consecutive `FailVmConcurrencyAtCap` rejections walked the
+    // counter from 0 → 3 and tripped the ceiling on an initiative
+    // whose only sin was running concurrently with a peer that
+    // saturated the host.
+    //
+    // We surface this skip path through a dedicated structured-log
+    // emit so a forensic reader can correlate the audit-side
+    // `kernel://planner_self_exit_dirty` revoke URN with the
+    // kernel's deliberate decision NOT to walk the NNSP counter.
+    if predecessor_was_capacity_pressure {
+        eprintln!(
+            "{{\"level\":\"info\",\
+             \"event\":\"orchestrator_respawn_capacity_pressure_no_count_increment\",\
+             \"initiative_id\":\"{initiative_id}\",\
+             \"invariant\":\"INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01\"}}",
+        );
+    }
+
+    // When `predecessor_was_capacity_pressure` is true, we skip the
+    // SQLite-side increment + ceiling evaluation transaction
+    // entirely and synthesise a `Permitted { count_after_increment: 0 }`
+    // outcome locally — the counter on disk does NOT mutate, so a
+    // subsequent honest no-progress respawn (e.g. an actual rejected
+    // RetrySubTask after the slot frees) walks the counter from its
+    // pre-existing value rather than from a polluted starting point.
+    let skip_ceiling_check = predecessor_was_capacity_pressure;
+    let ceiling_outcome = if skip_ceiling_check {
+        Some((
+            crate::orch_respawn_ceiling::CeilingOutcome::Permitted {
+                count_after_increment: 0,
+            },
+            None,
+        ))
+    } else {
+        let policy_epoch_for_escalation: i64 = ctx.policy.load_full().epoch() as i64;
+        let escalation_timeout_secs = ctx.policy.load_full().escalation_timeout().as_secs() as i64;
+        let store_for_ceiling = Arc::clone(&ctx.store);
+        let init_for_ceiling = initiative_id.to_owned();
+        tokio::task::spawn_blocking(move || -> Result<
         Option<(crate::orch_respawn_ceiling::CeilingOutcome, Option<String>)>,
         rusqlite::Error,
     > {
@@ -2503,13 +2679,13 @@ pub async fn respawn_orchestrator_for_initiative(
     .await
     .ok()
     .and_then(Result::ok)
-    .flatten();
+    .flatten()
+    };
 
     let (ceiling_outcome, escalation_id_opt) = match ceiling_outcome {
         None => (None, None),
         Some((o, eid)) => (Some(o), eid),
     };
-    let _ = escalation_id_opt; // chain-side audit anchor; surfaced via the audit event below.
 
     match ceiling_outcome {
         None => {
@@ -2532,6 +2708,106 @@ pub async fn respawn_orchestrator_for_initiative(
                  \"attempts\":{count_after_increment},\
                  \"max_attempts\":{max_attempts}}}",
             );
+            // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01`
+            // (iter65) — paired chain-side audit emit for the
+            // kernel-initiated `LogicalDeadlock` escalation row
+            // inserted in the spawn_blocking above. Emit BEFORE
+            // the `OrchestratorRespawnCeilingExceeded` event so a
+            // chain-replay sees the operator-actionable
+            // `EscalationSubmitted` row anchored to its
+            // ceiling-trip context. Per
+            // `audit-paired-writes.md §4` the emit runs
+            // post-commit; a crash between commit + emit leaves
+            // an `escalations` row with a missing audit anchor,
+            // which the dashboard surfaces via its own
+            // `escalations`-table projection. The advisory
+            // recovery sweep (`INV-AUDIT-PAIRED-06`) handles the
+            // re-emit.
+            //
+            // Pre-iter65 the emit was missing entirely — the
+            // SQLite-side `INSERT INTO escalations` ran (when the
+            // FK could resolve) but no `EscalationSubmitted` row
+            // landed in the chain, breaking
+            // `INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-01`'s
+            // chain-side observability contract.
+            if let Some(escalation_id) = &escalation_id_opt {
+                // Resolve task_id + lineage_id for the audit
+                // payload via a fresh read (the spawn_blocking
+                // already committed the row, so the read sees
+                // the persisted shape — the `escalations` row
+                // itself carries them).
+                let store_for_lookup = Arc::clone(&ctx.store);
+                let escalation_id_for_lookup = escalation_id.clone();
+                let escalation_meta = tokio::task::spawn_blocking(
+                    move || -> Option<(String, String, String)> {
+                        let conn = store_for_lookup.lock_sync();
+                        conn.query_row(
+                            &format!(
+                                "SELECT task_id, lineage_id, class
+                                   FROM {esc} WHERE escalation_id = ?1",
+                                esc = raxis_store::Table::Escalations.as_str(),
+                            ),
+                            rusqlite::params![&escalation_id_for_lookup],
+                            |r| {
+                                Ok((
+                                    r.get::<_, String>(0)?,
+                                    r.get::<_, String>(1)?,
+                                    r.get::<_, String>(2)?,
+                                ))
+                            },
+                        )
+                        .ok()
+                    },
+                )
+                .await
+                .ok()
+                .flatten();
+                if let Some((task_id, lineage_id, class)) = escalation_meta {
+                    if let Err(e) = ctx.audit.emit(
+                        raxis_audit_tools::AuditEventKind::EscalationSubmitted {
+                            escalation_id: escalation_id.clone(),
+                            task_id,
+                            class,
+                            lineage_id,
+                        },
+                        None,
+                        None,
+                        Some(initiative_id),
+                    ) {
+                        eprintln!(
+                            "{{\"level\":\"warn\",\
+                             \"event\":\"EscalationSubmittedAuditEmitFailed\",\
+                             \"escalation_id\":\"{escalation_id}\",\
+                             \"initiative_id\":\"{initiative_id}\",\
+                             \"error\":\"{e}\"}}",
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"event\":\"EscalationSubmittedAuditEmitSkipped\",\
+                         \"reason\":\"escalation_row_lookup_miss\",\
+                         \"escalation_id\":\"{escalation_id}\",\
+                         \"initiative_id\":\"{initiative_id}\"}}",
+                    );
+                }
+            } else {
+                // The Tier-2 fallback in
+                // `insert_logical_deadlock_escalation_in_tx`
+                // returned `Ok(None)` — neither a worker session
+                // nor a pre-existing Orchestrator session row
+                // existed for this initiative. Surface
+                // structurally so a forensic reader can flag the
+                // (rare) case rather than silently dropping the
+                // escalation contract.
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"LogicalDeadlockEscalationSkippedNoFkAnchor\",\
+                     \"initiative_id\":\"{initiative_id}\",\
+                     \"invariant\":\"INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01\"}}",
+                );
+            }
+
             // Audit emission is the chain-side half of the paired
             // write. The SQLite-side state mutation
             // (`initiatives.state = 'Failed' + failure_reason`)

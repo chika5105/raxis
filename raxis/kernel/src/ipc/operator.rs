@@ -2408,9 +2408,16 @@ async fn handle_approve_logical_deadlock(
     let ctx_for_respawn = Arc::clone(ctx);
     let init_for_respawn = initiative_id.clone();
     tokio::spawn(async move {
+        // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+        // — operator-driven escalation-approval respawn. There is
+        // no preceding capacity-pressure-rejected session here
+        // (this is a fresh restart of the orchestrator after the
+        // operator approved the LogicalDeadlock escalation); pass
+        // `false`.
         let _ = crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
             &init_for_respawn,
             ctx_for_respawn,
+            false,
         )
         .await;
     });

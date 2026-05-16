@@ -444,9 +444,18 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
                 if let Some(init_id) = initiative_id_opt {
                     let ctx_for_respawn = Arc::clone(ctx);
                     tokio::spawn(async move {
+                        // `INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01`
+                        // (iter65) — the EarlyResponse dispatch path
+                        // is fired by a worker-tier intent's
+                        // accepted-response cascade, not by an
+                        // orchestrator session's exit. There is no
+                        // preceding orchestrator session whose last
+                        // intent could have been a capacity-pressure
+                        // rejection; pass `false` unconditionally.
                         crate::session_spawn_orchestrator::respawn_orchestrator_for_initiative(
                             &init_id,
                             ctx_for_respawn,
+                            false,
                         )
                         .await;
                     });
