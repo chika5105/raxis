@@ -968,9 +968,67 @@ pub fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
     );
     body.push_str(&injected);
     body.push_str(&observability_policy_block());
+
+    // ── iter62/iter63: real witness verifier (additive, FOLLOWUP-B) ────────
+    //
+    // INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01: every live-e2e
+    // run MUST drive at least one verifier-backed gate through
+    // `kernel/src/scheduler/dag.rs::transition_to_admitted`. Mirror
+    // of the block in `extended_e2e_concurrent_lifecycle.rs`. The
+    // injection is conditional on the verifier binary existing on
+    // disk; absent binary → skip + eprintln (avoids hanging the
+    // test on a broken policy).
+    if let Some(verifier_bin) = sibling_verifier_binary(gateway_binary) {
+        let gate_block = format!(
+            "\n# ── [[gates]] — witness verifier (iter62 / iter63) ──\n\
+             # Real, fast worktree-scanning gate. Source:\n\
+             # `crates/verifier-no-secrets/`.\n\
+             # See `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for\n\
+             # the rationale (this is the live coverage point for the\n\
+             # iter63 recheck-clear paired-write audit row).\n\
+             [[gates]]\n\
+             gate_type        = \"NoSecretStrings\"\n\
+             verifier_command = \"{vb}\"\n\
+             max_wall_seconds = 30\n\
+             max_memory_bytes = 268435456\n\
+             network_allowed  = false\n",
+            vb = verifier_bin.display(),
+        );
+        body.push_str(&gate_block);
+        eprintln!(
+            "[live-e2e] enabling NoSecretStrings gate; verifier={}",
+            verifier_bin.display()
+        );
+    } else {
+        eprintln!(
+            "[live-e2e] skipping NoSecretStrings gate injection — \
+             raxis-verifier-no-secrets binary not found alongside \
+             {} (build with `cargo build -p raxis-verifier-no-secrets --release` \
+             to enable iter63 recheck-clear coverage)",
+            gateway_binary.display(),
+        );
+    }
     std::fs::write(&policy_path, body)
         .unwrap_or_else(|e| panic!("rewrite {}: {e}", policy_path.display()));
 }
+
+/// Resolve the absolute path of the `raxis-verifier-no-secrets`
+/// binary built into the same `target/<profile>/` tree as
+/// `gateway_binary`. Returns `None` when the binary has not been
+/// built — callers MUST short-circuit gate injection in that case.
+/// Cf. `extended_e2e_concurrent_lifecycle::sibling_verifier_binary`
+/// for the canonical definition; duplicated here to keep each
+/// extended-e2e slice self-contained at its file-ownership boundary.
+fn sibling_verifier_binary(gateway_binary: &std::path::Path) -> Option<std::path::PathBuf> {
+    let parent = gateway_binary.parent()?;
+    let candidate = parent.join("raxis-verifier-no-secrets");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
+}
+
 
 /// Seed `<data_dir>/repositories/main` as a real (non-bare) git
 /// repository with `refs/heads/main` pointing at an initial empty
