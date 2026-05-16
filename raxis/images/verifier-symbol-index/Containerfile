@@ -1,0 +1,85 @@
+# RAXIS kernel-canonical symbol-index verifier image —
+# Containerfile (iter62 D5).
+#
+# Normative references:
+#   - verifier-processes.md §6 (witness body shape)
+#   - INV-VERIFIER-12 (reserved alias `raxis-verifier-symbol-index`)
+#   - INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01 (D11)
+#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#
+# Shape
+# ─────
+# Strictly smaller than `verifier-starter` because this image has
+# exactly one purpose — produce a symbol index for the worktree
+# attached at `/raxis/worktree` and emit it to the kernel as a
+# `WitnessSubmission` with `artifact = symbol_index.json`. Target
+# image size: < 30 MiB.
+#
+# Toolchain:
+#   - `busybox-static` — the only shell + coreutils surface needed
+#     for the diff-scoped + parallel ctags pipeline from D7. The
+#     verifier binary itself orchestrates the pipeline; busybox is
+#     here so `sh -lc` (the kernel's spawn command) has a shell
+#     to invoke when the kernel rather than the verifier wants to
+#     run the symbol-index command directly.
+#   - `universal-ctags` — the canonical symbol-index emitter. Used
+#     by D7's fast incremental path (`ctags -f - --output-format=json`
+#     for the per-file streaming output the verifier merges into
+#     the kernel-side base index).
+#
+# Notably absent: bash (busybox-static covers POSIX sh), ripgrep
+# (D7 uses `find -print0 | xargs -0 ctags` rather than rg for the
+# parallelism shape), language runtimes, network tools, editors,
+# build systems. The kernel-canonical posture forbids anything
+# operators might want to "just slip into the image"; the digest
+# is the SOLE truth at spawn time and operators cannot override
+# it via policy (see D6 / D9).
+
+FROM debian:bookworm-slim AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        busybox-static \
+        universal-ctags \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
+
+# Strict exclusion list — the kernel-canonical posture refuses any
+# language runtime, compiler, or networking tool. A divergence here
+# (e.g. busybox accidentally pulling in `bash` as a recommended dep)
+# would surface at the bake step's per-rootfs binary audit.
+RUN rm -f \
+    /usr/bin/python3 \
+    /usr/bin/node \
+    /usr/bin/ruby \
+    /usr/bin/perl \
+    /usr/bin/lua \
+    /usr/bin/rustc \
+    /usr/bin/gcc \
+    /usr/bin/clang \
+    /usr/bin/tsc \
+    /usr/bin/go \
+    /usr/bin/npm \
+    /usr/bin/cargo \
+    /usr/bin/pip \
+    /usr/bin/gem \
+    /usr/bin/curl \
+    /usr/bin/wget \
+    /usr/bin/ssh \
+    /usr/bin/nc \
+    /usr/bin/vi \
+    /usr/bin/nano \
+    /usr/bin/emacs \
+    /usr/bin/less \
+    /usr/bin/make \
+    /usr/bin/bazel \
+    /usr/bin/meson \
+    /usr/bin/ninja || true
+
+# raxis-verifier (PID 1) overlaid by the bake step at
+# /usr/bin/raxis-verifier. Cf. `images/verifier-starter/Containerfile`
+# — same overlay shape, smaller surface. The kernel-canonical posture
+# is enforced at the trust-anchor layer
+# (`crates/canonical-images::CanonicalImageKind::VerifierSymbolIndex`)
+# rather than by anything in this Containerfile.

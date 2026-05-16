@@ -17,6 +17,14 @@
 pub mod claim;
 pub mod policy_lookup;
 pub mod verifier_runner;
+// === iter62 verifier-runtime D8: VerifierVm* audit-emission helpers ===
+//
+// Builder/emission helpers for the six new `AuditEventKind::Verifier*`
+// variants the iter62 verifier runtime emits at the kernel-side
+// verifier-VM lifecycle sites. Lives next to `verifier_runner` so
+// the call sites and the helpers stay co-located. See
+// `verifier_audit.rs` module-level comment for the wiring contract.
+pub mod verifier_audit;
 pub mod witness;
 
 use std::path::{Path, PathBuf};

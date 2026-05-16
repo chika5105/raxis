@@ -43,6 +43,16 @@ pub use bundle::{
     VERIFIER_ENV_MAX_TOTAL_BYTES, VERIFIER_TIMEOUT_MIN_SECS,
 };
 
+// === iter62 verifier-runtime: general-verifier alias re-export ===
+//
+// `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME` is the operator-side
+// counterpart of the existing `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`.
+// Re-exported so kernel-side validators (and out-of-band tools like
+// `raxis doctor`) can reference the literal without depending on
+// the bundle module path. See `INV-VERIFIER-RESERVED-ALIAS-MUTUAL-
+// EXCLUSION-01` (D11) for the rule the const enforces.
+pub use bundle::RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME;
+
 #[cfg(any(debug_assertions, test))]
 pub use bundle::EscalationPolicyForTests;
 pub use error::PolicyError;

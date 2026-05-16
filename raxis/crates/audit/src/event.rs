@@ -4084,6 +4084,127 @@ pub enum AuditEventKind {
         /// Stable-wire outcome string.
         outcome: String,
     },
+
+    // === iter62 verifier-runtime: VerifierVm* family ==================
+    //
+    // The six variants below close the `INV-VERIFIER-AUDIT-PAIRED-WRITE-01`
+    // contract from `specs/invariants.md` (D11). Every
+    // `VerifierVmSpawned` MUST be paired with EXACTLY ONE of:
+    //
+    //   * `VerifierVmExited` AND `VerifierWitnessReceived`
+    //     (the happy path — the verifier ran and submitted a witness)
+    //   * `VerifierTimeout`
+    //     (the wall-clock fired; verifier short-circuited)
+    //   * `VerifierImageDigestMismatch`
+    //     (the kernel-canonical digest gate refused to spawn the VM)
+    //   * `VerifierArtifactRejected`
+    //     (the verifier produced an artefact the kernel cannot
+    //     admit — size cap, path-escape, sha mismatch)
+    //
+    // The kernel-side emit sites live at
+    // `kernel/src/gates/verifier_runner.rs::spawn_verifier`. Audit
+    // event-kind allowlist + dashboard SSE mirror updates land in the
+    // same iter62 batch.
+    /// The kernel just successfully spawned a verifier VM under the
+    /// V2 image-bake / digest-verify / spawn pipeline. The first
+    /// half of the `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair.
+    VerifierVmSpawned {
+        /// Stable per-VM identifier the kernel mints at spawn.
+        /// Threaded into every subsequent VerifierVm* event in this
+        /// pair so the audit chain can re-stitch the lifecycle even
+        /// when interleaved with other verifiers.
+        verifier_run_id: String,
+        /// Task whose verifier this is, for cross-table joins with
+        /// `tasks.id`.
+        task_id: String,
+        /// Owning initiative.
+        initiative_id: String,
+        /// Operator-visible image alias the kernel resolved at
+        /// spawn (e.g. `raxis-verifier-symbol-index`,
+        /// `raxis-verifier-starter`, or an operator-published
+        /// `[[vm_images]]` name).
+        image_alias: String,
+        /// Lowercase-hex SHA-256 of the spawned image (the
+        /// canonical digest that survived
+        /// `verify_canonical_image_via_manifest`).
+        oci_digest: String,
+        /// Verifier-supplied shell command line (or `<builtin>`
+        /// for the kernel-canonical built-in pipeline).
+        command: String,
+        /// Operator-supplied disposition for the verifier's
+        /// witness (`fail_initiative`, `warn_only`, `retry_task`).
+        on_failure: String,
+    },
+    /// The verifier VM exited. Pairs with the latest
+    /// `VerifierVmSpawned` for the same `verifier_run_id`.
+    VerifierVmExited {
+        /// Same id minted at spawn.
+        verifier_run_id: String,
+        /// Coarse classification of the exit (`exit`, `signal`,
+        /// `timeout`, `killed`).
+        signal_class: String,
+        /// Numeric exit code if the kernel observed one
+        /// (`None` for signal-terminated children).
+        exit_code: Option<i32>,
+        /// Wall-clock milliseconds from spawn to exit (kernel
+        /// timer; not the verifier's self-reported `wall_ms`).
+        wall_ms: u64,
+    },
+    /// The kernel admitted the verifier's `WitnessSubmission`.
+    /// Pairs with the latest `VerifierVmSpawned` for the same
+    /// `verifier_run_id`.
+    VerifierWitnessReceived {
+        /// Same id minted at spawn.
+        verifier_run_id: String,
+        /// `Pass`, `Fail`, or `Inconclusive` per the
+        /// `verifier-processes.md §6` table.
+        verdict: String,
+        /// Lowercase-hex SHA-256 of the witness artefact (when
+        /// present).
+        artifact_sha256: Option<String>,
+        /// Size of the artefact in bytes (when present).
+        artifact_bytes: Option<u64>,
+    },
+    /// The kernel-canonical digest gate refused to spawn the VM
+    /// because the on-disk image's SHA-256 did not equal the
+    /// kernel-binary-embedded expected digest. Short-circuits the
+    /// `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair.
+    VerifierImageDigestMismatch {
+        /// The alias the operator (or kernel-canonical resolution)
+        /// asked for.
+        image_alias: String,
+        /// Lowercase-hex SHA-256 the kernel binary expected.
+        expected: String,
+        /// Lowercase-hex SHA-256 the on-disk file actually hashed
+        /// to.
+        actual: String,
+        /// On-disk path the kernel was attempting to verify.
+        path: String,
+    },
+    /// The verifier's wall-clock timer fired before the command
+    /// (or built-in pipeline) completed. Short-circuits the
+    /// `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` pair.
+    VerifierTimeout {
+        /// Same id minted at spawn.
+        verifier_run_id: String,
+        /// `RAXIS_VERIFIER_TIMEOUT_SECONDS` the kernel set in the
+        /// spawn envelope.
+        timeout_seconds: u64,
+        /// Bytes of stdout the verifier streamed before the kill.
+        partial_stdout_bytes: u64,
+    },
+    /// The kernel rejected the verifier's artefact at admission
+    /// time (size cap, path-escape, sha mismatch). The verifier
+    /// VM may have exited cleanly; this event captures the
+    /// admission-time refusal that supersedes
+    /// `VerifierWitnessReceived`.
+    VerifierArtifactRejected {
+        /// Same id minted at spawn.
+        verifier_run_id: String,
+        /// Stable wire string for the rejection reason
+        /// (`size_cap`, `path_escape`, `sha_mismatch`).
+        reason: String,
+    },
 }
 
 impl AuditEventKind {
@@ -4262,6 +4383,13 @@ impl AuditEventKind {
             Self::OperatorViewedWorktreeList { .. } => "OperatorViewedWorktreeList",
             Self::OperatorViewedWorktreeLog { .. } => "OperatorViewedWorktreeLog",
             Self::OperatorViewedPlanToml { .. } => "OperatorViewedPlanToml",
+            // === iter62 verifier-runtime: VerifierVm* family ===
+            Self::VerifierVmSpawned { .. } => "VerifierVmSpawned",
+            Self::VerifierVmExited { .. } => "VerifierVmExited",
+            Self::VerifierWitnessReceived { .. } => "VerifierWitnessReceived",
+            Self::VerifierImageDigestMismatch { .. } => "VerifierImageDigestMismatch",
+            Self::VerifierTimeout { .. } => "VerifierTimeout",
+            Self::VerifierArtifactRejected { .. } => "VerifierArtifactRejected",
         }
     }
 }
@@ -5196,5 +5324,111 @@ mod credential_proxy_kind_tests {
         assert_eq!(v["path_sha256"], serde_json::json!("cafebabe"));
         assert_eq!(v["status_code"], serde_json::json!(200));
         assert_eq!(v["blocked"], serde_json::json!(false));
+    }
+
+    // === iter62 verifier-runtime: VerifierVm* family witnesses ========
+
+    #[test]
+    fn iter62_verifier_vm_spawned_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierVmSpawned {
+            verifier_run_id: "vrun-1".to_owned(),
+            task_id: "task-7".to_owned(),
+            initiative_id: "ini-3".to_owned(),
+            image_alias: "raxis-verifier-symbol-index".to_owned(),
+            oci_digest: "deadbeef".to_owned(),
+            command: "<builtin>".to_owned(),
+            on_failure: "warn_only".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "VerifierVmSpawned");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierVmSpawned"));
+        assert_eq!(v["verifier_run_id"], serde_json::json!("vrun-1"));
+        assert_eq!(v["task_id"], serde_json::json!("task-7"));
+        assert_eq!(v["initiative_id"], serde_json::json!("ini-3"));
+        assert_eq!(
+            v["image_alias"],
+            serde_json::json!("raxis-verifier-symbol-index")
+        );
+        assert_eq!(v["oci_digest"], serde_json::json!("deadbeef"));
+        assert_eq!(v["command"], serde_json::json!("<builtin>"));
+        assert_eq!(v["on_failure"], serde_json::json!("warn_only"));
+    }
+
+    #[test]
+    fn iter62_verifier_vm_exited_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierVmExited {
+            verifier_run_id: "vrun-1".to_owned(),
+            signal_class: "exit".to_owned(),
+            exit_code: Some(0),
+            wall_ms: 184,
+        };
+        assert_eq!(kind.as_str(), "VerifierVmExited");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierVmExited"));
+        assert_eq!(v["verifier_run_id"], serde_json::json!("vrun-1"));
+        assert_eq!(v["signal_class"], serde_json::json!("exit"));
+        assert_eq!(v["exit_code"], serde_json::json!(0));
+        assert_eq!(v["wall_ms"], serde_json::json!(184));
+    }
+
+    #[test]
+    fn iter62_verifier_witness_received_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierWitnessReceived {
+            verifier_run_id: "vrun-1".to_owned(),
+            verdict: "Pass".to_owned(),
+            artifact_sha256: Some("cafe".to_owned()),
+            artifact_bytes: Some(2048),
+        };
+        assert_eq!(kind.as_str(), "VerifierWitnessReceived");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierWitnessReceived"));
+        assert_eq!(v["verdict"], serde_json::json!("Pass"));
+        assert_eq!(v["artifact_sha256"], serde_json::json!("cafe"));
+        assert_eq!(v["artifact_bytes"], serde_json::json!(2048));
+    }
+
+    #[test]
+    fn iter62_verifier_image_digest_mismatch_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierImageDigestMismatch {
+            image_alias: "raxis-verifier-symbol-index".to_owned(),
+            expected: "abc".to_owned(),
+            actual: "def".to_owned(),
+            path: "/var/lib/raxis/images/raxis-verifier-symbol-index-0.1.0.img".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "VerifierImageDigestMismatch");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierImageDigestMismatch"));
+        assert_eq!(
+            v["image_alias"],
+            serde_json::json!("raxis-verifier-symbol-index")
+        );
+        assert_eq!(v["expected"], serde_json::json!("abc"));
+        assert_eq!(v["actual"], serde_json::json!("def"));
+    }
+
+    #[test]
+    fn iter62_verifier_timeout_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierTimeout {
+            verifier_run_id: "vrun-1".to_owned(),
+            timeout_seconds: 30,
+            partial_stdout_bytes: 4096,
+        };
+        assert_eq!(kind.as_str(), "VerifierTimeout");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierTimeout"));
+        assert_eq!(v["timeout_seconds"], serde_json::json!(30));
+        assert_eq!(v["partial_stdout_bytes"], serde_json::json!(4096));
+    }
+
+    #[test]
+    fn iter62_verifier_artifact_rejected_kind_and_fields_pinned() {
+        let kind = AuditEventKind::VerifierArtifactRejected {
+            verifier_run_id: "vrun-1".to_owned(),
+            reason: "size_cap".to_owned(),
+        };
+        assert_eq!(kind.as_str(), "VerifierArtifactRejected");
+        let v = serde_json::to_value(&kind).expect("serialises");
+        assert_eq!(v["kind"], serde_json::json!("VerifierArtifactRejected"));
+        assert_eq!(v["reason"], serde_json::json!("size_cap"));
     }
 }

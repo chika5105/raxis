@@ -1,0 +1,69 @@
+# RAXIS general-verifier starter image inputs (iter62 D4).
+#
+# Normative references:
+#   - peripherals.md §3.3 (verifier spawn envelope)
+#   - verifier-processes.md §6 (witness body shape + exit-code mapping)
+#   - planner-harness.md §14.4 (image-build pipeline)
+#   - V2_GAPS.md A8 (verifier runtime — shipped, iter62)
+#   - INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01 (D11)
+#
+# Trust model
+# ───────────
+# The general-verifier starter is operator-publishable-equivalent
+# (operators MAY publish their own `[[vm_images]] role_restriction =
+# ["Verifier"]` with a different alias, but the canonical alias
+# `raxis-verifier-starter` is reserved by
+# `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME` — see D9). The kernel
+# does NOT version-lock against this image's digest at the binary
+# level; the digest is operator-pinned via the policy bundle's
+# `[[vm_images]]` entry. The signed manifest produced here is what
+# the operator policy-pins, exactly like the executor-starter
+# manifest pattern in `images/executor-starter/manifest.toml`.
+
+role              = "Verifier"
+kernel_version    = "0.1.0"
+
+source_date_epoch = 1700000000
+erofs_version     = "1.7.1"
+tar_version       = "1.34"
+zstd_version      = "1.5.5"
+
+# `image_format` selects the on-disk shape of the rootfs blob this
+# build emits. Defaults to `RootfsErofs` (production canonical) when
+# absent; `cargo xtask images build-all` overrides this to
+# `RootfsInitramfsCpio` for the macOS-hermetic dev pipeline. Both
+# shapes are kernel-trusted via the same signed manifest path.
+image_format      = "RootfsErofs"
+
+# Default `RAXIS_VERIFIER_TIMEOUT_SECONDS` the kernel injects at
+# spawn time when an operator omits an explicit `timeout` on a
+# `[[plan.tasks.<id>.verifiers]]` block. 60 s is generous enough
+# for the common gate types (test suite slices, lint over a 50-file
+# diff, coverage XML parsing) while still triggering the kernel's
+# wall-clock kill path for any pathological producer. Cf.
+# `crates/verifier::VerifierEnv::MIN_TIMEOUT_SECS = 5` (the
+# verifier-side floor; the kernel rejects anything below that
+# operator-side via `validate_integration_merge_verifier_entry`).
+#
+# Documentary field — the verifier binary itself reads
+# `RAXIS_VERIFIER_TIMEOUT_SECONDS` from the spawn envelope, not
+# from this manifest. The value here is what operators see in
+# `raxis doctor vm-images` so a misconfigured policy that forgets
+# to pass a timeout still gets a sane default.
+[runtime_defaults]
+verifier_timeout_seconds = 60
+verifier_artifact_max_bytes = 1048576  # 1 MiB; matches lib.rs DEFAULT
+verifier_stdout_max_bytes = 262144     # 256 KiB
+verifier_stderr_max_bytes = 262144     # 256 KiB
+
+# Pinned tool versions for documentary purposes — same shape as
+# `images/executor-starter/manifest.toml [lint_toolchain]`. The
+# kernel does not consume these at boot; they exist so an operator
+# auditing the manifest can answer "which ctags / ripgrep / jq is
+# in this bake?" without re-running the rootfs through `dpkg-query`.
+# The Containerfile is the source of truth; `verify.sh` cross-checks
+# the bake against the values below.
+[verifier_toolchain]
+universal_ctags_version = "5.9.20220403.0"
+ripgrep_version = "13.0.0"
+jq_version = "1.6"

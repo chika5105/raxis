@@ -12253,6 +12253,182 @@ handler. See `RETURN_NOTE_TO_PARENT.md`.
 
 ---
 
+### iter62 verifier-runtime invariants
+
+The five invariants below close the V2_GAPS A8 row
+("verifier runtime — partial: dispatch done, runtime partial")
+by pinning the structural contracts the iter62 verifier-runtime
+ships against. Each entry follows the §2 / §3 house style
+(Statement / Why structural / Witness). Canonical homes are the
+spec docs in `specs/v2/verifier-processes.md` and
+`specs/v2/iter62-verifier-runtime-live-e2e.md`; this section is a
+navigational consolidation per `§13`.
+
+### INV-VERIFIER-RUNTIME-PRODUCTION-BINARY-01 — The production verifier binary MUST be `crates/verifier`, NOT `crates/verifier-stub`
+
+**Statement.** The `raxis-verifier-starter` and
+`raxis-verifier-symbol-index` images bake the `raxis-verifier`
+binary from `crates/verifier/`. Operator policy MUST NOT
+configure a `[[gates]] verifier_command` that resolves to the
+`crates/verifier-stub` binary in any production deployment; the
+stub is `publish = false` (its `Cargo.toml` is pinned that way)
+and exists exclusively for kernel-internal tests
+(`kernel/tests/witness_round_trip_via_stub.rs` and the rest of the
+synthetic-witness suite).
+
+**Why structural.** The stub short-circuits witness emission via
+its `RAXIS_STUB_*` knobs; production must never accept a witness
+that did not actually run the verifier-supplied command. A
+deployment that accidentally pointed `verifier_command` at the
+stub binary would silently turn every gate into a synthetic-pass
+emitter — the worst kind of gate-FSM corruption.
+
+**Witness.**
+* `crates/verifier/Cargo.toml` — `[lib] path = "src/lib.rs"`,
+  `[[bin]] name = "raxis-verifier"`, no `publish = false`.
+* `crates/verifier-stub/Cargo.toml` — `publish = false` retained.
+* `crates/verifier/src/lib.rs::run_verifier_command` — `sh -lc
+  $RAXIS_VERIFIER_COMMAND` execution + size-capped capture +
+  wall-clock timeout, never short-circuited.
+
+### INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01 — The kernel-canonical symbol-index image's digest is the SOLE truth at spawn
+
+**Statement.** The `raxis-verifier-symbol-index` image's spawn
+gate MUST consult the kernel-binary-embedded
+`EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST` (or the V2
+manifest-trust path's signed `image_artefact_sha256` derivative).
+Operator policy MUST NOT override either surface. Any
+`[[vm_images]] name = "raxis-verifier-symbol-index"` declaration
+is rejected at policy load with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`
+per `INV-VERIFIER-12`.
+
+**Why structural.** The symbol-index verifier feeds the Reviewer
+read path; an operator-overrideable digest would let a tampered
+or accidentally-rebuilt image silently corrupt every Reviewer
+decision until the next forensic audit. The kernel-canonical
+posture mirrors Reviewer / Orchestrator (which cannot be operator-
+overridden either) and keeps the trust boundary one-way: kernel
+publishes, operators consume.
+
+**Witness.**
+* `crates/canonical-images/src/lib.rs::CanonicalImageKind::VerifierSymbolIndex.expected_digest`
+  routes through `EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST`.
+* `crates/canonical-images/src/lib.rs::tests::iter62_verify_canonical_image_pinned_refuses_placeholder_for_verifier_symbol_index`
+  — fail-loud on the all-zero placeholder.
+* `crates/policy/src/bundle.rs::tests::validate_vm_images_rejects_reserved_alias`
+  + `iter62_validate_vm_images_rejects_reserved_general_verifier_alias`
+  — operator squat on either reserved name surfaces
+  `FAIL_POLICY_RESERVED_VM_IMAGE_NAME` at policy load.
+
+### INV-VERIFIER-AUDIT-PAIRED-WRITE-01 — Every `VerifierVmSpawned` pairs with exactly one terminal event
+
+**Statement.** Every `AuditEventKind::VerifierVmSpawned { verifier_run_id = R, ... }`
+MUST be followed in the audit chain by EXACTLY ONE of:
+
+* `VerifierVmExited { verifier_run_id = R, ... }` AND
+  `VerifierWitnessReceived { verifier_run_id = R, ... }`
+  (the happy path — the verifier ran and submitted a witness)
+* `VerifierTimeout { verifier_run_id = R, ... }`
+  (wall-clock fired; verifier short-circuited)
+* `VerifierImageDigestMismatch { ... }`
+  (kernel-canonical digest gate refused the spawn)
+* `VerifierArtifactRejected { verifier_run_id = R, ... }`
+  (kernel rejected the artefact at admission time)
+
+The four short-circuit kinds are mutually exclusive with the
+happy-path pair for the same `verifier_run_id`; emitting both
+would be a double-pairing bug surfaced by chain replay.
+
+**Why structural.** A spawn without a terminal event leaves the
+gate FSM hanging on a verdict that will never arrive — the
+operator-facing dashboard SSE bridge would render the verifier
+as "still running" indefinitely. The four-way short-circuit set
+makes the contract complete: any failure mode the verifier-VM
+lifecycle can encounter has a structured terminal event the
+audit chain can pin.
+
+**Witness.**
+* `kernel/src/gates/verifier_audit.rs::tests::iter62_paired_write_happy_path_emits_three_events`
+  — Spawned + Exited + WitnessReceived for the happy path.
+* `kernel/src/gates/verifier_audit.rs::tests::iter62_paired_write_timeout_short_circuit_emits_spawned_plus_timeout`
+  — Spawned + Timeout for the wall-clock-fired short-circuit.
+* `kernel/src/notifications/sink.rs::bridge_kind_if_relevant`
+  — every variant in the family is bridged to the dashboard SSE
+  stream so an operator-side missing-terminal can be diagnosed
+  without scraping the JSONL directly.
+
+### INV-VERIFIER-SYMBOL-INDEX-PERF-CEILING-01 — The symbol-index verifier MUST complete within budget on the realistic workload
+
+**Statement.** The `raxis-verifier-symbol-index` built-in
+pipeline (activated by `RAXIS_VERIFIER_BUILTIN = "symbol-index"`)
+MUST emit its `WitnessSubmission` within:
+
+* **< 200 ms** wall-clock for a no-change diff (base sha equals
+  evaluation sha)
+* **< 1 s** wall-clock for a 50-file diff on a 10k-file repo
+  with a warm BASE_SYMBOL_INDEX
+* **< 5 s** wall-clock for a cold full-repo rebuild (no base
+  index, no cache hits) on a 10k-file repo
+
+Measured on a 10k-file Rust source-tree-shape repo with the
+BASE_SYMBOL_INDEX served from the kernel-side blob cache.
+Documented as `[perf_budget]` in
+`images/verifier-symbol-index/manifest.toml` and as the
+`perf_budget_50_file_diff` field in the verifier's audit summary.
+
+**Why structural.** The symbol-index gate runs on every Reviewer
+spawn; a regression past the 1-second ceiling would multiply
+across every initiative the harness drives. The diff-scoped /
+content-addressed / parallel-ctags pipeline (D7) is what makes
+the budget achievable; a future contributor who rolls back any
+of the four speed paths would silently re-introduce the bottleneck
+the budget is designed to prevent.
+
+**Witness.**
+* `images/verifier-symbol-index/README.md` — perf-budget table
+  pinning the three ceilings against the same realistic workload
+  shape.
+* `images/verifier-symbol-index/manifest.toml [perf_budget]` —
+  manifest-pinned numeric ceilings the bake step enforces.
+* `crates/verifier/src/symbol_index.rs::tests` — diff-scoped /
+  skiplist / cache-key / merge unit suite covering each
+  speed-path's correctness.
+* The verifier's audit summary `wall_ms` field — chain-replay
+  scripts can pin the ceiling against the live-e2e corpus.
+
+### INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01 — Operator policy MUST NOT declare `[[vm_images]]` that squats on a kernel-canonical verifier alias
+
+**Statement.** The operator-side `[[vm_images]]` validator
+(`validate_vm_images` in `crates/policy/src/bundle.rs`) MUST
+reject any entry whose `name` is in:
+
+* `raxis-verifier-symbol-index` (`RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`)
+* `raxis-verifier-starter` (`RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME`)
+
+with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`. Operators MAY publish
+their own verifier image with a DIFFERENT alias and
+`role_restriction = ["Verifier"]`; they cannot squat on either
+of the two kernel-published canonical names.
+
+**Why structural.** Two `[[vm_images]]` entries with the same
+alias would create an image-resolution ambiguity at spawn time;
+even if the kernel-canonical entry "wins", the operator-side
+declaration creates a misleading expectation that the operator's
+digest is authoritative. The shift-left rejection at policy load
+is the only place the contract can be enforced cheaply — by the
+time spawn runs the resolution must already be unambiguous.
+
+**Witness.**
+* `crates/policy/src/bundle.rs::tests::validate_vm_images_rejects_reserved_alias`
+  — symbol-index alias rejection.
+* `crates/policy/src/bundle.rs::tests::iter62_validate_vm_images_rejects_reserved_general_verifier_alias`
+  — general-verifier alias rejection (with the diagnostic naming
+  this invariant explicitly).
+* `crates/policy/src/bundle.rs::tests::iter62_reserved_general_verifier_alias_literal_is_pinned`
+  — the alias literal is exactly `"raxis-verifier-starter"`.
+
+---
+
 ## §13 — When this file is wrong
 
 This file is a navigational consolidation. The canonical homes

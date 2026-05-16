@@ -1,0 +1,107 @@
+# RAXIS general-verifier starter image — Containerfile (iter62 D4).
+#
+# Normative references:
+#   - peripherals.md §3.3 (verifier spawn envelope)
+#   - verifier-processes.md §6 (exit-code → WitnessResultClass mapping)
+#   - release-and-distribution.md §4.2 (PID-1 binary overlay path)
+#   - V2_GAPS.md A8 (verifier runtime — partial → shipped, iter62)
+#
+# Shape
+# ─────
+# The general verifier starter ships the `raxis-verifier` PID 1
+# alongside the smallest viable toolchain that covers the common
+# gate types operators reach for first:
+#
+#   - `bash` ≥ 5.0 + busybox-static — needed by `sh -lc
+#     $RAXIS_VERIFIER_COMMAND` (the kernel writes shell pipelines
+#     into the spawn envelope; busybox-static is the safety net
+#     when an operator's command uses one of the BusyBox-supplied
+#     applets that Debian's coreutils replaces but which most CI
+#     pipelines still assume exist).
+#   - `coreutils` + `findutils` + `grep` + `sed` — POSIX file
+#     inspection the gate commands chain through.
+#   - `jq` — structured-JSON inspection for verifiers that read
+#     `.lcov.info` / `*.json` reports and want to emit a
+#     witness-body fragment via `jq -c '{coverage_pct}'`.
+#   - `ripgrep` — the symbol-index speed path (D7) leans on
+#     `rg --files-with-matches` for fast diff scoping. Operators
+#     writing their own verifier commands also reach for it as
+#     a `grep -R` replacement.
+#   - `universal-ctags` — the canonical symbol-index emitter
+#     (D7 / `INV-VERIFIER-12`).
+#   - `file` + `tar` — gate-side artefact-archive shape probes.
+#   - `ca-certificates` — sanity, not network: even with no
+#     egress allowed, `git`-shaped tools refuse to start without
+#     a CA bundle present.
+#
+# Notably absent (refused at build time): language runtimes
+# (python/node/ruby), compilers (gcc/clang/rustc), package
+# managers (pip/npm/cargo/gem), networking tools (curl/wget/ssh/nc),
+# editors (vi/nano/emacs), build systems (make/bazel/meson/ninja).
+# A verifier that needs any of these MUST publish its own
+# `[[vm_images]]` with `role_restriction = ["Verifier"]` and a
+# distinct alias; the canonical starter stays small (< 50 MiB
+# target) so verifier cold-boot stays inside the spec's spawn
+# budget. The alias `raxis-verifier-starter` is reserved per
+# `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME` (D9) — operators
+# cannot squat on it.
+
+FROM debian:bookworm-slim AS base
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+
+RUN apt-get update && apt-get install --no-install-recommends -y \
+        bash \
+        busybox-static \
+        ca-certificates \
+        coreutils \
+        file \
+        findutils \
+        grep \
+        jq \
+        ripgrep \
+        sed \
+        tar \
+        universal-ctags \
+    && rm -rf /var/lib/apt/lists/* /usr/share/doc/* /usr/share/man/*
+
+# Enforce the strict binary exclusion list. Mirrors the executor
+# starter / orchestrator discipline so a verifier image never
+# accidentally inherits a language runtime that a downstream gate
+# command could exploit to escape its sandbox.
+RUN rm -f \
+    /usr/bin/python3 \
+    /usr/bin/node \
+    /usr/bin/ruby \
+    /usr/bin/perl \
+    /usr/bin/lua \
+    /usr/bin/rustc \
+    /usr/bin/gcc \
+    /usr/bin/clang \
+    /usr/bin/tsc \
+    /usr/bin/go \
+    /usr/bin/npm \
+    /usr/bin/cargo \
+    /usr/bin/pip \
+    /usr/bin/gem \
+    /usr/bin/curl \
+    /usr/bin/wget \
+    /usr/bin/ssh \
+    /usr/bin/nc \
+    /usr/bin/vi \
+    /usr/bin/nano \
+    /usr/bin/emacs \
+    /usr/bin/less \
+    /usr/bin/make \
+    /usr/bin/bazel \
+    /usr/bin/meson \
+    /usr/bin/ninja || true
+
+# raxis-verifier (PID 1) overlaid by the bake step at
+# /usr/bin/raxis-verifier per `release-and-distribution.md §4.2`.
+# The bake pipeline (cargo xtask images bake --role verifier-starter)
+# cross-compiles `crates/verifier` with the host-arch musl target and
+# copies the resulting binary into the rootfs before signing the
+# manifest. No `CMD` / `ENTRYPOINT` is set in the OCI layer — the
+# microVM substrate runs `/usr/bin/raxis-verifier` directly as PID 1.

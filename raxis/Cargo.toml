@@ -53,6 +53,16 @@ members = [
     # production coverage. See `crates/verifier-no-secrets/Cargo.toml`
     # for the full rationale.
     "crates/verifier-no-secrets",
+    # === iter62 verifier-runtime ===
+    #
+    # V2 production verifier binary baked into the
+    # `verifier-starter` and `verifier-symbol-index` guest images.
+    # See `crates/verifier/src/lib.rs` for the spawn-envelope
+    # contract; `crates/verifier-stub` stays for the kernel-internal
+    # `witness_round_trip_via_stub.rs` test that needs a controllable
+    # synthetic-witness emitter (the production binary actually
+    # execs `RAXIS_VERIFIER_COMMAND`).
+    "crates/verifier",
     "crates/domain",
     "crates/domain-git",
     "crates/prompts",
@@ -255,6 +265,14 @@ raxis-isolation-apple-vz = { path = "crates/isolation-apple-vz" }
 raxis-isolation-firecracker = { path = "crates/isolation-firecracker" }
 raxis-runtime           = { path = "crates/runtime" }
 raxis-verifier-stub     = { path = "crates/verifier-stub" }
+# === iter62 verifier-runtime ===
+#
+# Production verifier crate — same wire shape as `raxis-verifier-stub`
+# but executes the operator-supplied `RAXIS_VERIFIER_COMMAND` instead
+# of emitting a synthetic witness. The xtask bake pipeline pulls
+# this crate to populate `images/verifier-starter/rootfs/usr/bin/`
+# and `images/verifier-symbol-index/rootfs/usr/bin/`.
+raxis-verifier          = { path = "crates/verifier" }
 raxis-domain            = { path = "crates/domain" }
 raxis-domain-git        = { path = "crates/domain-git" }
 raxis-prompts           = { path = "crates/prompts" }

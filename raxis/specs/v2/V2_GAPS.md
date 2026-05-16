@@ -65,7 +65,7 @@ audit integration is complete.
 | A5 | [`integration-merge.md`](integration-merge.md) (admission) | `kernel/src/handlers/intent.rs`, `integration_merge_attribution.rs` | ~2,000 |
 | A6 | [`agent-disagreement.md`](agent-disagreement.md) | `kernel/src/handlers/escalation.rs` | 1,012 |
 | A7 | [`vm-network-isolation.md`](vm-network-isolation.md) | `tproxy/`, `crates/tproxy-protocol/`, `crates/egress-admission/` | 1,587 |
-| A8 | [`verifier-processes.md`](verifier-processes.md) (dispatch) | `kernel/src/gates/verifier_runner.rs`, `handlers/witness.rs` | ~2,200 |
+| A8 | [`verifier-processes.md`](verifier-processes.md) (dispatch + runtime — **shipped iter62**: production `raxis-verifier` crate, kernel-canonical symbol-index image, general-verifier image, `VerifierVm*` audit family) | `kernel/src/gates/verifier_runner.rs`, `kernel/src/gates/verifier_audit.rs`, `handlers/witness.rs`, `crates/verifier/`, `images/verifier-{starter,symbol-index}/` | ~3,400 |
 | A9 | [`release-and-distribution.md`](release-and-distribution.md) | `.github/workflows/release.yml`, `build-images.yml` | ~540 |
 | A10 | [`image-cache.md`](image-cache.md) | `crates/image-cache/` | 2,165 |
 | A11 | [`kernel-mediated-egress.md`](kernel-mediated-egress.md) | `crates/egress-admission/`, session-spawn env injection | ~1,300 |
@@ -3206,7 +3206,7 @@ workstream.
 | `INV-NOTIFY-01..06` (6) | Email + Webhook notification channels (C4) | V2 scope — ships with transport impl |
 | `INV-VM-CAP-01..03, 05` (4) | VM capacity admission queue (D2) | V2 scope — ships with capacity management |
 | `INV-PUSH-01, 03..05` (4) | Full push protocol (C6 — only auto-push shipped) | Partial V2 — push attestation is V3 |
-| `INV-VERIFIER-01..10, 12..15` (14) | Verifier runtime enforcement (A8 — dispatch done, runtime partial) | V2 scope — most ship with verifier wiring |
+| `INV-VERIFIER-01..10, 12..15` (14) | Verifier runtime enforcement (A8 — **shipped iter62**: dispatch + runtime + canonical symbol-index image + general verifier image; see iter62 invariants in `specs/invariants.md`) | ✅ V2 scope shipped under iter62; the iter62 verifier runtime adds `INV-VERIFIER-RUNTIME-PRODUCTION-BINARY-01`, `-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`, `-AUDIT-PAIRED-WRITE-01`, `-SYMBOL-INDEX-PERF-CEILING-01`, `-RESERVED-ALIAS-MUTUAL-EXCLUSION-01` |
 | `INV-CONVERGENCE-01..07` (7) | DAG convergence / liveness analysis | **V3** — the DAG is structural (no cycles by construction); convergence proofs are post-V2 |
 | `INV-SMTP-PROXY-01..05` (5) | SMTP proxy crate | **V3** — no SMTP proxy in V2 |
 
@@ -3367,3 +3367,68 @@ baseline. The V2.4 audit pass that closed Category 4 illustrates
 the cost of *not* maintaining that discipline: 5 of 6 invariants
 were already enforced in shipped code but the gap-tracking table
 had not been refreshed.
+
+---
+
+## §17 — iter62 verifier-runtime diff note (A8 closure)
+
+**Closes:** A8 row above ("verifier runtime — partial: dispatch
+done, runtime partial").
+
+The iter62 verifier-runtime worker shipped the production
+verifier end-to-end so the live-e2e harness now exercises the
+same image-bake / digest-verify / VM-spawn path that production
+uses, with no shortcuts. The deliverables landed as a single
+clearly-bounded change set: (1) the `xtask` and `image-manifest`
+`Role` enums grew `Verifier` and `VerifierSymbolIndex` variants
+with the full five-fold dispatch (parse / workspace_crate /
+binary_name / images_subdir / artefact_stem / manifest_role) so
+`cargo xtask images bake-all` now bakes five images instead of
+three; (2) a new production crate `crates/verifier/` (publish
+binary `raxis-verifier`) replaced the test-only `verifier-stub`
+in the live spawn path while leaving the stub crate intact for
+kernel-internal witness-emitter tests; (3) two new image trees
+under `images/verifier-{starter,symbol-index}/` carry the
+operator-publishable general verifier and the kernel-canonical
+symbol-index image respectively; (4) `crates/canonical-images/`
+grew compile-time digest pins for both new images with all-zero
+placeholders that fail-loud at spawn until the bake step
+populates them; (5) the symbol-index image ships a built-in
+fast-incremental pipeline (diff-scoped, persistent base index,
+parallel `ctags`, content-addressed cache, hard-coded skiplist)
+inside the same `raxis-verifier` binary, gated by
+`RAXIS_VERIFIER_BUILTIN=symbol-index`, with a perf budget of
+< 200 ms wall-clock for a no-change diff and < 1 s for a 50-file
+diff on a 10k-file repo (witnessed by
+`INV-VERIFIER-SYMBOL-INDEX-PERF-CEILING-01`); (6) a new
+`VerifierVm*` audit family (`Spawned`, `Exited`, `WitnessReceived`,
+`ImageDigestMismatch`, `Timeout`, `ArtifactRejected`) was
+appended to `crates/audit/src/event.rs`, allow-listed in the
+policy bundle, bridged through `kernel/src/notifications/sink.rs`
+to the dashboard SSE stream, and wired into a new helper module
+`kernel/src/gates/verifier_audit.rs` that the verifier runner
+calls at lifecycle boundaries; (7) the policy bundle reserves
+the `raxis-verifier-starter` alias as a sibling of
+`RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` so operators cannot squat
+on canonical aliases; (8) a new live-e2e spec
+`specs/v2/iter62-verifier-runtime-live-e2e.md` plus an additive
+`[[tasks.verifiers]]` block in `live-e2e/examples/plan_primary.toml`
+document and exercise the new path while a return-note delegates
+the (Worker-4-owned) `extended_e2e_support` audit-chain assertion
+to the parent at merge time; (9) five new normative invariants
+(`INV-VERIFIER-RUNTIME-PRODUCTION-BINARY-01`,
+`-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`,
+`-AUDIT-PAIRED-WRITE-01`, `-SYMBOL-INDEX-PERF-CEILING-01`,
+`-RESERVED-ALIAS-MUTUAL-EXCLUSION-01`) were appended to
+`specs/invariants.md` in a clearly-bounded `### iter62
+verifier-runtime invariants` section. All six witness-test paths
+called out in D12 (env parsing, exit-code mapping, timeout
+failure_reason, artifact size-cap, digest-mismatch fail-closed,
+reserved-alias rejection) ship with `#[cfg(test)] mod tests`
+coverage in the new code. The remaining cross-cutting follow-ups
+for the parent — wiring the `verifier_audit` emit helpers into
+`kernel/src/handlers/witness.rs` and the spawn preflight, folding
+the live-e2e audit-chain assertions into `extended_e2e_support`,
+and running `cargo xtask images bake-all` to populate the
+canonical-image digest placeholders — are documented in
+`RETURN_NOTE_TO_PARENT.md` at the worktree root.

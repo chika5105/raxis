@@ -145,6 +145,18 @@ impl ImageFormat {
 /// Which canonical role this image targets. Matches
 /// `raxis-types::Role` and the `[planner_role]` enum in the kernel
 /// session schema.
+///
+/// **Backwards-compatible additions (iter62, A8 verifier runtime).**
+/// Adding new variants to this enum is wire-compatible because the
+/// `#[serde(rename_all = "PascalCase")]` discriminant is a closed
+/// string set — older manifests that omit `Verifier` /
+/// `VerifierSymbolIndex` still deserialise as `Reviewer` /
+/// `Orchestrator` / `ExecutorStarter`. New verifier manifests
+/// produced by the iter62 bake pipeline carry the new tags. No
+/// `SCHEMA_VERSION` bump is needed; the canonical `bundle_hash`
+/// canonicalisation in [`ImageManifest::recompute_bundle_hash`]
+/// continues to fold the role into the signature implicitly via
+/// the manifest TOML round-trip.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "PascalCase")]
 pub enum Role {
@@ -154,6 +166,37 @@ pub enum Role {
     Orchestrator,
     /// Opt-in Executor starter image (operator-elected via policy).
     ExecutorStarter,
+    // === iter62 verifier-runtime: production verifier roles ===
+    //
+    // Two distinct image identities so the kernel-canonical
+    // symbol-index image (which operators MUST NOT override) has
+    // its own digest pinning slot in `raxis-canonical-images`
+    // separate from the general-verifier starter image (which is
+    // operator-equivalent and only reserves its alias). The
+    // separation also keeps `Role::artefact_stem` deterministic
+    // per produced .img blob — every blob has exactly one role tag.
+    /// **General verifier starter** — the V2 production verifier
+    /// `raxis-verifier` PID 1 plus a small toolchain (`busybox`,
+    /// `ripgrep`, `ctags`, `jq`, …). Operator-publishable-equivalent:
+    /// operators MAY publish their own `[[vm_images]]` with
+    /// `role_restriction = ["Verifier"]` and a different alias, but
+    /// MAY NOT squat on `raxis-verifier-starter` (the canonical
+    /// starter alias is reserved per `INV-VERIFIER-RESERVED-ALIAS-
+    /// MUTUAL-EXCLUSION-01`). The kernel boot path treats this image
+    /// like the executor-starter: trust comes from the signed
+    /// manifest, not from a compile-time digest. Closes the
+    /// `V2_GAPS.md A8` runtime gap.
+    Verifier,
+    /// **Kernel-canonical symbol-index verifier** — the
+    /// `raxis-verifier-symbol-index` image. Kernel-canonical in the
+    /// same sense as Reviewer / Orchestrator: the digest is the
+    /// SOLE truth at spawn time and the alias
+    /// `raxis-verifier-symbol-index` is reserved by
+    /// `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`. Carries the diff-
+    /// scoped + parallel ctags symbol-index implementation from
+    /// `iter62-verifier-runtime` (D7); ships in a minimal busybox
+    /// rootfs to keep the spawn cold-boot budget low.
+    VerifierSymbolIndex,
 }
 
 impl Role {
@@ -165,6 +208,9 @@ impl Role {
             Role::Reviewer => "reviewer-core",
             Role::Orchestrator => "orchestrator-core",
             Role::ExecutorStarter => "executor-starter",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "verifier-starter",
+            Role::VerifierSymbolIndex => "verifier-symbol-index",
         }
     }
 
@@ -174,6 +220,9 @@ impl Role {
             Role::Reviewer => "raxis-reviewer-core",
             Role::Orchestrator => "raxis-orchestrator-core",
             Role::ExecutorStarter => "raxis-executor-starter",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "raxis-verifier-starter",
+            Role::VerifierSymbolIndex => "raxis-verifier-symbol-index",
         }
     }
 }
@@ -1013,5 +1062,73 @@ mod tests {
         hasher.update(b"raxis-image-manifest-test");
         let expected: [u8; 32] = hasher.finalize().into();
         assert_eq!(hex_str, hex::encode(expected));
+    }
+
+    // === iter62 verifier-runtime ===
+    //
+    // Pin the iter62 additions to the closed `Role` enum so:
+    //
+    //   * `as_dir_name` / `artefact_stem` agree with the per-role
+    //     subdir layout the xtask bake pipeline writes
+    //     (`images/<role.as_dir_name()>/manifest.toml` and
+    //     `<install_dir>/images/<role.artefact_stem()>-<kver>.img`).
+    //   * PascalCase serde discriminants round-trip cleanly so an
+    //     operator inspecting a verifier `.manifest.toml` sees
+    //     `role = "Verifier"` / `role = "VerifierSymbolIndex"`
+    //     rather than a malformed tag.
+    //   * Existing variants (`Reviewer` / `Orchestrator` /
+    //     `ExecutorStarter`) keep their stems unchanged — the
+    //     iter62 additions are strictly append-only, no schema
+    //     bump needed (cf. lib.rs Role doc comment).
+    #[test]
+    fn verifier_role_variants_have_expected_dir_and_artefact_stems() {
+        assert_eq!(Role::Verifier.as_dir_name(), "verifier-starter");
+        assert_eq!(
+            Role::VerifierSymbolIndex.as_dir_name(),
+            "verifier-symbol-index"
+        );
+        assert_eq!(Role::Verifier.artefact_stem(), "raxis-verifier-starter");
+        assert_eq!(
+            Role::VerifierSymbolIndex.artefact_stem(),
+            "raxis-verifier-symbol-index"
+        );
+    }
+
+    #[test]
+    fn verifier_role_variants_serde_round_trip_through_toml() {
+        // Round-trip through TOML so a malformed serde tag would
+        // surface (the spawn-time manifest load uses the same path).
+        let s = toml::to_string(&Role::Verifier).unwrap();
+        let back: Role = toml::from_str(&s).unwrap();
+        assert_eq!(back, Role::Verifier, "Verifier must round-trip");
+
+        let s = toml::to_string(&Role::VerifierSymbolIndex).unwrap();
+        let back: Role = toml::from_str(&s).unwrap();
+        assert_eq!(
+            back,
+            Role::VerifierSymbolIndex,
+            "VerifierSymbolIndex must round-trip"
+        );
+    }
+
+    #[test]
+    fn existing_role_stems_unchanged_after_iter62_additions() {
+        // Strong negative pin: adding the two verifier variants to
+        // the closed enum MUST NOT shift any existing variant's
+        // surface. Operators with `Reviewer` / `Orchestrator` /
+        // `ExecutorStarter` manifests already on disk continue to
+        // load cleanly under the v3 schema.
+        assert_eq!(Role::Reviewer.as_dir_name(), "reviewer-core");
+        assert_eq!(Role::Orchestrator.as_dir_name(), "orchestrator-core");
+        assert_eq!(Role::ExecutorStarter.as_dir_name(), "executor-starter");
+        assert_eq!(Role::Reviewer.artefact_stem(), "raxis-reviewer-core");
+        assert_eq!(
+            Role::Orchestrator.artefact_stem(),
+            "raxis-orchestrator-core"
+        );
+        assert_eq!(
+            Role::ExecutorStarter.artefact_stem(),
+            "raxis-executor-starter"
+        );
     }
 }
