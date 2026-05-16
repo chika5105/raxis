@@ -82,7 +82,7 @@
 | Verifier processes — V2 | INV-VERIFIER-01..15 | 15 |
 | Environment binding — V2 | INV-ENV-01 | 1 |
 | Paired audit writes — V2 | INV-AUDIT-PAIRED-01..07 | 7 |
-| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03, INV-DASHBOARD-HEALTH-NO-CACHE-01, INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01, INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01, INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01, INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01, INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 | 24 |
+| Dashboard surface — V2   | INV-DASHBOARD-STREAM-ENVELOPE-01, INV-DASHBOARD-STREAM-PRODUCER-01, INV-AUDIT-DASHBOARD-01, INV-AUDIT-OPERATOR-ACTION-01, INV-NOTIF-SCOPE-01, INV-DASHBOARD-VALIDATE-01, INV-DASHBOARD-FAILURE-VISIBILITY-01, INV-DASHBOARD-INITIATIVE-PLAN-VISIBLE-01, INV-DASHBOARD-SESSION-DETAIL-FORENSIC-01, INV-DASHBOARD-AUTOLOGIN-VALID-AT-BOOT-01, INV-DASHBOARD-TASK-STATE-COMPLETENESS-01, INV-DASHBOARD-INTEGRATION-MERGE-VISIBLE-OR-EXCLUDED-01, INV-DASHBOARD-WIRE-UNITS-CONSISTENT-01, INV-DASHBOARD-FSM-STATE-VISIBILITY-01, INV-DASHBOARD-PUSH-FSM-COMPLETENESS-01, INV-DASHBOARD-TASK-LLM-CAPTURE-01, INV-DASHBOARD-TASK-LLM-CAPTURE-02, INV-DASHBOARD-TASK-LLM-CAPTURE-03, INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01, INV-DASHBOARD-HEALTH-NO-CACHE-01, INV-DASHBOARD-HEALTH-REFRESH-CADENCE-01, INV-DASHBOARD-WORKTREE-LATENCY-BUDGET-01, INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01, INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01, INV-DASHBOARD-SESSION-CAPTURE-NAMESPACED-PER-SESSION-01 | 25 |
 | Kernel-side failure-reason mandate — V3 (iter54) | INV-FAILURE-REASON-MANDATORY-01, INV-FAILURE-REASON-CONCRETE-01 | 2 |
 | Live-e2e harness — V2     | INV-LIVE-E2E-HARNESS-NO-INDEFINITE-WAIT-01, INV-LIVE-E2E-HARNESS-IMAGE-PREPULL-01, INV-LIVE-E2E-EXAMPLES-NO-REAL-SECRETS-01, INV-LIVE-E2E-DASHBOARD-FE-BUNDLE-PRESENT-01, INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01, INV-LIVE-E2E-OBSERVABILITY-LOG-NO-CONTRADICTION-01, INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01 | 7 |
 | Host hygiene — V2.5 | INV-HOST-HYGIENE-01 | 1 |
@@ -12195,6 +12195,120 @@ constructing the capture, and the shutdown sequence
 (post-IPC-drain, pre-`observability_hub.shutdown`) calls
 `TaskLlmCapture::drain_and_shutdown` then emits the
 `task_llm_capture_drained` info event.
+
+### INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01 — BE→FE wire view for `/api/tasks/:id/llm-turns` matches the FE panel contract field-for-field
+
+**Statement.** Every record returned by
+`GET /api/tasks/:task_id/llm-turns` MUST serialise as a
+JSON object whose keys match `dashboard-fe/src/types/
+api.ts::TaskLlmTurnView` field-for-field. The
+load-bearing keys the operator-facing per-task LLM turns
+panel reads:
+
+* `turn_number: u32` — 1-indexed monotonic position in
+  the per-task ring file (the BE's
+  `tail_task_llm_turns` enumerate index + 1).
+* `ts_unix: u64` — `record.at_ms / 1000`.
+* `model: String` — lifted from the parsed response
+  body's top-level `model` field (Anthropic + OpenAI
+  both use this name). Empty string when the body is
+  non-JSON or the field is absent.
+* `role: String` — lifted from the parsed response
+  body's top-level `role` field (Anthropic envelope).
+  Empty string when absent (e.g. OpenAI's
+  `chat.completion`, where `role` lives inside the
+  `choices` array — projecting empty here is correct).
+* `request: serde_json::Value` — fully-parsed REQUEST
+  payload from `record.request_body`. `Value::Null`
+  when the kernel-side tap didn't capture / parse the
+  bytes (e.g. pre-iter64 records reloaded from disk —
+  the on-disk format's `serde(default)` fills the
+  missing field with empty string, then the projection
+  emits Null).
+* `response: serde_json::Value` — fully-parsed RESPONSE
+  payload from `record.body`. ON PARSE FAILURE the
+  projection MUST fall back to
+  `Value::String(raw_body)` so the operator still sees
+  the bytes (a transport-error string the gateway
+  captured verbatim, an SSE stream tail, malformed
+  upstream output). Dropping to `Value::Null` would
+  hide the failure shape.
+* `input_tokens` / `output_tokens` /
+  `cache_creation_input_tokens` /
+  `cache_read_input_tokens: Option<u32>` — lifted from
+  `body.usage.*`. Anthropic field names are canonical;
+  OpenAI's `prompt_tokens` / `completion_tokens` MUST
+  map onto `input_tokens` / `output_tokens` (cache
+  fields stay `None` because OpenAI does not expose
+  prompt-cache hit/miss counts — the FE's cache-hit
+  ratio falls back to the "N/A" red badge in that
+  case, which is the correct operator signal).
+* `latency_ms: Option<u32>` — wall-clock latency from
+  gateway outbound write to first response byte.
+
+Carry-over keys serialised for global "recent LLM
+activity" cross-task views (the FE may not render them
+in this panel today but the wire MUST keep them so a
+future view can pick them up without another wire
+bump): `task_id`, `session_id`, `fetch_id`,
+`status_code`, `original_body_bytes`, `body_truncated`,
+`error`.
+
+**Why structural.** Pre-iter64 the BE wire emitted
+`at_ms: u64` + `body: String` + no
+`model`/`role`/`request`/usage breakdown. The FE's
+`<TaskLlmTurns>` component reads `turn.turn_number`,
+`turn.ts_unix`, `turn.model`, `turn.role`,
+`turn.input_tokens`, `turn.output_tokens`,
+`turn.cache_creation_input_tokens`,
+`turn.cache_read_input_tokens`, `turn.latency_ms`,
+`turn.request`, `turn.response` — every field except
+`latency_ms` came back `undefined` against the BE's
+shape, which the component coerced to empty / `0` and
+rendered as a half-broken card. iter63 forensics
+confirmed the on-disk file at
+`<data_dir>/llm-turns/materialize-records.jsonl` held
+real Anthropic content (5 turns, 22+ s latency, real
+tool_use blocks, real `usage.input_tokens` etc.) — the
+data was being captured, just not surfaced. iter64
+reshapes the wire view to match the FE contract and
+adds the response-body-parse projection so model /
+role / usage actually flow.
+
+**Witness.** `crates/dashboard-kernel/tests/task_llm_turn_view_projection.rs`:
+
+* `projection_lifts_anthropic_model_role_and_usage_into_wire_view`
+  — feed an Anthropic Sonnet 4.5 envelope through
+  `record_to_view` and assert
+  `model = "claude-sonnet-4-5-20250929"`,
+  `role = "assistant"`, `input_tokens = 2`,
+  `cache_creation_input_tokens = 5586`,
+  `cache_read_input_tokens = 2596`,
+  `output_tokens = 1281`, plus the parsed
+  `response.stop_reason = "tool_use"` and the parsed
+  `request.model` round-trip.
+* `projection_falls_back_to_value_string_on_response_parse_failure`
+  — body = `"not json"` MUST surface as
+  `response = Value::String("not json")`;
+  model / role empty; all token fields `None`. Empty
+  `request_body` → `request = Value::Null`.
+* `projection_maps_openai_prompt_completion_tokens_onto_canonical_slots`
+  — OpenAI `chat.completion` envelope (`prompt_tokens`
+  / `completion_tokens`, no top-level `role`, no cache
+  counts) MUST project onto `input_tokens` /
+  `output_tokens`; cache fields `None`; `role = ""`.
+
+FE witness: `dashboard-fe/src/test/task-llm-turns.test.tsx`
+asserts the rendered card shows the model name, the
+parsed response payload (substring of the Anthropic
+content block), the four token counters, and the
+cache-hit ratio percentage, all from the new wire
+shape. Two further witnesses pin the iter64 cosmetic
+touches: an "upstream error" red badge when
+`turn.error` is set, and the
+`(truncated, original size N bytes)` suffix on the
+Response payload header when `turn.body_truncated` is
+true.
 
 ### INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01 — `review_reject_count` is non-decreasing across activation_id sequence
 
