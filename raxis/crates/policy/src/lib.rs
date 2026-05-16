@@ -53,7 +53,6 @@ pub use bundle::{
 // EXCLUSION-01` (D11) for the rule the const enforces.
 pub use bundle::RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME;
 
-#[cfg(any(debug_assertions, test))]
 pub use bundle::EscalationPolicyForTests;
 pub use error::PolicyError;
 pub use loader::load_policy;

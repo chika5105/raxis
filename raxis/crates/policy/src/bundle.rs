@@ -4194,7 +4194,6 @@ pub struct PermittedCredentialConfig {
 /// planner-side EscalationRequest handler reads. Defaults to all-zero
 /// so callers that build via [`PolicyBundle::for_tests_with_operators`]
 /// keep their previous semantics.
-#[cfg(any(debug_assertions, test))]
 #[derive(Debug, Clone, Copy)]
 pub struct EscalationPolicyForTests {
     pub timeout: Duration,
@@ -4203,7 +4202,6 @@ pub struct EscalationPolicyForTests {
     pub quarantine_threshold: u32,
 }
 
-#[cfg(any(debug_assertions, test))]
 impl Default for EscalationPolicyForTests {
     fn default() -> Self {
         Self {
@@ -5154,8 +5152,7 @@ impl PolicyBundle {
     /// release builds, mirroring the convention used by
     /// `KeyRegistry::stub_for_tests` and the `raxis-test-support`
     /// public surface.
-    #[cfg(any(debug_assertions, test))]
-    pub fn for_tests_with_operators(operators: Vec<OperatorEntry>) -> Self {
+        pub fn for_tests_with_operators(operators: Vec<OperatorEntry>) -> Self {
         Self::for_tests_with_operators_and_escalation_policy(
             operators,
             EscalationPolicyForTests::default(),
@@ -5168,8 +5165,7 @@ impl PolicyBundle {
     /// `kernel/src/handlers/escalation.rs` which need to drive the
     /// rate-limit and quarantine paths deterministically without
     /// relying on real wall-clock budgets.
-    #[cfg(any(debug_assertions, test))]
-    pub fn for_tests_with_operators_and_escalation_policy(
+        pub fn for_tests_with_operators_and_escalation_policy(
         operators: Vec<OperatorEntry>,
         escalation_policy: EscalationPolicyForTests,
     ) -> Self {
@@ -5392,13 +5388,11 @@ impl PolicyBundle {
     /// a full `policy.toml` round-trip. Production code MUST NOT
     /// call this — it bypasses the validator's
     /// `allowed_worktree_roots is empty` rejection.
-    #[cfg(any(debug_assertions, test))]
-    pub fn set_allowed_worktree_roots_for_tests(&mut self, roots: Vec<String>) {
+        pub fn set_allowed_worktree_roots_for_tests(&mut self, roots: Vec<String>) {
         self.allowed_worktree_roots = roots;
     }
 
-    #[cfg(any(debug_assertions, test))]
-    pub fn set_lanes_for_tests(&mut self, lanes: Vec<LaneEntry>) {
+        pub fn set_lanes_for_tests(&mut self, lanes: Vec<LaneEntry>) {
         self.lanes = lanes;
     }
 
@@ -5406,16 +5400,14 @@ impl PolicyBundle {
     /// kernel V2.5 token-budget tests
     /// (`scheduler::budget::evaluate_token_budget_*`) to swing the
     /// admission ceiling without round-tripping a full `policy.toml`.
-    #[cfg(any(debug_assertions, test))]
-    pub fn set_max_cost_per_task_for_tests(&mut self, cents: u64) {
+        pub fn set_max_cost_per_task_for_tests(&mut self, cents: u64) {
         self.max_cost_per_task = cents;
     }
 
     /// Test-only setter for `[[providers]]`. Used by the kernel V2.5
     /// token-budget tests to install pricing tables without
     /// round-tripping a full `policy.toml`.
-    #[cfg(any(debug_assertions, test))]
-    pub fn set_providers_for_tests(&mut self, providers: Vec<ProviderEntry>) {
+        pub fn set_providers_for_tests(&mut self, providers: Vec<ProviderEntry>) {
         self.providers = providers;
     }
 
@@ -5424,8 +5416,7 @@ impl PolicyBundle {
     /// flip the V2.0 transitional knob without round-tripping a full
     /// policy.toml. The production loader path is still gated on the
     /// `[plan_signing]` validation in `validate_plan_signing`.
-    #[cfg(any(debug_assertions, test))]
-    pub fn set_plan_signing_accept_unfresh_v2_0_for_tests(&mut self, accept: bool) {
+        pub fn set_plan_signing_accept_unfresh_v2_0_for_tests(&mut self, accept: bool) {
         let mut section = self.plan_signing.clone().unwrap_or_default();
         section.accept_unfresh_v2_0_bundles = accept;
         self.plan_signing = Some(section);
