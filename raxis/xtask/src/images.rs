@@ -74,19 +74,48 @@ const STAGING_PARENT: &str = "images";
 const DEFAULT_DEV_INSTALL_DIR: &str = "/usr/local/lib/raxis";
 
 /// One canonical role this pipeline knows how to stage.
+///
+/// === iter62 verifier-runtime: production verifier roles ===
+///
+/// `Verifier` and `VerifierSymbolIndex` extend the bake pipeline to
+/// produce the two new V2 verifier images:
+///
+///   * `Verifier` ⇒ `images/verifier-starter/` (general verifier;
+///     ships the `raxis-verifier` PID 1 alongside ripgrep / ctags /
+///     jq for the common gate types — operator-publishable-
+///     equivalent, alias `raxis-verifier-starter` is reserved per
+///     `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME`).
+///   * `VerifierSymbolIndex` ⇒ `images/verifier-symbol-index/`
+///     (kernel-canonical symbol-index verifier carrying the diff-
+///     scoped + parallel ctags speed path from D7; the alias
+///     `raxis-verifier-symbol-index` is reserved per
+///     `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`).
+///
+/// Both flip `needs_rootfs_bake` to `true` because each image ships
+/// a small Linux tooling layer on top of the binary (busybox /
+/// universal-ctags / ripgrep). The cross-compile pulls a single
+/// workspace crate (`raxis-verifier`) for both; the per-image
+/// subdir owns the Containerfile that decides which utilities land
+/// in the rootfs. Cf. `xtask/src/linux_microvm.rs::Role` which
+/// mirrors this taxonomy at the dispatch / argv-parse seam.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 enum Role {
     Orchestrator,
     Reviewer,
     ExecutorStarter,
+    // === iter62 verifier-runtime ===
+    Verifier,
+    VerifierSymbolIndex,
 }
 
 impl Role {
     /// Does this role's rootfs come from a `Containerfile`-driven OCI
     /// bake (`bake-rootfs`), or is it binary-only (just the staged
     /// planner PID-1 binary)? Orchestrator + Reviewer are deliberately
-    /// binary-only per `INV-PLANNER-HARNESS-02` minimalism; only
-    /// `executor-starter` needs the OS-tooling-rich Containerfile bake.
+    /// binary-only per `INV-PLANNER-HARNESS-02` minimalism;
+    /// `executor-starter` and (iter62) both verifier images need the
+    /// OS-tooling-rich Containerfile bake — the verifier ships the
+    /// runtime alongside the binary.
     ///
     /// This single helper is the only place the dispatch lives so a
     /// future role that flips between the two shapes stays a one-line
@@ -94,7 +123,10 @@ impl Role {
     /// taxonomy and is kept in lockstep by
     /// `INV-IMAGE-BAKE-PREFLIGHT-FAIL-CLOSED-01`'s witness test.
     fn needs_rootfs_bake(self) -> bool {
-        matches!(self, Role::ExecutorStarter)
+        matches!(
+            self,
+            Role::ExecutorStarter | Role::Verifier | Role::VerifierSymbolIndex,
+        )
     }
 
     fn parse(s: &str) -> Result<Self> {
@@ -102,15 +134,26 @@ impl Role {
             "orchestrator" => Ok(Role::Orchestrator),
             "reviewer" => Ok(Role::Reviewer),
             "executor-starter" => Ok(Role::ExecutorStarter),
+            // === iter62 verifier-runtime ===
+            "verifier-starter" => Ok(Role::Verifier),
+            "verifier-symbol-index" => Ok(Role::VerifierSymbolIndex),
             other => bail!(
                 "unsupported --role {other:?}; expected one of: \
-                 orchestrator, reviewer, executor-starter"
+                 orchestrator, reviewer, executor-starter, \
+                 verifier-starter, verifier-symbol-index"
             ),
         }
     }
 
     fn all() -> &'static [Role] {
-        &[Role::Orchestrator, Role::Reviewer, Role::ExecutorStarter]
+        &[
+            Role::Orchestrator,
+            Role::Reviewer,
+            Role::ExecutorStarter,
+            // === iter62 verifier-runtime ===
+            Role::Verifier,
+            Role::VerifierSymbolIndex,
+        ]
     }
 
     fn workspace_crate(self) -> &'static str {
@@ -118,6 +161,17 @@ impl Role {
             Role::Orchestrator => "raxis-planner-orchestrator",
             Role::Reviewer => "raxis-planner-reviewer",
             Role::ExecutorStarter => "raxis-planner-executor",
+            // === iter62 verifier-runtime ===
+            //
+            // Both verifier images stage the SAME workspace crate
+            // (`raxis-verifier`) — the per-image Containerfile in
+            // `images/<images_subdir>/` decides which auxiliary
+            // tools land in the rootfs. Cross-compiling once would
+            // be a future optimisation; the per-role dev-stage call
+            // is idempotent and the cargo cache makes the second
+            // call cheap.
+            Role::Verifier => "raxis-verifier",
+            Role::VerifierSymbolIndex => "raxis-verifier",
         }
     }
 
@@ -128,6 +182,9 @@ impl Role {
             Role::Orchestrator => "raxis-orchestrator",
             Role::Reviewer => "raxis-reviewer",
             Role::ExecutorStarter => "raxis-executor",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "raxis-verifier",
+            Role::VerifierSymbolIndex => "raxis-verifier",
         }
     }
 
@@ -136,6 +193,9 @@ impl Role {
             Role::Orchestrator => "orchestrator-core",
             Role::Reviewer => "reviewer-core",
             Role::ExecutorStarter => "executor-starter",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "verifier-starter",
+            Role::VerifierSymbolIndex => "verifier-symbol-index",
         }
     }
 
@@ -146,6 +206,9 @@ impl Role {
             Role::Orchestrator => "raxis-orchestrator-core",
             Role::Reviewer => "raxis-reviewer-core",
             Role::ExecutorStarter => "raxis-executor-starter",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "raxis-verifier-starter",
+            Role::VerifierSymbolIndex => "raxis-verifier-symbol-index",
         }
     }
 
@@ -154,6 +217,16 @@ impl Role {
             Role::Orchestrator => raxis_image_manifest::Role::Orchestrator,
             Role::Reviewer => raxis_image_manifest::Role::Reviewer,
             Role::ExecutorStarter => raxis_image_manifest::Role::ExecutorStarter,
+            // === iter62 verifier-runtime ===
+            //
+            // Both verifier-bake roles fold into the same
+            // `image-manifest::Role` variant for their respective
+            // canonical shapes (`Verifier` vs `VerifierSymbolIndex`),
+            // so an operator inspecting the on-disk manifest sees
+            // a clear role tag that names the image's identity, not
+            // just "verifier".
+            Role::Verifier => raxis_image_manifest::Role::Verifier,
+            Role::VerifierSymbolIndex => raxis_image_manifest::Role::VerifierSymbolIndex,
         }
     }
 }
@@ -271,6 +344,26 @@ fn required_os_binaries(role: Role) -> &'static [&'static str] {
     match role {
         Role::ExecutorStarter => &["bin/bash", "usr/bin/python3", "usr/bin/git"],
         Role::Orchestrator | Role::Reviewer => &[],
+        // === iter62 verifier-runtime ===
+        //
+        // `verifier-starter` carries `bash` (for `RAXIS_VERIFIER_COMMAND
+        // → sh -lc <command>` execution), `ripgrep` (D7 symbol-index
+        // fast path), `jq` (gate-side JSON inspection), and
+        // `universal-ctags` (the canonical-verifier symbol-index
+        // path; Containerfile installs ctags binary at /usr/bin/ctags).
+        // The `verifier-symbol-index` image is smaller — just the
+        // verifier + ctags + busybox-static — so its required-binary
+        // set is narrower. The list pins paths the kernel-side
+        // `assert_no_stub_after_stage` check inspects after the bake;
+        // every entry MUST be present at the listed rootfs path or
+        // the bake fails closed.
+        Role::Verifier => &[
+            "bin/bash",
+            "usr/bin/jq",
+            "usr/bin/rg",
+            "usr/bin/ctags",
+        ],
+        Role::VerifierSymbolIndex => &["bin/busybox", "usr/bin/ctags"],
     }
 }
 
@@ -520,6 +613,16 @@ fn planner_source_dirs(role: Role, workspace_root: &Path) -> [PathBuf; 2] {
         Role::Orchestrator => "planner-orchestrator",
         Role::Reviewer => "planner-reviewer",
         Role::ExecutorStarter => "planner-executor",
+        // === iter62 verifier-runtime ===
+        //
+        // Both verifier roles stage the same workspace crate
+        // (`raxis-verifier`); the second freshness path stays
+        // `planner-core` for now (the verifier binary today does
+        // not link planner-core, but the slot exists for symmetry
+        // with the planner roles' freshness checking — the freshness
+        // walker silently skips missing dirs per the function's
+        // doc comment).
+        Role::Verifier | Role::VerifierSymbolIndex => "verifier",
     };
     [
         workspace_root.join("crates").join(role_dir).join("src"),
@@ -3309,8 +3412,77 @@ mod tests {
             Role::parse("executor-starter").unwrap(),
             Role::ExecutorStarter
         );
+        // === iter62 verifier-runtime ===
+        assert_eq!(Role::parse("verifier-starter").unwrap(), Role::Verifier);
+        assert_eq!(
+            Role::parse("verifier-symbol-index").unwrap(),
+            Role::VerifierSymbolIndex,
+        );
         assert!(Role::parse("Reviewer").is_err());
         assert!(Role::parse("orchestrators").is_err());
+        assert!(Role::parse("verifier").is_err());
+    }
+
+    // === iter62 verifier-runtime ===
+    //
+    // Pin the bake-shape dispatch and the verifier-specific
+    // workspace-crate routing so the per-role surfaces stay in
+    // lockstep with `image-manifest::Role` and `crates/verifier/`'s
+    // workspace name. A regression in any of these would surface as
+    // a confusing "Cargo cannot find package" error far downstream
+    // of the actual divergence.
+    #[test]
+    fn verifier_roles_need_rootfs_bake() {
+        assert!(
+            Role::Verifier.needs_rootfs_bake(),
+            "verifier-starter ships ripgrep / ctags / jq alongside the binary; \
+             rootfs bake is required",
+        );
+        assert!(
+            Role::VerifierSymbolIndex.needs_rootfs_bake(),
+            "verifier-symbol-index ships ctags + busybox; rootfs bake is required",
+        );
+    }
+
+    #[test]
+    fn verifier_roles_share_workspace_crate_and_binary_name() {
+        // Both verifier images stage the SAME workspace crate
+        // (`raxis-verifier`) and produce the SAME binary name
+        // (`raxis-verifier`). Only the Containerfile-driven rootfs
+        // layout differs (`images/verifier-starter/` vs
+        // `images/verifier-symbol-index/`).
+        assert_eq!(Role::Verifier.workspace_crate(), "raxis-verifier");
+        assert_eq!(
+            Role::VerifierSymbolIndex.workspace_crate(),
+            "raxis-verifier"
+        );
+        assert_eq!(Role::Verifier.binary_name(), "raxis-verifier");
+        assert_eq!(Role::VerifierSymbolIndex.binary_name(), "raxis-verifier");
+    }
+
+    #[test]
+    fn verifier_roles_have_distinct_images_subdirs_and_artefact_stems() {
+        // Distinct subdirs so the kernel-canonical symbol-index image
+        // has its own digest-pinning slot in `raxis-canonical-images`
+        // and operators inspecting `images/` see two separate trees.
+        assert_eq!(Role::Verifier.images_subdir(), "verifier-starter");
+        assert_eq!(
+            Role::VerifierSymbolIndex.images_subdir(),
+            "verifier-symbol-index"
+        );
+        assert_eq!(Role::Verifier.artefact_stem(), "raxis-verifier-starter");
+        assert_eq!(
+            Role::VerifierSymbolIndex.artefact_stem(),
+            "raxis-verifier-symbol-index"
+        );
+    }
+
+    #[test]
+    fn role_all_includes_both_verifier_variants() {
+        let all = Role::all();
+        assert!(all.contains(&Role::Verifier));
+        assert!(all.contains(&Role::VerifierSymbolIndex));
+        assert_eq!(all.len(), 5, "role taxonomy is closed at 5 variants");
     }
 
     #[test]

@@ -136,11 +136,24 @@ impl Arch {
 /// One canonical planner role. Mirrors `images.rs::Role` shape — we
 /// keep our own enum so the public surface of `images` stays
 /// unchanged (Worker B owns that file).
+///
+/// === iter62 verifier-runtime ===
+///
+/// The two verifier images (`Verifier` ⇒ `verifier-starter`,
+/// `VerifierSymbolIndex` ⇒ `verifier-symbol-index`) are surfaced
+/// here so a one-shot `cargo xtask linux-microvm bundle` produces
+/// every canonical guest image the V2 substrate needs. Without
+/// this, the bundle stops short of the verifier surfaces and the
+/// live-e2e harness has nothing to point at when wiring the
+/// symbol-index verifier into a plan (D10).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Role {
     Orchestrator,
     Reviewer,
     ExecutorStarter,
+    // === iter62 verifier-runtime ===
+    Verifier,
+    VerifierSymbolIndex,
 }
 
 impl Role {
@@ -149,11 +162,21 @@ impl Role {
             Role::Orchestrator => "orchestrator",
             Role::Reviewer => "reviewer",
             Role::ExecutorStarter => "executor-starter",
+            // === iter62 verifier-runtime ===
+            Role::Verifier => "verifier-starter",
+            Role::VerifierSymbolIndex => "verifier-symbol-index",
         }
     }
 
     fn all() -> &'static [Role] {
-        &[Role::Orchestrator, Role::Reviewer, Role::ExecutorStarter]
+        &[
+            Role::Orchestrator,
+            Role::Reviewer,
+            Role::ExecutorStarter,
+            // === iter62 verifier-runtime ===
+            Role::Verifier,
+            Role::VerifierSymbolIndex,
+        ]
     }
 }
 
@@ -265,9 +288,13 @@ impl BundleArgs {
                         "orchestrator" => Role::Orchestrator,
                         "reviewer" => Role::Reviewer,
                         "executor-starter" => Role::ExecutorStarter,
+                        // === iter62 verifier-runtime ===
+                        "verifier-starter" => Role::Verifier,
+                        "verifier-symbol-index" => Role::VerifierSymbolIndex,
                         other => bail!(
                             "unknown --role {other:?}; expected: \
-                             orchestrator | reviewer | executor-starter"
+                             orchestrator | reviewer | executor-starter | \
+                             verifier-starter | verifier-symbol-index"
                         ),
                     };
                     roles.push(r);
@@ -330,7 +357,7 @@ fn print_help() {
          [--install-dir <PATH>] [--arch aarch64|x86_64]\\\n  \
          [(--kernel-from-file <PATH> | --kernel-url <URL>) [--kernel-sha256 <HEX>]]\\\n  \
          [--target <TRIPLE>] [--signing-key <PATH>]\\\n  \
-         [--role orchestrator|reviewer|executor-starter] (repeatable)\\\n  \
+         [--role orchestrator|reviewer|executor-starter|verifier-starter|verifier-symbol-index] (repeatable)\\\n  \
          [--skip-kernel] [--skip-stage] [--force]\n\
          \n\
          One-shot orchestrator: stages the Firecracker reference kernel,\n\
@@ -664,7 +691,48 @@ mod tests {
     fn parse_defaults_role_set_to_every_canonical_role() {
         let args = BundleArgs::parse(&["--kernel-from-file".to_owned(), "/tmp/vmlinux".to_owned()])
             .unwrap();
-        assert_eq!(args.roles.len(), 3);
+        // === iter62 verifier-runtime ===
+        //
+        // V2-canonical role count bumped from 3 → 5 with the
+        // addition of `verifier-starter` and `verifier-symbol-index`.
+        // The unconditional "all roles" default keeps the one-shot
+        // bundle producing every guest image the substrate needs,
+        // including the two verifier surfaces that ship the D7
+        // symbol-index speed path.
+        assert_eq!(args.roles.len(), 5);
+        assert!(args.roles.contains(&Role::Verifier));
+        assert!(args.roles.contains(&Role::VerifierSymbolIndex));
+    }
+
+    // === iter62 verifier-runtime ===
+    #[test]
+    fn parse_role_accepts_both_verifier_aliases() {
+        let args = BundleArgs::parse(&[
+            "--kernel-from-file".to_owned(),
+            "/tmp/k".to_owned(),
+            "--role".to_owned(),
+            "verifier-starter".to_owned(),
+            "--role".to_owned(),
+            "verifier-symbol-index".to_owned(),
+        ])
+        .unwrap();
+        assert_eq!(
+            args.roles,
+            vec![Role::Verifier, Role::VerifierSymbolIndex]
+        );
+    }
+
+    #[test]
+    fn role_cli_name_round_trips_for_verifier_variants() {
+        // Pin the dispatch shape that `stage_role` / `pack_initramfs`
+        // forward to `images::run_*`. A drift here would silently
+        // route a `--role verifier-starter` argv to the wrong xtask
+        // arm.
+        assert_eq!(Role::Verifier.cli_name(), "verifier-starter");
+        assert_eq!(
+            Role::VerifierSymbolIndex.cli_name(),
+            "verifier-symbol-index"
+        );
     }
 
     #[test]
