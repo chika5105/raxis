@@ -4286,6 +4286,7 @@ mod tests {
             workspace_root: tmp.path().to_owned(),
             signing_key: tmp.path().join("key.hex"),
             no_auto_stage: true,
+            kernel_signing_key_hex: None,
         };
         let err = handle_staged_binary_freshness(Role::Reviewer, &args)
             .unwrap_err()
@@ -4315,6 +4316,7 @@ mod tests {
             workspace_root: tmp.path().to_owned(),
             signing_key: tmp.path().join("key.hex"),
             no_auto_stage: true,
+            kernel_signing_key_hex: None,
         };
         let err = handle_staged_binary_freshness(Role::Reviewer, &args)
             .unwrap_err()
@@ -4348,6 +4350,7 @@ mod tests {
             workspace_root: tmp.path().to_owned(),
             signing_key: tmp.path().join("key.hex"),
             no_auto_stage: false,
+            kernel_signing_key_hex: None,
         };
         handle_staged_binary_freshness(Role::Reviewer, &args).expect("fresh binary must not error");
     }
