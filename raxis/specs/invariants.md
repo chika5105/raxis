@@ -12877,3 +12877,167 @@ asserting the cardinality property: exactly one
 per operator-approved deadlock escalation that actually flipped
 the FSM.
 
+
+---
+
+## iter63 invariants — operator-authored hints + bounded-runtime verifier guard
+
+Both items below are sourced from
+[`specs/iter63-followups.md`](iter63-followups.md). The witnesses
+live in the call-site files cited under each entry; the test
+discipline is "additive cfg(test) arm per invariant" (or
+should_panic / timeout-bounded test where the witness is a
+kill-path).
+
+### INV-VERIFIER-HINTS-SCHEMA-VALIDATED-01 — operator hints must validate at policy load
+
+**Statement.** Every operator-authored hint key/value declared on
+`[[gates]] hints` or `[[integration_merge_verifiers]] hints` (and
+the plan-side `[[plan.integration_merge_verifiers]] hints` mirror)
+MUST validate against the policy validator
+(`crates/policy/src/bundle.rs::validate_verifier_hints`) at
+`PolicyBundle::load`. iter63 ships the structural caps + reserved-
+prefix rule; per-gate-type rich schemas are deferred to iter64
+(tracked inline with `TODO(iter64):`).
+
+**Witness.** `crates/policy/src/bundle.rs` unit tests
+`validate_verifier_hints_empty_map_is_valid`,
+`validate_imerge_with_valid_hints_is_accepted`,
+`validate_imerge_with_reserved_hint_key_is_rejected`.
+
+### INV-VERIFIER-HINTS-PAYLOAD-CAP-01 — hints capped at 32 entries / 4 KiB
+
+**Statement.** Operator-declared hints must satisfy
+`hints.len() ≤ 32` AND `serde_json::to_vec(&hints).len() ≤ 4096`
+AND `!key.starts_with("RAXIS_")` for every key. Violations are
+rejected at policy-load with the canonical
+`FAIL_POLICY_VERIFIER_HINTS_*` shape.
+
+**Witness.** `crates/policy/src/bundle.rs` unit tests
+`validate_verifier_hints_too_many_entries_is_rejected`,
+`validate_verifier_hints_payload_exceeding_4kib_is_rejected`,
+`validate_verifier_hints_reserved_prefix_is_rejected`.
+
+### INV-WITNESS-OPERATOR-HINTS-ECHOED-01 — kernel populates `body.operator_hints` from policy
+
+**Statement.** The kernel-side witness handler
+(`kernel/src/handlers/witness.rs::handle_inner`) populates
+`WitnessSubmission.body.operator_hints` from the policy-declared
+`[[gates]] hints` map for the matching `gate_type`, NEVER from
+the verifier's claimed payload. The injection happens before
+blob hashing and SQL persistence so the witness-as-stored is the
+canonical surface for reviewer inspection. The corresponding
+spawn-envelope echo is the `RAXIS_VERIFIER_OPERATOR_HINTS_JSON`
+env var in
+`kernel/src/gates/verifier_runner.rs::spawn_verifier_with_audit`.
+
+**Witness.** `kernel/src/gates/verifier_runner.rs` integration
+test `operator_hints_env_var_carries_deterministic_json_payload`
+pins the spawn envelope shape; the handler-side echo is exercised
+end-to-end by the `stub_round_trip` tests once a gate with
+declared hints is introduced.
+
+### INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01 — verifier may NOT pre-populate `body.operator_hints`
+
+**Statement.** If the verifier's claimed `WitnessSubmission.body`
+is a JSON object containing the reserved key `operator_hints`,
+the kernel rejects the submission with
+`WitnessRejectionReason::SpoofedOperatorHints` and emits
+`AuditEventKind::WitnessOperatorHintSpoofingDetected`. The
+verifier_run_token is NOT consumed (the verifier may retry with
+a corrected body shape after operator intervention).
+
+**Witness.** `kernel/src/handlers/witness.rs` unit test
+`spoofed_operator_hints_reason_is_distinct_wire_variant` +
+`witness_body_operator_hints_key_is_pinned` pin the rejection
+variant and reserved-key string. The policy-side
+`validate_verifier_hints_reserved_prefix_is_rejected` test pins
+the analogous load-time rejection that prevents the same
+spoofing vector via the env-var channel.
+
+### INV-VERIFIER-WALL-CLOCK-KILL-01 — verifier reaped within `min(declared, policy_max)`
+
+**Statement.** Every verifier execution (subprocess + VM) is
+reaped within
+`min(config.verifier_max_wall_secs, verifier_runtime.max_verifier_wall_seconds)`
+by the watcher task spawned in
+`kernel/src/gates/verifier_runner.rs::spawn_verifier_with_audit`.
+On expiry the kernel issues a graceful kill request, waits up to
+`verifier_force_shutdown_grace_seconds`, then issues the forced
+kill API. The `AuditEventKind::VerifierWallClockTimeout` audit
+row is emitted with the resolved budget seconds and elapsed
+milliseconds.
+
+**Witness.** Pre-existing
+`gates::verifier_runner::integration::wall_clock_kill_terminates_bin_sleep_within_timeout_plus_grace`
+covers the kill path; the audit-emit pin is the constructor of
+the new variant in `crates/audit/src/event.rs` exercised by
+`iter63_verifier_wall_clock_timeout_kind_and_fields_pinned`.
+
+### INV-VERIFIER-IDLE-TIMEOUT-01 — verifier with no UDS I/O reaped after `verifier_idle_timeout_seconds`
+
+**Statement.** A verifier whose `RAXIS_KERNEL_SOCKET` connection
+sees no I/O for `verifier_idle_timeout_seconds` is reaped via
+the same kill path as the wall-clock guard, and
+`AuditEventKind::VerifierIdleTimeout` is emitted. Per-read idle
+detection is the canonical pattern; the V2 UDS reader plumbing
+threads the configured idle timeout through
+`tokio::time::timeout` on each `read_frame` call.
+
+**Witness.** Audit variant constructor test
+`iter63_verifier_idle_timeout_kind_and_fields_pinned`. The
+runtime witness is exercised by the upstream wire-read paths
+that already use `tokio::time::timeout`; the
+`verifier_idle_timeout_seconds` field is read by those paths
+from `VerifierConfig.verifier_runtime`.
+
+### INV-VERIFIER-CUMULATIVE-BUDGET-01 — per-task verifier-time ceiling
+
+**Statement.** Across retries, the sum of verifier wall-times
+on a single task MUST NOT exceed
+`task_verifier_total_budget_seconds`. When the ceiling is
+already crossed at the next spawn,
+`gates::verifier_runner::spawn_verifier_with_audit` returns
+`GateError::VerifierBudgetExhausted` (no token issuance, no
+child spawn) and emits `VerifierBudgetExhausted` audit. The
+in-memory accumulator (`OnceLock<Mutex<BTreeMap>>`) resets on
+kernel restart by design — the budget bounds a single uptime
+cycle, not the historical sum across process restarts.
+
+**Witness.** `kernel/src/gates/verifier_runner.rs` integration
+test `cumulative_budget_blocks_further_spawns`.
+
+### INV-VERIFIER-VM-FORCE-SHUTDOWN-01 — VM watchdog escalates to forced kill after grace
+
+**Statement.** Every `Session` impl exposes
+`shutdown_grace_then_force(grace)` (default impl delegates to
+`shutdown(grace)`; Apple-VZ overrides to issue an explicit
+graceful-then-force dance via `runtime.stop(grace)`). When the
+graceful window closes and the substrate had to escalate, the
+return shape is `ExitStatus::BackendError` so the kernel can
+emit `VerifierVmForcedShutdown` on the escalation path
+specifically.
+
+**Witness.** Audit variant constructor test
+`iter63_verifier_vm_forced_shutdown_kind_and_fields_pinned`;
+trait surface pinned by the compile-time shape of the new
+method in `crates/isolation/src/lib.rs`.
+
+### INV-WITNESS-HANDLER-BOUNDED-01 — `handlers::witness::handle` returns within 5 s
+
+**Statement.** `kernel/src/handlers/witness.rs::handle` wraps its
+entire inner path in `tokio::time::timeout(5s, ...)`. On expiry,
+the kernel emits `AuditEventKind::WitnessHandlerTimeout` and
+returns `HandlerError::HandlerTimedOut` to the caller; the
+dispatcher slot is freed for other gate evaluations. The 5-second
+budget is exposed as `WITNESS_HANDLER_TIMEOUT_SECS` for downstream
+references.
+
+**Witness.** `kernel/src/handlers/witness.rs` unit test
+`witness_handler_timeout_constant_is_pinned_at_5_seconds` +
+`handler_error_timed_out_displays_budget_seconds`. The runtime
+witness (an injected slow blob writer that trips the timeout)
+is deferred to a follow-up integration test once the
+`HandlerContext` test-fixture infrastructure supports
+synthetic latency injection.
+

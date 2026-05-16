@@ -2165,6 +2165,117 @@ Total budget: ~13 engineer-days. Phase 1 + Phase 2 are independently mergeable (
 
 ---
 
+## §20 iter63 — Operator-authored hints + bounded-runtime guard
+
+iter63 closed two queued items from
+[`specs/iter63-followups.md`](../iter63-followups.md):
+
+### §20.1 Operator hints
+
+Operators may declare a `hints: BTreeMap<String, serde_json::Value>` map
+on every verifier surface:
+
+* `[[gates]] hints` (claim-based)
+* `[[integration_merge_verifiers]] hints` (operator-side, V2)
+* `[[plan.integration_merge_verifiers]] hints` (plan-side, V2)
+
+The hints are validated at policy/plan load time
+(`validate_verifier_hints` in `crates/policy/src/bundle.rs`,
+shared between operator-side and plan-side validators) against the
+following discipline:
+
+* ≤ 32 entries
+* ≤ 4 KiB total when serialised via `serde_json::to_vec`
+* No key may start with `RAXIS_` (the reserved kernel-injected env
+  prefix; operator-spoofing of kernel envs is rejected at load).
+
+### §20.1.1 Spawn-envelope echo
+
+The kernel injects the deterministic JSON serialisation of the
+hints map into the verifier spawn envelope as a single env var:
+
+```text
+RAXIS_VERIFIER_OPERATOR_HINTS_JSON={"language":"rust","coverage_min_pct":85}
+```
+
+The env var is ALWAYS set (empty `{}` when no hints declared), so a
+verifier may read it unconditionally. The `BTreeMap` ordering on the
+kernel side guarantees a byte-stable wire shape — the verifier can
+hash the env var bytes directly if it needs cache-key shape.
+
+### §20.1.2 Witness-body echo
+
+After token validation + evaluation-SHA binding, BEFORE persisting
+the witness, the kernel:
+
+1. Looks up the gate's policy-declared hints by `gate_type`.
+2. If the verifier's claimed `body` is a JSON object containing the
+   reserved key `operator_hints`, REJECTS the submission with
+   `WitnessRejectionReason::SpoofedOperatorHints` and emits
+   `AuditEventKind::WitnessOperatorHintSpoofingDetected`. Token is
+   NOT consumed.
+3. Otherwise, when policy hints are non-empty AND the body is a JSON
+   object, inserts the policy-declared map under the reserved key.
+4. Hashes the (now-augmented) body bytes for blob storage.
+
+The kernel is the only source of truth for `body.operator_hints` —
+the verifier is never trusted to echo hints back faithfully.
+Pinned by `INV-WITNESS-OPERATOR-HINTS-ECHOED-01` and
+`INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`.
+
+TODO(iter64): per-gate-type rich hint schema layer; operator-hint
+surfacing for non-Object witness bodies.
+
+### §20.2 Bounded-runtime guard
+
+The new `[verifier_runtime]` policy section ships four operator-
+tunable fields with the following spec defaults:
+
+| Field                                       | Default | Hard cap   |
+|---------------------------------------------|---------|------------|
+| `max_verifier_wall_seconds`                 | 300     | 4 hours    |
+| `verifier_idle_timeout_seconds`             | 60      | 30 minutes |
+| `task_verifier_total_budget_seconds`        | 900     | 8 hours    |
+| `verifier_force_shutdown_grace_seconds`     | 10      | 5 minutes  |
+
+Coherence rule: `verifier_idle_timeout_seconds ≤ max_verifier_wall_seconds`.
+
+Six guards land alongside the new fields:
+
+1. **Hard wall-clock kill** in `gates::verifier_runner::spawn_verifier_with_audit`
+   — `tokio::time::timeout(min(declared_timeout, policy_max), child.wait())`.
+   On expiry: SIGTERM via `start_kill()`, wait `verifier_force_shutdown_grace_seconds`,
+   SIGKILL via `kill()`. Emits `VerifierWallClockTimeout`. INV-VERIFIER-WALL-CLOCK-KILL-01.
+2. **Idle-stream timeout** — every UDS read on `RAXIS_KERNEL_SOCKET`
+   is wrapped in `tokio::time::timeout(verifier_idle_timeout, ...)`.
+   On expiry: same reap path; emits `VerifierIdleTimeout`. INV-VERIFIER-IDLE-TIMEOUT-01.
+3. **Per-task cumulative-time ceiling** — in-memory
+   `OnceLock<Mutex<BTreeMap<TaskId, u64>>>` tracker accumulates wall
+   time across retries. When the ceiling is crossed, the next spawn
+   returns `GateError::VerifierBudgetExhausted` + emits
+   `VerifierBudgetExhausted`. INV-VERIFIER-CUMULATIVE-BUDGET-01.
+4. **VM force-shutdown grace** — new `Session::shutdown_grace_then_force(grace)`
+   trait method (default impl delegates to `shutdown(grace)`). Apple-VZ
+   override issues an explicit graceful-then-force dance. On escalation,
+   returns `ExitStatus::BackendError`; kernel emits
+   `VerifierVmForcedShutdown`. INV-VERIFIER-VM-FORCE-SHUTDOWN-01.
+5. **Witness-handler bounded time** — `handlers::witness::handle`
+   wraps its body in `tokio::time::timeout(5s, ...)`. On expiry:
+   emits `WitnessHandlerTimeout` + returns `HandlerError::HandlerTimedOut`.
+   INV-WITNESS-HANDLER-BOUNDED-01.
+6. **Audit emission** — every kill path emits exactly one of the
+   five iter63 audit variants (`VerifierWallClockTimeout`,
+   `VerifierIdleTimeout`, `VerifierBudgetExhausted`,
+   `VerifierVmForcedShutdown`, `WitnessHandlerTimeout`) +
+   `WitnessOperatorHintSpoofingDetected` for the operator-hint
+   spoofing case. All six variants are wired through the SSE bridge
+   in `kernel/src/notifications/sink.rs` so the dashboard observes
+   them in real time.
+
+---
+
+---
+
 *Spec complete. When this file is wrong (i.e., when an implementation
 choice contradicts a statement here), the implementation MUST be
 amended to conform OR a follow-up amendment to this spec MUST land

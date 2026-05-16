@@ -42,7 +42,17 @@ expected file-ownership boundary for the iter63 fix.
 
 * **Operator-authored hints into witnesses** (queued during iter63
   launch — surfaced during iter62 witness/verifier review at
-  `3834db75`).
+  `3834db75`). **— CLOSED** by
+  `worker/iter63-hints-and-verifier-bound`
+  (commits: `feat(audit)`, `feat(policy)`,
+  `feat(verifier-runner)`, `feat(witness-handler)`,
+  `feat(notifications)`). Closing invariants:
+  `INV-VERIFIER-HINTS-SCHEMA-VALIDATED-01`,
+  `INV-VERIFIER-HINTS-PAYLOAD-CAP-01`,
+  `INV-WITNESS-OPERATOR-HINTS-ECHOED-01`,
+  `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`. Per-gate-type
+  rich hint schema layer deferred to iter64 (tracked inline with
+  `TODO(iter64):`).
 
   **Problem.** There is no first-class operator-facing "hint" channel
   into a verifier or onto the witness body today.
@@ -103,6 +113,14 @@ expected file-ownership boundary for the iter63 fix.
 
 * **Bounded-runtime guard for verifier execution (no kernel stall)**
   (queued during iter63 launch — iter62 architecture review).
+  **— CLOSED** by `worker/iter63-hints-and-verifier-bound`
+  (same series as the hints item above). Closing invariants:
+  `INV-VERIFIER-WALL-CLOCK-KILL-01`,
+  `INV-VERIFIER-IDLE-TIMEOUT-01`,
+  `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
+  `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`,
+  `INV-WITNESS-HANDLER-BOUNDED-01`. Operator-tunable policy fields
+  shipped under the new `[verifier_runtime]` section.
 
   **Source.** Current spawn paths trust the verifier `timeout`
   declared in `IntegrationMergeVerifierEntry.timeout` and
