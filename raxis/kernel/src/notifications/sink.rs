@@ -190,6 +190,20 @@ fn bridge_kind_if_relevant(kind: &AuditEventKind) -> Option<AuditEventKind> {
             // Git integration.
             | AuditEventKind::IntegrationMergeCompleted { .. }
             | AuditEventKind::MergeFastForwardFailed { .. }
+            // === iter62 verifier-runtime: VerifierVm* family ===
+            // Bridge every variant so the dashboard SSE stream observes
+            // the full `INV-VERIFIER-AUDIT-PAIRED-WRITE-01` lifecycle:
+            // spawn → (exit + witness) | timeout | digest mismatch |
+            // artifact rejected. No counter bump in
+            // `bridge_audit_to_metric` (Worker 1 owns observability;
+            // we use the existing audit-event surface for visibility
+            // and let a follow-up extend the metric mapping if needed).
+            | AuditEventKind::VerifierVmSpawned { .. }
+            | AuditEventKind::VerifierVmExited { .. }
+            | AuditEventKind::VerifierWitnessReceived { .. }
+            | AuditEventKind::VerifierImageDigestMismatch { .. }
+            | AuditEventKind::VerifierTimeout { .. }
+            | AuditEventKind::VerifierArtifactRejected { .. }
     )
     .then(|| kind.clone())
 }

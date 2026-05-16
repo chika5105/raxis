@@ -436,6 +436,26 @@ fn validate_vm_images(raw: &[VmImageEntry]) -> Result<Vec<VmImageConfig>, Policy
                 entry.name,
             )));
         }
+        // === iter62 verifier-runtime: general-verifier alias ===
+        // Reserved alias for the operator-publishable-equivalent
+        // general verifier image (raxis-verifier-starter). The
+        // alias is published by the kernel release pipeline; an
+        // operator publishing the same alias would shadow the
+        // canonical resolution. Reject shift-left under the same
+        // FAIL_POLICY_RESERVED_VM_IMAGE_NAME code so the dashboard
+        // surface stays uniform across the two reserved names
+        // (INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01).
+        if name == RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_RESERVED_VM_IMAGE_NAME: \
+                 [[vm_images]] name {:?} is reserved for the \
+                 kernel-canonical general verifier image \
+                 (INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01); \
+                 operators may publish their own verifier image with \
+                 a different alias",
+                entry.name,
+            )));
+        }
         if !seen.insert(name) {
             return Err(PolicyError::MalformedArtifact(format!(
                 "FAIL_POLICY_VM_IMAGE_DUPLICATE: \
@@ -563,6 +583,23 @@ fn validate_default_executor_image(
 /// image (`INV-VERIFIER-12`). Any `[[vm_images]]` entry attempting
 /// to use this name is rejected at policy load.
 pub const RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME: &str = "raxis-verifier-symbol-index";
+
+// === iter62 verifier-runtime: general-verifier alias ===
+//
+// Reserved alias for the operator-publishable-equivalent general
+// verifier image (`raxis-verifier-starter`). Operators MAY publish
+// their own verifier images with `[[vm_images]] role_restriction =
+// ["Verifier"]` and an alias of their choosing — but they cannot
+// squat on the canonical `raxis-verifier-starter` name the kernel
+// release pipeline publishes. Mirrors the structural-rejection
+// shape `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` already enforces.
+//
+// See `INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01` (D11).
+
+/// Reserved alias for the general verifier image. Operator
+/// `[[vm_images]]` entries attempting to use this name are rejected
+/// at policy load with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`.
+pub const RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME: &str = "raxis-verifier-starter";
 
 /// Minimum Linux guest kernel version pinned by
 /// `INV-PLANNER-HARNESS-03` (cgroup v2 controller availability).
@@ -3055,6 +3092,20 @@ pub const KNOWN_AUDIT_EVENT_KINDS: &[&str] = &[
     "KernelPushEnqueued",
     // V2_GAPS §12.4 — operator-ergonomics IPC dry-run audit event.
     "DryRunAdmitted",
+    // === iter62 verifier-runtime: VerifierVm* family ===
+    //
+    // The six audit kinds emitted by the iter62 verifier-runtime
+    // path. Allowlisted here so `[[notifications.routes]]` rules
+    // can target the events directly. Each maps 1:1 to a
+    // `AuditEventKind::Verifier*` variant in
+    // `crates/audit/src/event.rs`; the lockstep is enforced by the
+    // `KNOWN_AUDIT_EVENT_KINDS` drift-guard test in this crate.
+    "VerifierVmSpawned",
+    "VerifierVmExited",
+    "VerifierWitnessReceived",
+    "VerifierImageDigestMismatch",
+    "VerifierTimeout",
+    "VerifierArtifactRejected",
 ];
 
 // ---------------------------------------------------------------------------
@@ -7995,6 +8046,56 @@ channels   = []
                 supervisor_restart_id: "x".into(),
             }
             .as_str(),
+            // === iter62 verifier-runtime: VerifierVm* probes ===
+            //
+            // Six new variants the iter62 verifier-runtime emits at
+            // the kernel-side verifier-VM lifecycle sites
+            // (`kernel/src/gates/verifier_runner.rs::spawn_verifier`).
+            // Mirroring them here keeps the
+            // `KNOWN_AUDIT_EVENT_KINDS` ↔ `AuditEventKind`
+            // lockstep test alive.
+            AuditEventKind::VerifierVmSpawned {
+                verifier_run_id: "x".into(),
+                task_id: "x".into(),
+                initiative_id: "x".into(),
+                image_alias: "x".into(),
+                oci_digest: "x".into(),
+                command: "x".into(),
+                on_failure: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::VerifierVmExited {
+                verifier_run_id: "x".into(),
+                signal_class: "x".into(),
+                exit_code: None,
+                wall_ms: 0,
+            }
+            .as_str(),
+            AuditEventKind::VerifierWitnessReceived {
+                verifier_run_id: "x".into(),
+                verdict: "x".into(),
+                artifact_sha256: None,
+                artifact_bytes: None,
+            }
+            .as_str(),
+            AuditEventKind::VerifierImageDigestMismatch {
+                image_alias: "x".into(),
+                expected: "x".into(),
+                actual: "x".into(),
+                path: "x".into(),
+            }
+            .as_str(),
+            AuditEventKind::VerifierTimeout {
+                verifier_run_id: "x".into(),
+                timeout_seconds: 0,
+                partial_stdout_bytes: 0,
+            }
+            .as_str(),
+            AuditEventKind::VerifierArtifactRejected {
+                verifier_run_id: "x".into(),
+                reason: "x".into(),
+            }
+            .as_str(),
         ];
 
         let policy_kinds: std::collections::HashSet<&str> =
@@ -9003,6 +9104,38 @@ mod environment_tests {
                 .contains("FAIL_POLICY_RESERVED_VM_IMAGE_NAME"),
             "{err}"
         );
+    }
+
+    /// iter62 verifier-runtime D9: the general-verifier alias is
+    /// also reserved (operator may publish their own verifier
+    /// image, but not under this name). Mirrors the symbol-index
+    /// rejection shape so the dashboard surface stays uniform.
+    #[test]
+    fn iter62_validate_vm_images_rejects_reserved_general_verifier_alias() {
+        let raw = vec![vm_image_entry(
+            RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME,
+            STUB_DIGEST_HEX,
+            &["Verifier"],
+            Some("5.14"),
+        )];
+        let err = validate_vm_images(&raw).expect_err("must reject");
+        assert!(
+            err.to_string()
+                .contains("FAIL_POLICY_RESERVED_VM_IMAGE_NAME"),
+            "expected FAIL_POLICY_RESERVED_VM_IMAGE_NAME, got {err}",
+        );
+        assert!(
+            err.to_string()
+                .contains("INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01"),
+            "expected diagnostic to name the invariant, got {err}",
+        );
+    }
+
+    /// iter62 verifier-runtime D9: the literal must be the canonical
+    /// kernel-published alias.
+    #[test]
+    fn iter62_reserved_general_verifier_alias_literal_is_pinned() {
+        assert_eq!(RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME, "raxis-verifier-starter");
     }
 
     #[test]
