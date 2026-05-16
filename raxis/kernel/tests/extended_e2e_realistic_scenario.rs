@@ -78,7 +78,7 @@ use extended_e2e_support::{
     audit_chain::AuditChainWitness,
     crash_recovery::CrashRecoveryWitness,
     credential_substitution_evidence::{self as cred_sub_evidence, REAL_PG_PASSWORD},
-    docker_stack::ensure_extended_stack_up_or_panic,
+    docker_stack::{ensure_extended_stack_up_or_panic, extended_compose_file, COMPOSE_PROJECT},
     kernel_driver::{
         bootstrap_with_custom_cert, build_operator_key, enable_gateway_in_policy,
         locate_executor_worktree_via_chain, locate_session_id_for_task, maybe_refresh_examples,
@@ -115,6 +115,10 @@ use extended_e2e_support::{
 
 use common::dashboard::{
     configured_dashboard_port, mutate_dashboard_block_in_policy, open_dashboard_with_autologin,
+};
+use common::keep_alive::{
+    keep_running_after_exit_with_workdir, print_keep_alive_banner,
+    ComposeStackBanner,
 };
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -596,38 +600,78 @@ fn realistic_session_lifecycle() {
          {} = {metrics_size} bytes (>0 â periodic flush task drained the queue)",
         metrics_jsonl.display(),
     );
-    // ── Graceful shutdown ────────────────────────────────────
-    let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        status.success(),
-        "kernel must exit cleanly (got {:?}); stderr:\n{}",
-        status,
-        kernel.captured_stderr(),
-    );
+    // ── Graceful shutdown (skipped under keep-alive) ─────────
+    //
+    // Keep-alive opt-out (`RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`,
+    // `--keep-running-after-exit` CLI flag, or a `KEEP_RUNNING`
+    // touch file in `<data_dir>`): skip the SIGTERM and the
+    // kernel-clean-exit assertion so the kernel daemon, the
+    // operator dashboard, the otel-pusher, and any AVF/Firecracker
+    // guests stay running for the operator's post-mortem
+    // inspection. Default branch (no signal) preserves the
+    // legacy SIGTERM + exit-cleanly assertion per
+    // `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`. See
+    // `specs/v3/live-e2e-keep-alive.md`.
+    let keep_running = keep_running_after_exit_with_workdir(Some(kernel.data_dir()));
+    if !keep_running {
+        let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
+        assert!(
+            status.success(),
+            "kernel must exit cleanly (got {:?}); stderr:\n{}",
+            status,
+            kernel.captured_stderr(),
+        );
 
-    // ── Post-mortem chain integrity ──────────────────────────
-    let final_chain = walk_chain_or_panic(kernel.data_dir());
-    let audit_witness = AuditChainWitness::for_data_dir(kernel.data_dir());
-    let structural_report = audit_witness.assert_structural();
-    eprintln!(
-        "[realism-e2e] AuditChainWitness::walk_structural: {} records walked, \
-         last_seq={}, {} segment(s), {} distinct event_kind(s)",
-        structural_report.records_walked,
-        structural_report.last_seq,
-        structural_report.segments.len(),
-        structural_report.kinds_seen.len(),
-    );
-    eprintln!(
-        "[realism-e2e] final chain integrity verified ({} events; \
-         primary={initiative_primary}, sibling={initiative_sibling}; \
-         primary_workdir={})",
-        final_chain.len(),
-        primary_workdir.display(),
-    );
+        // ── Post-mortem chain integrity ──────────────────────
+        // Asserted only when the kernel has actually been shut
+        // down — under keep-alive the chain is still being
+        // appended to, so the structural walk would race the
+        // live writer.
+        let final_chain = walk_chain_or_panic(kernel.data_dir());
+        let audit_witness = AuditChainWitness::for_data_dir(kernel.data_dir());
+        let structural_report = audit_witness.assert_structural();
+        eprintln!(
+            "[realism-e2e] AuditChainWitness::walk_structural: {} records walked, \
+             last_seq={}, {} segment(s), {} distinct event_kind(s)",
+            structural_report.records_walked,
+            structural_report.last_seq,
+            structural_report.segments.len(),
+            structural_report.kinds_seen.len(),
+        );
+        eprintln!(
+            "[realism-e2e] final chain integrity verified ({} events; \
+             primary={initiative_primary}, sibling={initiative_sibling}; \
+             primary_workdir={})",
+            final_chain.len(),
+            primary_workdir.display(),
+        );
+    } else {
+        eprintln!(
+            "[realism-e2e] keep-alive flag active; skipped graceful kernel \
+             shutdown + post-mortem chain walk so dashboard / AVF guests / \
+             otel-pusher / docker-compose stack stay live for operator \
+             inspection"
+        );
+        let compose_file = extended_compose_file();
+        print_keep_alive_banner(
+            kernel.data_dir(),
+            Some(dashboard_port),
+            Some(ComposeStackBanner {
+                project: COMPOSE_PROJECT,
+                compose_file: &compose_file,
+            }),
+        );
+    }
 
     tier3.mark_success();
-    // `tier3` Drop runs here (or unwinds via a panic above), emitting
-    // the post-run artifact block exactly once.
+    // `tier3` Drop runs here (or unwinds via a panic above),
+    // emitting the post-run artifact block exactly once. Under
+    // keep-alive the `Tier3Reporter::Drop` MUST also keep
+    // `<data_dir>` even when `RAXIS_E2E_KEEP=0` is set, and the
+    // `KernelInstance::Drop` / `OtelPusherSupervisor::Drop`
+    // SIGKILL safety nets MUST be skipped — wired in
+    // `tier3_artifacts.rs`, `kernel_harness.rs`, and
+    // `otel_pusher.rs` respectively.
 }
 
 // ---------------------------------------------------------------------------

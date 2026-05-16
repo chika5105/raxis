@@ -145,6 +145,9 @@ use raxis_types::{BundleArtifact, OperatorFingerprint, PlanBundle};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
+use common::keep_alive::{
+    keep_running_after_exit_with_workdir, print_keep_alive_banner,
+};
 use common::kernel_harness::{acquire_test_lock, build_and_locate_kernel, KernelInstance};
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -336,25 +339,51 @@ fn full_session_lifecycle() {
     // ── §7.13 — graceful shutdown. The kernel's signal handler must
     //    drain in-flight intents, terminate active sessions, and emit
     //    the final `KernelShutdown { exit: "graceful" }` audit row.
-    let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
-    assert!(
-        status.success(),
-        "kernel must exit cleanly (got {:?}); stderr:\n{}",
-        status,
-        kernel.captured_stderr(),
-    );
+    //
+    //    Keep-alive opt-out: when `RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT=1`,
+    //    a `KEEP_RUNNING` touch file in `<data_dir>`, or the
+    //    `--keep-running-after-exit` CLI flag is set, skip both the
+    //    SIGTERM and the post-mortem audit-chain walk so the kernel
+    //    daemon, the dashboard, and any AVF/Firecracker guests stay
+    //    live for the operator's post-mortem inspection. Default
+    //    branch (no signal) preserves the legacy SIGTERM + chain
+    //    integrity assertions per `INV-E2E-KEEP-ALIVE-DEFAULT-OFF-01`.
+    //    See `specs/v3/live-e2e-keep-alive.md`.
+    let keep_running = keep_running_after_exit_with_workdir(Some(kernel.data_dir()));
+    if !keep_running {
+        let status = kernel.shutdown_with(libc::SIGTERM, SHUTDOWN_DEADLINE);
+        assert!(
+            status.success(),
+            "kernel must exit cleanly (got {:?}); stderr:\n{}",
+            status,
+            kernel.captured_stderr(),
+        );
 
-    // ── §7.14 — post-mortem audit chain assertions. We pin the
-    //    *invariants* the spec's table calls out, not the per-row
-    //    positions (real LLM scheduling is non-deterministic; e.g. the
-    //    orchestrator may interleave `ProposedDefaults` reads with
-    //    `ActivateSubTask` calls).
-    let final_chain = walk_chain_or_panic(kernel.data_dir());
-    assert_audit_invariants(&final_chain, &initiative_id);
-    eprintln!(
-        "[e2e] audit chain integrity verified ({} events)",
-        final_chain.len()
-    );
+        // ── §7.14 — post-mortem audit chain assertions. We pin the
+        //    *invariants* the spec's table calls out, not the per-row
+        //    positions (real LLM scheduling is non-deterministic; e.g. the
+        //    orchestrator may interleave `ProposedDefaults` reads with
+        //    `ActivateSubTask` calls). Asserted only when the kernel
+        //    has actually been shut down — under keep-alive the chain
+        //    is still being appended to, so the structural walk would
+        //    race the live writer.
+        let final_chain = walk_chain_or_panic(kernel.data_dir());
+        assert_audit_invariants(&final_chain, &initiative_id);
+        eprintln!("[e2e] audit chain integrity verified ({} events)", final_chain.len());
+    } else {
+        eprintln!(
+            "[e2e] keep-alive flag active; skipped graceful kernel shutdown \
+             + post-mortem chain walk so dashboard / AVF guests / \
+             docker-compose stack stay live for operator inspection"
+        );
+        // `full_e2e_session_lifecycle` does not import
+        // `extended_e2e_support`, so we let the banner fall back
+        // to the generic `cargo xtask observability ps / down`
+        // surface for the compose stack (the
+        // `live-e2e/docker-compose.e2e.yml` project the
+        // `raxis-live-e2e-test` namespace owns).
+        print_keep_alive_banner(kernel.data_dir(), Some(dashboard_port), None);
+    }
 
     // Tier-3 artifact-block parity with the realistic-scenario
     // driver. The merged worktree for `full_e2e_session_lifecycle`
