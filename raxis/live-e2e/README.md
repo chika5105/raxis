@@ -206,6 +206,35 @@ Each slice prints `OK — all selected slices passed` on success
 and exits non-zero with an actionable error (which compose
 service to start, which env var to set) on failure.
 
+### Witness verifier prerequisite (`INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01`)
+
+The extended-e2e slices (concurrent-lifecycle, realistic-scenario,
+single-task) inject a `[[gates]] gate_type = "NoSecretStrings"`
+block into the bootstrapped `policy.toml` whenever the
+`raxis-verifier-no-secrets` binary is found alongside
+`raxis-gateway` in the same `target/<profile>/` tree. This drives
+the iter63 paired-write recheck-clear edge in
+`kernel/src/scheduler/dag.rs::transition_to_admitted`. If the
+binary is absent, the gate is silently skipped and live-e2e runs
+take the fast-path admission — `INV-WITNESS-VERIFIER-LIVE-E2E-
+EXERCISED-01` coverage is then DROPPED for that run.
+
+The default `cargo build --workspace --all-targets` already
+builds `raxis-verifier-no-secrets` (it is a workspace member);
+the explicit invocation is only required when iterating on a
+narrower build:
+
+```bash
+# Alongside the gateway build the live-e2e harness expects:
+cargo build --release -p raxis-gateway
+cargo build --release -p raxis-verifier-no-secrets
+```
+
+CI builds the verifier implicitly via the workspace build in
+`.github/workflows/build-images.yml`; an explicit named step is
+also pinned there so a future narrowing of the workspace build
+does not silently drop verifier coverage.
+
 ---
 
 ## Executor image lint-toolchain contract (`INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-PYTHON-01` + `INV-EXECUTOR-IMAGE-LINT-TOOLCHAIN-JS-01`)

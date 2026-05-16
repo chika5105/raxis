@@ -73,6 +73,17 @@ jobs:
       - name: cargo build (workspace)
         run: cargo build --workspace --all-targets
 
+      # Explicit verifier-no-secrets build (FOLLOWUP-D /
+      # INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01). The workspace
+      # build above already covers this binary, but pinning a
+      # named step here means a future narrowing of the
+      # workspace-build step (e.g. switching to a focused
+      # `cargo build -p raxis-gateway`) cannot silently drop the
+      # iter63 recheck-clear coverage that depends on the binary
+      # being present in `target/<profile>/`.
+      - name: cargo build raxis-verifier-no-secrets (live-e2e prerequisite)
+        run: cargo build -p raxis-verifier-no-secrets --release
+
       # GitHub Actions Ubuntu runners ship /dev/kvm but the runner
       # user lacks permission. Open it so the kernel's Firecracker
       # substrate probe succeeds and e2e tests run against real
