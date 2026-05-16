@@ -62,3 +62,53 @@ classification grid. The pattern to look for: a
 SQLite schema AND whose value V is read for a cap / admission /
 dispatch / signature decision AND whose write is not
 atomically paired with the matching DB write.
+
+## iter65-review — deferred permanent-failure helper wirings
+
+Iter65-review (`worker/iter65-review-and-extend`) generalised
+the iter65-Bug-3 paired-write escalation pattern via
+`kernel::initiative_escalation::escalate_initiative_on_permanent_failure`.
+Three emit sites are wired in this PR
+(`MergeFastForwardFailed` + two `PushFailed` paths in
+`kernel/src/handlers/intent.rs`); the remaining in-scope
+sites are deferred for the reasons documented below. For
+each deferred site the chain-side `AuditEventKind` event
+continues to fire unchanged; only the operator-actionable
+escalation enrichment is missing.
+
+The notification dispatch gate already routes the chain
+event to Critical for every iter65-review-scope kind (per
+`INV-NOTIFICATION-PRIORITY-PARITY-01`-extension) so the
+inbox-level paging signal IS preserved on the deferred
+paths — operators still see a Critical inbox row for every
+permanent-stall event; what's missing is the
+operator-actionable escalation row + the
+`InitiativePermanentFailureEscalated` chain anchor that
+would let the operator approve/deny via
+`raxis escalation approve <id>`.
+
+| Audit kind | Emit site | Why deferred | Suggested wiring |
+|---|---|---|---|
+| `SessionVmFailedFinal` | `kernel/src/session_spawn_orchestrator.rs::spawn_with_transient_retry` | Helper has no `Arc<HandlerContext>`; pulled by `SessionSpawnService` callers from many sites (orchestrator spawn, executor spawn, respawn-with-larger). | Pass `Option<Arc<HandlerContext>>` through `spawn_with_transient_retry` (None for legacy/test callers, Some for production) so the helper can fire post-`Err` from inside `spawn_with_transient_retry`. Alt: wrap each call site's Err branch with the helper invocation directly. |
+| `PlanRejected` | `kernel/src/handlers/plan.rs` (admission validator) | Emit site has the planner's session_id but NOT the initiative_id (admission runs before the initiative is bound). | Resolve initiative_id from `signed_plan_artifacts.initiative_id` by joining the rejected plan's plan_artifact_sha256 → initiative_id, then fire the helper. |
+| `EscalationTimedOut` | No production emit site | The `AuditEventKind` is defined and serialised in tests + `push::initiative_bus` translation, but the kernel does not run a timeout-sweep that fires it. | First wire a kernel-side timeout sweep (background task that walks `escalations WHERE status='Pending' AND timeout_at < now`), THEN call the helper from inside the sweep. |
+| `EscalationRateLimitExceeded` | `kernel/src/handlers/escalation.rs::handle_submit_escalation` | Emit site is inside the escalation-submit transaction and returns a `SubmitOutcome` with a deferred `audit_after` list; no `Arc<HandlerContext>` available at the inline call site. | Surface `SubmitOutcome::RateLimitExceeded { initiative_id }` to the IPC handler caller (which DOES have ctx) and fire the helper there post-tx. |
+| `SessionEgressStallDetected` | `crates/egress-admission/src/stall_tracker.rs` (detector) | Emit site is in the egress-admission crate, not the kernel; needs both `Arc<HandlerContext>` plumbing AND a session→initiative_id lookup. | Add a kernel-side observer that subscribes to the stall-tracker's event stream and fires the helper from inside the kernel, bypassing the cross-crate plumbing. |
+| `InitiativeStateChanged{new_state: Failed}` (catch-all) | Many emit sites | Catch-all wiring would double-fire on already-wired kinds (every wired kind also runs the cascade UPDATE that emits InitiativeStateChanged). | Add a `from_state` discriminator + a per-cause classifier so the catch-all only fires when the FSM-flip's cause is NOT already wired. Lower priority than the per-cause sites above. |
+
+### Acceptance for iter66+
+
+Closing each deferred row requires:
+
+1. The helper invocation lands at the emit site (or at a
+   higher level with `Arc<HandlerContext>` + `initiative_id`
+   in scope).
+2. The schema-level witness in
+   `kernel/tests/initiative_permanent_failure_escalation.rs`
+   gets a per-cause test (mirroring the
+   `idempotency_dedup_on_same_cause_seq` pattern) that
+   exercises the new wiring.
+3. The matrix in `specs/v2/dashboard-hardening.md §10.1`
+   gets a "Wired" column flip from "Deferred — …" to "Yes".
+4. The `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+   coverage table in `specs/invariants.md` gets the same flip.

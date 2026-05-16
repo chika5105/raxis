@@ -1714,3 +1714,102 @@ unit doc-comments),
 When changing any of these, please update the table in
 §1.3 in the same commit so the contract stays in sync
 with the code.
+
+---
+
+## §10 — Permanent-failure escalation surface (iter65-review)
+
+`INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01` and
+`INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01`. This section
+documents the per-cause approve semantics for the
+`AuditEventKind::InitiativePermanentFailureEscalated` chain
+anchor introduced in iter65-review and the underlying
+`LogicalDeadlock`-class escalation row.
+
+### §10.1 — Per-cause approve matrix
+
+The kernel-side helper
+`kernel::initiative_escalation::escalate_initiative_on_permanent_failure`
+inserts ONE `LogicalDeadlock` escalation row per
+`(initiative_id, cause_kind, cause_seq)` triple and emits the
+`InitiativePermanentFailureEscalated` chain anchor. The
+operator-approve handler is the SAME for every cause (all
+in-scope causes ride the existing
+`approve_logical_deadlock_escalation_in_tx` path). The cause
+discriminator is preserved on the chain anchor so dashboards
+can render per-cause guidance without forking the approve
+machinery.
+
+| Cause kind | Recoverable via approve | Approve semantics | Re-failure semantics |
+|---|---|---|---|
+| `OrchestratorRespawnCeilingExceeded` | Yes | Reset NNSP counter; flip `Failed → Executing`; next decision-cycle re-spawns the orchestrator. | If respawn re-trips the ceiling, a fresh escalation lands with a NEW idempotency key (the attempt counter advanced). Operator can Deny to settle the FSM. |
+| `MergeFastForwardFailed` | Yes | Flip `Failed → Executing`; orchestrator's next decision-cycle re-attempts the merge. | If FF still refused, fresh anchor lands with a different `cause_seq` (the integration ref's `target_ref` may have advanced) — operator should Deny + manually rebase. |
+| `PushFailed` | Yes | Flip `Failed → Executing`; next merge attempt re-attempts the push. | If push still failing, fresh anchor lands with the new push attempt's reason text in `cause_seq`. |
+| `SessionVmFailedFinal` | Yes (transient host pressure) | Flip `Failed → Executing`; next session-spawn cycle re-attempts. | If still permanent, fresh anchor with `total_attempts` advanced. |
+| `PlanRejected` | **No** | Flip `Failed → Executing` is a structural no-op (the rejected plan needs to be re-submitted; approve does not re-run admission). Operator should Deny + open a fresh plan. The chain anchor's `recoverable_via_approve = false` field surfaces this in the inbox. | N/A. |
+| `EscalationTimedOut` | Yes | Flip `Failed → Executing`; the original blocked work resumes. | If the underlying condition that drove the original escalation is still present, it re-trips immediately. |
+| `EscalationRateLimitExceeded` | **No** | Approve is structural no-op (the storm pattern needs out-of-band investigation). Operator should Deny. | N/A. |
+| `SessionEgressStallDetected` | Yes | Flip `Failed → Executing`; orchestrator's next decision-cycle re-runs the egress-blocked session. | If egress still stalled, fresh anchor with the stalled session_id in `cause_seq`. |
+
+### §10.2 — Anti-loop guarantee
+
+The helper's `cause_seq` always includes a per-instance
+discriminator (attempt counter, reason hash, refspec, etc.)
+so a re-fire after an unsuccessful approve does NOT silently
+dedup against the just-approved row. The new escalation
+shows up in the inbox as a fresh row with a NEW
+idempotency_key; the operator sees the cycle and can choose
+Deny as the semantically-correct response. This guarantees
+the system can never enter the
+`approve → no-op → silently stuck` failure mode pinned by
+`INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01`.
+
+### §10.3 — Anchor-less escalation path
+
+The helper's two-tier FK-anchor lookup (most-recently-touched
+worker session → most-recent Orchestrator session for the
+initiative) covers every well-formed initiative. In the
+pathological case where BOTH lookups fail (no session of any
+kind ever bound to the initiative — a corrupted-state
+scenario), the helper emits the chain anchor with
+`escalation_id = None` and writes a structured warn log
+(`LogicalDeadlockEscalationSkippedNoFkAnchor`). The inbox
+notification still fires (the `InitiativePermanentFailureEscalated`
+event routes to Critical), so the operator is paged even
+though no operator-actionable escalation row exists. The
+dashboard renders this as a "chain-only; manual triage
+required" badge per the `escalation_id` JSON-null signal.
+
+### §10.4 — Deferred coverage
+
+Not every in-scope kind is wired in iter65-review; the
+following emit sites are tracked in
+`specs/iter65-followups.md`:
+
+* `SessionVmFailedFinal` — emit site
+  (`spawn_with_transient_retry`) lacks `Arc<HandlerContext>`;
+  needs caller-side wiring at every spawn entry point or a
+  helper-API rework.
+* `PlanRejected` — emit site (plan admission) needs
+  initiative_id surfacing.
+* `EscalationTimedOut` — no production emit site (defined +
+  serialised in tests, but no kernel-side timeout sweep
+  exists yet).
+* `EscalationRateLimitExceeded` — emit site is inside the
+  escalation-submit transaction without `Arc<HandlerContext>`;
+  the chain anchor still fires (Critical-classified per
+  iter65 Bug 4) but no per-event helper invocation lands.
+* `SessionEgressStallDetected` — emit site needs
+  session→initiative_id resolution.
+* `InitiativeStateChanged{new_state: Failed}` (catch-all) —
+  needs `from`-state classification to avoid double-firing
+  on already-wired kinds.
+
+For each deferred kind the chain-side `AuditEventKind` event
+continues to fire unchanged; only the operator-actionable
+escalation enrichment is missing. The
+`INV-NOTIFICATION-PRIORITY-PARITY-01`-extension means the
+notification dispatch gate still routes the chain event to
+Critical for every iter65-review-scope kind, so the
+inbox-level paging signal is preserved even on the deferred
+paths.

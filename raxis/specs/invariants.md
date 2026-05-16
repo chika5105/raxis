@@ -104,7 +104,9 @@
 | Dev signing-key autogen — V3 (iter61, kernel build path added iter62) | INV-IMAGE-DEV-SIGNING-KEY-AUTOGEN-01 | 1 |
 | Trust anchor dev-profile fallback — V3 (iter62) | INV-IMAGE-TRUST-ANCHOR-DEV-FALLBACK-01 | 1 |
 | Release-bake rejects dev key — V3 (iter62) | INV-IMAGE-RELEASE-BAKE-REJECTS-DEV-KEY-01 | 1 |
-| **Total** | | **146** |
+| iter65 fail-closed VM cap + planner clean-completion + auto-LogicalDeadlock + notification parity — V3 (iter65) | INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01, INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01, INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01, INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01, INV-NOTIFICATION-PRIORITY-PARITY-01 | 5 |
+| iter65-review generalised permanent-failure escalation + recovery semantics — V3 (iter65-review) | INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01, INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01 | 2 |
+| **Total** | | **153** |
 
 ---
 
@@ -13498,3 +13500,102 @@ saw no auto-paged signal that the initiative had
 self-failed.
 
 **Canonical home.** `crates/dashboard-kernel/src/notification_filter.rs`.
+
+### `INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01`
+
+**Statement.** Every `AuditEventKind` variant whose payload
+implies a permanent stall of an initiative MUST, at its
+kernel-side emit site, also invoke
+`kernel::initiative_escalation::escalate_initiative_on_permanent_failure`
+(or carry a structured deferral note in the
+`PermanentFailureCause` enum docs explaining why direct
+wiring is structurally impossible at this site). The closed
+in-scope kind list is:
+
+| Kind | Recoverable via approve | Wired |
+|---|---|---|
+| `OrchestratorRespawnCeilingExceeded` | Yes (counter reset) | Yes (iter65 Bug 3, separate paired-write helper) |
+| `MergeFastForwardFailed` | Yes (operator may rebase + retry) | Yes (iter65-review) |
+| `PushFailed` | Yes (operator addresses cause + retries) | Yes (iter65-review) |
+| `SessionVmFailedFinal` | Yes (transient host pressure may clear) | Deferred — emit site lacks `Arc<HandlerContext>` (`spawn_with_transient_retry` is plumbed via `SessionSpawnService` only); see `specs/iter65-followups.md` |
+| `PlanRejected` | No (plan must be re-submitted) | Deferred — emit site needs initiative_id surfacing via plan-admission glue; see `specs/iter65-followups.md` |
+| `EscalationTimedOut` | Yes (operator can re-approve via fresh anchor) | Deferred — no production emit site (the type is defined and serialised in tests + push translation, but the kernel does not run a timeout-sweep that fires it); see `specs/iter65-followups.md` |
+| `EscalationRateLimitExceeded` | No (storm-protection is doing its job) | Deferred — emit site is inside the escalation submit transaction without `Arc<HandlerContext>`; the chain anchor still fires; see `specs/iter65-followups.md` |
+| `SessionEgressStallDetected` | Yes (operator adjusts policy) | Deferred — needs session→initiative_id lookup at emit site; see `specs/iter65-followups.md` |
+| `InitiativeStateChanged{new_state: Failed}` (catch-all) | Conservative yes | Deferred — would require classifying the `from` cause to avoid double-firing on already-wired kinds; see `specs/iter65-followups.md` |
+
+**Justification.** Iter64 evidence: an initiative auto-failed
+on `OrchestratorRespawnCeilingExceeded` and the operator inbox
+surfaced no Critical paged signal because the only escalation
+path was the planner-side `EscalationSubmitted` flow + a
+`Medium`-classified chain event. Bug 3 wired the auto-escalation
+helper for ONE kind; iter65-review generalises the contract:
+every permanent-stall kind MUST surface a Critical-priority
+operator-actionable anchor, otherwise the dashboard's
+inbox-by-priority filter (and the kernel's
+`notifications::dispatch` defense-in-depth gate) silently
+drop the signal and the operator never sees the failure.
+
+The `PermanentFailureCause` enum is closed (compile-time
+exhaustive) so a future variant addition forces an explicit
+opt-in or opt-out decision (rather than the implicit-non-coverage
+default that broke iter64).
+
+**Canonical home.** `kernel/src/initiative_escalation.rs`
+(`PermanentFailureCause` enum + `escalate_initiative_on_permanent_failure`
+helper).
+
+### `INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01`
+
+**Statement.** Every escalation class's operator-approve path
+(via `OperatorIntent::ApproveEscalation` or
+`raxis escalation approve <id>`) MUST either:
+
+  1. Drive the kernel to RESUME the affected initiative work
+     (e.g. flip `Failed → Executing`, reset the relevant
+     counter, let the next decision-cycle pick up); OR
+  2. Document non-recovery in a structured way that surfaces
+     to the operator before they approve (the
+     `AuditEventKind::InitiativePermanentFailureEscalated`
+     anchor's `recoverable_via_approve = false` field, and
+     the dashboard's per-class "non-recoverable" badge).
+
+No escalation class may be `approve, no-op, silently stuck`.
+For the `LogicalDeadlock` class (which the iter65-review
+helper reuses for all in-scope permanent-failure causes),
+approval always: (a) flips `escalations.status = 'Approved'`,
+(b) resets `initiatives.orchestrator_no_progress_respawn_count`,
+(c) flips `initiatives.state = 'Failed' → 'Executing'` (when
+applicable), (d) emits `OperatorApprovedRespawnEscalation` +
+`InitiativeStateChanged` paired-writes. The next orchestrator
+decision-cycle is responsible for the actual respawn (the
+operator-handler does NOT re-spawn directly — the kernel does
+not assume the operator's intent extends to spawning).
+
+**Re-failure semantics.** When the underlying cause is still
+present at approve-time (e.g. capacity pressure unchanged,
+network still partitioned, plan still malformed), the next
+decision-cycle re-trips the same condition and a FRESH
+permanent-failure helper invocation runs. The new escalation
+gets a NEW idempotency key (because `cause_seq` includes
+attempt counters / hashes that differ between fires), so it
+does NOT silently dedup against the just-approved row — the
+operator sees a new escalation and can choose Deny + manual
+intervention. This is the explicit anti-loop guarantee.
+
+**Justification.** Iter64 evidence: the only auto-escalation
+class (`LogicalDeadlock`) had a working approve handler; with
+iter65-review's broadening the same handler now serves every
+in-scope cause. Without this invariant, a future cause class
+could ship with an approve path that flips
+`escalations.status = 'Approved'` but does NOT reset the
+relevant counter or re-enable the FSM, leaving the
+initiative permanently stuck in `Failed` despite operator
+approval — a silent-stall regression worse than the original
+auto-fail (because the operator believes they have unblocked
+the work).
+
+**Canonical home.**
+`kernel/src/orch_respawn_ceiling.rs::approve_logical_deadlock_escalation_in_tx`
++ `kernel/src/ipc/operator.rs::handle_approve_logical_deadlock`
++ `specs/v2/dashboard-hardening.md` (per-class approve table).
