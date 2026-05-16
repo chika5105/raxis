@@ -11781,3 +11781,68 @@ The agreed protocol when adding a new `INV-*`:
    any relevant §12 composition row.
 4. If the invariant is enforced by code, leave a `// INV-XXX` or
    spec crossref comment at the enforcement site.
+
+### INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01 — Every kernel-driven `tasks.state` mutation MUST emit a paired `TaskStateChanged` audit row
+
+**Statement.** Every successful UPDATE of `tasks.state` (any
+column write that flips a task from one `TaskState` to
+another) MUST be paired with exactly one
+`AuditEventKind::TaskStateChanged` audit row landing in the
+audit chain post-commit, carrying a non-empty `from_state`,
+the new `to_state`, an `actor` matching the canonical
+`TransitionActor::as_audit_string()` shape (`"kernel"` or
+`"operator:<fingerprint>"`), and the `policy_epoch` of the
+row at the moment of the SELECT-then-UPDATE. Bulk cancel
+paths (`abort_initiative`'s mass `state = 'Cancelled'`
+UPDATE) MUST emit one paired-write per affected row, NOT a
+single anchor — the dashboard's `<LifecycleTimeline>` pins
+on per-task rows and the SSE stream pushes per-task events.
+
+**Why structural.** Pre-iter63 the operator-driven
+`abort_task` / `abort_initiative` paths and the gate-
+recheck-cleared `transition_to_admitted` path UPDATE'd the
+SQL row but emitted only a structured `eprintln!` log line;
+the audit chain therefore carried zero
+`TaskStateChanged * → Aborted` / `* → Cancelled` /
+`GatesPending → Admitted` rows for those transitions, and
+the dashboard's per-task lifecycle timeline showed the
+prior state forever even after the SQLite-side state had
+flipped. Pinning the paired-write rule closes the chain
+hole and lets the `<LifecycleTimeline>` reach 100%
+coverage of `tasks.state` mutations.
+
+**Witness.** `kernel/src/scheduler/dag.rs::tests::inv_audit_task_state_changed_paired_write_01_gates_pending_to_admitted_emits_audit`
+pins the gate-recheck-clear edge.
+`kernel/src/initiatives/lifecycle.rs::tests::abort_initiative_emits_paired_audit_writes_iter63`
+pins the operator bulk cancel + initiative abort pairing.
+`kernel/src/initiatives/lifecycle.rs::tests::abort_task_emits_paired_audit_write_iter63`
+pins the operator single-task abort pairing.
+`kernel/src/initiatives/task_transitions.rs::tests::inv_dashboard_push_fsm_completeness_01_admitted_to_running_emits_audit`
+(pre-existing) pins the `Admitted → Running` edge for
+executor admission.
+
+### INV-AUDIT-INITIATIVE-ABORT-PAIRED-WRITE-01 — Every operator-driven initiative abort MUST emit `InitiativeAborted`
+
+**Statement.** Every `lifecycle::abort_initiative` call that
+successfully commits the `initiatives.state = 'Aborted'`
+UPDATE MUST emit exactly one
+`AuditEventKind::InitiativeAborted` audit row carrying
+the offending `initiative_id` plus the operator
+attribution (`triggered_by_operator = Some(<aborted_by>)`)
+when an `audit` sink is supplied to the helper. Tests that
+pass `audit = None` are exempt.
+
+**Why structural.** Pre-iter63 the only abort-side
+observation was a structured `eprintln!` line; the audit
+chain had no anchor for the operator-driven abort, so the
+dashboard's `<RecentInitiativesPanel>` could not surface
+the operator's identity nor the abort wall-clock. Operator
+forensics required parsing kernel stderr, which is not
+durable across kernel restarts. Pinning the paired-write
+rule makes the abort observable through the canonical
+audit-chain reader path.
+
+**Witness.** `kernel/src/initiatives/lifecycle.rs::tests::abort_initiative_emits_paired_audit_writes_iter63`
+asserts the post-abort audit chain carries exactly one
+`InitiativeAborted` row keyed on the offending
+initiative_id.

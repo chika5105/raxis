@@ -1853,10 +1853,24 @@ pub fn reject_plan(
 /// every task `Cancelled` while the initiative remained `Executing` forever
 /// (no startup recovery sweep re-derives initiative state from task state).
 /// Wrapping both writes in `conn.transaction()` makes the failure binary.
+///
+/// **`INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01` /
+/// `INV-AUDIT-INITIATIVE-ABORT-PAIRED-WRITE-01`.** When `audit` is
+/// `Some(_)`, the kernel emits one
+/// `AuditEventKind::TaskStateChanged * → Cancelled` row per
+/// non-terminal task that was just cancelled, plus one
+/// `AuditEventKind::InitiativeAborted` row keyed on the initiative.
+/// Pre-iter63 the bulk cancel + initiative flip were SQLite-only and
+/// the dashboard's `<LifecycleTimeline>` showed every cancelled task
+/// stuck in its prior state forever (no audit-chain anchor for the
+/// transition). Tests pass `None` to skip the emit when the test
+/// is exercising the SQL transactionality without caring about the
+/// audit chain shape.
 pub fn abort_initiative(
     initiative_id: &str,
     aborted_by: &str,
     store: &Store,
+    audit: Option<&dyn raxis_audit_tools::AuditSink>,
 ) -> Result<(), LifecycleError> {
     let mut conn = store.lock_sync();
 
@@ -1900,22 +1914,27 @@ pub fn abort_initiative(
 
     let tx = conn.transaction()?;
 
-    // Snapshot the about-to-be-cancelled tasks' (lane_id, task_id)
-    // pairs BEFORE the bulk UPDATE — once the rows flip to Cancelled
-    // the post-UPDATE snapshot would still have the same lane_id,
-    // but reading first matches the order the spec describes
-    // (terminal-state handler MUST call release_budget; the
-    // "cancelled" transition IS the terminal-state handler for
-    // operator-driven aborts) and keeps the `WHERE state NOT IN
-    // (terminal)` filter on the snapshot consistent with the bulk
-    // UPDATE's WHERE clause.
-    let pairs_to_release: Vec<(String, String)> = {
+    // Snapshot the about-to-be-cancelled tasks' (lane_id, task_id,
+    // prior_state) triples BEFORE the bulk UPDATE — `lane_id` is
+    // needed for `release_budget_in_tx`, `prior_state` is needed
+    // for the per-task `TaskStateChanged from → Cancelled` audit
+    // emit post-commit per `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`,
+    // and `task_id` is needed for both. Snapshot order matches the
+    // bulk UPDATE's WHERE clause so the snapshot and the cancel
+    // set are identical even under a concurrent operator double-
+    // abort (the second tx finds zero rows and the snapshot is
+    // empty).
+    let task_snapshot: Vec<(String, String, String)> = {
         let mut stmt = tx.prepare(&format!(
-            "SELECT lane_id, task_id FROM {TASKS}
+            "SELECT lane_id, task_id, state FROM {TASKS}
               WHERE initiative_id=?1 AND state NOT IN ({terminal_not_in})"
         ))?;
         let rows = stmt.query_map(rusqlite::params![initiative_id], |r| {
-            Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?))
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+            ))
         })?;
         rows.filter_map(Result::ok).collect()
     };
@@ -1937,7 +1956,7 @@ pub fn abort_initiative(
     // sub-task that pushes the cumulative reservation over the
     // ceiling). Idempotent on rows == 0 (a Cancelled-pre-tx task
     // that had not yet reserved is safely a no-op).
-    for (lane_id, task_id) in &pairs_to_release {
+    for (lane_id, task_id, _) in &task_snapshot {
         crate::scheduler::budget::release_budget_in_tx(&tx, lane_id, task_id)
             .map_err(|e| LifecycleError::PlanInvalid {
                 reason: format!(
@@ -1955,11 +1974,50 @@ pub fn abort_initiative(
     )?;
 
     tx.commit()?;
+    drop(conn);
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"InitiativeAborted\",\
          \"initiative_id\":\"{initiative_id}\",\"aborted_by\":\"{aborted_by}\"}}",
     );
+
+    // ── Audit-chain pairing — post-commit emit per
+    //    `audit-paired-writes.md §1` (write to SQLite, then to the
+    //    audit chain; never inverted). Failure to emit is structural-
+    //    log only and never rolls back the SQL state, mirroring the
+    //    `transition_task_with_audit` discipline.
+    if let Some(audit) = audit {
+        for (_, task_id, prior_state) in &task_snapshot {
+            let kind = raxis_audit_tools::AuditEventKind::TaskStateChanged {
+                task_id: task_id.clone(),
+                from_state: prior_state.clone(),
+                to_state: TaskState::Cancelled.as_sql_str().to_owned(),
+                actor: format!("operator:{aborted_by}"),
+                policy_epoch: 0,
+            };
+            if let Err(e) = audit.emit(kind, None, Some(task_id), Some(initiative_id)) {
+                eprintln!(
+                    "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+                     \"audit_event\":\"TaskStateChanged\",\"task_id\":\"{task_id}\",\
+                     \"initiative_id\":\"{initiative_id}\",\"from\":\"{prior_state}\",\
+                     \"to\":\"Cancelled\",\"reason\":\"{e}\"}}",
+                );
+            }
+        }
+
+        let initiative_kind = raxis_audit_tools::AuditEventKind::InitiativeAborted {
+            initiative_id: initiative_id.to_owned(),
+            triggered_by_operator: Some(aborted_by.to_owned()),
+            triggered_by_operator_display_name: None,
+        };
+        if let Err(e) = audit.emit(initiative_kind, None, None, Some(initiative_id)) {
+            eprintln!(
+                "{{\"level\":\"error\",\"event\":\"AuditEmitFailed\",\
+                 \"audit_event\":\"InitiativeAborted\",\
+                 \"initiative_id\":\"{initiative_id}\",\"reason\":\"{e}\"}}",
+            );
+        }
+    }
     Ok(())
 }
 
@@ -1967,18 +2025,37 @@ pub fn abort_initiative(
 // abort_task — operator cancels a single task
 // ---------------------------------------------------------------------------
 
-pub fn abort_task(task_id: &str, aborted_by: &str, store: &Store) -> Result<(), LifecycleError> {
-    let mut conn = store.lock_sync();
-    let now = unix_now_secs();
+/// Abort a single non-terminal task — operator-driven `Aborted`
+/// transition.
+///
+/// **`INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`.** When `audit`
+/// is `Some(_)`, the kernel emits one
+/// `AuditEventKind::TaskStateChanged * → Aborted` row post-commit
+/// keyed on the task's prior state. Pre-iter63 this handler did
+/// the SQLite UPDATE with a raw statement and an `eprintln!` -only
+/// emit, which left the dashboard's per-task lifecycle timeline
+/// permanently stuck on the prior state — every operator-driven
+/// `AbortTask` was an invisible mutation. Tests pass `None` to
+/// skip the emit.
+pub fn abort_task(
+    task_id: &str,
+    aborted_by: &str,
+    store: &Store,
+    audit: Option<&dyn raxis_audit_tools::AuditSink>,
+) -> Result<(), LifecycleError> {
+    use crate::initiatives::task_transitions::{transition_task_in_tx, TransitionActor};
 
-    // Read state + lane_id together — we need lane_id for the
-    // post-flip `release_budget_in_tx`, and folding both reads
-    // into the same SELECT means one round trip instead of two.
-    let (state, lane_id): (String, String) = conn
+    let mut conn = store.lock_sync();
+
+    // Read prior state + lane_id + initiative_id together — we need
+    // `lane_id` for the post-flip `release_budget_in_tx`, the
+    // `initiative_id` for the audit row's `initiative_id` column,
+    // and the `state` for the early terminal-state guard.
+    let (prior_state, lane_id, initiative_id): (String, String, String) = conn
         .query_row(
-            &format!("SELECT state, lane_id FROM {TASKS} WHERE task_id=?1"),
+            &format!("SELECT state, lane_id, initiative_id FROM {TASKS} WHERE task_id=?1"),
             rusqlite::params![task_id],
-            |r| Ok((r.get(0)?, r.get(1)?)),
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .map_err(|e| match e {
             rusqlite::Error::QueryReturnedNoRows => LifecycleError::TaskNotFound {
@@ -1994,23 +2071,23 @@ pub fn abort_task(task_id: &str, aborted_by: &str, store: &Store) -> Result<(), 
         TaskState::Cancelled,
     ]
     .map(|s| s.as_sql_str());
-    if aborted_states.contains(&state.as_str()) {
+    if aborted_states.contains(&prior_state.as_str()) {
         return Err(LifecycleError::TaskNotAbortable {
-            current_state: state,
+            current_state: prior_state,
         });
     }
 
-    // Transactional fold: state-flip + budget-release commit
-    // together — same INV-STORE-02 contract as
+    // Transactional fold: FSM-validated state-flip + budget-release
+    // commit together — same INV-STORE-02 contract as
     // `commit_task_completion` / `handle_report_failure` (a crash
     // mid-handler must leave either both writes durable or both
     // rolled back, never the half-state where the task is Aborted
     // but its lane reservation is still charged).
     let tx = conn.transaction()?;
-    tx.execute(
-        &format!("UPDATE {TASKS} SET state=?1, transitioned_at=?2 WHERE task_id=?3"),
-        rusqlite::params![TaskState::Aborted.as_sql_str(), now, task_id],
-    )?;
+    let actor = TransitionActor::Operator {
+        fingerprint: aborted_by.to_owned(),
+    };
+    let record = transition_task_in_tx(&tx, task_id, TaskState::Aborted, None, actor)?;
     crate::scheduler::budget::release_budget_in_tx(&tx, &lane_id, task_id).map_err(|e| {
         LifecycleError::PlanInvalid {
             reason: format!(
@@ -2019,11 +2096,19 @@ pub fn abort_task(task_id: &str, aborted_by: &str, store: &Store) -> Result<(), 
         }
     })?;
     tx.commit()?;
+    drop(conn);
 
     eprintln!(
         "{{\"level\":\"info\",\"event\":\"TaskAborted\",\
          \"task_id\":\"{task_id}\",\"aborted_by\":\"{aborted_by}\"}}",
     );
+
+    // Audit-chain pairing — post-commit emit per
+    // `audit-paired-writes.md §1`.
+    if let Some(audit) = audit {
+        let _ = initiative_id; // surfaced via `record.initiative_id`
+        crate::initiatives::task_transitions::emit_task_state_changed_audit(audit, &record, None);
+    }
     Ok(())
 }
 
@@ -8927,7 +9012,7 @@ target_ref = "refs/heads/raxis/feature"
             &live_registry,
         )
         .unwrap();
-        abort_initiative(&init_id, "op", &store).unwrap();
+        abort_initiative(&init_id, "op", &store, None).unwrap();
 
         let restarted = PlanRegistry::new();
         let n = repopulate_plan_registry(&store, &restarted, "refs/heads/main", false).unwrap();
@@ -9018,7 +9103,7 @@ target_ref = "refs/heads/raxis/feature"
             assert_eq!(init_state, "Executing");
         }
 
-        abort_initiative(&init_id, "op", &store).unwrap();
+        abort_initiative(&init_id, "op", &store, None).unwrap();
 
         // Both writes MUST be visible (success path = commit both).
         let conn = store.lock_sync();
@@ -9041,6 +9126,179 @@ target_ref = "refs/heads/raxis/feature"
             init_state, "Aborted",
             "initiatives UPDATE must have committed in the SAME transaction"
         );
+    }
+
+    /// `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01` /
+    /// `INV-AUDIT-INITIATIVE-ABORT-PAIRED-WRITE-01` — every
+    /// `abort_initiative` call MUST emit one `TaskStateChanged
+    /// from → Cancelled` audit row per non-terminal task PLUS
+    /// exactly one `InitiativeAborted` row keyed on the
+    /// initiative. Pre-iter63 the operator-driven abort path
+    /// landed the SQLite UPDATEs but emitted only an
+    /// `eprintln!`-shaped log line, which left the dashboard's
+    /// `<LifecycleTimeline>` stuck on the prior task / initiative
+    /// state forever.
+    #[test]
+    fn abort_initiative_emits_paired_audit_writes_iter63() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t-paired"
+        path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let approve_audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(
+            &init_id,
+            "op",
+            None,
+            &pk,
+            1,
+            &store,
+            &approve_audit,
+            &live_registry,
+        )
+        .unwrap();
+
+        // Fresh sink for the abort path so the witness only counts
+        // events emitted by `abort_initiative` itself.
+        let abort_audit = FakeAuditSink::new();
+        abort_initiative(&init_id, "op", &store, Some(&abort_audit)).unwrap();
+
+        let events = abort_audit.events();
+        let kinds: Vec<&str> = events.iter().map(|e| e.kind.as_str()).collect();
+
+        // Per-task `TaskStateChanged` for every non-terminal row
+        // we just cancelled (the fixture seeds one task in
+        // `Admitted`).
+        let task_state_changed: Vec<&raxis_audit_tools::AuditEventKind> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                k @ raxis_audit_tools::AuditEventKind::TaskStateChanged { task_id, .. }
+                    if task_id == "t-paired" =>
+                {
+                    Some(k)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            task_state_changed.len(),
+            1,
+            "INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01: exactly \
+             one TaskStateChanged audit row per cancelled task; \
+             observed kinds = {kinds:?}",
+        );
+        match task_state_changed[0] {
+            raxis_audit_tools::AuditEventKind::TaskStateChanged {
+                from_state,
+                to_state,
+                actor,
+                ..
+            } => {
+                assert_eq!(
+                    from_state, "Admitted",
+                    "from_state MUST reflect the prior task state"
+                );
+                assert_eq!(
+                    to_state, "Cancelled",
+                    "to_state MUST be the bulk-cancel terminal state"
+                );
+                assert!(
+                    actor.starts_with("operator:"),
+                    "actor MUST be `operator:<fingerprint>` for operator-driven aborts; got {actor}"
+                );
+            }
+            _ => unreachable!(),
+        }
+
+        // Single `InitiativeAborted` paired-write keyed on the
+        // initiative.
+        let initiative_aborted: Vec<&raxis_audit_tools::AuditEventKind> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                k @ raxis_audit_tools::AuditEventKind::InitiativeAborted {
+                    initiative_id: id,
+                    ..
+                } if id == &init_id => Some(k),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            initiative_aborted.len(),
+            1,
+            "INV-AUDIT-INITIATIVE-ABORT-PAIRED-WRITE-01: exactly \
+             one InitiativeAborted audit row per abort; observed \
+             kinds = {kinds:?}",
+        );
+    }
+
+    /// Companion witness for `abort_task` — the operator-driven
+    /// single-task abort MUST emit a `TaskStateChanged from →
+    /// Aborted` audit row.
+    #[test]
+    fn abort_task_emits_paired_audit_write_iter63() {
+        let store = Store::open_in_memory().unwrap();
+        let (sk, _) = fixture_keypair();
+        let plan = r#"[[tasks]]
+        task_id = "t-abort-paired"
+        path_allowlist = ["src/"]
+        "#;
+        let (init_id, pk) = seed_draft_initiative(&store, plan, &sk);
+        let approve_audit = FakeAuditSink::new();
+        let live_registry = PlanRegistry::new();
+        approve_plan_for_test(
+            &init_id,
+            "op",
+            None,
+            &pk,
+            1,
+            &store,
+            &approve_audit,
+            &live_registry,
+        )
+        .unwrap();
+
+        let abort_audit = FakeAuditSink::new();
+        abort_task("t-abort-paired", "op", &store, Some(&abort_audit)).unwrap();
+
+        let events = abort_audit.events();
+        let task_state_changed: Vec<&raxis_audit_tools::AuditEventKind> = events
+            .iter()
+            .filter_map(|e| match &e.kind {
+                k @ raxis_audit_tools::AuditEventKind::TaskStateChanged { task_id, .. }
+                    if task_id == "t-abort-paired" =>
+                {
+                    Some(k)
+                }
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            task_state_changed.len(),
+            1,
+            "INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01: exactly \
+             one TaskStateChanged audit row per abort_task; observed \
+             kinds = {:?}",
+            events.iter().map(|e| e.kind.as_str()).collect::<Vec<_>>(),
+        );
+        match task_state_changed[0] {
+            raxis_audit_tools::AuditEventKind::TaskStateChanged {
+                from_state,
+                to_state,
+                actor,
+                ..
+            } => {
+                assert_eq!(from_state, "Admitted");
+                assert_eq!(to_state, "Aborted");
+                assert!(
+                    actor.starts_with("operator:"),
+                    "actor MUST be `operator:<fingerprint>` for operator-driven aborts; got {actor}"
+                );
+            }
+            _ => unreachable!(),
+        }
     }
 
     // V2.5 deletion: the V1 `create_initiative` two-INSERT

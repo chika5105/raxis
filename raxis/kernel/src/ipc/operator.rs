@@ -1858,6 +1858,7 @@ async fn handle_abort_task(
     ctx: &HandlerContext,
 ) -> OperatorResponse {
     let store_for_blocking = Arc::clone(&ctx.store);
+    let audit_for_blocking = Arc::clone(&ctx.audit);
     let task_id_for_blocking = task_id.clone();
     let aborted_by_for_blocking = aborted_by.clone();
     let join_result = tokio::task::spawn_blocking(move || {
@@ -1865,6 +1866,7 @@ async fn handle_abort_task(
             &task_id_for_blocking,
             &aborted_by_for_blocking,
             &store_for_blocking,
+            Some(audit_for_blocking.as_ref()),
         )
     })
     .await;
@@ -1895,6 +1897,7 @@ async fn handle_abort_initiative(
     ctx: &HandlerContext,
 ) -> OperatorResponse {
     let store_for_blocking = Arc::clone(&ctx.store);
+    let audit_for_blocking = Arc::clone(&ctx.audit);
     let initiative_id_for_blocking = initiative_id.clone();
     let aborted_by_for_blocking = aborted_by.clone();
     let join_result = tokio::task::spawn_blocking(move || {
@@ -1902,6 +1905,7 @@ async fn handle_abort_initiative(
             &initiative_id_for_blocking,
             &aborted_by_for_blocking,
             &store_for_blocking,
+            Some(audit_for_blocking.as_ref()),
         )
     })
     .await;
