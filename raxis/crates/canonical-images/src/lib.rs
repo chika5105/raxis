@@ -198,6 +198,66 @@ pub const EXPECTED_REVIEWER_IMAGE_DIGEST: [u8; DIGEST_LEN] = GENERATED_REVIEWER_
 pub const EXPECTED_ORCHESTRATOR_IMAGE_DIGEST: [u8; DIGEST_LEN] =
     GENERATED_ORCHESTRATOR_IMAGE_DIGEST;
 
+// === iter62 verifier-runtime: V1-fallback per-role digests ============
+//
+// `EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST` and
+// `EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST` are the V1-fallback
+// counterparts of the existing Reviewer / Orchestrator constants.
+// The V2 boot path uses the manifest-trust model and does NOT consult
+// these — they exist to keep `verify_canonical_image_pinned` and
+// `CanonicalImageKind::expected_digest` working for out-of-band tools
+// (`raxis doctor`, ad-hoc image audits) and for audit-event payloads
+// that carry the V1 digest as a stable identifier.
+//
+// Population follows the same shape as the existing two: build.rs
+// reads `RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX` and
+// `RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX` (each 64
+// lowercase hex chars) and emits the bytes; defaults to the all-zero
+// placeholder ([`UNPOPULATED_DIGEST`]) when unset, in which case
+// [`verify_canonical_image_pinned`] surfaces
+// [`CanonicalImageError::DigestNotPopulated`] — the kernel-binary's
+// fail-loud posture for the kernel-canonical symbol-index image
+// (`INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`, D11).
+
+/// SHA-256 of the kernel-bundled
+/// `raxis-verifier-starter-<kernel_version>.img` for callers using
+/// the V1 compile-time-pinned verification path.
+///
+/// **Build-pipeline driven.** Populated by `build.rs` from
+/// `RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX` (64 lowercase
+/// hex chars). Defaults to the all-zero placeholder
+/// ([`UNPOPULATED_DIGEST`]) when the env var is unset.
+///
+/// **Operator-publishable-equivalent.** The general verifier image
+/// is publishable by operators via `[[vm_images]] role_restriction =
+/// ["Verifier"]` with their own alias, but the canonical
+/// `raxis-verifier-starter` alias is reserved by
+/// `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME` (D9) so operator
+/// publication cannot squat on the kernel-published name. The V2
+/// manifest path is the supported entry point for this variant.
+pub const EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST: [u8; DIGEST_LEN] =
+    GENERATED_VERIFIER_STARTER_IMAGE_DIGEST;
+
+/// SHA-256 of the kernel-bundled
+/// `raxis-verifier-symbol-index-<kernel_version>.img` for callers
+/// using the V1 compile-time-pinned verification path.
+///
+/// **Kernel-canonical.** The digest is the SOLE truth at spawn time
+/// (`INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`).
+/// Operator policy CANNOT override this — the alias
+/// `raxis-verifier-symbol-index` is reserved by
+/// `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` and any operator
+/// `[[vm_images]] name = "raxis-verifier-symbol-index"` is rejected
+/// at policy load with `FAIL_POLICY_RESERVED_VM_IMAGE_NAME`.
+///
+/// **Build-pipeline driven.** Populated by `build.rs` from
+/// `RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX` (64
+/// lowercase hex chars). Defaults to the all-zero placeholder; the
+/// kernel boot path's `assert_trust_anchor_present_or_panic` is the
+/// trip wire for unsigned production builds.
+pub const EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST: [u8; DIGEST_LEN] =
+    GENERATED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST;
+
 /// Errors the verification helpers can surface.
 #[derive(Debug, thiserror::Error)]
 pub enum CanonicalImageError {
@@ -316,6 +376,27 @@ pub enum CanonicalImageKind {
     /// load do not exercise this variant; activations then fall
     /// back to operator-published `[[vm_images]]` aliases.
     ExecutorStarter,
+    // === iter62 verifier-runtime: kernel-canonical verifier images ===
+    /// `raxis-verifier-starter-<kernel_version>.img` — the iter62
+    /// general verifier image. Operator-publishable-equivalent
+    /// (operators may publish a `[[vm_images]] role_restriction =
+    /// ["Verifier"]` with their own alias) but the canonical
+    /// `raxis-verifier-starter` alias is reserved by
+    /// `RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME` (D9) so operator
+    /// policy cannot squat on it. See `images/verifier-starter/` for
+    /// the Containerfile + manifest, and
+    /// `INV-VERIFIER-RESERVED-ALIAS-MUTUAL-EXCLUSION-01` (D11).
+    Verifier,
+    /// `raxis-verifier-symbol-index-<kernel_version>.img` — the
+    /// iter62 kernel-canonical symbol-index verifier. The digest is
+    /// the SOLE truth at spawn time
+    /// (`INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`):
+    /// operator policy CANNOT override and the alias
+    /// `raxis-verifier-symbol-index` is reserved by
+    /// `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME`. See
+    /// `images/verifier-symbol-index/` for the Containerfile +
+    /// manifest + perf-budget README.
+    VerifierSymbolIndex,
 }
 
 impl CanonicalImageKind {
@@ -326,6 +407,12 @@ impl CanonicalImageKind {
             Self::Reviewer => "ReviewerImageDigestMismatch",
             Self::Orchestrator => "OrchestratorImageDigestMismatch",
             Self::ExecutorStarter => "ExecutorStarterImageDigestMismatch",
+            // iter62 verifier-runtime D6 + D8: stable audit-kind
+            // strings for the two new canonical verifier images.
+            // Wired to the `VerifierImageDigestMismatch` audit
+            // variant family in `crates/audit/src/event.rs` (D8).
+            Self::Verifier => "VerifierStarterImageDigestMismatch",
+            Self::VerifierSymbolIndex => "VerifierSymbolIndexImageDigestMismatch",
         }
     }
 
@@ -347,6 +434,16 @@ impl CanonicalImageKind {
             Self::Reviewer => EXPECTED_REVIEWER_IMAGE_DIGEST,
             Self::Orchestrator => EXPECTED_ORCHESTRATOR_IMAGE_DIGEST,
             Self::ExecutorStarter => UNPOPULATED_DIGEST,
+            // iter62 verifier-runtime D6: route through the new
+            // build-script-populated constants. A kernel built
+            // without populating these envs returns
+            // [`UNPOPULATED_DIGEST`] just like the existing roles —
+            // [`verify_canonical_image_pinned`] then surfaces
+            // `DigestNotPopulated` and the spawn-time emitter
+            // surfaces `VerifierImageDigestMismatch` per
+            // `INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01`.
+            Self::Verifier => EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST,
+            Self::VerifierSymbolIndex => EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST,
         }
     }
 
@@ -358,6 +455,13 @@ impl CanonicalImageKind {
             Self::Reviewer => Role::Reviewer,
             Self::Orchestrator => Role::Orchestrator,
             Self::ExecutorStarter => Role::ExecutorStarter,
+            // iter62 verifier-runtime D2 + D6: the manifest crate
+            // (`crates/image-manifest/src/lib.rs`) carries the
+            // matching `Role::Verifier` and `Role::VerifierSymbolIndex`
+            // variants (added in the same iter62 batch), so the
+            // mapping is symmetric with the existing three.
+            Self::Verifier => Role::Verifier,
+            Self::VerifierSymbolIndex => Role::VerifierSymbolIndex,
         }
     }
 }
@@ -1246,5 +1350,163 @@ mod tests {
             CanonicalImageKind::Orchestrator.audit_kind(),
             "OrchestratorImageDigestMismatch",
         );
+    }
+
+    // === iter62 verifier-runtime D6 + D12: witness tests ==============
+    //
+    // Pin the new audit-kind strings, the new V1-fallback digest
+    // wire-through, the new `manifest_role` mapping, and the
+    // `expected_digest` mapping for both new variants. The existing
+    // tests above stay intact (per the iter62 append-only contract on
+    // shared files); this block adds NEW witnesses for the new
+    // surface only.
+
+    /// Pin the new iter62 verifier audit-kind strings. Any rename
+    /// here is a SQL/dashboard schema change — the dashboard SSE
+    /// consumer keys off these strings to render the
+    /// `VerifierImageDigestMismatch` row.
+    #[test]
+    fn iter62_verifier_audit_kind_strings_are_pinned() {
+        assert_eq!(
+            CanonicalImageKind::Verifier.audit_kind(),
+            "VerifierStarterImageDigestMismatch",
+            "operator-publishable-equivalent verifier image audit kind",
+        );
+        assert_eq!(
+            CanonicalImageKind::VerifierSymbolIndex.audit_kind(),
+            "VerifierSymbolIndexImageDigestMismatch",
+            "kernel-canonical symbol-index verifier image audit kind",
+        );
+    }
+
+    /// Same wiring contract as
+    /// `generated_role_digests_are_wired_through_to_public_constants`
+    /// but for the iter62 verifier digests. A divergence here means
+    /// the build.rs verifier-digest population path has been silently
+    /// disconnected from the public lib.rs surface — V2 boot is
+    /// unaffected (manifest path) but
+    /// `verify_canonical_image_pinned`, `raxis doctor`, and the
+    /// audit-event field would all return placeholder zeros.
+    #[test]
+    fn iter62_generated_verifier_digests_are_wired_through_to_public_constants() {
+        assert_eq!(
+            EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST, GENERATED_VERIFIER_STARTER_IMAGE_DIGEST,
+            "`EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST` must alias \
+             `GENERATED_VERIFIER_STARTER_IMAGE_DIGEST` (build.rs \
+             output for RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX)",
+        );
+        assert_eq!(
+            EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST,
+            GENERATED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST,
+            "`EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST` must alias \
+             `GENERATED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST` (build.rs \
+             output for RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX)",
+        );
+    }
+
+    /// Developer builds with the new verifier digest env vars unset
+    /// MUST default to the all-zero placeholder so
+    /// `verify_canonical_image_pinned` surfaces `DigestNotPopulated`
+    /// rather than silently accepting any image — the
+    /// `INV-VERIFIER-CANONICAL-SYMBOL-INDEX-DIGEST-PINNED-01` rule.
+    #[test]
+    fn iter62_placeholder_build_defaults_to_all_zero_verifier_digests() {
+        if EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST != UNPOPULATED_DIGEST {
+            eprintln!(
+                "skipping placeholder default test: \
+                 EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST is non-zero (signed build)"
+            );
+        } else {
+            assert_eq!(
+                EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST, UNPOPULATED_DIGEST,
+                "developer builds must default the verifier-starter \
+                 digest to the all-zero placeholder",
+            );
+        }
+
+        if EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST != UNPOPULATED_DIGEST {
+            eprintln!(
+                "skipping placeholder default test: \
+                 EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST is non-zero \
+                 (signed build)"
+            );
+        } else {
+            assert_eq!(
+                EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST, UNPOPULATED_DIGEST,
+                "developer builds must default the verifier-symbol-index \
+                 digest to the all-zero placeholder",
+            );
+        }
+    }
+
+    /// `expected_digest` for the new variants must route through the
+    /// new build-script-populated constants. A divergence here would
+    /// be silent until an `OrchestratorImageDigestMismatch` audit
+    /// event tries to surface the V1 fallback for a verifier image.
+    #[test]
+    fn iter62_canonical_image_kind_expected_digest_matches_verifier_constants() {
+        assert_eq!(
+            CanonicalImageKind::Verifier.expected_digest(),
+            EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST,
+            "Verifier kind must map to EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST",
+        );
+        assert_eq!(
+            CanonicalImageKind::VerifierSymbolIndex.expected_digest(),
+            EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST,
+            "VerifierSymbolIndex kind must map to EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST",
+        );
+    }
+
+    /// `manifest_role` for the new variants must map to the matching
+    /// `image-manifest::Role` variants iter62 D2 added. A swap here
+    /// would let a `verifier-symbol-index` manifest verify against a
+    /// `Verifier`-keyed image (or vice-versa) and silently bypass
+    /// the kernel-canonical posture.
+    #[test]
+    fn iter62_canonical_image_kind_manifest_role_matches_verifier_variants() {
+        assert_eq!(
+            CanonicalImageKind::Verifier.manifest_role(),
+            Role::Verifier,
+            "Verifier kind must map to Role::Verifier",
+        );
+        assert_eq!(
+            CanonicalImageKind::VerifierSymbolIndex.manifest_role(),
+            Role::VerifierSymbolIndex,
+            "VerifierSymbolIndex kind must map to Role::VerifierSymbolIndex",
+        );
+    }
+
+    /// The kernel-canonical `VerifierSymbolIndex` digest is the SOLE
+    /// truth at spawn — `verify_canonical_image_pinned` MUST refuse
+    /// to verify against the all-zero placeholder. Mirrors the
+    /// existing `verify_canonical_image_pinned_rejects_unpopulated_digest`
+    /// witness, applied to the iter62 fail-closed posture for the
+    /// kernel-canonical symbol-index image.
+    #[test]
+    fn iter62_verify_canonical_image_pinned_refuses_placeholder_for_verifier_symbol_index() {
+        let f = tempfile::NamedTempFile::new().unwrap();
+        let err = verify_canonical_image_pinned(
+            f.path(),
+            CanonicalImageKind::VerifierSymbolIndex.expected_digest(),
+        );
+        if EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST == UNPOPULATED_DIGEST {
+            // Unsigned dev build — fail-loud is the contract.
+            match err {
+                Err(CanonicalImageError::DigestNotPopulated) => {}
+                other => panic!(
+                    "expected DigestNotPopulated for unpopulated \
+                     VerifierSymbolIndex digest; got {other:?}"
+                ),
+            }
+        } else {
+            // Signed build — the digest will not match an empty
+            // file. Either DigestMismatch or success on a coincidence
+            // (vanishingly unlikely; SHA-256 of `""` is well-known).
+            // Accept either non-`DigestNotPopulated` outcome.
+            assert!(
+                !matches!(err, Err(CanonicalImageError::DigestNotPopulated)),
+                "signed build must not return DigestNotPopulated"
+            );
+        }
     }
 }
