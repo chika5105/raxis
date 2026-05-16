@@ -45,6 +45,14 @@ members = [
     "crates/runtime",
     "crates/test-support",
     "crates/verifier-stub",
+    # Real, fast worktree-scanning verifier (iter62 / iter63). Wired
+    # into the live-e2e bootstrap so the gate-recheck-clear edge in
+    # `kernel/src/scheduler/dag.rs::transition_to_admitted` (and its
+    # paired-write audit row from
+    # `INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`) gets active
+    # production coverage. See `crates/verifier-no-secrets/Cargo.toml`
+    # for the full rationale.
+    "crates/verifier-no-secrets",
     "crates/domain",
     "crates/domain-git",
     "crates/prompts",
