@@ -12801,10 +12801,9 @@ The five invariants below close the V2_GAPS A8 row
 ("verifier runtime — partial: dispatch done, runtime partial")
 by pinning the structural contracts the iter62 verifier-runtime
 ships against. Each entry follows the §2 / §3 house style
-(Statement / Why structural / Witness). Canonical homes are the
-spec docs in `specs/v2/verifier-processes.md` and
-`specs/v2/iter62-verifier-runtime-live-e2e.md`; this section is a
-navigational consolidation per `§13`.
+(Statement / Why structural / Witness). The canonical home is
+`specs/v2/verifier-processes.md`; this section is a navigational
+consolidation per `§13`.
 
 ### INV-VERIFIER-RUNTIME-PRODUCTION-BINARY-01 — The production verifier binary MUST be `crates/verifier`, NOT `crates/verifier-stub`
 

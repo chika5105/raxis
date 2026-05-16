@@ -2,12 +2,7 @@
 
 **Status:** normative. Every lock-bearing struct under `raxis/`
 MUST follow this contract; deviations require a doc-comment that
-explains the exception and a sister entry in
-`raxis/specs/v2/lock-audit-<date>.md`.
-
-**See also:** [`raxis/specs/v2/lock-audit-20260513.md`](lock-audit-20260513.md) — the V2
-sweep that hand-traced every existing lock-bearing site and
-verified compliance.
+explains the exception.
 
 ## 1. Why this document exists
 

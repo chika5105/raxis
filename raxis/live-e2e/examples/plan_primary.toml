@@ -284,8 +284,8 @@ do not silently swallow it.
 # to the materialize-records Executor task so the live-e2e harness
 # exercises the V2 production verifier path end-to-end (image-bake
 # → digest-verify → VM-spawn → built-in symbol-index pipeline →
-# witness submission). See `specs/v2/iter62-verifier-runtime-live-e2e.md`
-# for the full wiring contract + audit-chain assertion shape.
+# witness submission). See `specs/v2/verifier-processes.md` for the
+# full wiring contract.
 #
 # `on_failure = "warn_only"` so a transient verifier failure does
 # NOT break the existing materialize-records flow (the realistic

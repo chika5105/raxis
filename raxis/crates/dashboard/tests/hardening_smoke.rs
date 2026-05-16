@@ -94,6 +94,23 @@ async fn oversized_verify_body_is_rejected_before_parsing() {
     // per `BODY_LIMIT_AUTH`). A 1 MiB JSON blob MUST be refused
     // by the request-body limit middleware, NOT bubble up to a
     // panic in the JSON parser.
+    //
+    // Both outcomes are correct for an HTTP/1.1 server hardened
+    // by a `RequestBodyLimitLayer`:
+    //
+    //   1. A 413 Payload Too Large status (preferred — the server
+    //      reads the limit-tripping prefix, drains, and responds).
+    //   2. A torn-down TCP connection (`BrokenPipe` / `ConnectionReset`)
+    //      — also acceptable: the server closed the socket without
+    //      finishing the read, which is the standard "tarpit a body
+    //      bomb" pattern. The contract is that the kernel never
+    //      panics or holds a connection forever; it does not
+    //      promise to gracefully send a status for every body
+    //      shape, and a 1 MiB POST over a fresh TCP connection
+    //      can race against the close.
+    //
+    // The test passes if either path is taken. It fails only if
+    // the body is *accepted* (2xx, or any handler-level status).
     let (handle, base) = serve_in_memory().await;
     let client = reqwest::Client::new();
     let oversized = "x".repeat(1_048_576);
@@ -101,18 +118,34 @@ async fn oversized_verify_body_is_rejected_before_parsing() {
         "{{\"challenge\":\"{x}\",\"signature\":\"{x}\",\"public_key\":\"{x}\"}}",
         x = oversized
     );
-    let res = client
+    let outcome = client
         .post(format!("{base}/api/auth/verify"))
         .header(reqwest::header::CONTENT_TYPE, "application/json")
         .body(body)
         .send()
-        .await
-        .expect("send");
-    let status = res.status().as_u16();
-    assert!(
-        status == 413 || status == 400,
-        "oversized body must yield 413 (PayloadTooLarge) or 400, got {status}",
-    );
+        .await;
+    match outcome {
+        Ok(res) => {
+            let status = res.status().as_u16();
+            assert!(
+                status == 413 || status == 400,
+                "oversized body must yield 413 (PayloadTooLarge) or 400, got {status}",
+            );
+        }
+        Err(e) => {
+            // BrokenPipe / ConnectionReset are valid — the server
+            // tore down the socket before we finished writing the
+            // 1 MiB body. Anything else (TLS error, DNS, etc.)
+            // would be a real bug.
+            let msg = format!("{e:?}");
+            assert!(
+                msg.contains("BrokenPipe")
+                    || msg.contains("ConnectionReset")
+                    || msg.contains("BodyWrite"),
+                "expected body-write tear-down on oversized POST, got {msg}",
+            );
+        }
+    }
     handle.shutdown().await.expect("shutdown");
 }
 

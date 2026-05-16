@@ -3410,10 +3410,9 @@ to the dashboard SSE stream, and wired into a new helper module
 calls at lifecycle boundaries; (7) the policy bundle reserves
 the `raxis-verifier-starter` alias as a sibling of
 `RESERVED_SYMBOL_INDEX_VM_IMAGE_NAME` so operators cannot squat
-on canonical aliases; (8) a new live-e2e spec
-`specs/v2/iter62-verifier-runtime-live-e2e.md` plus an additive
-`[[tasks.verifiers]]` block in `live-e2e/examples/plan_primary.toml`
-document and exercise the new path while a return-note delegates
+on canonical aliases; (8) an additive `[[tasks.verifiers]]` block
+in `live-e2e/examples/plan_primary.toml` exercises the new path
+while a return-note delegates
 the (Worker-4-owned) `extended_e2e_support` audit-chain assertion
 to the parent at merge time; (9) five new normative invariants
 (`INV-VERIFIER-RUNTIME-PRODUCTION-BINARY-01`,

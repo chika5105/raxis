@@ -8,6 +8,15 @@
 // the private inner field. This means a `CommitSha` in any function signature
 // is guaranteed to be a valid 40-char lowercase hex string — no runtime checks
 // needed at use sites.
+//
+// Serde:
+//   - `Serialize` is `#[serde(transparent)]` — the wire form is just the
+//     inner string.
+//   - `Deserialize` is hand-written for every type and routes through the
+//     type's `parse()` method so that an invalid wire value is rejected
+//     at the deserialization boundary. This is what gives RAXIS its
+//     "an `InitiativeId` is always a valid UUID" guarantee, even for
+//     identifiers that arrive over IPC, HTTP, or from disk.
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -15,6 +24,11 @@ use uuid::Uuid;
 
 // ---------------------------------------------------------------------------
 // Macro: define a newtype wrapping a String with a private field.
+//
+// Note: `Serialize` is derived (transparent wire form). `Deserialize` is
+// **not** derived — each concrete type adds a hand-written impl that calls
+// its `parse()` validator so invalid wire values are rejected at the
+// boundary.
 // ---------------------------------------------------------------------------
 macro_rules! string_id {
     (
@@ -22,17 +36,11 @@ macro_rules! string_id {
         $name:ident
     ) => {
         $(#[$attr])*
-        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+        #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize)]
         #[serde(transparent)]
         pub struct $name(String);
 
         impl $name {
-            /// Wrap an already-validated string. Callers inside this crate only.
-            #[allow(dead_code)]
-            pub(crate) fn from_string_unchecked(s: String) -> Self {
-                Self(s)
-            }
-
             /// Return the inner string slice.
             pub fn as_str(&self) -> &str {
                 &self.0
@@ -99,6 +107,16 @@ macro_rules! uuid_id {
             type Error = uuid::Error;
             fn try_from(s: &str) -> Result<Self, Self::Error> {
                 Self::parse(s)
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+            where
+                D: serde::Deserializer<'de>,
+            {
+                let s = String::deserialize(deserializer)?;
+                Self::parse(&s).map_err(serde::de::Error::custom)
             }
         }
     };
@@ -183,6 +201,16 @@ impl TryFrom<&str> for TaskId {
     }
 }
 
+impl<'de> Deserialize<'de> for TaskId {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum TaskIdError {
     #[error("task_id must not be empty")]
@@ -227,6 +255,16 @@ impl TryFrom<&str> for CommitSha {
     type Error = CommitShaError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         Self::parse(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for CommitSha {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 
@@ -278,6 +316,16 @@ impl TryFrom<&str> for GateType {
     type Error = GateTypeError;
     fn try_from(s: &str) -> Result<Self, Self::Error> {
         Self::parse(s)
+    }
+}
+
+impl<'de> Deserialize<'de> for GateType {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        Self::parse(&s).map_err(serde::de::Error::custom)
     }
 }
 

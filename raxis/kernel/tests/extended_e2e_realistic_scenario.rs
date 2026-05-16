@@ -629,7 +629,7 @@ fn realistic_session_lifecycle() {
         let final_chain = walk_chain_or_panic(kernel.data_dir());
 
         // FOLLOWUP-G — INV-VERIFIER-AUDIT-PAIRED-WRITE-01 + the audit
-        // chain pin from `specs/v2/iter62-verifier-runtime-live-e2e.md`:
+        // chain pin from `specs/v2/verifier-processes.md`:
         // when the chain shows even one
         // `VerifierVmSpawned { image_alias = "raxis-verifier-symbol-index" }`
         // event, the same `verifier_run_id` MUST also surface a
@@ -1065,7 +1065,7 @@ fn assert_verifier_symbol_index_paired_write(chain: &[raxis_audit_tools::AuditEv
         eprintln!(
             "[realism-e2e] FOLLOWUP-G: no `VerifierVmSpawned {{ image_alias = \"raxis-verifier-symbol-index\" }}` \
              observed; skipping paired-write assertion. The bake step + verifier image are required \
-             to exercise this path; see specs/v2/iter62-verifier-runtime-live-e2e.md."
+             to exercise this path; see specs/v2/verifier-processes.md."
         );
         return;
     }
@@ -1093,7 +1093,7 @@ fn assert_verifier_symbol_index_paired_write(chain: &[raxis_audit_tools::AuditEv
              (verifier_run_id={run_id}) has no matching \
              VerifierWitnessReceived {{ verdict = \"Pass\" }} in the audit chain. \
              Pinned by INV-VERIFIER-AUDIT-PAIRED-WRITE-01 + the audit-chain \
-             contract in specs/v2/iter62-verifier-runtime-live-e2e.md.",
+             contract in specs/v2/verifier-processes.md.",
         );
     }
     eprintln!(

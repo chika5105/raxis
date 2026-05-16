@@ -6,7 +6,11 @@
 //   - Environment scrubbing (env_clear + explicit envelope vars only)
 //   - stdout/stderr piped; stdin null
 //   - FD_CLOEXEC on all kernel fds (set at creation time)
-//   - Resource limits via setrlimit (RLIMIT_CPU, RLIMIT_AS, RLIMIT_NOFILE)
+//   - Resource limits via setrlimit (RLIMIT_CPU, RLIMIT_AS), applied
+//     in `pre_exec` on Linux (production microVM target). macOS dev
+//     hosts do not enforce `RLIMIT_AS` reliably and would EINVAL
+//     legitimate spawns, so the call is skipped there; the wall-clock
+//     watcher is still active on every platform.
 //   - Working directory set to worktree_root
 //   - Wall-clock timeout via background tokio task
 //
@@ -353,6 +357,50 @@ pub async fn spawn_verifier_with_audit(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .current_dir(worktree_root);
+
+    // Apply documented RLIMIT_CPU + RLIMIT_AS via `pre_exec`
+    // before exec. The cpu/mem limits originate from the
+    // gate-declared budgets and are mirrored into
+    // `VerifierSubprocessConfig` so the post-exec child cannot
+    // exceed them even if the wall-clock watcher misses.
+    //
+    // `pre_exec` runs in the forked child between `fork` and
+    // `exec` — only async-signal-safe operations are legal. The
+    // libc `setrlimit` call is signal-safe; we do nothing else
+    // here and convert any non-zero return to `std::io::Error`
+    // so the parent sees a real `SpawnFailed`.
+    //
+    // Linux-only: RAXIS production runs verifier subprocesses
+    // inside Linux microVMs, where `RLIMIT_AS` is honoured.
+    // macOS (dev) does not enforce `RLIMIT_AS` (it is silently
+    // aliased to `RLIMIT_RSS` and the kernel returns EINVAL on
+    // many values), so we skip the call on macOS rather than
+    // fail-closed every spawn during local development.
+    #[cfg(target_os = "linux")]
+    {
+        use std::io;
+        let cpu_secs = config.verifier_cpu_secs;
+        let mem_bytes = config.verifier_memory_bytes;
+        unsafe {
+            cmd.pre_exec(move || {
+                let cpu = libc::rlimit {
+                    rlim_cur: cpu_secs as libc::rlim_t,
+                    rlim_max: cpu_secs as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_CPU, &cpu) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                let mem = libc::rlimit {
+                    rlim_cur: mem_bytes as libc::rlim_t,
+                    rlim_max: mem_bytes as libc::rlim_t,
+                };
+                if libc::setrlimit(libc::RLIMIT_AS, &mem) != 0 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
 
     // Step 5: Spawn subprocess.
     // Note: FD_CLOEXEC is set by tokio::process::Command by default on Unix.
