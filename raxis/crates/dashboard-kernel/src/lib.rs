@@ -1057,14 +1057,20 @@ impl DashboardData for KernelDashboardData {
         Ok(task_row_to_view_with_lifecycle(&conn, &audit_chain, &row))
     }
 
-    /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`. Tail the per-task
-    /// raw-LLM-turn ring and project each
+    /// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`,
+    /// `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`. Tail the
+    /// per-task raw-LLM-turn ring and project each
     /// [`crate::LlmTurnRecord`] to the dashboard's
     /// [`raxis_dashboard::data::TaskLlmTurnView`]. Returns
     /// `Err(ApiError::NotFound { kind: "task_llm_turns" })` when
     /// the kernel did not wire a capture (read-only data dir /
     /// EROFS / ENOSPC at boot) so the absent capability is
     /// observable to the operator.
+    ///
+    /// `tail()` returns records in disk-append order; we
+    /// thread the index through `record_to_view` as
+    /// `turn_number = i + 1` so the FE can render "Turn 1",
+    /// "Turn 2", … without sorting.
     fn tail_task_llm_turns(
         &self,
         task_id: &str,
@@ -1075,7 +1081,11 @@ impl DashboardData for KernelDashboardData {
         })?;
         let n = (n.min(500)) as usize;
         let records = cap.tail(task_id, n);
-        Ok(records.into_iter().map(record_to_view).collect())
+        Ok(records
+            .into_iter()
+            .enumerate()
+            .map(|(i, r)| record_to_view(r, (i as u32).saturating_add(1)))
+            .collect())
     }
 
     /// `INV-DASHBOARD-SESSION-CAPTURE-FIXED-RING-01` /
@@ -3118,20 +3128,129 @@ pub(crate) fn task_display_title(task_id: &str, initiative_id: &str) -> String {
 
 /// Project a kernel-glue [`crate::LlmTurnRecord`] to the
 /// dashboard-side [`raxis_dashboard::data::TaskLlmTurnView`].
-/// Field order MUST stay identity — the FE consumes the
-/// dashboard view shape and the JSON wire shape is pinned by
-/// `INV-DASHBOARD-TASK-LLM-CAPTURE-01`.
-fn record_to_view(r: crate::LlmTurnRecord) -> raxis_dashboard::data::TaskLlmTurnView {
+///
+/// `INV-DASHBOARD-LLM-TURN-PANEL-WIRE-SHAPE-01`. The FE's
+/// per-task LLM turns panel reads `turn_number`, `ts_unix`,
+/// `model`, `role`, `request`, `response`, and per-turn token
+/// usage; we lift each from the on-disk `LlmTurnRecord` here:
+///
+/// * `turn_number` — passed in by the caller (the
+///   `tail()`-side enumeration, 1-indexed in disk-append
+///   order).
+/// * `ts_unix` — `at_ms / 1000`.
+/// * `response` — `serde_json::from_str(&record.body)` on
+///   success; on parse failure falls back to
+///   `Value::String(body)` so the operator still sees the
+///   raw bytes (e.g. partial SSE stream / transport-error
+///   string).
+/// * `model` / `role` — `body.model` / `body.role` when the
+///   parse succeeds (Anthropic's response envelope shape;
+///   OpenAI uses the same field names in `chat.completion`).
+///   Empty string when absent or the body is non-JSON.
+/// * `input_tokens` / `output_tokens` /
+///   `cache_creation_input_tokens` / `cache_read_input_tokens`
+///   — lifted from `body.usage.*`. Anthropic's field names
+///   are the canonical shape; OpenAI's `prompt_tokens` /
+///   `completion_tokens` are mapped onto `input_tokens` /
+///   `output_tokens` (cache fields stay `None` — OpenAI
+///   doesn't expose prompt-cache hit/miss counts).
+/// * `request` — `serde_json::from_str(&record.request_body)`
+///   when iter64+ kernels recorded one; legacy records (or
+///   parse failures) → `Value::Null`.
+///
+/// Public so the integration test at
+/// `tests/task_llm_turn_view_projection.rs` can witness the
+/// projection contract end-to-end without the full
+/// `KernelDashboardData` scaffold.
+pub fn record_to_view(
+    r: crate::LlmTurnRecord,
+    turn_number: u32,
+) -> raxis_dashboard::data::TaskLlmTurnView {
+    let response = match serde_json::from_str::<serde_json::Value>(&r.body) {
+        Ok(v) => v,
+        Err(_) => serde_json::Value::String(r.body.clone()),
+    };
+    let request = if r.request_body.is_empty() {
+        serde_json::Value::Null
+    } else {
+        serde_json::from_str::<serde_json::Value>(&r.request_body)
+            .unwrap_or(serde_json::Value::Null)
+    };
+
+    let (model, role, input_tokens, output_tokens, cache_creation, cache_read) = match &response {
+        serde_json::Value::Object(_) => {
+            let model = response
+                .get("model")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let role = response
+                .get("role")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_owned();
+            let usage = response.get("usage").and_then(|v| v.as_object());
+            // Anthropic uses `input_tokens` / `output_tokens`
+            // / `cache_creation_input_tokens` /
+            // `cache_read_input_tokens`. OpenAI uses
+            // `prompt_tokens` / `completion_tokens` and does
+            // not expose cache-hit counts; map the
+            // OpenAI-shape names onto the canonical fields
+            // and leave cache_* `None` so the FE's cache
+            // ratio falls back to "N/A".
+            let input_tokens = usage
+                .and_then(|u| {
+                    u.get("input_tokens")
+                        .or_else(|| u.get("prompt_tokens"))
+                        .and_then(|v| v.as_u64())
+                })
+                .map(|n| n as u32);
+            let output_tokens = usage
+                .and_then(|u| {
+                    u.get("output_tokens")
+                        .or_else(|| u.get("completion_tokens"))
+                        .and_then(|v| v.as_u64())
+                })
+                .map(|n| n as u32);
+            let cache_creation = usage
+                .and_then(|u| {
+                    u.get("cache_creation_input_tokens")
+                        .and_then(|v| v.as_u64())
+                })
+                .map(|n| n as u32);
+            let cache_read = usage
+                .and_then(|u| u.get("cache_read_input_tokens").and_then(|v| v.as_u64()))
+                .map(|n| n as u32);
+            (
+                model,
+                role,
+                input_tokens,
+                output_tokens,
+                cache_creation,
+                cache_read,
+            )
+        }
+        _ => (String::new(), String::new(), None, None, None, None),
+    };
+
     raxis_dashboard::data::TaskLlmTurnView {
-        at_ms: r.at_ms,
+        turn_number,
+        ts_unix: r.at_ms / 1000,
+        model,
+        role,
+        request,
+        response,
+        input_tokens,
+        output_tokens,
+        cache_creation_input_tokens: cache_creation,
+        cache_read_input_tokens: cache_read,
+        latency_ms: Some(r.latency_ms),
         task_id: r.task_id,
         session_id: r.session_id,
         fetch_id: r.fetch_id,
         status_code: r.status_code,
-        latency_ms: r.latency_ms,
-        body: r.body,
-        body_truncated: r.body_truncated,
         original_body_bytes: r.original_body_bytes,
+        body_truncated: r.body_truncated,
         error: r.error,
     }
 }
