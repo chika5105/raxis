@@ -13041,3 +13041,78 @@ is deferred to a follow-up integration test once the
 `HandlerContext` test-fixture infrastructure supports
 synthetic latency injection.
 
+
+### INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01 — `gates::evaluate_claims` MUST NOT trigger `Store::lock_sync` panic from a tokio runtime worker
+
+**Statement.** `gates::evaluate_claims` (and every sync DB-touching
+helper it transitively calls — including
+`gates::witness::lookup` → `witness_index::lookup`,
+`gates::claim::evaluate` → `authority::delegation::check_capability`,
+`authority::delegation::record_capability_use`, and any future
+addition) MUST NOT trigger
+`crates/store/src/db.rs::Store::lock_sync`'s "Cannot block the
+current thread from within a runtime" panic when invoked from a
+tokio async runtime worker. The required structure: all sync
+DB-touching work in `evaluate_claims` runs inside a single
+`tokio::task::spawn_blocking` (the private `evaluate_pre_spawn`
+helper); only the genuinely-async verifier-spawn phase (Step 5)
+runs on the tokio worker directly.
+
+**Why structural.** iter63 `extended_e2e_realistic_scenario`
+crashed the kernel daemon on the first `IntegrationMerge`
+planner intent with:
+
+```
+thread 'tokio-rt-worker' panicked at crates/store/src/db.rs:125:
+Cannot block the current thread from within a runtime.
+   ...
+   raxis_store::db::Store::lock_sync
+   raxis_kernel::witness_index::lookup
+   raxis_kernel::gates::witness::lookup
+   raxis_kernel::gates::evaluate_claims::{{closure}}
+   raxis_kernel::handlers::intent::handle_inner::{{closure}}
+```
+
+The async `evaluate_claims` had inlined `gates::witness::lookup`
+(Step 2.5 + Step 4) and `gates::claim::evaluate` (Step 3) — both
+of which acquire the store mutex via `Store::lock_sync()` →
+`tokio::sync::Mutex::blocking_lock`, the latter panicking by
+design when the calling thread is a runtime worker. The kernel
+daemon died, plans never completed, and the dashboard at
+`:19820` went unreachable. A narrow fix at
+`witness_index::lookup` alone would have left
+`claim::evaluate → delegation::check_capability` to panic on
+the very next gate evaluation; the invariant has to cover the
+whole `evaluate_claims` body, not one inlined callee.
+
+**Witnesses.**
+
+1. `kernel/src/witness_index.rs::async_runtime_safety::lookup_directly_from_runtime_worker_panics`
+   — `#[tokio::test]` + `#[should_panic(expected = "Cannot block
+   the current thread from within a runtime")]` that pins the
+   inner-facade bug shape at `witness_index::lookup`.
+
+2. `kernel/src/witness_index.rs::async_runtime_safety::lookup_from_runtime_worker_via_spawn_blocking_is_ok`
+   — `#[tokio::test]` that drives `witness_index::lookup` via
+   `tokio::task::spawn_blocking` and asserts the call returns
+   `Ok(None)` (canonical safe call pattern).
+
+3. `kernel/src/gates/mod.rs::async_runtime_safety::evaluate_pre_spawn_direct_call_from_runtime_panics`
+   — `#[tokio::test]` + `#[should_panic]` that reproduces the
+   iter63 panic shape at the `evaluate_pre_spawn` helper
+   boundary using a real `[[gates]]` policy.
+
+4. `kernel/src/gates/mod.rs::async_runtime_safety::evaluate_pre_spawn_via_spawn_blocking_is_async_safe`
+   — `#[tokio::test]` that drives `evaluate_pre_spawn` from a
+   tokio runtime via `spawn_blocking` and asserts
+   `NeedsVerifierSpawn { missing_gates: ["TestGate"] }`.
+
+5. `kernel/src/gates/mod.rs::async_runtime_safety::evaluate_claims_end_to_end_from_runtime_is_async_safe`
+   — `#[tokio::test(flavor = "multi_thread")]` that drives the
+   public `gates::evaluate_claims` end-to-end from a runtime
+   worker through a full `HandlerContext` (the iter63
+   `handlers::intent::handle_inner` call shape) and asserts
+   `Ok(_)`. Before the fix this would have panicked with the
+   iter63 stack trace; after the fix it returns
+   `PendingWitness` (no verifier seeded) or `Pass`.
+
