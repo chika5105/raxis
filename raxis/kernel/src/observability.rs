@@ -469,6 +469,13 @@ pub fn record_planner_cache_read_tokens(
 /// counters at query time.
 ///
 /// Spec: `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`.
+//
+// 8 args is the natural shape for this telemetry helper: 4 are
+// stable label keys (task_id / session_id / model / role) and 3 are
+// the cache-token counters that go into the ratio. Bundling them
+// into a struct would obscure the call sites without saving any
+// arity at the API surface.
+#[allow(clippy::too_many_arguments)]
 pub fn record_planner_cache_hit_ratio(
     hub: &ObservabilityHub,
     task_id: &str,

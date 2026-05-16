@@ -53,7 +53,7 @@ use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
     AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
     EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
-    InitiativeView, LifecycleAnnotation, NotificationView, OperatorAuthResolution,
+    InitiativeView, NotificationView, OperatorAuthResolution,
     OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
     RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, StructuredOutputView,
     SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
@@ -3508,9 +3508,9 @@ fn read_sessions_all_for_recent(
 
 /// Build the per-reviewer panel results table for one executor
 /// task by projecting every `SubmitReview`-shaped audit row
-/// downstream of `executor_task_id` (`reviewer_count` + verdict
-/// + critique excerpt). This is the structured surface that
-/// powers `<ReviewerVerdictPanel>` on the FE.
+/// downstream of `executor_task_id` (`reviewer_count` and verdict
+/// and critique excerpt). This is the structured surface that
+/// powers the `<ReviewerVerdictPanel>` on the FE.
 ///
 /// We accept payload kinds named `SubmitReview`,
 /// `ReviewerSubmittedVerdict`, and the existing

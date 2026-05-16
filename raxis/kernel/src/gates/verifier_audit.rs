@@ -248,9 +248,11 @@ mod tests {
     /// public `AuditSink` shape directly; production code paths use
     /// `raxis_test_support::FakeAuditSink` (dev-dep-only) for the
     /// same purpose.
+    type CapturedEvent = (String, Option<String>, Option<String>);
+
     #[derive(Default)]
     struct CapturingSink {
-        events: Mutex<Vec<(String, Option<String>, Option<String>)>>,
+        events: Mutex<Vec<CapturedEvent>>,
     }
 
     impl AuditSink for CapturingSink {

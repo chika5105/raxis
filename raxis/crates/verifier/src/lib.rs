@@ -261,7 +261,7 @@ impl VerifierBuiltin {
     pub fn parse_optional(raw: Option<&str>) -> Result<Option<Self>, String> {
         match raw {
             None => Ok(None),
-            Some(s) if s.is_empty() => Ok(None),
+            Some("") => Ok(None),
             Some(s) if s == Self::SYMBOL_INDEX_STR => Ok(Some(Self::SymbolIndex)),
             Some(other) => Err(format!(
                 "unknown RAXIS_VERIFIER_BUILTIN {other:?} (expected {:?} or unset)",
@@ -1113,7 +1113,7 @@ pub fn build_submission(
 /// caller, and is exercised by the unit tests below.
 fn base64_encode(bytes: &[u8]) -> String {
     const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     let mut iter = bytes.chunks_exact(3);
     for chunk in &mut iter {
         let b0 = chunk[0] as u32;

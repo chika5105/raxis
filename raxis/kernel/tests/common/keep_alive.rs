@@ -176,10 +176,10 @@ impl Drop for CliFlagGuard {
 pub fn parse_truthy_env_value(value: Option<&str>) -> bool {
     match value {
         None => false,
-        Some(raw) => match raw.trim().to_ascii_lowercase().as_str() {
-            "1" | "true" | "yes" | "on" => true,
-            _ => false,
-        },
+        Some(raw) => matches!(
+            raw.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes" | "on"
+        ),
     }
 }
 
