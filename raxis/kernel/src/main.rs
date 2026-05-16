@@ -582,6 +582,36 @@ async fn main() {
             }
         };
 
+    // `INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01` — panic-hook
+    // defense-in-depth. `TaskLlmCapture::append` already
+    // `sync_all`s per turn so under steady state the
+    // load-bearing durability work is done before the gateway
+    // pump's `observer.observe()` returns. This hook covers
+    // the (narrow) race where a panic fires mid-`append`,
+    // AFTER `write_all` but BEFORE `sync_all` — `flush_all`
+    // walks the per-task file map and best-effort fsyncs
+    // every handle whose mutex is not currently held by the
+    // panicking thread.
+    //
+    // Installed BEFORE the gateway pump and IPC server come
+    // up so any early-boot panic (policy reload failure
+    // post-capture-init, etc.) still flushes whatever turns
+    // landed during bring-up. The hook calls the previous
+    // default hook last so the standard panic message + abort
+    // behaviour are preserved.
+    if let Some(cap) = task_llm_capture.as_ref() {
+        let hook_capture = Arc::clone(cap);
+        let prev_hook = std::panic::take_hook();
+        std::panic::set_hook(Box::new(move |info| {
+            // Best-effort: never panic from inside the hook
+            // (recursive panic aborts immediately with no
+            // diagnostic). `flush_all` swallows IO errors
+            // and uses `try_lock` for the same reason.
+            hook_capture.flush_all();
+            prev_hook(info);
+        }));
+    }
+
     // Per-session lifecycle capture (`SessionCapture`) — sibling
     // of `TaskLlmCapture` for the post-mortem surface. The
     // dashboard's `GET /api/sessions/:id/capture` endpoint reads
@@ -2160,6 +2190,19 @@ async fn main() {
              \"event\":\"plan_bundle_nonce_sweep_loop_join_failed\",\
              \"reason\":\"{join_err}\"}}"
         ),
+    }
+
+    // `INV-TASK-LLM-CAPTURE-DURABLE-WRITE-01` —
+    // graceful-shutdown drain of the per-task LLM-turn
+    // capture. `append` already syncs per turn, so this is a
+    // belt-and-braces flush of the in-memory file-handle map:
+    // any append that lost its sync race with a process-level
+    // signal still lands on disk before the kernel process
+    // exits. Idempotent and cheap when the capture failed to
+    // construct (read-only data dir / EROFS).
+    if let Some(cap) = task_llm_capture.as_ref() {
+        cap.drain_and_shutdown();
+        eprintln!("{{\"level\":\"info\",\"event\":\"task_llm_capture_drained\"}}");
     }
 
     // V3 §3 — flush + shutdown the observability hub before
