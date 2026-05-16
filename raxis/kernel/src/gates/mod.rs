@@ -833,3 +833,319 @@ mod auto_claim_tests {
         );
     }
 }
+
+// ---------------------------------------------------------------------------
+// Async-runtime safety witnesses — INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01.
+// ---------------------------------------------------------------------------
+//
+// iter63 realistic_session_lifecycle crashed the kernel daemon on the
+// first `IntegrationMerge` planner intent with:
+//
+//   thread 'tokio-rt-worker' panicked at crates/store/src/db.rs:125:
+//   Cannot block the current thread from within a runtime.
+//      ...
+//      witness_index::lookup
+//      gates::witness::lookup
+//      gates::evaluate_claims::{{closure}}
+//      handlers::intent::handle_inner::{{closure}}
+//
+// Root cause: `evaluate_claims` (async, runs on a tokio runtime worker)
+// inlined sync DB-touching steps — `witness::lookup` (Step 2.5 + Step
+// 4), `claim::evaluate` → `delegation::check_capability` (Step 3),
+// `delegation::record_capability_use` (Step 4 on terminal Pass) — each
+// of which calls `Store::lock_sync()` →
+// `tokio::sync::Mutex::blocking_lock`. `blocking_lock` panics by
+// design when the calling thread is a runtime worker.
+//
+// Fix: extracted Steps 2/2.5/3/4 into `evaluate_pre_spawn` and hop
+// the entire block onto the blocking pool via a single
+// `tokio::task::spawn_blocking` (matches the Phase-A pattern in
+// `handlers::intent::handle_inner`). Step 5 (verifier spawn) stays
+// async because `tokio::process::Command` requires the runtime.
+//
+// The tests below pin the invariant at two layers:
+//
+//   1. `evaluate_pre_spawn_direct_call_from_runtime_panics` —
+//      `#[should_panic]` test that reproduces the iter63 panic shape
+//      at the helper boundary. If a future refactor merges
+//      `evaluate_pre_spawn` back into `evaluate_claims` without
+//      preserving the `spawn_blocking` hop, this test would go green
+//      (silently — it asserts the panic) but the production code
+//      would crash; we therefore pair it with #2 which fires
+//      green-then-red if the wrap is dropped.
+//
+//   2. `evaluate_pre_spawn_via_spawn_blocking_is_async_safe` —
+//      drives `evaluate_pre_spawn` from a `#[tokio::test]` runtime
+//      via the canonical `spawn_blocking` hop and asserts the call
+//      returns Ok (no panic). This is the positive regression
+//      witness for the invariant.
+
+#[cfg(test)]
+mod async_runtime_safety {
+    use std::path::PathBuf;
+    use std::sync::Arc;
+
+    use raxis_policy::PolicyBundle;
+    use raxis_store::Store;
+    use raxis_test_support::mem_store;
+    use raxis_types::SessionId;
+
+    use super::{evaluate_pre_spawn, PreSpawnDecision};
+
+    /// Build a minimal valid `PolicyBundle` with one `[[gates]]` entry
+    /// (`TestGate`). The gate forces `evaluate_pre_spawn` to traverse
+    /// Step 4 (per-gate witness lookup) — the exact code site whose
+    /// `Store::lock_sync` call panicked in iter63 when reached from
+    /// the async runtime worker.
+    ///
+    /// We render the genesis-shaped policy via
+    /// `raxis_genesis_tools::render_genesis_policy_toml` (so every
+    /// `[meta]`/`[authority]`/`[sessions]` invariant the validator
+    /// enforces is satisfied) and append a `[[gates]]` table by
+    /// string concatenation; the TOML parser is tolerant of trailing
+    /// tables because `[[gates]]` is `#[serde(default)]` in
+    /// `raxis_policy::RawPolicy`.
+    fn policy_with_one_gate(allowed_worktree_root: &std::path::Path) -> Arc<PolicyBundle> {
+        let key = raxis_test_support::ephemeral_signing_key([0x42u8; 32]);
+        let pk = raxis_test_support::pubkey_hex(&key);
+        let fp = raxis_genesis_tools::pubkey_fingerprint(&hex::decode(&pk).unwrap());
+        let cert = raxis_test_support::ephemeral_cert_with_key(
+            &key,
+            raxis_test_support::CertOpts {
+                display_name: "gates-async-safety".to_owned(),
+                permitted_ops: raxis_genesis_tools::PERMITTED_OPS
+                    .iter()
+                    .map(|s| (*s).to_owned())
+                    .collect(),
+                ..raxis_test_support::CertOpts::default()
+            },
+        );
+        let root_str = allowed_worktree_root.display().to_string();
+        let mut policy_toml = raxis_genesis_tools::render_genesis_policy_toml(
+            raxis_genesis_tools::GenesisPolicyInputs {
+                authority_pubkey_hex:
+                    "0000000000000000000000000000000000000000000000000000000000000000",
+                quality_pubkey_hex:
+                    "1111111111111111111111111111111111111111111111111111111111111111",
+                operator_pubkey_hex: &pk,
+                operator_fingerprint: &fp,
+                signed_at_unix_secs: 1_700_000_000,
+                allowed_worktree_roots: &[root_str.as_str()],
+                operator_cert: &cert,
+            },
+        );
+        policy_toml.push_str(
+            "
+[[gates]]
+             gate_type        = \"TestGate\"
+             verifier_command = \"/usr/local/bin/raxis-verify-testgate\"
+             max_wall_seconds = 60
+             max_memory_bytes = 268435456
+             network_allowed  = false
+",
+        );
+
+        let tmp = tempfile::NamedTempFile::new().expect("tempfile");
+        std::fs::write(tmp.path(), &policy_toml).expect("write policy");
+        let (bundle, _bytes, _sha) =
+            raxis_policy::load_policy(tmp.path()).expect("load_policy on async-safety policy");
+        Arc::new(bundle)
+    }
+
+    /// **INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01** witness (positive).
+    ///
+    /// Drives `evaluate_pre_spawn` from a `#[tokio::test]` async
+    /// runtime via the canonical `tokio::task::spawn_blocking` hop —
+    /// the production wrapping that `evaluate_claims` now applies.
+    /// Asserts the call returns `Ok(NeedsVerifierSpawn)` (the seeded
+    /// policy has one `TestGate` and the in-memory store has no
+    /// witness rows ⇒ the gate is missing ⇒ the caller would spawn
+    /// a verifier in Step 5).
+    ///
+    /// Before the fix: `evaluate_claims` inlined this body and
+    /// panicked at the first `witness::lookup → Store::lock_sync`
+    /// site. After the fix: `evaluate_claims` wraps this body in
+    /// `spawn_blocking`, which is exactly what this test mimics.
+    #[tokio::test]
+    async fn evaluate_pre_spawn_via_spawn_blocking_is_async_safe() {
+        let tmp_root = tempfile::tempdir().expect("tempdir");
+        let policy = policy_with_one_gate(tmp_root.path());
+        let store = Arc::new(mem_store());
+
+        let session_id = SessionId::new_v4();
+        let evaluation_sha = "abcdef0123456789abcdef0123456789abcdef01".to_owned();
+        let task_id = "task-gates-async-safety".to_owned();
+        let touched_paths: Vec<PathBuf> = vec![tmp_root.path().join("src/lib.rs")];
+
+        let decision = tokio::task::spawn_blocking({
+            let policy = Arc::clone(&policy);
+            let store = Arc::clone(&store);
+            move || {
+                evaluate_pre_spawn(
+                    &session_id,
+                    &evaluation_sha,
+                    &task_id,
+                    &touched_paths,
+                    &policy,
+                    &store,
+                )
+            }
+        })
+        .await
+        .expect("spawn_blocking join")
+        .expect("evaluate_pre_spawn must not error");
+
+        match decision {
+            PreSpawnDecision::NeedsVerifierSpawn { missing_gates } => {
+                assert_eq!(
+                    missing_gates,
+                    vec!["TestGate".to_owned()],
+                    "the single seeded gate has no witness ⇒ it must be reported missing",
+                );
+            }
+            other => panic!(
+                "expected NeedsVerifierSpawn (no witness seeded for TestGate); got {other:?}",
+            ),
+        }
+    }
+
+    /// **INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01** witness (end-to-end).
+    ///
+    /// Drives the public async `gates::evaluate_claims` from a
+    /// `#[tokio::test]` runtime worker — the exact call shape the
+    /// iter63 stack trace showed crashing
+    /// (`handlers::intent::handle_inner::{{closure}}` →
+    /// `gates::evaluate_claims::{{closure}}` → …). Constructs a
+    /// minimal `HandlerContext` with the cfg-gated test builders so
+    /// the full `evaluate_claims` body executes (Step 1 break-glass
+    /// → `spawn_blocking { Steps 2 + 2.5 + 3 + 4 }` → Step 5 verifier
+    /// spawn). Asserts the call returns `Ok(_)` instead of
+    /// propagating the `Cannot block the current thread from within
+    /// a runtime` panic.
+    ///
+    /// The seeded policy contains a single `[[gates]]` entry whose
+    /// `verifier_command` points at a non-existent binary; Step 5
+    /// will attempt to spawn it, fail with `SpawnFailed`, log the
+    /// non-fatal `VerifierSpawnFailed` event, and return
+    /// `PendingWitness { missing_gates: ["TestGate"] }`. That outcome
+    /// is the success case for this test — what we are pinning is
+    /// "no panic", not "verifier spawn succeeds".
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn evaluate_claims_end_to_end_from_runtime_is_async_safe() {
+        use std::path::Path;
+
+        use arc_swap::ArcSwap;
+        use raxis_audit_tools::AuditSink;
+        use raxis_test_support::FakeAuditSink;
+
+        use crate::initiatives::PlanRegistry;
+        use crate::ipc::context;
+
+        let data_dir = tempfile::tempdir().expect("data tempdir");
+        let worktree_root = tempfile::tempdir().expect("worktree tempdir");
+
+        let policy = policy_with_one_gate(worktree_root.path());
+        let store: Arc<Store> = Arc::new(mem_store());
+        let audit: Arc<dyn AuditSink> = Arc::new(FakeAuditSink::new());
+        let registry = Arc::new(crate::authority::keys::KeyRegistry::stub_for_tests());
+        let plan_registry = Arc::new(PlanRegistry::new());
+        let credentials =
+            context::build_default_test_credentials(data_dir.path(), Arc::clone(&audit));
+        let isolation = context::build_fail_closed_test_isolation();
+        let orchestrator_spawn = context::build_test_orchestrator_spawn();
+        let executor_spawn = context::build_test_executor_spawn();
+        let domain = context::build_default_test_domain(data_dir.path());
+
+        let ctx = Arc::new(context::HandlerContext::new(
+            Arc::new(ArcSwap::new(Arc::clone(&policy))),
+            registry,
+            store,
+            audit,
+            data_dir.path().to_path_buf(),
+            plan_registry,
+            Arc::new(crate::gateway::client::GatewayClient::new()),
+            Arc::new(crate::prompt::EpochBinding::new()),
+            credentials,
+            isolation,
+            orchestrator_spawn,
+            executor_spawn,
+            domain,
+        ));
+
+        let session_id = SessionId::new_v4();
+        let evaluation_sha = "cafe0123cafe0123cafe0123cafe0123cafe0123";
+        let task_id = "task-evaluate-claims-async-safety";
+        let touched_paths: Vec<PathBuf> = vec![worktree_root.path().join("src/lib.rs")];
+
+        let result = super::evaluate_claims(
+            &session_id,
+            evaluation_sha,
+            task_id,
+            &touched_paths,
+            &[],
+            Path::new(worktree_root.path()),
+            &ctx,
+        )
+        .await;
+
+        // The point of the test: `evaluate_claims` returned at all.
+        // Pre-fix, the call would have unwound via the iter63
+        // panic ("Cannot block the current thread from within a
+        // runtime") instead of reaching this assertion.
+        let outcome = result.expect("evaluate_claims must return Ok, not panic");
+        match outcome {
+            super::GateEvalResult::PendingWitness { missing_gates } => {
+                assert_eq!(
+                    missing_gates,
+                    vec!["TestGate".to_owned()],
+                    "no witness seeded ⇒ TestGate must be reported missing",
+                );
+            }
+            super::GateEvalResult::Pass { .. } => {
+                // Acceptable if the empty path-rules table makes
+                // `required_claims` empty AND the spawn_blocking hop
+                // still succeeded; the invariant under test is "no
+                // panic", not the specific gate-state semantics.
+            }
+            other => panic!("expected PendingWitness or Pass from evaluate_claims; got {other:?}",),
+        }
+    }
+
+    /// **INV-GATES-EVALUATE-CLAIMS-ASYNC-SAFE-01** witness (negative).
+    ///
+    /// Reproduces the iter63 panic shape at the
+    /// `evaluate_pre_spawn` boundary: invoking the helper **directly**
+    /// from a tokio runtime worker (no `spawn_blocking` hop) hits
+    /// `witness::lookup → witness_index::lookup → Store::lock_sync →
+    /// blocking_lock` and panics with "Cannot block the current
+    /// thread from within a runtime". This test pins the bug shape
+    /// so a future refactor that removes the `spawn_blocking` wrap
+    /// in `evaluate_claims` cannot quietly land — the production
+    /// invariant is "all sync DB work goes through `spawn_blocking`",
+    /// and this `#[should_panic]` documents exactly why.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot block the current thread from within a runtime")]
+    async fn evaluate_pre_spawn_direct_call_from_runtime_panics() {
+        let tmp_root = tempfile::tempdir().expect("tempdir");
+        let policy = policy_with_one_gate(tmp_root.path());
+        let store: Arc<Store> = Arc::new(mem_store());
+
+        let session_id = SessionId::new_v4();
+        let evaluation_sha = "abcdef0123456789abcdef0123456789abcdef01".to_owned();
+        let task_id = "task-gates-async-unsafe".to_owned();
+        let touched_paths: Vec<PathBuf> = vec![tmp_root.path().join("src/lib.rs")];
+
+        // Direct call, no spawn_blocking — this is the iter63 call shape
+        // that crashed the kernel daemon. The `let _ =` binding is
+        // intentional: the panic fires inside `evaluate_pre_spawn`
+        // before the call site can observe the return value.
+        let _ = evaluate_pre_spawn(
+            &session_id,
+            &evaluation_sha,
+            &task_id,
+            &touched_paths,
+            &policy,
+            &store,
+        );
+    }
+}

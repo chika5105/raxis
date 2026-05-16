@@ -367,3 +367,93 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+// ---------------------------------------------------------------------------
+// Async-runtime safety witness — INV-WITNESS-INDEX-LOOKUP-ASYNC-SAFE-01.
+// ---------------------------------------------------------------------------
+//
+// iter63 realistic_session_lifecycle hit
+// `crates/store/src/db.rs:125` "Cannot block the current thread from
+// within a runtime" the first time `gates::evaluate_claims` (async,
+// runs on a tokio runtime worker) reached `gates::witness::lookup` →
+// `witness_index::lookup` → `Store::lock_sync` →
+// `tokio::sync::Mutex::blocking_lock`. The kernel daemon crashed
+// mid-planner-stream and the dashboard at :19820 went unreachable.
+//
+// The broader fix lives at the `evaluate_claims` boundary (a single
+// `tokio::task::spawn_blocking` wraps every sync DB-touching step;
+// see `kernel::gates::evaluate_pre_spawn`). This test pins the
+// canonical safe call pattern at the inner facade so a future change
+// to `witness_index::lookup` (e.g. removing this comment block or
+// inlining the lookup into a fn that gets called raw from async) can
+// never regress the invariant without the regression test going red.
+
+#[cfg(test)]
+mod async_runtime_safety {
+    use std::sync::Arc;
+
+    use raxis_store::Store;
+
+    use super::{lookup, WitnessError, WitnessRecord};
+
+    /// **INV-WITNESS-INDEX-LOOKUP-ASYNC-SAFE-01** witness (positive).
+    ///
+    /// Drives `witness_index::lookup` from a `#[tokio::test]` async
+    /// runtime via the canonical `tokio::task::spawn_blocking` hop.
+    /// Pre-fix the broader bug (`evaluate_claims` calling this
+    /// function directly on a runtime worker) panicked; post-fix the
+    /// canonical wrapping must work and return `Ok(None)` against
+    /// an empty index (no rows seeded — the test isolates the
+    /// async-safety question from FK / schema concerns).
+    #[tokio::test]
+    async fn lookup_from_runtime_worker_via_spawn_blocking_is_ok() {
+        let store = Arc::new(Store::open_in_memory().expect("in-memory store"));
+        let evaluation_sha = "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef";
+        let task_id = "task-async-safe";
+        let gate_type = "TestGate";
+
+        let result: Result<Option<WitnessRecord>, WitnessError> = tokio::task::spawn_blocking({
+            let store = Arc::clone(&store);
+            move || lookup(evaluation_sha, task_id, gate_type, None, &store)
+        })
+        .await
+        .expect("lookup spawn_blocking join");
+
+        // The lookup must complete without panicking and return Ok
+        // (empty index ⇒ no record). The point of this test is that
+        // the call returned at all — the iter63 bug shape was an
+        // unconditional panic before the function body could query
+        // the empty table.
+        let record = result.expect("lookup must not error");
+        assert!(record.is_none(), "no rows seeded → no record returned");
+    }
+
+    /// **INV-WITNESS-INDEX-LOOKUP-ASYNC-SAFE-01** witness (negative).
+    ///
+    /// Pins the underlying iter63 bug shape: invoking
+    /// `witness_index::lookup` **directly** from a tokio runtime
+    /// worker triggers `Store::lock_sync` → `blocking_lock` →
+    /// "Cannot block the current thread from within a runtime"
+    /// panic. The kernel's production fix is to wrap the call chain
+    /// in `spawn_blocking` (see
+    /// `kernel::gates::evaluate_pre_spawn`); this test documents
+    /// **why** that wrapping is mandatory so a future refactor that
+    /// silently drops the `spawn_blocking` reintroduces the iter63
+    /// crash via this test going green-then-removed rather than
+    /// going green-then-shipped.
+    #[tokio::test]
+    #[should_panic(expected = "Cannot block the current thread from within a runtime")]
+    async fn lookup_directly_from_runtime_worker_panics() {
+        let store = Store::open_in_memory().expect("in-memory store");
+        // No `spawn_blocking` hop — this is the iter63 call shape.
+        // The unused binding is intentional: the panic fires inside
+        // `lookup` before it returns.
+        let _ = lookup(
+            "deadbeefdeadbeefdeadbeefdeadbeefdeadbeef",
+            "task-async-unsafe",
+            "TestGate",
+            None,
+            &store,
+        );
+    }
+}
