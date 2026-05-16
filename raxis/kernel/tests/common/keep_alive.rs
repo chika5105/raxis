@@ -273,10 +273,7 @@ pub fn print_keep_alive_banner(
         "  Kernel stderr  tail -f {}/kernel.stderr.log",
         work_dir.display(),
     );
-    eprintln!(
-        "  SQLite         sqlite3 {}/kernel.db",
-        work_dir.display(),
-    );
+    eprintln!("  SQLite         sqlite3 {}/kernel.db", work_dir.display(),);
     eprintln!(
         "  Audit chain    cat {}/audit/segment-000.jsonl",
         work_dir.display(),
@@ -422,7 +419,9 @@ mod tests {
     /// mutation-test the parser without spawning a process.
     #[test]
     fn parse_truthy_env_value_canonical_cases() {
-        for v in ["1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " 1 ", "  true\t"] {
+        for v in [
+            "1", "true", "TRUE", "True", "yes", "YES", "on", "ON", " 1 ", "  true\t",
+        ] {
             assert!(
                 parse_truthy_env_value(Some(v)),
                 "value {v:?} MUST parse truthy",
@@ -557,8 +556,7 @@ mod tests {
         let _env = SetEnvGuard::unset(ENV_KEEP_RUNNING_AFTER_EXIT);
         let _cli = CliFlagGuard::set(false);
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH_FILE), b"")
-            .expect("write touch file");
+        std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH_FILE), b"").expect("write touch file");
         let tore_down = std::rc::Rc::new(std::cell::Cell::new(false));
         {
             let _h = MockHarness {
@@ -585,10 +583,7 @@ mod tests {
                 tore_down: tore_down.clone(),
             };
         }
-        assert!(
-            !tore_down.get(),
-            "CLI-flag branch MUST skip teardown",
-        );
+        assert!(!tore_down.get(), "CLI-flag branch MUST skip teardown",);
     }
 
     /// Banner emission MUST NOT panic on any reasonable input

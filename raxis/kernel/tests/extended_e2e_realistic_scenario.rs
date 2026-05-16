@@ -117,8 +117,7 @@ use common::dashboard::{
     configured_dashboard_port, mutate_dashboard_block_in_policy, open_dashboard_with_autologin,
 };
 use common::keep_alive::{
-    keep_running_after_exit_with_workdir, print_keep_alive_banner,
-    ComposeStackBanner,
+    keep_running_after_exit_with_workdir, print_keep_alive_banner, ComposeStackBanner,
 };
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -1056,11 +1055,7 @@ fn assert_verifier_symbol_index_paired_write(chain: &[raxis_audit_tools::AuditEv
                 .and_then(|v| v.as_str())
                 .unwrap_or_default();
             if image_alias == "raxis-verifier-symbol-index" {
-                if let Some(run_id) = ev
-                    .payload
-                    .get("verifier_run_id")
-                    .and_then(|v| v.as_str())
-                {
+                if let Some(run_id) = ev.payload.get("verifier_run_id").and_then(|v| v.as_str()) {
                     spawned_runs.push(run_id.to_owned());
                 }
             }

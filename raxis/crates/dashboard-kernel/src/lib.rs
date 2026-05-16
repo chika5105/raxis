@@ -51,13 +51,12 @@ use raxis_audit_tools::reader::ChainReader;
 use raxis_dashboard::auth::DashboardRole;
 use raxis_dashboard::config::DashboardConfig;
 use raxis_dashboard::data::{
-    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge,
-    DashboardData, EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry,
-    InitiativePlanView, InitiativeView, LifecycleAnnotation, NotificationView,
-    OperatorAuthResolution, OrchestratorGapsResponse, PolicyAdvancement,
-    PolicyOperatorView, PolicySnapshotView, RecentSessionEntry, ReviewerPanelEntry,
-    ReviewerVerdictView, SessionView, StructuredOutputView, SubsystemDetailRow,
-    SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
+    AuditEntryView, ChainStatusView, CredentialMetadata, CredentialReveal, DagEdge, DashboardData,
+    EscalationView, HealthCheck, HealthSnapshot, InitiativeListEntry, InitiativePlanView,
+    InitiativeView, LifecycleAnnotation, NotificationView, OperatorAuthResolution,
+    OrchestratorGapsResponse, PolicyAdvancement, PolicyOperatorView, PolicySnapshotView,
+    RecentSessionEntry, ReviewerPanelEntry, ReviewerVerdictView, SessionView, StructuredOutputView,
+    SubsystemDetailRow, SubsystemHealthCard, SubsystemHealthResponse, TaskView, WorktreeDetail,
     WorktreeDiff, WorktreeFile, WorktreeListEntry, WorktreeLogEntry, WorktreeTree,
     WorktreeTreeEntry, SUBSYSTEM_CATALOG,
 };
@@ -1182,21 +1181,17 @@ impl DashboardData for KernelDashboardData {
         // itself does not carry an initiative FK — tasks own
         // the link — so this is the only consistent way to
         // narrow without a schema change.
-        let allowed: Option<std::collections::HashSet<String>> = match initiative_id {
-            None => None,
-            Some(i) => {
-                let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
-                    .map_err(|e| ApiError::Internal {
-                        log_only: format!("tasks::list_by_initiative: {e}"),
-                    })?;
-                Some(
-                    tasks
-                        .into_iter()
-                        .filter_map(|t| t.session_id)
-                        .collect(),
-                )
-            }
-        };
+        let allowed: Option<std::collections::HashSet<String>> =
+            match initiative_id {
+                None => None,
+                Some(i) => {
+                    let tasks = raxis_store::views::tasks::list_by_initiative(&conn, i, 500)
+                        .map_err(|e| ApiError::Internal {
+                            log_only: format!("tasks::list_by_initiative: {e}"),
+                        })?;
+                    Some(tasks.into_iter().filter_map(|t| t.session_id).collect())
+                }
+            };
         // Pre-load the audit chain so the per-session
         // classifier sees the SessionRevoked rows without a
         // re-walk per response.
@@ -1231,7 +1226,7 @@ impl DashboardData for KernelDashboardData {
                     // chain for the matching `SessionRevoked` /
                     // `SessionVmFailedFinal` row.
                     failure: None,
-                    annotations:       Vec::new(),
+                    annotations: Vec::new(),
                     latest_annotation: None,
                 };
                 enrich_session_view_with_lifecycle(&audit_chain, view)
@@ -1292,7 +1287,7 @@ impl DashboardData for KernelDashboardData {
             // rationale. V3 promotes this to a real audit
             // chain walk.
             failure: None,
-            annotations:       Vec::new(),
+            annotations: Vec::new(),
             latest_annotation: None,
         };
         Ok(enrich_session_view_with_lifecycle(&audit_chain, view))
@@ -3205,10 +3200,10 @@ fn task_row_to_view(
         // via `task_row_to_view_with_lifecycle` so the global
         // index gets `latest_annotation` without re-reading
         // audit per row.
-        annotations:            Vec::new(),
-        latest_annotation:      None,
-        review_verdict:         None,
-        last_critique:          None,
+        annotations: Vec::new(),
+        latest_annotation: None,
+        review_verdict: None,
+        last_critique: None,
         reviewer_panel_results: Vec::new(),
     }
 }
@@ -3223,9 +3218,9 @@ fn task_row_to_view(
 /// [`collect_lifecycle_audit_rows`] so a multi-task initiative
 /// page does not re-walk the chain per row.
 fn task_row_to_view_with_lifecycle(
-    conn:        &raxis_store::ro::RoConn,
+    conn: &raxis_store::ro::RoConn,
     audit_chain: &[lifecycle::AuditRow],
-    t:           &raxis_store::views::tasks::TaskRow,
+    t: &raxis_store::views::tasks::TaskRow,
 ) -> TaskView {
     let mut view = task_row_to_view(conn, t);
     let activations = read_activations_for_task(conn, &t.task_id);
@@ -3238,10 +3233,10 @@ fn task_row_to_view_with_lifecycle(
     );
     let latest = annotations.last().cloned();
     let panel = extract_reviewer_panel_results(audit_chain, &t.task_id);
-    view.annotations            = annotations;
-    view.latest_annotation      = latest;
-    view.review_verdict         = review_verdict;
-    view.last_critique          = last_critique;
+    view.annotations = annotations;
+    view.latest_annotation = latest;
+    view.review_verdict = review_verdict;
+    view.last_critique = last_critique;
     view.reviewer_panel_results = panel;
     view
 }
@@ -3251,11 +3246,11 @@ fn task_row_to_view_with_lifecycle(
 /// timeline (operator-revoke vs self-exit, initiative-block).
 fn enrich_session_view_with_lifecycle(
     audit_chain: &[lifecycle::AuditRow],
-    mut view:    SessionView,
+    mut view: SessionView,
 ) -> SessionView {
     let annotations = lifecycle::classify_for_session(audit_chain, &view.session_id);
     view.latest_annotation = annotations.last().cloned();
-    view.annotations       = annotations;
+    view.annotations = annotations;
     view
 }
 
@@ -3300,12 +3295,12 @@ fn collect_lifecycle_audit_rows(audit_dir: &Path) -> Vec<lifecycle::AuditRow> {
             .and_then(|v| v.get("payload").cloned())
             .unwrap_or(serde_json::Value::Null);
         out.push(lifecycle::AuditRow {
-            seq:           rec.seq,
-            event_kind:    rec.event_kind,
+            seq: rec.seq,
+            event_kind: rec.event_kind,
             initiative_id: rec.initiative_id,
-            task_id:       rec.task_id,
-            session_id:    rec.session_id,
-            at:            rec.emitted_at.unwrap_or(0),
+            task_id: rec.task_id,
+            session_id: rec.session_id,
+            at: rec.emitted_at.unwrap_or(0),
             payload,
         });
     }
@@ -3346,10 +3341,10 @@ fn read_activations_for_task(
     };
     let rows = stmt.query_map([task_id], |r| {
         Ok(lifecycle::ActivationRow {
-            activation_id:    r.get(0)?,
-            task_id:          r.get(1)?,
+            activation_id: r.get(0)?,
+            task_id: r.get(1)?,
             activation_state: r.get(2)?,
-            created_at:       r.get::<_, i64>(3)?,
+            created_at: r.get::<_, i64>(3)?,
         })
     });
     if let Ok(rows) = rows {
@@ -3364,9 +3359,7 @@ fn read_activations_for_task(
 /// project to the classifier's shape. Used by
 /// `list_orchestrator_gaps` where the gap detector needs the
 /// global `PendingActivation` set.
-fn read_activations_all(
-    conn: &raxis_store::ro::RoConn,
-) -> Vec<lifecycle::ActivationRow> {
+fn read_activations_all(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::ActivationRow> {
     let mut out: Vec<lifecycle::ActivationRow> = Vec::new();
     let Ok(mut stmt) = conn.prepare(
         "SELECT activation_id, task_id, activation_state, created_at \
@@ -3376,10 +3369,10 @@ fn read_activations_all(
     };
     let rows = stmt.query_map([], |r| {
         Ok(lifecycle::ActivationRow {
-            activation_id:    r.get(0)?,
-            task_id:          r.get(1)?,
+            activation_id: r.get(0)?,
+            task_id: r.get(1)?,
             activation_state: r.get(2)?,
-            created_at:       r.get::<_, i64>(3)?,
+            created_at: r.get::<_, i64>(3)?,
         })
     });
     if let Ok(rows) = rows {
@@ -3395,13 +3388,9 @@ fn read_activations_all(
 /// `task_dag_edges` joined into `predecessors`. `completed_at`
 /// is populated from `tasks.transitioned_at` when the task is in
 /// a `Completed` state.
-fn read_tasks_with_predecessors(
-    conn: &raxis_store::ro::RoConn,
-) -> Vec<lifecycle::TaskRow> {
+fn read_tasks_with_predecessors(conn: &raxis_store::ro::RoConn) -> Vec<lifecycle::TaskRow> {
     let mut out: Vec<lifecycle::TaskRow> = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT task_id, state, transitioned_at FROM tasks",
-    ) else {
+    let Ok(mut stmt) = conn.prepare("SELECT task_id, state, transitioned_at FROM tasks") else {
         return out;
     };
     let rows = stmt.query_map([], |r| {
@@ -3442,9 +3431,9 @@ fn read_predecessors_for_task(
     successor_task_id: &str,
 ) -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    let Ok(mut stmt) = conn.prepare(
-        "SELECT predecessor_task_id FROM task_dag_edges WHERE successor_task_id = ?1",
-    ) else {
+    let Ok(mut stmt) =
+        conn.prepare("SELECT predecessor_task_id FROM task_dag_edges WHERE successor_task_id = ?1")
+    else {
         return out;
     };
     let rows = stmt.query_map([successor_task_id], |r| r.get::<_, String>(0));
@@ -3491,22 +3480,22 @@ fn read_sessions_all_for_recent(
         return out;
     };
     let rows = stmt.query_map([limit as i64], |r| {
-        let session_id: String       = r.get(0)?;
-        let agent_type: String       = r.get(1)?;
-        let created_at: i64          = r.get(2)?;
-        let revoked_at: Option<i64>  = r.get(3)?;
-        let task_id: Option<String>  = r.get(4)?;
-        let init_id: Option<String>  = r.get(5)?;
+        let session_id: String = r.get(0)?;
+        let agent_type: String = r.get(1)?;
+        let created_at: i64 = r.get(2)?;
+        let revoked_at: Option<i64> = r.get(3)?;
+        let task_id: Option<String> = r.get(4)?;
+        let init_id: Option<String> = r.get(5)?;
         Ok(RecentSessionEntry {
             session_id,
             agent_type,
             task_id,
-            initiative_id:     init_id,
-            created_at:        created_at.max(0) as u64,
-            terminated_at:     revoked_at.map(|v| v.max(0) as u64),
+            initiative_id: init_id,
+            created_at: created_at.max(0) as u64,
+            terminated_at: revoked_at.map(|v| v.max(0) as u64),
             terminated_reason: None,
-            final_annotation:  None,
-            capture_bytes:     0,
+            final_annotation: None,
+            capture_bytes: 0,
         })
     });
     if let Ok(rows) = rows {
@@ -3529,8 +3518,8 @@ fn read_sessions_all_for_recent(
 /// reviewer's verdict — different kernel revisions emit
 /// different shapes; we tolerate all three.
 fn extract_reviewer_panel_results(
-    audit_chain:       &[lifecycle::AuditRow],
-    executor_task_id:  &str,
+    audit_chain: &[lifecycle::AuditRow],
+    executor_task_id: &str,
 ) -> Vec<ReviewerPanelEntry> {
     let mut out: Vec<ReviewerPanelEntry> = Vec::new();
     for row in audit_chain.iter() {
@@ -3538,45 +3527,75 @@ fn extract_reviewer_panel_results(
             "ReviewAggregationCompleted" => {
                 // Inspect every "reviewer_results" entry for
                 // this executor's aggregation row.
-                let exec_target = row.payload.get("executor_task_id")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                if exec_target != executor_task_id { continue; }
-                if let Some(arr) = row.payload.get("reviewer_results")
+                let exec_target = row
+                    .payload
+                    .get("executor_task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if exec_target != executor_task_id {
+                    continue;
+                }
+                if let Some(arr) = row
+                    .payload
+                    .get("reviewer_results")
                     .and_then(|v| v.as_array())
                 {
                     for r in arr {
-                        let reviewer_task_id = r.get("reviewer_task_id")
-                            .and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                        let verdict = r.get("verdict")
-                            .and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                        let critique = r.get("critique")
-                            .and_then(|v| v.as_str()).unwrap_or("");
+                        let reviewer_task_id = r
+                            .get("reviewer_task_id")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        let verdict = r
+                            .get("verdict")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("")
+                            .to_owned();
+                        let critique = r.get("critique").and_then(|v| v.as_str()).unwrap_or("");
                         out.push(ReviewerPanelEntry {
                             reviewer_task_id,
                             verdict,
                             critique_excerpt: first_n_lines_helper(critique, 3),
-                            completed_at:     row.at,
+                            completed_at: row.at,
                         });
                     }
                 }
             }
             "SubmitReview" | "ReviewerSubmittedVerdict" => {
-                let exec_target = row.payload.get("executor_task_id")
-                    .and_then(|v| v.as_str()).unwrap_or("");
-                if exec_target != executor_task_id { continue; }
-                let reviewer_task_id = row.task_id.clone()
-                    .or_else(|| row.payload.get("reviewer_task_id")
-                        .and_then(|v| v.as_str()).map(str::to_owned))
+                let exec_target = row
+                    .payload
+                    .get("executor_task_id")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
+                if exec_target != executor_task_id {
+                    continue;
+                }
+                let reviewer_task_id = row
+                    .task_id
+                    .clone()
+                    .or_else(|| {
+                        row.payload
+                            .get("reviewer_task_id")
+                            .and_then(|v| v.as_str())
+                            .map(str::to_owned)
+                    })
                     .unwrap_or_default();
-                let verdict = row.payload.get("verdict")
-                    .and_then(|v| v.as_str()).unwrap_or("").to_owned();
-                let critique = row.payload.get("critique")
-                    .and_then(|v| v.as_str()).unwrap_or("");
+                let verdict = row
+                    .payload
+                    .get("verdict")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_owned();
+                let critique = row
+                    .payload
+                    .get("critique")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("");
                 out.push(ReviewerPanelEntry {
                     reviewer_task_id,
                     verdict,
                     critique_excerpt: first_n_lines_helper(critique, 3),
-                    completed_at:     row.at,
+                    completed_at: row.at,
                 });
             }
             _ => {}
@@ -3591,8 +3610,12 @@ fn extract_reviewer_panel_results(
 fn first_n_lines_helper(s: &str, n: usize) -> String {
     let mut acc = String::new();
     for (i, line) in s.lines().enumerate() {
-        if i >= n { break; }
-        if i > 0 { acc.push('\n'); }
+        if i >= n {
+            break;
+        }
+        if i > 0 {
+            acc.push('\n');
+        }
         acc.push_str(line);
     }
     acc

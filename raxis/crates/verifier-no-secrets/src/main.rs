@@ -123,9 +123,7 @@ async fn run() -> Result<ExitCode, ExitCode> {
             }
         }
         other => {
-            eprintln!(
-                "raxis-verifier-no-secrets: expected WitnessAck, got {other:?}"
-            );
+            eprintln!("raxis-verifier-no-secrets: expected WitnessAck, got {other:?}");
             Err(ExitCode::IoError)
         }
     }

@@ -9137,7 +9137,10 @@ mod environment_tests {
     /// kernel-published alias.
     #[test]
     fn iter62_reserved_general_verifier_alias_literal_is_pinned() {
-        assert_eq!(RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME, "raxis-verifier-starter");
+        assert_eq!(
+            RESERVED_GENERAL_VERIFIER_VM_IMAGE_NAME,
+            "raxis-verifier-starter"
+        );
     }
 
     #[test]

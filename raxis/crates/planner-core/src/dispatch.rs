@@ -1869,10 +1869,13 @@ mod tests {
     fn planner_turn_usage_emitted_per_turn() {
         let mut buf: Vec<u8> = Vec::new();
         // Three turns with distinct usage so we can pin the order.
-        for (idx, (in_t, out_t, cc, cr)) in
-            [(10u32, 5u32, 0u32, 0u32), (12, 6, 100, 200), (14, 7, 50, 150)]
-                .iter()
-                .enumerate()
+        for (idx, (in_t, out_t, cc, cr)) in [
+            (10u32, 5u32, 0u32, 0u32),
+            (12, 6, 100, 200),
+            (14, 7, 50, 150),
+        ]
+        .iter()
+        .enumerate()
         {
             emit_turn_usage(
                 &mut buf,
@@ -1935,8 +1938,7 @@ mod tests {
         );
         let line = std::str::from_utf8(&buf).expect("must be UTF-8");
         let trimmed = line.trim_end_matches('\n');
-        let v: serde_json::Value =
-            serde_json::from_str(trimmed).expect("must parse as JSON");
+        let v: serde_json::Value = serde_json::from_str(trimmed).expect("must parse as JSON");
         // `input_tokens=10` is non-zero so the denominator is 10
         // (not zero) and the ratio is `0 / 10 = 0.0`. The
         // assertion is the same either way: the wire shape
@@ -1952,9 +1954,7 @@ mod tests {
         // Also exercise the truly all-zero path (every counter 0)
         // to pin the explicit `denom == 0` guard.
         let mut buf2: Vec<u8> = Vec::new();
-        emit_turn_usage(
-            &mut buf2, "t", "s", "executor", "m", 0, 0, 0, 0, 0, 0, 0,
-        );
+        emit_turn_usage(&mut buf2, "t", "s", "executor", "m", 0, 0, 0, 0, 0, 0, 0);
         let v2: serde_json::Value =
             serde_json::from_str(std::str::from_utf8(&buf2).unwrap().trim_end_matches('\n'))
                 .expect("must parse as JSON");

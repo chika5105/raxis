@@ -3630,9 +3630,7 @@ mod supervisor_auto_resume_witness {
     fn reservation_count_for(store: &Store, task_id: &str) -> i64 {
         let conn = store.lock_sync();
         conn.query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {LANE_BUDGET_RESERVATIONS} WHERE task_id=?1"
-            ),
+            &format!("SELECT COUNT(*) FROM {LANE_BUDGET_RESERVATIONS} WHERE task_id=?1"),
             rusqlite::params![task_id],
             |r| r.get(0),
         )

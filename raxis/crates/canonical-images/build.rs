@@ -129,8 +129,7 @@ const ORCHESTRATOR_DIGEST_HEX_VAR: &str = "RAXIS_EXPECTED_ORCHESTRATOR_IMAGE_DIG
 // `DigestNotPopulated` — preserving the V1 trust posture for
 // out-of-band tools (`raxis doctor`) and the kernel-canonical
 // symbol-index image's "digest is the SOLE truth at spawn" rule.
-const VERIFIER_STARTER_DIGEST_HEX_VAR: &str =
-    "RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX";
+const VERIFIER_STARTER_DIGEST_HEX_VAR: &str = "RAXIS_EXPECTED_VERIFIER_STARTER_IMAGE_DIGEST_HEX";
 const VERIFIER_SYMBOL_INDEX_DIGEST_HEX_VAR: &str =
     "RAXIS_EXPECTED_VERIFIER_SYMBOL_INDEX_IMAGE_DIGEST_HEX";
 const TRUST_ANCHOR_LEN_BYTES: usize = 32;

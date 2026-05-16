@@ -497,10 +497,12 @@ async fn lookup_active_task_id_for_session(
 ) -> Option<String> {
     let store = Arc::clone(&ctx.store);
     let session_owned = session_id.to_owned();
-    tokio::task::spawn_blocking(move || lookup_active_task_id_for_session_sync(&store, &session_owned))
-        .await
-        .ok()
-        .flatten()
+    tokio::task::spawn_blocking(move || {
+        lookup_active_task_id_for_session_sync(&store, &session_owned)
+    })
+    .await
+    .ok()
+    .flatten()
 }
 
 /// Sync core of [`lookup_active_task_id_for_session`] — extracted so
@@ -644,10 +646,7 @@ mod tests {
     /// row, and return the store. Mirrors the schema invariants in
     /// `crates/store/src/migration.rs` §1070 (`subtask_activations`
     /// CHECK pins `session_id NOT NULL` for Active rows).
-    fn seed_active_activation(
-        task_id: &str,
-        session_id: &str,
-    ) -> raxis_store::Store {
+    fn seed_active_activation(task_id: &str, session_id: &str) -> raxis_store::Store {
         let store = raxis_store::Store::open_in_memory().unwrap();
         let conn = store.lock_sync();
         conn.execute_batch(&format!(

@@ -148,20 +148,32 @@ async fn run() -> Result<ExitCode, ExitCode> {
             // Even on connect failure, surface the disposition that
             // matches the underlying classifier so the kernel-side
             // watcher's exit-code interpretation stays consistent.
-            return Err(short_circuit_exit_code(&env, &outcome, artifact_reject_reason));
+            return Err(short_circuit_exit_code(
+                &env,
+                &outcome,
+                artifact_reject_reason,
+            ));
         }
     };
 
     if let Err(e) = write_frame(&mut stream, &IpcMessage::WitnessSubmission(submission)).await {
         eprintln!("raxis-verifier: write_frame: {e}");
-        return Err(short_circuit_exit_code(&env, &outcome, artifact_reject_reason));
+        return Err(short_circuit_exit_code(
+            &env,
+            &outcome,
+            artifact_reject_reason,
+        ));
     }
 
     let ack: IpcMessage = match read_frame(&mut stream).await {
         Ok(m) => m,
         Err(e) => {
             eprintln!("raxis-verifier: read_frame: {e}");
-            return Err(short_circuit_exit_code(&env, &outcome, artifact_reject_reason));
+            return Err(short_circuit_exit_code(
+                &env,
+                &outcome,
+                artifact_reject_reason,
+            ));
         }
     };
 

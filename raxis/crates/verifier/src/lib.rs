@@ -404,11 +404,13 @@ pub fn parse_verifier_env_from_process() -> Result<VerifierEnv, VerifierEnvError
     let parallelism = match env::var("RAXIS_VERIFIER_PARALLELISM").ok().as_deref() {
         None | Some("") => None,
         Some(raw) => {
-            let parsed = raw.parse::<usize>().map_err(|e| VerifierEnvError::Invalid {
-                var: "RAXIS_VERIFIER_PARALLELISM",
-                value: raw.to_owned(),
-                reason: e.to_string(),
-            })?;
+            let parsed = raw
+                .parse::<usize>()
+                .map_err(|e| VerifierEnvError::Invalid {
+                    var: "RAXIS_VERIFIER_PARALLELISM",
+                    value: raw.to_owned(),
+                    reason: e.to_string(),
+                })?;
             Some(parsed)
         }
     };
@@ -556,7 +558,9 @@ fn validate_artifact_path(path: &Path) -> Result<(), ArtifactError> {
 ///     bytes ≤ cap.
 ///   * `Err(ArtifactError)` — file rejected; the verifier short-
 ///     circuits to [`ExitCode::ArtifactRejected`].
-pub fn load_artifact_if_present(env: &VerifierEnv) -> Result<Option<LoadedArtifact>, ArtifactError> {
+pub fn load_artifact_if_present(
+    env: &VerifierEnv,
+) -> Result<Option<LoadedArtifact>, ArtifactError> {
     let Some(path) = env.artifact_path.as_ref() else {
         return Ok(None);
     };
@@ -795,9 +799,7 @@ fn lossy_utf8(bytes: Vec<u8>) -> String {
 /// `SymbolIndexBuiltinError::*` arms describe the failure modes;
 /// the corresponding `failure_reason` strings are stable wire shapes
 /// pinned by `iter62_symbol_index_failure_reasons_are_pinned`.
-pub async fn run_builtin_symbol_index(
-    env: &VerifierEnv,
-) -> Result<CommandOutcome, RunError> {
+pub async fn run_builtin_symbol_index(env: &VerifierEnv) -> Result<CommandOutcome, RunError> {
     use std::time::Instant;
 
     let started = Instant::now();
@@ -838,10 +840,7 @@ pub async fn run_builtin_symbol_index(
                 Err(e) => {
                     return Ok(builtin_failure_outcome(
                         "base_index_malformed",
-                        &format!(
-                            "BASE_SYMBOL_INDEX at {} is malformed: {e}",
-                            p.display()
-                        ),
+                        &format!("BASE_SYMBOL_INDEX at {} is malformed: {e}", p.display()),
                         started,
                     ));
                 }
@@ -1113,8 +1112,7 @@ pub fn build_submission(
 /// verifier-bake layer); the encoder is < 40 lines, has a single
 /// caller, and is exercised by the unit tests below.
 fn base64_encode(bytes: &[u8]) -> String {
-    const CHARS: &[u8; 64] =
-        b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    const CHARS: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
     let mut out = String::with_capacity(((bytes.len() + 2) / 3) * 4);
     let mut iter = bytes.chunks_exact(3);
     for chunk in &mut iter {

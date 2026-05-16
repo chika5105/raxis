@@ -135,7 +135,9 @@ pub struct RecentQuery {
     pub limit: u32,
 }
 
-fn default_recent_limit() -> u32 { 50 }
+fn default_recent_limit() -> u32 {
+    50
+}
 
 /// `GET /api/recent-sessions`. Returns the last N sessions
 /// regardless of their `revoked` flag, ordered newest-first.

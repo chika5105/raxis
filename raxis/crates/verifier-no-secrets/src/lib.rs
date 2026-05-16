@@ -497,7 +497,10 @@ pub enum BuildError {
 /// The `files_scanned` field on the Pass path is the strongest
 /// available "did the scanner actually run?" signal short of replaying
 /// the scan from the witness body.
-pub fn build_submission(env: &ScannerEnv, report: &ScanReport) -> Result<WitnessSubmission, BuildError> {
+pub fn build_submission(
+    env: &ScannerEnv,
+    report: &ScanReport,
+) -> Result<WitnessSubmission, BuildError> {
     let body = match report {
         ScanReport::Clean { files_scanned } => serde_json::json!({
             "files_scanned": files_scanned,
@@ -721,16 +724,18 @@ mod tests {
         let report = scan_worktree_for_secrets(root, &ScanOpts::default());
         match report {
             ScanReport::Found { matches } => {
-                assert_eq!(matches.len(), 1, "expected exactly one match, got {matches:?}");
+                assert_eq!(
+                    matches.len(),
+                    1,
+                    "expected exactly one match, got {matches:?}"
+                );
                 let m = &matches[0];
                 assert_eq!(m.pattern_name, "aws_access_key_id");
                 assert_eq!(m.relative_path, "config/secrets.env");
                 // The "AWS_KEY=" prefix is 8 bytes; AKIA starts at offset 8.
                 assert_eq!(m.byte_offset, 8);
             }
-            other => panic!(
-                "fixture with planted AWS key must return Found, got {other:?}"
-            ),
+            other => panic!("fixture with planted AWS key must return Found, got {other:?}"),
         }
     }
 

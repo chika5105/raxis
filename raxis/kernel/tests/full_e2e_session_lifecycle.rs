@@ -145,9 +145,7 @@ use raxis_types::{BundleArtifact, OperatorFingerprint, PlanBundle};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
-use common::keep_alive::{
-    keep_running_after_exit_with_workdir, print_keep_alive_banner,
-};
+use common::keep_alive::{keep_running_after_exit_with_workdir, print_keep_alive_banner};
 use common::kernel_harness::{acquire_test_lock, build_and_locate_kernel, KernelInstance};
 use common::tier3_artifacts::Tier3Reporter;
 
@@ -369,7 +367,10 @@ fn full_session_lifecycle() {
         //    race the live writer.
         let final_chain = walk_chain_or_panic(kernel.data_dir());
         assert_audit_invariants(&final_chain, &initiative_id);
-        eprintln!("[e2e] audit chain integrity verified ({} events)", final_chain.len());
+        eprintln!(
+            "[e2e] audit chain integrity verified ({} events)",
+            final_chain.len()
+        );
     } else {
         eprintln!(
             "[e2e] keep-alive flag active; skipped graceful kernel shutdown \
@@ -934,7 +935,6 @@ fn sibling_verifier_binary(gateway_binary: &std::path::Path) -> Option<std::path
         None
     }
 }
-
 
 // ---------------------------------------------------------------------------
 // §7.3 — Credential injection

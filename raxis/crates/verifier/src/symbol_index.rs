@@ -260,10 +260,7 @@ impl SymbolIndex {
                 let mut out = BTreeMap::new();
                 for (k, v) in map {
                     let entry_obj = v.as_object().ok_or_else(|| {
-                        SymbolIndexError::Malformed(format!(
-                            "files[{k}] must be an object",
-                            k = k
-                        ))
+                        SymbolIndexError::Malformed(format!("files[{k}] must be an object", k = k))
                     })?;
                     let content_hash = entry_obj
                         .get("content_hash")
@@ -613,7 +610,9 @@ mod tests {
 
         let hints = merged.cache_hints_against(&base);
         // src/foo.rs unchanged → hit
-        assert!(hints.hits.contains(&("src/foo.rs".to_owned(), "h-foo".to_owned())));
+        assert!(hints
+            .hits
+            .contains(&("src/foo.rs".to_owned(), "h-foo".to_owned())));
         // src/bar.rs content changed → miss (new hash)
         assert!(hints
             .misses

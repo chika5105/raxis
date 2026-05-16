@@ -716,10 +716,7 @@ mod tests {
             "verifier-symbol-index".to_owned(),
         ])
         .unwrap();
-        assert_eq!(
-            args.roles,
-            vec![Role::Verifier, Role::VerifierSymbolIndex]
-        );
+        assert_eq!(args.roles, vec![Role::Verifier, Role::VerifierSymbolIndex]);
     }
 
     #[test]

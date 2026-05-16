@@ -6052,9 +6052,7 @@ mod tests {
             let entry = cols
                 .iter()
                 .find(|(name, _, _, _)| name == col_name)
-                .unwrap_or_else(|| {
-                    panic!("tasks.{col_name} column must exist after migration 21")
-                });
+                .unwrap_or_else(|| panic!("tasks.{col_name} column must exist after migration 21"));
             assert_eq!(entry.1, "INTEGER", "{col_name} must be INTEGER");
             assert_eq!(entry.2, 1, "{col_name} must be NOT NULL");
             assert_eq!(

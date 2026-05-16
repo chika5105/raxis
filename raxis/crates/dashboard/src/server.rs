@@ -393,25 +393,28 @@ fn build_router<D: DashboardData>(state: AppState<D>) -> Router {
         .route("/api/tasks/:id/outputs", get(tasks::outputs::<D>))
         .route("/api/tasks/:id/llm-turns", get(tasks::llm_turns::<D>))
         // Sessions.
-        .route("/api/sessions",                    get(sessions::list::<D>))
-        .route("/api/sessions/:id",                get(sessions::detail::<D>))
+        .route("/api/sessions", get(sessions::list::<D>))
+        .route("/api/sessions/:id", get(sessions::detail::<D>))
         // INV-DASHBOARD-SESSION-CAPTURE-PERSIST-AFTER-TERMINATION-01
         // (`specs/v3/session-capture.md`): post-mortem lifecycle
         // capture tail. Persists after Completed/Failed/Aborted
         // so the operator can still drill in.
-        .route("/api/sessions/:id/capture",        get(sessions::capture::<D>))
+        .route("/api/sessions/:id/capture", get(sessions::capture::<D>))
         // Recent-sessions ring (`INV-DASHBOARD-RECENT-SESSIONS-RING-01`).
         // Surfaces ended sessions previously dropped from the
         // active list. One row per session with its final
         // lifecycle annotation pre-classified by the backend.
-        .route("/api/recent-sessions",             get(sessions::recent::<D>))
+        .route("/api/recent-sessions", get(sessions::recent::<D>))
         // Orchestrator-gap warnings pane
         // (`INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`). Lists every
         // `subtask_activations` row stuck in PendingActivation
         // for more than the gap threshold whose predecessors all
         // completed — the operator-visible signal that
         // something upstream of admission is wedged.
-        .route("/api/orchestrator-gaps",           get(sessions::orchestrator_gaps::<D>))
+        .route(
+            "/api/orchestrator-gaps",
+            get(sessions::orchestrator_gaps::<D>),
+        )
         // Escalations.
         .route("/api/escalations", get(escalations::list::<D>))
         .route("/api/escalations/:id", get(escalations::detail::<D>))

@@ -483,11 +483,16 @@ impl ComposeStackGuard {
     pub fn run_down(&self) -> Result<(), DockerStackError> {
         let mut cmd = Command::new("docker");
         cmd.arg("compose")
-            .arg("-p").arg(&self.project)
-            .arg("-f").arg(&self.compose_file)
-            .arg("down").arg("-v");
+            .arg("-p")
+            .arg(&self.project)
+            .arg("-f")
+            .arg(&self.compose_file)
+            .arg("down")
+            .arg("-v");
         let out = match run_command_output_timeout(
-            &mut cmd, DOCKER_BRINGUP_TIMEOUT, "docker-compose-down",
+            &mut cmd,
+            DOCKER_BRINGUP_TIMEOUT,
+            "docker-compose-down",
         ) {
             Ok(o) => o,
             Err(BoundedWaitError::SpawnFailed { reason, .. }) => {
@@ -520,22 +525,21 @@ impl Drop for ComposeStackGuard {
         // `compose_stack_drop_skips_down_when_keep_running`
         // / `compose_stack_drop_runs_teardown_when_no_keep_alive_signal`
         // witness pair.
-        let should_run = should_run_compose_teardown(
-            self.teardown_on_drop,
-            self.work_dir.as_deref(),
-        );
+        let should_run =
+            should_run_compose_teardown(self.teardown_on_drop, self.work_dir.as_deref());
         if !should_run {
             // Poison-tolerant: Drop may run on the unwind path where a
             // prior holder of the mutex panicked; the bookkeeping bit
             // is purely diagnostic and we never want a second panic
             // from inside a Drop.
-            if let Ok(mut g) = self
-                .last_drop_decision
-                .lock()
-                .or_else(|p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
-                    Ok::<std::sync::MutexGuard<'_, Option<bool>>, std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>>(p.into_inner())
-                })
-            {
+            if let Ok(mut g) = self.last_drop_decision.lock().or_else(
+                |p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
+                    Ok::<
+                        std::sync::MutexGuard<'_, Option<bool>>,
+                        std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>,
+                    >(p.into_inner())
+                },
+            ) {
                 *g = Some(false);
             }
             return;
@@ -561,13 +565,14 @@ impl Drop for ComposeStackGuard {
                 compose = self.compose_file.display(),
             );
         }
-        if let Ok(mut g) = self
-            .last_drop_decision
-            .lock()
-            .or_else(|p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
-                Ok::<std::sync::MutexGuard<'_, Option<bool>>, std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>>(p.into_inner())
-            })
-        {
+        if let Ok(mut g) = self.last_drop_decision.lock().or_else(
+            |p: std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>| {
+                Ok::<
+                    std::sync::MutexGuard<'_, Option<bool>>,
+                    std::sync::PoisonError<std::sync::MutexGuard<'_, Option<bool>>>,
+                >(p.into_inner())
+            },
+        ) {
             *g = Some(true);
         }
     }
@@ -752,7 +757,9 @@ mod tests {
     /// other.
     static KEEP_ALIVE_ENV_LOCK: Mutex<()> = Mutex::new(());
     fn keep_alive_env_lock() -> std::sync::MutexGuard<'static, ()> {
-        KEEP_ALIVE_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+        KEEP_ALIVE_ENV_LOCK
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
     }
 
     const KEEP_RUNNING_ENV: &str = "RAXIS_E2E_KEEP_RUNNING_AFTER_EXIT";
@@ -801,8 +808,7 @@ mod tests {
         // Touch-file arm.
         let _env = SetEnvGuard::unset(KEEP_RUNNING_ENV);
         let tmp = tempfile::tempdir().expect("tempdir");
-        std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH), b"")
-            .expect("write touch file");
+        std::fs::write(tmp.path().join(KEEP_RUNNING_TOUCH), b"").expect("write touch file");
         assert!(
             !should_run_compose_teardown(true, Some(tmp.path())),
             "touch-file arm MUST gate teardown off",

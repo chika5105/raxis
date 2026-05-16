@@ -64,9 +64,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use super::harness_timeout::{
-    run_command_output_timeout, BoundedWaitError,
-};
+use super::harness_timeout::{run_command_output_timeout, BoundedWaitError};
 use crate::common::keep_alive::keep_running_after_exit_with_workdir;
 
 // ─── Operator-facing env-var contract ─────────────────────────────

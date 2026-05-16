@@ -7295,10 +7295,7 @@ mod tests {
     /// the classifier so a future drift detector / dashboard label
     /// regression surfaces a witness failure (and not a silent
     /// re-classification of one operator-visible reason as another).
-    fn make_intent_for_classify(
-        base_sha: Option<&str>,
-        head_sha: Option<&str>,
-    ) -> IntentRequest {
+    fn make_intent_for_classify(base_sha: Option<&str>, head_sha: Option<&str>) -> IntentRequest {
         IntentRequest {
             session_token: "tok".into(),
             sequence_number: 1,
@@ -7324,10 +7321,7 @@ mod tests {
     /// as `empty_head_sha`.
     #[test]
     fn classify_validation_reason_empty_head_sha() {
-        let req = make_intent_for_classify(
-            Some("aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"),
-            None,
-        );
+        let req = make_intent_for_classify(Some("aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"), None);
         assert_eq!(classify_validation_reason(&req), "empty_head_sha");
     }
 

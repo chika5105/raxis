@@ -1029,7 +1029,6 @@ fn sibling_verifier_binary(gateway_binary: &std::path::Path) -> Option<std::path
     }
 }
 
-
 /// Seed `<data_dir>/repositories/main` as a real (non-bare) git
 /// repository with `refs/heads/main` pointing at an initial empty
 /// commit. The orchestrator-spawn path's

@@ -412,7 +412,11 @@ pub fn record_planner_cache_creation_tokens(
         ("model", model),
         ("role", role),
     ]);
-    hub.record_counter(MetricName::PlannerCacheCreationTokens, labels, delta_tokens as f64);
+    hub.record_counter(
+        MetricName::PlannerCacheCreationTokens,
+        labels,
+        delta_tokens as f64,
+    );
 }
 
 /// iter62 — `raxis.planner.cache.read_tokens.total` counter.
@@ -439,7 +443,11 @@ pub fn record_planner_cache_read_tokens(
         ("model", model),
         ("role", role),
     ]);
-    hub.record_counter(MetricName::PlannerCacheReadTokens, labels, delta_tokens as f64);
+    hub.record_counter(
+        MetricName::PlannerCacheReadTokens,
+        labels,
+        delta_tokens as f64,
+    );
 }
 
 /// iter62 — `raxis.planner.cache.hit_ratio` histogram.

@@ -357,12 +357,7 @@ fn required_os_binaries(role: Role) -> &'static [&'static str] {
         // `assert_no_stub_after_stage` check inspects after the bake;
         // every entry MUST be present at the listed rootfs path or
         // the bake fails closed.
-        Role::Verifier => &[
-            "bin/bash",
-            "usr/bin/jq",
-            "usr/bin/rg",
-            "usr/bin/ctags",
-        ],
+        Role::Verifier => &["bin/bash", "usr/bin/jq", "usr/bin/rg", "usr/bin/ctags"],
         Role::VerifierSymbolIndex => &["bin/busybox", "usr/bin/ctags"],
     }
 }

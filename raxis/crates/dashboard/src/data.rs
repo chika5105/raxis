@@ -52,95 +52,95 @@ pub enum LifecycleAnnotation {
     /// / `ExecutorRespawnFromReviewRejection` audit rows.
     RetryReviewReject {
         /// One-based retry number (the first retry is `1`).
-        retry_number:                  u32,
+        retry_number: u32,
         /// Reviewer task that triggered the rejection
         /// aggregation.
         triggered_by_reviewer_task_id: String,
         /// Aggregated verdict string from the
         /// `ReviewAggregationCompleted` row.
-        verdict:                       String,
+        verdict: String,
         /// First-line excerpt of the captured aggregated
         /// critique (typically `tasks.last_critique`). Empty
         /// when no critique was captured for this retry.
-        critique:                      String,
+        critique: String,
         /// Cumulative review-reject count after this retry.
-        review_reject_count:           u32,
+        review_reject_count: u32,
         /// Per-task max review rejections (V2 default 3).
-        max_review_rejections:         u32,
+        max_review_rejections: u32,
         /// Cumulative crash-retry count carried through.
-        crash_retry_count:             u32,
+        crash_retry_count: u32,
         /// Per-task max crash retries (V2 default 3).
-        max_crash_retries:             u32,
+        max_crash_retries: u32,
         /// Activation id that was just torn down.
-        prior_activation_id:           String,
+        prior_activation_id: String,
         /// Activation id that took its place.
-        new_activation_id:             String,
+        new_activation_id: String,
         /// Worktree HEAD sha at the prior activation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        prior_head_sha:                Option<String>,
+        prior_head_sha: Option<String>,
         /// Worktree HEAD sha at the new activation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        new_head_sha:                  Option<String>,
+        new_head_sha: Option<String>,
         /// Unix-seconds timestamp of the
         /// `ExecutorRespawnFromReviewRejection` audit row.
-        ts_unix:                       i64,
+        ts_unix: i64,
     },
     /// A retry triggered by the executor VM's premature exit.
     RetryCrash {
         /// One-based retry number.
-        retry_number:           u32,
+        retry_number: u32,
         /// Exit code reported by the guest.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code:              Option<i32>,
+        exit_code: Option<i32>,
         /// Last terminal-tool the agent invoked before crash.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_tool:          Option<String>,
+        terminal_tool: Option<String>,
         /// `max_turns` value the prior activation ran with.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_turns_scaled_from:  Option<u32>,
+        max_turns_scaled_from: Option<u32>,
         /// `max_turns` value scaled to for the new activation.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        max_turns_scaled_to:    Option<u32>,
+        max_turns_scaled_to: Option<u32>,
         /// Cumulative crash-retry count after this retry.
-        crash_retry_count:      u32,
+        crash_retry_count: u32,
         /// Per-task max crash retries (V2 default 3).
-        max_crash_retries:      u32,
+        max_crash_retries: u32,
         /// Unix-seconds timestamp of the
         /// `RetrySubTaskAdmitted` audit row.
-        ts_unix:                i64,
+        ts_unix: i64,
     },
     /// A retry triggered by the planner's intent-validator
     /// (Worker 1 C7).
     RetryValidationReject {
         /// One-based retry number.
-        retry_number:               u32,
+        retry_number: u32,
         /// Validator's short reason string.
-        validator_reason:           String,
+        validator_reason: String,
         /// Validator's structured detail blob.
-        validator_detail:           serde_json::Value,
+        validator_detail: serde_json::Value,
         /// Cumulative validation-reject count after this retry.
-        validation_reject_count:    u32,
+        validation_reject_count: u32,
         /// Per-task max validation rejections.
-        max_validation_rejections:  u32,
+        max_validation_rejections: u32,
         /// Unix-seconds timestamp of the
         /// `IntentValidationRejected` audit row.
-        ts_unix:                    i64,
+        ts_unix: i64,
     },
     /// Operator-initiated session revocation. Anything whose
     /// `revoked_by` does NOT start with the `kernel://` marker
     /// pattern lands here.
     SessionRevokedOperator {
         /// Verbatim `revoked_by` field.
-        revoked_by:              String,
+        revoked_by: String,
         /// Display name from the audit row, when populated.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         revoked_by_display_name: Option<String>,
         /// Intent kind that drove the revocation
         /// (`UserCommand` / `IntentEnded` / …) when known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        intent_kind:             Option<String>,
+        intent_kind: Option<String>,
         /// Unix-seconds timestamp of the `SessionRevoked` row.
-        ts_unix:                 i64,
+        ts_unix: i64,
     },
     /// Self-exit revocation — the kernel ended the session in
     /// response to a clean planner exit. Worker 1's C1 marker
@@ -150,26 +150,26 @@ pub enum LifecycleAnnotation {
         /// Last terminal-tool the planner invoked before
         /// graceful exit.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        terminal_tool:     Option<String>,
+        terminal_tool: Option<String>,
         /// Exit code captured from the guest, when available.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        exit_code:         Option<i32>,
+        exit_code: Option<i32>,
         /// Path to `kernel.stderr.log` for operator drill-down.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        console_log_path:  Option<String>,
+        console_log_path: Option<String>,
         /// Unix-seconds timestamp of the `SessionRevoked` row.
-        ts_unix:           i64,
+        ts_unix: i64,
     },
     /// Initiative entered the `Blocked` state.
     InitiativeBlocked {
         /// Free-form block reason from the
         /// `InitiativeStateChanged` payload.
-        block_reason:      String,
+        block_reason: String,
         /// Task that triggered the block, when populated.
         #[serde(default, skip_serializing_if = "Option::is_none")]
-        blocking_task_id:  Option<String>,
+        blocking_task_id: Option<String>,
         /// Unix-seconds timestamp of the audit row.
-        ts_unix:           i64,
+        ts_unix: i64,
     },
     /// Stale `PendingActivation` row whose predecessors are all
     /// `Completed` and whose `created_at` is older than the
@@ -177,14 +177,14 @@ pub enum LifecycleAnnotation {
     /// or scheduler gaps that would otherwise be invisible.
     OrchestratorGap {
         /// Activation id that has been waiting.
-        activation_id:               String,
+        activation_id: String,
         /// Owning task id.
-        task_id:                     String,
+        task_id: String,
         /// Predecessor task → completion-timestamp pairs. Empty
         /// when the task is a root.
-        predecessors_completed_at:   Vec<(String, i64)>,
+        predecessors_completed_at: Vec<(String, i64)>,
         /// `now_unix - activation.created_at` in seconds.
-        wait_seconds:                i64,
+        wait_seconds: i64,
     },
 }
 
@@ -211,13 +211,13 @@ impl LifecycleAnnotation {
     /// pattern-matching on the typed variants.
     pub fn kind_str(&self) -> &'static str {
         match self {
-            Self::RetryReviewReject { .. }     => "retry_review_reject",
-            Self::RetryCrash { .. }            => "retry_crash",
+            Self::RetryReviewReject { .. } => "retry_review_reject",
+            Self::RetryCrash { .. } => "retry_crash",
             Self::RetryValidationReject { .. } => "retry_validation_reject",
             Self::SessionRevokedOperator { .. } => "session_revoked_operator",
             Self::SessionRevokedSelfExit { .. } => "session_revoked_self_exit",
-            Self::InitiativeBlocked { .. }     => "initiative_blocked",
-            Self::OrchestratorGap { .. }       => "orchestrator_gap",
+            Self::InitiativeBlocked { .. } => "initiative_blocked",
+            Self::OrchestratorGap { .. } => "orchestrator_gap",
         }
     }
 }
@@ -230,11 +230,11 @@ pub struct ReviewerPanelEntry {
     /// Reviewer task id (e.g. `review-lint-defect-rust`).
     pub reviewer_task_id: String,
     /// Verdict the reviewer issued (`Approved` / `Rejected`).
-    pub verdict:          String,
+    pub verdict: String,
     /// First-line excerpt of the reviewer's critique.
     pub critique_excerpt: String,
     /// Unix-seconds timestamp the reviewer completed.
-    pub completed_at:     i64,
+    pub completed_at: i64,
 }
 
 /// `GET /api/orchestrator-gaps` response envelope. Carries the
@@ -245,7 +245,7 @@ pub struct ReviewerPanelEntry {
 pub struct OrchestratorGapsResponse {
     /// One [`LifecycleAnnotation::OrchestratorGap`] per stuck
     /// activation.
-    pub gaps:        Vec<LifecycleAnnotation>,
+    pub gaps: Vec<LifecycleAnnotation>,
     /// Unix-seconds timestamp the gap detector ran. Mirrors
     /// `now_unix` from the data-layer call so the FE can show
     /// staleness when the operator parks the page.
@@ -1531,7 +1531,7 @@ pub trait DashboardData: Send + Sync + 'static {
     /// `INV-DASHBOARD-LIFECYCLE-CAUSALITY-01`.
     fn list_orchestrator_gaps(&self) -> Result<OrchestratorGapsResponse, ApiError> {
         Ok(OrchestratorGapsResponse {
-            gaps:         Vec::new(),
+            gaps: Vec::new(),
             generated_at: 0,
         })
     }
