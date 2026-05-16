@@ -306,10 +306,18 @@ const ALLOW_LIST: &[(&str, AttrSchema)] = &[
         },
     ),
     (
+        // iter62 — widened to 32 bytes to accommodate cache-token
+        // metric labels (`PlannerCacheCreationTokens` /
+        // `PlannerCacheReadTokens` / `PlannerCacheHitRatio`)
+        // whose role values are the closed lexicon
+        // {`executor`, `reviewer`, `orchestrator`} but the
+        // PER-`INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` design
+        // budget of 32 keeps headroom for a future role variant
+        // without requiring a redactor migration.
         "role",
         AttrSchema {
             ty: AttrTy::Str,
-            max_bytes: 16,
+            max_bytes: 32,
         },
     ),
     (

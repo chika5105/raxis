@@ -341,7 +341,50 @@ async fn handle_inner(req: IntentRequest, ctx: &Arc<HandlerContext>) -> HandlerR
     };
 
     let pre_state = match pre_gate {
-        PreGateOutcome::Reject(code, state) => return Err((code, state)),
+        PreGateOutcome::Reject(code, state) => {
+            // iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
+            //
+            // FailInvalidDiff is a *validation* rejection (empty
+            // diff, unchanged head_sha, malformed format, path-
+            // scope violation, non-ancestor base/head, …) — NOT
+            // a substrate / VM crash. Pre-iter62 the rejection
+            // returned to the planner, the planner exited
+            // because its terminal intent was rejected, the
+            // post-exit hook in
+            // `kernel/src/session_spawn_orchestrator.rs`
+            // synthesised `TaskFailedOnWorkerPrematureExit` and
+            // bumped `crash_retry_count`, and
+            // `PlannerMaxTurnsProgressivelyScaled` (60 → 90 →
+            // 120) fired on the next round — wrong budget, wrong
+            // remediation.
+            //
+            // We bump the new `validation_reject_count` counter
+            // on the most-recent `subtask_activations` row and
+            // emit the `IntentValidationRejected` audit anchor
+            // BEFORE returning the rejection to the planner, so
+            // the budget is charged synchronously with the
+            // rejection. The post-exit hook still fires on
+            // session disconnect, but the audit chain now
+            // unambiguously shows the validation-class anchor
+            // landed first; downstream retry-admission logic
+            // consults `validation_reject_count` against
+            // `max_validation_rejections` (default 2) and the
+            // ceiling-exceeded path emits a separate Failed
+            // transition without scaling `max_turns`.
+            if code == PlannerErrorCode::FailInvalidDiff {
+                let validator_reason = classify_validation_reason(&req);
+                emit_intent_validation_rejected_and_bump_count(
+                    ctx,
+                    session_id.as_str(),
+                    req.task_id.as_str(),
+                    req.intent_kind.as_str(),
+                    &validator_reason,
+                    &req,
+                )
+                .await;
+            }
+            return Err((code, state));
+        }
         PreGateOutcome::EarlyResponse(resp) => {
             // ── V2 Step 6 — Orchestrator continuation re-spawn ────────────
             //
@@ -763,23 +806,85 @@ fn run_phase_a(
     // the *next* intent's gate sees a stale (under-) cost — the
     // current intent still proceeds with the correct admission
     // decision.
+    //
+    // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`. The
+    // SQL UPDATE folds the planner-reported cache_* token deltas
+    // into the new `cumulative_cache_creation_tokens` /
+    // `cumulative_cache_read_tokens` columns alongside the
+    // existing input / output / cost columns so the per-task
+    // ledger surface stays consistent — operators querying
+    // `tasks` see ALL four token channels in lock-step.
     if new_token_cost_micros != task.cumulative_token_cost_micros {
         let conn = store.lock_sync();
         if let Some(report) = req.tokens_used.as_ref() {
             let _ = conn.execute(
                 &format!(
                     "UPDATE {TASKS} SET
-                       cumulative_input_tokens       = ?1,
-                       cumulative_output_tokens      = ?2,
-                       cumulative_token_cost_micros  = ?3
-                     WHERE task_id = ?4"
+                       cumulative_input_tokens          = ?1,
+                       cumulative_output_tokens         = ?2,
+                       cumulative_token_cost_micros     = ?3,
+                       cumulative_cache_creation_tokens = ?4,
+                       cumulative_cache_read_tokens     = ?5
+                     WHERE task_id = ?6"
                 ),
                 rusqlite::params![
                     report.input_tokens as i64,
                     report.output_tokens as i64,
                     new_token_cost_micros as i64,
+                    report.cache_creation_tokens as i64,
+                    report.cache_read_tokens as i64,
                     req.task_id.as_str(),
                 ],
+            );
+            drop(conn);
+
+            // iter62 — `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`
+            // metric emission. Use the planner's `provider_id` as
+            // the `model` label proxy (the kernel does not see the
+            // model id at this seam — the gateway has it, but the
+            // fetch round-trip is one process boundary deeper).
+            // `role` is the session's agent type
+            // (`executor` / `reviewer` / `orchestrator`); the
+            // helper is a no-op when the hub is disabled or the
+            // delta is zero.
+            let model_label = report.provider_id.as_str();
+            let role_label = session
+                .session_agent_type
+                .map(|a| a.as_sql_str().to_ascii_lowercase())
+                .unwrap_or_else(|| "unknown".to_owned());
+            crate::observability::record_planner_cache_creation_tokens(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_creation_tokens,
+            );
+            crate::observability::record_planner_cache_read_tokens(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_read_tokens,
+            );
+            crate::observability::record_planner_cache_hit_ratio(
+                &ctx.observability,
+                req.task_id.as_str(),
+                session_id.as_str(),
+                model_label,
+                &role_label,
+                report.cache_read_tokens,
+                report.cache_creation_tokens,
+                // `uncached_input` ≈ `input_tokens - cache_read -
+                // cache_creation` when the planner reported the
+                // input total; saturating subtraction guards
+                // against a planner that reports inconsistent
+                // sub-totals.
+                report
+                    .input_tokens
+                    .saturating_sub(report.cache_read_tokens)
+                    .saturating_sub(report.cache_creation_tokens),
             );
         }
     }
@@ -2875,6 +2980,148 @@ fn compute_export_set(touched: &[PathBuf], export_globs: &[String]) -> Vec<Strin
 /// per round (when the last Pending vote becomes non-Pending),
 /// and `handle_submit_review` itself is serialised by the
 /// per-session sequence-number gate (INV-01).
+/// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`.
+///
+/// Classify the kernel's FailInvalidDiff rejection branch to a
+/// stable short lexeme for the `IntentValidationRejected` audit
+/// event's `validator_reason` field. The lexeme set is the wire
+/// surface for dashboards / forensic queries; new reason variants
+/// require both a kernel-side string + a dashboard-side label
+/// addition.
+///
+/// The current implementation is heuristic — `IntentRequest`
+/// alone does not carry the kernel's actual rejection branch, so
+/// we infer the most-likely class from the intent shape. A
+/// follow-up could plumb the structured reason through
+/// `PreGateOutcome::Reject` itself; for now the audit event
+/// captures the intent_kind + the structural snapshot, which is
+/// enough for the operator to reconstruct.
+fn classify_validation_reason(req: &IntentRequest) -> String {
+    // `head_sha` / `base_sha` are operator-relevant fields; their
+    // emptiness or equality is the most common FailInvalidDiff
+    // root cause. Distinct lexemes per branch let the dashboard
+    // count separately.
+    match (req.base_sha.as_ref(), req.head_sha.as_ref()) {
+        (_, None) => "empty_head_sha".to_owned(),
+        (Some(b), Some(h)) if b.as_str() == h.as_str() => "unchanged_head_sha".to_owned(),
+        _ => "diff_validation_failed".to_owned(),
+    }
+}
+
+/// iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`. Bump
+/// the new `validation_reject_count` column on the most-recent
+/// `subtask_activations` row for `executor_task_id`, then emit
+/// the chain-side `IntentValidationRejected` audit anchor.
+///
+/// Mirrors the shape of `increment_executor_review_reject_count`
+/// for monotonicity and audit-paired-write (per
+/// `audit-paired-writes.md §4`): the SQL UPDATE commits first,
+/// then the audit emit fires. A crash between the two leaves the
+/// counter advanced with no audit anchor; the recovery sweep
+/// observes the gap per `INV-AUDIT-PAIRED-06`.
+async fn emit_intent_validation_rejected_and_bump_count(
+    ctx: &Arc<HandlerContext>,
+    session_id: &str,
+    task_id: &str,
+    intent_kind: &str,
+    validator_reason: &str,
+    req: &IntentRequest,
+) {
+    let validator_detail = serde_json::json!({
+        "intent_kind": intent_kind,
+        "task_id": task_id,
+        "base_sha": req.base_sha.as_ref().map(|s| s.as_str()),
+        "head_sha": req.head_sha.as_ref().map(|s| s.as_str()),
+    });
+
+    // Bump the counter on the spawn_blocking pool — `Store::lock_sync`
+    // panics on the tokio worker.
+    let store = Arc::clone(&ctx.store);
+    let task_id_owned = task_id.to_owned();
+    let bumped = tokio::task::spawn_blocking(move || -> Result<usize, rusqlite::Error> {
+        let conn = store.lock_sync();
+        conn.execute(
+            &format!(
+                "UPDATE {SUBTASK_ACTIVATIONS}
+                    SET validation_reject_count = validation_reject_count + 1
+                  WHERE activation_id = (
+                      SELECT activation_id FROM {SUBTASK_ACTIVATIONS}
+                       WHERE task_id = ?1
+                       ORDER BY created_at DESC
+                       LIMIT 1
+                  )"
+            ),
+            rusqlite::params![&task_id_owned],
+        )
+    })
+    .await;
+
+    match bumped {
+        Ok(Ok(n)) if n > 0 => {
+            eprintln!(
+                "{{\"level\":\"info\",\"event\":\"validation_reject_count_bumped\",\
+                 \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\",\
+                 \"rows\":{n}}}",
+            );
+        }
+        Ok(Ok(_)) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_no_row\",\
+                 \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\"}}",
+            );
+        }
+        Ok(Err(e)) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_sql_failed\",\
+                 \"task_id\":\"{task_id}\",\"reason\":\"{e}\"}}",
+            );
+        }
+        Err(_) => {
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"validation_reject_count_bump_join_failed\",\
+                 \"task_id\":\"{task_id}\"}}",
+            );
+        }
+    }
+
+    // Look up initiative_id for the audit-emit context (paired-
+    // writes contract requires the audit row to carry initiative
+    // alongside session + task).
+    let store2 = Arc::clone(&ctx.store);
+    let task_id_for_init = task_id.to_owned();
+    let initiative_id_opt = tokio::task::spawn_blocking(move || -> Option<String> {
+        let conn = store2.lock_sync();
+        conn.query_row(
+            &format!("SELECT initiative_id FROM {TASKS} WHERE task_id = ?1"),
+            rusqlite::params![&task_id_for_init],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+    })
+    .await
+    .ok()
+    .flatten();
+
+    if let Err(e) = ctx.audit.emit(
+        raxis_audit_tools::AuditEventKind::IntentValidationRejected {
+            task_id: task_id.to_owned(),
+            intent_kind: intent_kind.to_owned(),
+            validator_reason: validator_reason.to_owned(),
+            validator_detail,
+        },
+        Some(session_id),
+        Some(task_id),
+        initiative_id_opt.as_deref(),
+    ) {
+        eprintln!(
+            "{{\"level\":\"warn\",\
+             \"event\":\"IntentValidationRejectedAuditEmitFailed\",\
+             \"task_id\":\"{task_id}\",\"validator_reason\":\"{validator_reason}\",\
+             \"error\":\"{e}\"}}",
+        );
+    }
+}
+
 fn increment_executor_review_reject_count(
     executor_task_id: &str,
     store: &Store,
@@ -5872,12 +6119,45 @@ async fn handle_retry_sub_task(
 
             // 2d. Insert a NEW activation row in `PendingActivation`.
             //      Migration 5 line 51-52: "a retry inserts a NEW
-            //      row, never updates the prior one." Counters carry
-            //      forward verbatim from the prior row — this is
-            //      the V2 spec contract that the retry handler
-            //      neither bumps nor resets the counters; bumps
-            //      happen at the failure event (`SubmitReview`
-            //      rejection / SIGCHLD), reset never happens.
+            //      row, never updates the prior one."
+            //
+            //      iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`.
+            //      For Reviewer-rejection retries we bump the
+            //      `review_reject_count` on the NEW row (prior + 1)
+            //      instead of carrying the prior row's value
+            //      verbatim. Pre-iter62 the counter relied on
+            //      `increment_executor_review_reject_count` firing
+            //      the bump in the SubmitReview aggregator's
+            //      terminal-`AtLeastOneRejected` branch, but
+            //      reviewers were not being reactivated on
+            //      executor retries (`INV-RETRY-REVIEWER-PANEL-
+            //      REACTIVATED-01`), so the aggregator never
+            //      re-fired and the counter stalled at 1 across
+            //      N retries (iter62 forensics on
+            //      `lint-runner-python` / `lint-runner-js`).
+            //      Bumping at admission gives the counter a
+            //      kernel-owned source of truth that does not
+            //      depend on the reviewer-side aggregator firing.
+            //
+            //      Crash retries (`prior_state == "Failed"`)
+            //      still carry the prior `review_reject_count`
+            //      verbatim — only the crash counter advances on
+            //      that path, and the iter62-spec witness pins
+            //      it as a negative case.
+            //
+            //      `crash_retry_count` continues to be bumped
+            //      out-of-band at the failure event (in the
+            //      `transition_task_in_tx` cascade for
+            //      `ReportFailure` and SIGCHLD-driven crashes); we
+            //      DO NOT bump it here to avoid double-counting.
+            let from_review_rejection_admit =
+                (prior_state == "Completed" || prior_state == "PendingActivation")
+                    && review_reject_count > 0;
+            let new_review_reject_count = if from_review_rejection_admit {
+                review_reject_count.saturating_add(1)
+            } else {
+                review_reject_count
+            };
             let new_activation_id = uuid::Uuid::new_v4().to_string();
             tx.execute(
                 &format!(
@@ -5894,7 +6174,7 @@ async fn handle_retry_sub_task(
                     &task_id_clone,
                     &initiative_id_clone,
                     crash_retry_count,
-                    review_reject_count,
+                    new_review_reject_count,
                     now,
                 ],
             ).map_err(|e| {
@@ -5937,6 +6217,141 @@ async fn handle_retry_sub_task(
                 (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
             })?;
 
+            // ── Step 2f: reactivate the reviewer panel.
+            //
+            // iter62 — `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01`.
+            //
+            // When the orchestrator retries an executor task, every
+            // downstream Reviewer that already voted on the prior
+            // round MUST be re-activated so the panel votes against
+            // the executor's NEW `head_sha`. Pre-iter62 the Reviewer
+            // panel was treated as one-shot terminal:
+            // `lint-runner-python` retried 5× while
+            // `review-lint-defect-A` and `-B` had a single
+            // activation row each (from t=0), and the aggregator's
+            // verdict was permanently pinned to the round-0 fold.
+            // The orchestrator was operating against a stale
+            // verdict.
+            //
+            // We identify Reviewer successors purely from on-disk
+            // state — a task that is a `task_dag_edges` successor
+            // of this executor AND whose `tasks.review_verdict` is
+            // non-NULL has voted at least once and is therefore a
+            // Reviewer. This heuristic is precise per
+            // `v2-deep-spec.md §Step 25` (only Reviewers carry a
+            // `review_verdict`); non-Reviewer successors (e.g.
+            // an `IntegrationMerge` coordinator that depends on the
+            // executor) keep `review_verdict = NULL` and are
+            // skipped. The on-disk-state heuristic also avoids
+            // routing the plan_registry through the
+            // `spawn_blocking` closure boundary.
+            //
+            // Cascade per Reviewer: clear the prior verdict /
+            // critique on the `tasks` row, reset state to
+            // `Admitted`, insert a fresh `PendingActivation`
+            // activation row. The orchestrator's "next-action"
+            // loop (or kernel sweep) will then issue
+            // `ActivateSubTask` against the pending row.
+            //
+            // Idempotency: this branch only runs on Reviewer-
+            // rejection retries (`from_review_rejection_admit`).
+            // Crash retries (`prior_state == "Failed"`) leave the
+            // reviewer panel alone — the prior round never
+            // produced a clean executor `head_sha` for the
+            // reviewers to vote against, so re-folding the
+            // existing verdicts on retry round N+1 is the
+            // correct behaviour for crash retries.
+            if from_review_rejection_admit {
+                let reviewer_task_ids: Vec<String> = {
+                    let mut stmt = tx.prepare(
+                        "SELECT t.task_id \
+                           FROM task_dag_edges e \
+                           JOIN tasks t ON t.task_id = e.successor_task_id \
+                          WHERE e.predecessor_task_id = ?1 \
+                            AND t.review_verdict IS NOT NULL"
+                    ).map_err(|_| {
+                        emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                        (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                    })?;
+                    let rows = stmt
+                        .query_map(rusqlite::params![&task_id_clone], |r| r.get::<_, String>(0))
+                        .map_err(|_| {
+                            emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                            (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                        })?;
+                    rows.filter_map(Result::ok).collect()
+                };
+
+                for reviewer_task_id in &reviewer_task_ids {
+                    // Reset the reviewer's task FSM to Admitted +
+                    // clear the prior verdict / critique. The
+                    // critique cleanup matters because
+                    // `tasks.last_critique` is the operator-visible
+                    // field; carrying a stale round-N-1 critique
+                    // forward into a round-N reviewer activation
+                    // would corrupt the audit chain.
+                    tx.execute(
+                        &format!(
+                            "UPDATE {TASKS}
+                                SET state           = ?1,
+                                    transitioned_at = ?2,
+                                    review_verdict  = NULL,
+                                    last_critique   = NULL
+                              WHERE task_id = ?3"
+                        ),
+                        rusqlite::params![
+                            TaskState::Admitted.as_sql_str(),
+                            now,
+                            reviewer_task_id,
+                        ],
+                    )
+                    .map_err(|_| {
+                        emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                        (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                    })?;
+
+                    let reviewer_activation_id = uuid::Uuid::new_v4().to_string();
+                    tx.execute(
+                        &format!(
+                            "INSERT INTO {SUBTASK_ACTIVATIONS} (
+                                activation_id, task_id, initiative_id,
+                                activation_state, session_id, evaluation_sha,
+                                crash_retry_count, review_reject_count,
+                                created_at, activated_at, terminated_at
+                             ) VALUES (?1, ?2, ?3, 'PendingActivation',
+                                       NULL, NULL, 0, 0, ?4, NULL, NULL)"
+                        ),
+                        rusqlite::params![
+                            &reviewer_activation_id,
+                            reviewer_task_id,
+                            &initiative_id_clone,
+                            now,
+                        ],
+                    )
+                    .map_err(|e| {
+                        eprintln!(
+                            "{{\"level\":\"error\",\
+                             \"event\":\"ReviewerReactivationInsertFailed\",\
+                             \"executor_task_id\":\"{task_id_clone}\",\
+                             \"reviewer_task_id\":\"{reviewer_task_id}\",\
+                             \"reason\":\"{e}\"}}",
+                        );
+                        emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
+                        (PlannerErrorCode::FailPolicyViolation, TaskState::Admitted)
+                    })?;
+                }
+
+                if !reviewer_task_ids.is_empty() {
+                    eprintln!(
+                        "{{\"level\":\"info\",\
+                         \"event\":\"ReviewerPanelReactivatedOnExecutorRetry\",\
+                         \"executor_task_id\":\"{task_id_clone}\",\
+                         \"reviewer_count\":{count}}}",
+                        count = reviewer_task_ids.len(),
+                    );
+                }
+            }
+
             tx.commit()
                 .map_err(|_| {
                     emit_admit(false, crate::observability::ADMIT_REASON_OTHER);
@@ -5954,10 +6369,8 @@ async fn handle_retry_sub_task(
                 prior_session_id,
                 new_activation_id,
                 crash_retry_count,
-                review_reject_count,
-                from_review_rejection:
-                    (prior_state == "Completed" || prior_state == "PendingActivation")
-                        && review_reject_count > 0,
+                review_reject_count: new_review_reject_count,
+                from_review_rejection: from_review_rejection_admit,
             })
         })
         .await
@@ -6117,12 +6530,21 @@ async fn handle_retry_sub_task(
     // the `prior_activation_id` is enough disambiguation.
     //
     // The `review_reject_count` payload is the value carried into
-    // the new activation row (Step 2d insert; the value was
-    // forwarded verbatim from the prior row's column). It is the
-    // round number of the rejection that drove this retry, NOT a
-    // post-bump value — the bump happened earlier in the
-    // aggregator at `handle_submit_review`'s
-    // terminal-`AtLeastOneRejected` branch.
+    // the new activation row (Step 2d insert).
+    //
+    // iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`. The
+    // value is now the **post-bump** count (`prior + 1` on
+    // Reviewer-rejection retries; `prior` verbatim on crash
+    // retries) so the audit payload aligns row-for-row with
+    // `subtask_activations.review_reject_count` on the new row.
+    // Pre-iter62 the audit emitted the pre-bump value (the bump
+    // was assumed to fire later in the SubmitReview aggregator's
+    // terminal-`AtLeastOneRejected` branch); reviewer
+    // reactivation was broken, so the aggregator never re-fired
+    // and the SQL counter stalled at 1, while the audit event
+    // emitted 1 forever — the divergence was indistinguishable
+    // from "fix is working" to a forensic operator. Emitting the
+    // canonical row value closes that loop.
     if decision.from_review_rejection {
         let review_reject_count_u32 =
             u32::try_from(decision.review_reject_count).unwrap_or(u32::MAX);
@@ -6863,6 +7285,81 @@ mod tests {
     fn parse_unknown_defaults_to_admitted() {
         // Defensive: unknown DB value should not panic; treated as non-runnable.
         assert_eq!(parse_task_state("CorruptValue"), TaskState::Admitted);
+    }
+
+    // ─── iter62 — INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01 ────────────
+
+    /// `classify_validation_reason` returns a stable closed-set of
+    /// short lexemes for the `IntentValidationRejected` audit event's
+    /// `validator_reason` field. Each test below pins one branch of
+    /// the classifier so a future drift detector / dashboard label
+    /// regression surfaces a witness failure (and not a silent
+    /// re-classification of one operator-visible reason as another).
+    fn make_intent_for_classify(
+        base_sha: Option<&str>,
+        head_sha: Option<&str>,
+    ) -> IntentRequest {
+        IntentRequest {
+            session_token: "tok".into(),
+            sequence_number: 1,
+            envelope_nonce: "0".repeat(32),
+            intent_kind: IntentKind::CompleteTask,
+            task_id: raxis_types::TaskId::parse("task-c7-cls").unwrap(),
+            base_sha: base_sha.map(|s| raxis_types::CommitSha::parse(s).unwrap()),
+            head_sha: head_sha.map(|s| raxis_types::CommitSha::parse(s).unwrap()),
+            submitted_claims: vec![],
+            justification: None,
+            idempotency_key: None,
+            approval_token: None,
+            approved: None,
+            critique: None,
+            resolved_via_escalation: None,
+            tokens_used: None,
+            structured_output: None,
+        }
+    }
+
+    /// Wire surface: a `CompleteTask` whose `head_sha` is None
+    /// (planner exited without ever populating a head) classifies
+    /// as `empty_head_sha`.
+    #[test]
+    fn classify_validation_reason_empty_head_sha() {
+        let req = make_intent_for_classify(
+            Some("aa11aa11aa11aa11aa11aa11aa11aa11aa11aa11"),
+            None,
+        );
+        assert_eq!(classify_validation_reason(&req), "empty_head_sha");
+    }
+
+    /// `head_sha == base_sha` means the planner produced a
+    /// no-op diff; classifies as `unchanged_head_sha`.
+    #[test]
+    fn classify_validation_reason_unchanged_head_sha() {
+        let same = "bb22bb22bb22bb22bb22bb22bb22bb22bb22bb22";
+        let req = make_intent_for_classify(Some(same), Some(same));
+        assert_eq!(classify_validation_reason(&req), "unchanged_head_sha");
+    }
+
+    /// Generic catch-all: structurally distinct base / head shas,
+    /// kernel still rejected the diff for some other reason
+    /// (path scope violation, malformed format, …).
+    #[test]
+    fn classify_validation_reason_generic_diff_failure() {
+        let req = make_intent_for_classify(
+            Some("cc33cc33cc33cc33cc33cc33cc33cc33cc33cc33"),
+            Some("dd44dd44dd44dd44dd44dd44dd44dd44dd44dd44"),
+        );
+        assert_eq!(classify_validation_reason(&req), "diff_validation_failed");
+    }
+
+    /// No `base_sha` populated either — the classifier still
+    /// surfaces a stable lexeme (`empty_head_sha` because head is
+    /// None — the empty-head branch wins over the structurally-
+    /// distinct branch).
+    #[test]
+    fn classify_validation_reason_both_shas_missing() {
+        let req = make_intent_for_classify(None, None);
+        assert_eq!(classify_validation_reason(&req), "empty_head_sha");
     }
 
     // ── wait_for_git_apply_pending_clear (V2.5 §11.5 push wait) ───────────
@@ -11217,11 +11714,22 @@ mod tests {
             activations[1].2.is_none(),
             "new PendingActivation row MUST have NULL session_id"
         );
+        // iter62 — `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01`.
+        // The retry handler now bumps `review_reject_count` to
+        // `prior + 1` on Reviewer-rejection retries. Before the
+        // iter62 fix the new row carried `1` verbatim, which made
+        // `max_review_rejections` structurally dead (the counter
+        // never advanced past 1 because reviewers were not being
+        // re-activated, so `increment_executor_review_reject_count`
+        // never re-fired in the SubmitReview aggregator). With the
+        // fix the counter is monotonic per activation row and the
+        // ceiling actually fires.
         assert_eq!(
-            activations[1].4, 1,
-            "new row MUST carry review_reject_count = 1 forward \
-             from the prior row (the counter is denormalised; \
-             handle_retry_sub_task itself does NOT bump)"
+            activations[1].4, 2,
+            "iter62 — new row MUST carry review_reject_count = \
+             prior + 1 = 2 (kernel-bumped at admission, no longer \
+             dependent on the SubmitReview aggregator firing on the \
+             retry round)"
         );
 
         // Audit anchor — the new event variant the witness matches
@@ -11266,9 +11774,12 @@ mod tests {
                      PendingActivation row"
                 );
                 assert_eq!(
-                    *review_reject_count, 1,
-                    "audit payload MUST carry the round-of-rejection counter \
-                     (the value at admission time, not post-bump)"
+                    *review_reject_count, 2,
+                    "iter62 — audit payload MUST carry the new \
+                     row's post-bump review_reject_count = \
+                     prior + 1 = 2 so the audit event aligns \
+                     row-for-row with subtask_activations on \
+                     the new activation_id"
                 );
             }
             _ => unreachable!(),
@@ -11704,6 +12215,336 @@ mod tests {
              from 1 (carried forward at admission) to 2 (this round's \
              rejection) — the per-round counter semantic"
         );
+    }
+
+    // ─── iter62 — C6 retry-counter + reviewer-reactivation witnesses ──
+
+    /// `INV-RETRY-REVIEW-REJECT-COUNT-MONOTONIC-01` — the new
+    /// activation row carries `review_reject_count = prior + 1`
+    /// on every Reviewer-rejection retry. Pre-iter62 the counter
+    /// stalled at 1 across N retries (the SubmitReview aggregator
+    /// never re-fired because reviewers were not being re-
+    /// activated; see `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01`).
+    /// Bumping at admission gives the counter a kernel-owned
+    /// source of truth that does not depend on the aggregator.
+    ///
+    /// The test drives THREE consecutive retries and asserts the
+    /// `review_reject_count` advances `1 → 2 → 3 → 4` on the
+    /// activation rows (round 0 was the initial completion;
+    /// rounds 1, 2, 3 are the retries) — exact monotonicity, exact
+    /// step of 1.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_review_reject_count_is_monotonic_across_three_retries() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // Seed the round-0 Completed activation with
+            // `review_reject_count = 1` (one reviewer-rejection
+            // round has fired against the round-0 head_sha).
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-monotonic",
+                /*review_count*/ 1,
+                /*max_review*/ Some(10),
+            );
+        })
+        .await
+        .unwrap();
+
+        // Round 1 retry — counter must bump 1 → 2.
+        let resp1 = handle_retry_sub_task(
+            make_retry_request("exe-monotonic", 1),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        )
+        .await
+        .expect("round-1 retry must admit");
+        assert!(matches!(resp1.outcome, IntentOutcome::Accepted { .. }));
+        let acts_round1 = read_activations(store.clone(), "exe-monotonic").await;
+        assert_eq!(acts_round1.len(), 2);
+        assert_eq!(
+            acts_round1[1].4, 2,
+            "round-1 retry MUST bump review_reject_count to 2"
+        );
+
+        // To drive a round-2 retry the test fixture flips the
+        // round-1 PendingActivation row back to `Completed`
+        // (simulating the cascade after a fresh CompleteTask
+        // landed and the reviewer panel rejected again).
+        // `tasks.state` returns to `Completed` so the retry
+        // handler's prior_state filter matches.
+        let store_for_flip1 = store.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_flip1.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "UPDATE {SUBTASK_ACTIVATIONS}
+                        SET activation_state = 'Completed',
+                            terminated_at    = ?1
+                      WHERE task_id = 'exe-monotonic'
+                        AND activation_state = 'PendingActivation'"
+                ),
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS}
+                        SET state           = ?1,
+                            transitioned_at = ?2
+                      WHERE task_id = 'exe-monotonic'"
+                ),
+                rusqlite::params![TaskState::Completed.as_sql_str(), now],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+
+        // Round 2 retry — counter must bump 2 → 3.
+        let resp2 = handle_retry_sub_task(
+            make_retry_request("exe-monotonic", 2),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            2,
+            &ctx,
+        )
+        .await
+        .expect("round-2 retry must admit");
+        assert!(matches!(resp2.outcome, IntentOutcome::Accepted { .. }));
+        let acts_round2 = read_activations(store.clone(), "exe-monotonic").await;
+        assert_eq!(acts_round2.len(), 3);
+        assert_eq!(
+            acts_round2[2].4, 3,
+            "round-2 retry MUST bump review_reject_count to 3"
+        );
+
+        // Same flip for round 3.
+        let store_for_flip2 = store.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = store_for_flip2.lock_sync();
+            let now = unix_now_secs();
+            conn.execute(
+                &format!(
+                    "UPDATE {SUBTASK_ACTIVATIONS}
+                        SET activation_state = 'Completed',
+                            terminated_at    = ?1
+                      WHERE task_id = 'exe-monotonic'
+                        AND activation_state = 'PendingActivation'"
+                ),
+                rusqlite::params![now],
+            )
+            .unwrap();
+            conn.execute(
+                &format!(
+                    "UPDATE {TASKS}
+                        SET state           = ?1,
+                            transitioned_at = ?2
+                      WHERE task_id = 'exe-monotonic'"
+                ),
+                rusqlite::params![TaskState::Completed.as_sql_str(), now],
+            )
+            .unwrap();
+        })
+        .await
+        .unwrap();
+
+        // Round 3 retry — counter must bump 3 → 4.
+        let resp3 = handle_retry_sub_task(
+            make_retry_request("exe-monotonic", 3),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            3,
+            &ctx,
+        )
+        .await
+        .expect("round-3 retry must admit");
+        assert!(matches!(resp3.outcome, IntentOutcome::Accepted { .. }));
+        let acts_round3 = read_activations(store.clone(), "exe-monotonic").await;
+        assert_eq!(acts_round3.len(), 4);
+        let counts: Vec<i64> = acts_round3.iter().map(|r| r.4).collect();
+        assert_eq!(
+            counts,
+            vec![1, 2, 3, 4],
+            "review_reject_count MUST advance 1 → 2 → 3 → 4 \
+             monotonically across the activation_id sequence"
+        );
+        for i in 1..counts.len() {
+            assert_eq!(
+                counts[i] - counts[i - 1],
+                1,
+                "iter62 monotonicity invariant: every step MUST be \
+                 exactly +1, not 0 (stall) or > 1 (double-bump)"
+            );
+        }
+    }
+
+    /// `INV-RETRY-REVIEWER-PANEL-REACTIVATED-01` — when the
+    /// orchestrator retries an executor on a Reviewer-rejection
+    /// path, the kernel reactivates the entire reviewer panel.
+    /// This pins the cascade: every reviewer's `tasks.state`
+    /// flips back to `Admitted`, `tasks.review_verdict` and
+    /// `tasks.last_critique` are cleared on the reviewer rows,
+    /// and a fresh `PendingActivation` `subtask_activations` row
+    /// is inserted for each reviewer.
+    ///
+    /// The pre-iter62 behaviour was that reviewers stayed
+    /// terminal one-shot — both `review-lint-defect-A/B` had a
+    /// single activation row across 5 executor retries on
+    /// `lint-runner-python` per the iter62 forensics.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retry_reactivates_reviewer_panel_on_review_rejection() {
+        let store = Arc::new(Store::open_in_memory().unwrap());
+        let (ctx, registry, _sink) = build_retry_test_ctx(store.clone());
+
+        let store_for_seed = store.clone();
+        let registry_for_seed = registry.clone();
+        tokio::task::spawn_blocking(move || {
+            seed_orchestrator_session(&store_for_seed);
+            // Seed the executor + its rejection round-0 activation.
+            seed_completed_review_rejected_executor_for_retry(
+                &store_for_seed,
+                &registry_for_seed,
+                "exe-reactivate",
+                /*review_count*/ 1,
+                /*max_review*/ Some(5),
+            );
+            // Seed two reviewer successors with `review_verdict =
+            // Rejected` (matches the iter62 forensic shape: two
+            // reviewers, both rejected the round-0 head_sha) and
+            // a non-NULL `last_critique` so we can witness the
+            // cleanup.
+            let conn = store_for_seed.lock_sync();
+            let now = unix_now_secs();
+            for reviewer in ["rev-A", "rev-B"] {
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {TASKS}
+                            (task_id, initiative_id, lane_id, state,
+                             actor, policy_epoch, admitted_at,
+                             transitioned_at, actual_cost,
+                             review_verdict, last_critique)
+                         VALUES (?1, 'init-retry', 'default', ?2,
+                                 'kernel', 1, ?3, ?3, 0,
+                                 ?4, 'previous critique')"
+                    ),
+                    rusqlite::params![
+                        reviewer,
+                        TaskState::Completed.as_sql_str(),
+                        now,
+                        raxis_types::ReviewVerdict::Rejected.as_sql_str(),
+                    ],
+                )
+                .unwrap();
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {dag_edges}
+                            (initiative_id, predecessor_task_id,
+                             successor_task_id, predecessor_satisfied)
+                         VALUES ('init-retry', 'exe-reactivate', ?1, 1)",
+                        dag_edges = Table::TaskDagEdges.as_str(),
+                    ),
+                    rusqlite::params![reviewer],
+                )
+                .unwrap();
+                // Seed the reviewer's round-0 Completed activation
+                // row so we can verify exactly one new activation
+                // is inserted per reviewer (round 0 + round 1 = 2).
+                conn.execute(
+                    &format!(
+                        "INSERT INTO {SUBTASK_ACTIVATIONS}
+                            (activation_id, task_id, initiative_id,
+                             activation_state, session_id, evaluation_sha,
+                             crash_retry_count, review_reject_count,
+                             created_at, activated_at, terminated_at)
+                         VALUES (?1, ?2, 'init-retry', 'Completed',
+                                 NULL, NULL, 0, 0, ?3, ?3, ?3)"
+                    ),
+                    rusqlite::params![uuid::Uuid::new_v4().to_string(), reviewer, now],
+                )
+                .unwrap();
+            }
+        })
+        .await
+        .unwrap();
+
+        let resp = handle_retry_sub_task(
+            make_retry_request("exe-reactivate", 1),
+            dummy_orchestrator_session_row(),
+            dummy_session_id(),
+            1,
+            &ctx,
+        )
+        .await
+        .expect("review-rejection retry must admit");
+        assert!(matches!(resp.outcome, IntentOutcome::Accepted { .. }));
+
+        // Reviewer panel post-state: each reviewer task's FSM is
+        // reset to Admitted, review_verdict is NULL, last_critique
+        // is NULL, and a fresh PendingActivation activation row
+        // is inserted.
+        for reviewer in ["rev-A", "rev-B"] {
+            let state = read_task_state(store.clone(), reviewer).await;
+            assert_eq!(
+                state,
+                TaskState::Admitted.as_sql_str(),
+                "reviewer {reviewer} MUST be reset to Admitted"
+            );
+            let row = read_review_columns(store.clone(), reviewer).await;
+            assert!(
+                row.0.is_none(),
+                "reviewer {reviewer} review_verdict MUST be cleared"
+            );
+            assert!(
+                row.1.is_none(),
+                "reviewer {reviewer} last_critique MUST be cleared"
+            );
+            let acts = read_activations(store.clone(), reviewer).await;
+            assert_eq!(
+                acts.len(),
+                2,
+                "reviewer {reviewer} MUST have 2 activations \
+                 (round-0 Completed + round-1 PendingActivation) \
+                 after the executor retry"
+            );
+            assert_eq!(
+                acts[1].1, "PendingActivation",
+                "reviewer {reviewer} round-1 row MUST be \
+                 PendingActivation"
+            );
+        }
+    }
+
+    /// Read `tasks.review_verdict` + `tasks.last_critique` for a
+    /// task on the blocking pool. Same rationale as
+    /// [`read_activations`].
+    async fn read_review_columns(
+        store: Arc<Store>,
+        task_id: &str,
+    ) -> (Option<String>, Option<String>) {
+        let task_id = task_id.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let conn = store.lock_sync();
+            conn.query_row(
+                &format!(
+                    "SELECT review_verdict, last_critique FROM {TASKS} \
+                     WHERE task_id = ?1"
+                ),
+                rusqlite::params![&task_id],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap()
+        })
+        .await
+        .unwrap()
     }
 
     /// Explicit `Some(0)` ceiling: operator says "no retries

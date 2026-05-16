@@ -1185,6 +1185,8 @@ mod tests {
                 signal_class: "GracefulExit".into(),
                 exit_code: 0,
                 backend_error: None,
+                terminal_tool: None,
+                console_log_path: None,
             },
             Some("sess-fsm-1"),
             None,

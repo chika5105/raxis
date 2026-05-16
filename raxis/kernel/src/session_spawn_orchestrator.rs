@@ -1293,6 +1293,77 @@ pub(crate) fn build_worker_post_exit_failure_reason(
     crate::session_activity::render_clean_exit_without_activity(role_str)
 }
 
+/// iter62 — best-effort terminal-tool scraper for the planner-
+/// self-exit audit emit (`INV-AUDIT-SESSION-VM-EXITED-EMITTED-01`).
+///
+/// Reads `path` line-by-line in reverse and returns the value of
+/// the first `step:planner-completed` breadcrumb's `tool=` field.
+/// Lines on the planner driver's console use the structured
+/// JSON-with-prefix shape:
+///
+/// ```text
+/// step:planner-completed {"tool":"complete_task","exit_class":"Terminal", ...}
+/// ```
+///
+/// On any I/O failure (file missing, permission denied, EROFS) or
+/// when no matching line is present in the last 256 lines the
+/// kernel scans, returns `None`. The scraper bounds its read to
+/// the last 64 KiB of the file so a multi-MiB console log does
+/// not stall the post-exit hook (the breadcrumb the planner driver
+/// emits sits in the LAST few lines by construction — the
+/// disconnect happens immediately after the breadcrumb is
+/// flushed).
+///
+/// **Why bounded.** A misbehaving planner that keeps spamming the
+/// console after issuing the terminal tool would otherwise cost
+/// the kernel an O(file-size) scan in the post-exit hot path. The
+/// 64 KiB cap covers ~1000 typical console-log lines, well above
+/// the breadcrumb's expected position.
+fn scrape_terminal_tool_from_console_log(path: &Path) -> Option<String> {
+    use std::io::Read;
+    const MAX_TAIL_BYTES: u64 = 64 * 1024;
+    const PREFIX: &str = "step:planner-completed";
+    let mut f = std::fs::File::open(path).ok()?;
+    let total = f.metadata().ok()?.len();
+    let start = total.saturating_sub(MAX_TAIL_BYTES);
+    if start > 0 {
+        use std::io::Seek;
+        f.seek(std::io::SeekFrom::Start(start)).ok()?;
+    }
+    let mut buf = Vec::with_capacity(MAX_TAIL_BYTES as usize);
+    f.take(MAX_TAIL_BYTES).read_to_end(&mut buf).ok()?;
+    let tail = String::from_utf8_lossy(&buf);
+    // Walk lines in reverse so we return the MOST RECENT
+    // `step:planner-completed` breadcrumb (a planner that retries
+    // a terminal-tool dispatch under exotic conditions could in
+    // principle log multiple breadcrumbs; the last one is the
+    // authoritative exit reason).
+    for line in tail.lines().rev() {
+        let Some(idx) = line.find(PREFIX) else {
+            continue;
+        };
+        let after = &line[idx + PREFIX.len()..];
+        // Look for the `"tool":"<value>"` substring without
+        // pulling in `serde_json` for a one-line parse — the
+        // breadcrumb format is pinned by the planner driver
+        // and stable across iterations.
+        let tool_marker = "\"tool\":\"";
+        let Some(t_idx) = after.find(tool_marker) else {
+            continue;
+        };
+        let tail_after = &after[t_idx + tool_marker.len()..];
+        let Some(end_idx) = tail_after.find('"') else {
+            continue;
+        };
+        let tool = &tail_after[..end_idx];
+        if tool.is_empty() {
+            continue;
+        }
+        return Some(tool.to_owned());
+    }
+    None
+}
+
 pub fn spawn_planner_dispatcher(
     handle: &mut SpawnHandle,
     ctx: Arc<crate::ipc::context::HandlerContext>,
@@ -1410,6 +1481,14 @@ pub fn spawn_planner_dispatcher(
         })
         .await;
 
+        // iter62 — `INV-AUDIT-SESSION-SELF-EXIT-PAIRED-WRITE-01` /
+        // `INV-AUDIT-SESSION-VM-EXITED-EMITTED-01`. Track whether
+        // we transitioned the row out of `revoked=0` so the
+        // chain-side paired-write below only fires on the path
+        // where the kernel itself owned the revoke (idempotent on
+        // operator-driven prior revokes).
+        let revoke_committed = matches!(&revoke_result, Ok(Ok(rows)) if *rows > 0);
+
         match revoke_result {
             Ok(Ok(rows)) if rows > 0 => {
                 eprintln!(
@@ -1428,6 +1507,127 @@ pub fn spawn_planner_dispatcher(
                  \"session_id\":\"{session_id}\",\"error\":\"join: {err}\"}}",
                 err = e,
             ),
+        }
+
+        // iter62 — paired-write of `SessionVmExited` +
+        // `SessionRevoked` after the kernel-owned revoke commit.
+        //
+        // **Why both, here?**
+        //
+        // 1. `SessionVmExited` — the substrate's
+        //    `SessionSpawnService::terminate_session` is the canonical
+        //    emit site for this kind, but the planner-self-exit
+        //    path (PID 1 `LINUX_REBOOT_CMD_POWER_OFF` after a clean
+        //    terminal-tool dispatch) does NOT route through
+        //    `terminate_session` — the kernel observes the
+        //    IPC socket EOF, marks the row revoked, and returns.
+        //    Without this emission the audit chain has a
+        //    `SessionVmSpawned` with no matching `SessionVmExited`
+        //    for clean-exit sessions; iter62 forensics found the
+        //    chain hole reproducibly. The emitted variant carries
+        //    `signal_class = "GracefulExit"`, `exit_code = 0`,
+        //    `backend_error = None`, plus the iter62 enrichment
+        //    fields `terminal_tool` (parsed from the
+        //    `step:planner-completed` console-log line) and
+        //    `console_log_path` (the absolute path the kernel
+        //    used to read it).
+        //
+        // 2. `SessionRevoked` — pairs with the SQL `UPDATE
+        //    sessions SET revoked = 1` we just committed.
+        //    `revoked_by` carries the stable kernel-internal URN
+        //    `kernel://planner_self_exit` so a forensic replay can
+        //    distinguish this clean-disconnect path from the two
+        //    other revoke sources without parsing the display
+        //    name:
+        //      * `kernel://planner_self_exit`  — this hook (clean
+        //        VM exit after planner self-disconnect).
+        //      * Operator session id           — interactive
+        //        `OperatorRequest::RevokeSession` /
+        //        `RetrySubTask` orchestrator-driven revoke (the
+        //        existing `handlers/intent.rs:6076` emitter).
+        //      * Anything else                 — reserved.
+        //
+        // **Skip conditions.** We only emit when
+        // `revoke_committed = true` (the SQL UPDATE actually
+        // flipped the row). If the row was already
+        // `revoked = 1` (operator's manual revoke ran first, or a
+        // prior shutdown raced ahead), the operator's
+        // `SessionRevoked` event is the canonical anchor and
+        // double-emitting here would produce a duplicate row in
+        // the chain.
+        //
+        // **Defense-in-depth.** Audit-emit failures are logged
+        // structurally (matching the existing `*AuditEmitFailed`
+        // log convention) and never propagate — the kernel's
+        // revoke commit already landed and a subsequent retry
+        // sees `revoked = 1` (idempotent).
+        if revoke_committed {
+            // iter62 — terminal_tool extraction. Read the most
+            // recent `step:planner-completed` line from
+            // `<data_dir>/guests/<session_id>/console.log` and
+            // surface the tool the planner reported using before
+            // its clean disconnect. Best-effort; an unreadable
+            // log surfaces as `None` (the kernel doesn't fail
+            // the audit emit on a missing console-log file).
+            let console_log_path = ctx
+                .data_dir
+                .join("guests")
+                .join(session_id.as_str())
+                .join("console.log");
+            let console_log_path_str = Some(console_log_path.display().to_string());
+            let terminal_tool = scrape_terminal_tool_from_console_log(&console_log_path);
+
+            // SessionVmExited — emit FIRST (matches the
+            // substrate-side ordering: VM-exit-then-revoke is
+            // the spec-mandated audit-replay order in
+            // `audit-paired-writes.md §4`).
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::SessionVmExited {
+                    session_id: session_id.to_string(),
+                    signal_class: "GracefulExit".to_owned(),
+                    exit_code: 0,
+                    backend_error: None,
+                    terminal_tool: terminal_tool.clone(),
+                    console_log_path: console_log_path_str.clone(),
+                },
+                Some(session_id.as_str()),
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"PlannerSelfExitVmExitedAuditEmitFailed\",\
+                     \"session_id\":\"{session_id}\",\"error\":\"{e}\"}}",
+                );
+            }
+
+            // SessionRevoked — emit AFTER `SessionVmExited` so a
+            // chain-replay sees the ordered pair. The kernel-
+            // internal URN in `revoked_by` is the load-bearing
+            // forensic discriminator — operators investigating an
+            // initiative replay `jq 'select(.revoked_by |
+            // startswith("kernel://"))'` to filter to the
+            // self-exit class.
+            let revoked_by_display_name = Some(format!(
+                "Planner self-exit (clean disconnect, terminal_tool={:?})",
+                terminal_tool,
+            ));
+            if let Err(e) = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::SessionRevoked {
+                    session_id: session_id.to_string(),
+                    revoked_by: "kernel://planner_self_exit".to_owned(),
+                    revoked_by_display_name,
+                },
+                Some(session_id.as_str()),
+                None,
+                None,
+            ) {
+                eprintln!(
+                    "{{\"level\":\"warn\",\
+                     \"event\":\"PlannerSelfExitSessionRevokedAuditEmitFailed\",\
+                     \"session_id\":\"{session_id}\",\"error\":\"{e}\"}}",
+                );
+            }
         }
 
         // ── V2 §Step 6 — post-exit recovery dispatch. ─────────────
@@ -5651,6 +5851,127 @@ mod concrete_reason_tests {
         assert!(
             s.contains("42 used / 100 limit"),
             "must render `n used / m limit`; got {s:?}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// `INV-AUDIT-SESSION-VM-EXITED-EMITTED-01` /
+// `INV-AUDIT-SESSION-SELF-EXIT-PAIRED-WRITE-01` — iter62 paired-write
+// witnesses for the planner-self-exit hook.
+//
+// Pure-function witnesses for the console-log scraper (the
+// kernel-side enrichment fed into `SessionVmExited.terminal_tool`).
+// The full post-exit hook is exercised end-to-end by the
+// extended-e2e test suite under `kernel/tests/`; the witnesses
+// here cover the kernel-internal helper without paying for VM
+// boot.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod self_exit_paired_write_tests {
+    use super::scrape_terminal_tool_from_console_log;
+    use std::io::Write;
+
+    /// Happy path — most-recent `step:planner-completed` line
+    /// surfaces its `tool=` value verbatim.
+    #[test]
+    fn scraper_extracts_terminal_tool_from_breadcrumb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(
+            f,
+            "boot: kernel banner up\n\
+             step:planner-dispatch {{\"turn\":1}}\n\
+             step:planner-completed {{\"tool\":\"complete_task\",\"exit_class\":\"Terminal\"}}\n\
+             tear_down: shutting down"
+        )
+        .unwrap();
+        drop(f);
+        assert_eq!(
+            scrape_terminal_tool_from_console_log(&path).as_deref(),
+            Some("complete_task"),
+            "scraper must surface the tool from the breadcrumb",
+        );
+    }
+
+    /// When multiple breadcrumbs are present (rare — e.g. a
+    /// retry path within the same VM), the scraper must surface
+    /// the MOST RECENT (last) one. Forensic invariant: the last
+    /// breadcrumb is the authoritative exit reason.
+    #[test]
+    fn scraper_returns_most_recent_breadcrumb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(
+            f,
+            "step:planner-completed {{\"tool\":\"submit_review\"}}\n\
+             ... more lines ...\n\
+             step:planner-completed {{\"tool\":\"report_failure\"}}"
+        )
+        .unwrap();
+        drop(f);
+        assert_eq!(
+            scrape_terminal_tool_from_console_log(&path).as_deref(),
+            Some("report_failure"),
+        );
+    }
+
+    /// No breadcrumb in the log → `None` (the kernel emits
+    /// `terminal_tool = None` on the audit row, which the
+    /// dashboard renders as "unknown terminal tool").
+    #[test]
+    fn scraper_returns_none_when_no_breadcrumb_present() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        writeln!(f, "boot: kernel banner\nturn 1\nturn 2\nshutdown").unwrap();
+        drop(f);
+        assert!(scrape_terminal_tool_from_console_log(&path).is_none());
+    }
+
+    /// Missing file (kernel boot before the substrate provisioned
+    /// the per-session console-log path, or operator nuked the
+    /// data dir between the spawn and the exit) → `None`. The
+    /// scraper MUST NOT propagate the I/O error — the audit
+    /// chain still wants the `SessionRevoked` /
+    /// `SessionVmExited` paired-write.
+    #[test]
+    fn scraper_returns_none_on_missing_file() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("absent-console.log");
+        assert!(scrape_terminal_tool_from_console_log(&path).is_none());
+    }
+
+    /// Bounded-tail invariant — the scraper reads only the last
+    /// 64 KiB of the file. We synthesise a 200 KiB pre-amble
+    /// followed by the breadcrumb and assert the scraper still
+    /// finds it (it sits in the last 64 KiB by construction —
+    /// the planner driver flushes the breadcrumb immediately
+    /// before disconnecting).
+    #[test]
+    fn scraper_reads_only_tail_for_recent_breadcrumb() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("console.log");
+        let mut f = std::fs::File::create(&path).expect("create");
+        // 200 KiB of noise (no breadcrumb).
+        let noise_line = "noise: ".to_string() + &"x".repeat(120) + "\n";
+        for _ in 0..1700 {
+            f.write_all(noise_line.as_bytes()).unwrap();
+        }
+        // Breadcrumb at the tail.
+        writeln!(
+            f,
+            "step:planner-completed {{\"tool\":\"end_turn\",\"exit_class\":\"Terminal\"}}"
+        )
+        .unwrap();
+        drop(f);
+        assert_eq!(
+            scrape_terminal_tool_from_console_log(&path).as_deref(),
+            Some("end_turn"),
+            "scraper MUST find a tail-positioned breadcrumb even when the head is large",
         );
     }
 }

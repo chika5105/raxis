@@ -55,7 +55,7 @@ use rusqlite::Connection;
 /// `kernel.db` resolves to the same value through Cargo workspace
 /// dep resolution; a CLI compiled against an older `raxis-store`
 /// version is a hard build error rather than a silent drift.
-pub const SCHEMA_VERSION: u32 = 20;
+pub const SCHEMA_VERSION: u32 = 22;
 
 /// Apply all pending migrations to `conn`.
 ///
@@ -130,6 +130,12 @@ pub fn apply_pending(conn: &Connection) -> Result<(), StoreError> {
     }
     if current_version < 20 {
         apply_migration_20(conn)?;
+    }
+    if current_version < 21 {
+        apply_migration_21(conn)?;
+    }
+    if current_version < 22 {
+        apply_migration_22(conn)?;
     }
 
     Ok(())
@@ -2535,6 +2541,129 @@ ALTER TABLE {escalations}
 -- Record this migration.
 INSERT OR IGNORE INTO {schema_version} (version, applied_at)
     VALUES (20, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 21 — iter62 per-task cumulative cache-token columns.
+//
+// `INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01` introduces two new
+// per-task SQLite columns mirroring the planner's
+// `TokensReport.cache_creation_tokens` /
+// `cache_read_tokens` payload (`crates/types/src/intent.rs`).
+// Pre-Migration-21 the kernel's
+// `pre_gate_evaluate_for_envelope` UPDATE bumped only the
+// `cumulative_input_tokens` / `cumulative_output_tokens` /
+// `cumulative_token_cost_micros` columns and silently dropped the
+// cache_* deltas — cost reconciliation against the provider's
+// billed cache_creation_input_tokens / cache_read_input_tokens was
+// then impossible without re-parsing the audit chain.
+//
+// The columns are `INTEGER NOT NULL DEFAULT 0` so pre-migration
+// rows surface as zero (no observable cache hits / creations
+// recorded) until the next `IntentRequest` admission lands and
+// the kernel issues the canonical UPDATE.
+//
+// Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-
+// migration leaves the pre-migration schema intact (every-
+// migration invariant declared at the top of this module).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_21(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_21_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 21 failed: {e}")))
+}
+
+/// The complete migration-21 DDL.
+pub fn render_migration_21_ddl() -> String {
+    let tasks = Table::Tasks.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter62 — per-task cumulative cache-token ledger
+-- (`INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01`). The kernel's
+-- `pre_gate_evaluate_for_envelope` UPDATE bumps these columns
+-- in lock-step with `cumulative_input_tokens` /
+-- `cumulative_output_tokens` whenever the planner reports
+-- non-zero cache_creation / cache_read deltas in
+-- `IntentRequest.tokens_used`.
+ALTER TABLE {tasks}
+    ADD COLUMN cumulative_cache_creation_tokens INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {tasks}
+    ADD COLUMN cumulative_cache_read_tokens INTEGER NOT NULL DEFAULT 0;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (21, strftime('%s', 'now'));
+
+COMMIT;
+"
+    )
+}
+
+// ---------------------------------------------------------------------------
+// Migration 22 — iter62 validation_reject_count + max_validation_rejections.
+//
+// `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01` introduces a third
+// per-activation counter on `subtask_activations` that disambiguates
+// validation-class rejections (FailInvalidDiff: empty diff, unchanged
+// head_sha, malformed format, path-scope violation) from substrate-
+// crash retries. Pre-Migration-22 the FailInvalidDiff path bumped
+// `crash_retry_count` and triggered the
+// `PlannerMaxTurnsProgressivelyScaled` resolver — wrong budget
+// (max_crash_retries=3 fired too early), wrong remediation (more
+// turns don't help when the planner produced a malformed terminal
+// intent). The new counter (default ceiling 2) gives validation
+// rejection a separate, properly-scoped budget.
+//
+// Both columns are `INTEGER NOT NULL DEFAULT 0` (counter) and
+// `INTEGER NOT NULL DEFAULT 2` (ceiling) respectively — pre-
+// migration rows surface as "no validation rejections so far,
+// stock ceiling".
+//
+// Atomicity: single `BEGIN EXCLUSIVE … COMMIT`. Crash mid-
+// migration leaves the pre-migration schema intact (every-
+// migration invariant declared at the top of this module).
+// ---------------------------------------------------------------------------
+
+fn apply_migration_22(conn: &Connection) -> Result<(), StoreError> {
+    let ddl = render_migration_22_ddl();
+    conn.execute_batch(&ddl)
+        .map_err(|e| StoreError::Migration(format!("migration 22 failed: {e}")))
+}
+
+/// The complete migration-22 DDL.
+pub fn render_migration_22_ddl() -> String {
+    let subtask_activations = Table::SubtaskActivations.as_str();
+    let schema_version = Table::SchemaVersion.as_str();
+
+    format!(
+        "
+BEGIN EXCLUSIVE;
+
+-- iter62 — `INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01`. The
+-- kernel's FailInvalidDiff path bumps `validation_reject_count`
+-- on the new activation row instead of `crash_retry_count`;
+-- `max_validation_rejections` (per-activation ceiling) gates
+-- the retry admission gate alongside `max_crash_retries` and
+-- `max_review_rejections`.
+ALTER TABLE {subtask_activations}
+    ADD COLUMN validation_reject_count INTEGER NOT NULL DEFAULT 0;
+
+ALTER TABLE {subtask_activations}
+    ADD COLUMN max_validation_rejections INTEGER NOT NULL DEFAULT 2;
+
+-- Record this migration.
+INSERT OR IGNORE INTO {schema_version} (version, applied_at)
+    VALUES (22, strftime('%s', 'now'));
 
 COMMIT;
 "
@@ -5884,6 +6013,155 @@ mod tests {
         assert_eq!(
             count, 1,
             "structured_outputs must appear exactly once after repeated apply_pending"
+        );
+    }
+
+    // --- Migration 21 (iter62 — INV-OBSERVABILITY-CACHE-TOKEN-PERSISTED-01) ---
+
+    /// `apply_pending` ends at SCHEMA_VERSION with the two new
+    /// `tasks.cumulative_cache_*` columns present, NOT NULL,
+    /// INTEGER, defaulting to 0. The kernel handler (intent.rs)
+    /// reads/writes these columns; the schema test pins the
+    /// shape so the handler write is well-typed forever.
+    #[test]
+    fn migration_21_adds_cache_token_columns_to_tasks() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        for col_name in [
+            "cumulative_cache_creation_tokens",
+            "cumulative_cache_read_tokens",
+        ] {
+            let entry = cols
+                .iter()
+                .find(|(name, _, _, _)| name == col_name)
+                .unwrap_or_else(|| {
+                    panic!("tasks.{col_name} column must exist after migration 21")
+                });
+            assert_eq!(entry.1, "INTEGER", "{col_name} must be INTEGER");
+            assert_eq!(entry.2, 1, "{col_name} must be NOT NULL");
+            assert_eq!(
+                entry.3.as_deref(),
+                Some("0"),
+                "{col_name} must default to 0"
+            );
+        }
+    }
+
+    /// Migration 21 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_21_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({})", Table::Tasks.as_str()))
+            .unwrap();
+        let count_creation = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|n| n == "cumulative_cache_creation_tokens")
+            .count();
+        assert_eq!(
+            count_creation, 1,
+            "cumulative_cache_creation_tokens must appear exactly once after repeated apply_pending"
+        );
+    }
+
+    // --- Migration 22 (iter62 — INV-INTENT-VALIDATION-REJECTED-CLASSIFIED-01) ---
+
+    /// Migration 22 adds two columns to `subtask_activations`:
+    /// `validation_reject_count INTEGER NOT NULL DEFAULT 0` and
+    /// `max_validation_rejections INTEGER NOT NULL DEFAULT 2`. The
+    /// counter mirrors `review_reject_count` / `crash_retry_count`
+    /// — bumped per-row when the kernel rejects a CompleteTask
+    /// with `FailInvalidDiff` — and the ceiling is the budget
+    /// against which the orchestrator decides Failed vs retry.
+    #[test]
+    fn migration_22_adds_validation_columns_to_subtask_activations() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::SubtaskActivations.as_str()
+            ))
+            .unwrap();
+        let cols: Vec<(String, String, i64, Option<String>)> = stmt
+            .query_map([], |r| {
+                Ok((
+                    r.get::<_, String>(1)?,
+                    r.get::<_, String>(2)?,
+                    r.get::<_, i64>(3)?,
+                    r.get::<_, Option<String>>(4)?,
+                ))
+            })
+            .unwrap()
+            .map(Result::unwrap)
+            .collect();
+
+        let validation = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "validation_reject_count")
+            .expect("subtask_activations.validation_reject_count must exist after migration 22");
+        assert_eq!(validation.1, "INTEGER");
+        assert_eq!(validation.2, 1, "validation_reject_count must be NOT NULL");
+        assert_eq!(validation.3.as_deref(), Some("0"));
+
+        let ceiling = cols
+            .iter()
+            .find(|(name, _, _, _)| name == "max_validation_rejections")
+            .expect("subtask_activations.max_validation_rejections must exist after migration 22");
+        assert_eq!(ceiling.1, "INTEGER");
+        assert_eq!(ceiling.2, 1, "max_validation_rejections must be NOT NULL");
+        assert_eq!(ceiling.3.as_deref(), Some("2"));
+    }
+
+    /// Migration 22 is idempotent under `apply_pending`.
+    #[test]
+    fn migration_22_is_idempotent() {
+        let conn = Connection::open_in_memory().unwrap();
+        apply_pending(&conn).unwrap();
+        apply_pending(&conn).unwrap();
+        assert_eq!(read_current_version(&conn).unwrap(), SCHEMA_VERSION as i64);
+
+        let mut stmt = conn
+            .prepare(&format!(
+                "PRAGMA table_info({})",
+                Table::SubtaskActivations.as_str()
+            ))
+            .unwrap();
+        let dup = stmt
+            .query_map([], |r| r.get::<_, String>(1))
+            .unwrap()
+            .map(Result::unwrap)
+            .filter(|n| n == "validation_reject_count")
+            .count();
+        assert_eq!(
+            dup, 1,
+            "validation_reject_count must appear exactly once after repeated apply_pending"
         );
     }
 }

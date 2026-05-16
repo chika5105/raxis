@@ -877,6 +877,17 @@ impl SessionSpawnService {
                 signal_class,
                 exit_code,
                 backend_error,
+                // iter62 paired-write enrichment fields are kernel-
+                // side enrichments populated by the post-exit hook
+                // in `kernel/src/session_spawn_orchestrator.rs`
+                // when the planner self-exits. The substrate
+                // emitter has no visibility into terminal-tool
+                // semantics (it observes the VM exit, not the
+                // planner's IPC) and no canonical handle on the
+                // host-side `guests/<sid>/console.log` path, so
+                // both fields are `None` here.
+                terminal_tool: None,
+                console_log_path: None,
             },
             Some(session_id),
             None,

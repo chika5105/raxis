@@ -279,6 +279,32 @@ pub fn assemble_ksb_snapshot(
     // in this function see the same store snapshot).
     let capabilities = Some(assemble_capabilities(conn, registry, inputs)?);
 
+    // ── iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01` ─────────────
+    //
+    // Surface the most-recent reviewer critique into the KSB so a
+    // retried executor / reviewer can re-orient on the prior
+    // round's feedback. Pre-iter62 the persisted column was
+    // correct but never projected — the round-N+1 LLM produced
+    // the same flawed diff because it never saw the round-N
+    // reviewer feedback.
+    //
+    // Project on retry rounds only: a task whose most-recent
+    // activation row carries `crash_retry_count > 0`,
+    // `review_reject_count > 0`, OR `validation_reject_count > 0`
+    // is "past attempt 1". Round-1 sessions surface `None` so
+    // the KSB byte prefix stays stable for first-attempt tasks.
+    // The orchestrator's KSB always omits this field (it has
+    // initiative-wide visibility via the DAG / reviewer_verdicts
+    // already; the per-task critique would be ambiguous without
+    // a task scope).
+    let last_critique = match inputs.role {
+        KsbRole::Orchestrator => None,
+        KsbRole::Executor | KsbRole::Reviewer => match inputs.task_id {
+            None => None,
+            Some(tid) => read_last_critique_for_retry(conn, tid)?,
+        },
+    };
+
     Ok(KsbSnapshot {
         version: KSB_SCHEMA_VERSION,
         initiative_id: inputs.initiative_id.to_owned(),
@@ -296,7 +322,49 @@ pub fn assemble_ksb_snapshot(
         pending_escalations,
         credential_ports: inputs.credential_ports.clone(),
         capabilities,
+        last_critique,
     })
+}
+
+/// iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01`. Read
+/// `tasks.last_critique` for `task_id` IFF the most-recent
+/// `subtask_activations` row indicates the task is past attempt
+/// 1 (any of `crash_retry_count`, `review_reject_count`,
+/// `validation_reject_count` is non-zero). Returns `None` on the
+/// round-1 path so the KSB byte prefix stays stable.
+fn read_last_critique_for_retry(
+    conn: &Connection,
+    task_id: &str,
+) -> Result<Option<String>, KsbAssemblyError> {
+    let row: Option<(i64, i64, i64, Option<String>)> = conn
+        .query_row(
+            &format!(
+                "SELECT a.crash_retry_count, \
+                        a.review_reject_count, \
+                        COALESCE(a.validation_reject_count, 0), \
+                        t.last_critique \
+                   FROM {acts} a \
+                   JOIN {tasks} t ON t.task_id = a.task_id \
+                  WHERE a.task_id = ?1 \
+                  ORDER BY a.created_at DESC \
+                  LIMIT 1",
+                acts = Table::SubtaskActivations.as_str(),
+                tasks = Table::Tasks.as_str(),
+            ),
+            rusqlite::params![task_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()
+        .map_err(KsbAssemblyError::Sqlite)?;
+
+    match row {
+        Some((crash, review, validation, Some(critique)))
+            if (crash > 0 || review > 0 || validation > 0) && !critique.is_empty() =>
+        {
+            Ok(Some(critique))
+        }
+        _ => Ok(None),
+    }
 }
 
 /// Read the per-initiative anchor `base_sha` from the live
@@ -969,6 +1037,10 @@ pub fn fallback_snapshot(initiative_id: &str, task_id: Option<&str>, role: KsbRo
         // `assemble_ksb_snapshot` call) populates the envelope
         // when the SQL read succeeds.
         capabilities: None,
+        // iter62 — fallback snapshot has no SQL context to read
+        // the per-task `last_critique` from; the LLM does not
+        // surface prior round feedback in the fail-soft path.
+        last_critique: None,
     }
 }
 
@@ -1767,5 +1839,139 @@ mod tests {
                  clamp / transform the resolver-provided value",
             );
         }
+    }
+
+    // ─── iter62 — INV-RETRY-LAST-CRITIQUE-IN-KSB-01 ────────────────
+
+    /// `read_last_critique_for_retry` projects `tasks.last_critique`
+    /// IFF the most-recent activation row is past attempt 1 (any of
+    /// `crash_retry_count`, `review_reject_count`, or
+    /// `validation_reject_count` is non-zero). The round-1 path
+    /// surfaces `None` so the KSB byte prefix stays stable.
+    #[test]
+    fn last_critique_projection_returns_none_on_round_1() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        // Seed a task with last_critique populated but ZERO retry
+        // counters on the most-recent activation row.
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-c7r1', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, last_critique) \
+             VALUES ('task-c7r1', 'init-c7r1', 'default', \
+                     'Running', 'kernel', 1, 1, 1, 0, \
+                     'round-0 critique that should not surface'); \
+             INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, \
+                 activation_state, session_id, \
+                 crash_retry_count, review_reject_count, \
+                 validation_reject_count, created_at, \
+                 activated_at) \
+             VALUES ('act-c7r1', 'task-c7r1', 'init-c7r1', \
+                     'Active', \
+                     '11111111-1111-1111-1111-111111111111', \
+                     0, 0, 0, 1, 2);",
+        )
+        .unwrap();
+        // Seed the matching session row (FK).
+        conn.execute(
+            "INSERT INTO sessions \
+                (session_id, planner_pubkey, planner_kind, \
+                 admission_token, capability_url, capability_signature, \
+                 monotonic_uuid, created_at, expires_at, revoked, \
+                 session_agent_type, can_delegate) \
+             VALUES ('11111111-1111-1111-1111-111111111111', 'pk', \
+                     'rust-test', 'tok', 'urn:c7', 'sig', \
+                     '00000000-0000-4000-8000-000000000003', \
+                     1, 9999999999, 0, 'Executor', 0)",
+            [],
+        )
+        .unwrap();
+
+        let critique = read_last_critique_for_retry(&conn, "task-c7r1").unwrap();
+        assert!(
+            critique.is_none(),
+            "round-1 task MUST surface last_critique=None so the KSB byte prefix is stable"
+        );
+    }
+
+    /// Retry rounds (any non-zero counter) MUST surface the
+    /// persisted `tasks.last_critique`.
+    #[test]
+    fn last_critique_projection_returns_critique_when_review_rejected() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-c7r2', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, last_critique) \
+             VALUES ('task-c7r2', 'init-c7r2', 'default', \
+                     'Admitted', 'kernel', 1, 1, 1, 0, \
+                     'round-0 reviewer feedback'); \
+             INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, \
+                 activation_state, session_id, \
+                 crash_retry_count, review_reject_count, \
+                 validation_reject_count, created_at) \
+             VALUES ('act-c7r2', 'task-c7r2', 'init-c7r2', \
+                     'PendingActivation', NULL, \
+                     0, 1, 0, 1);",
+        )
+        .unwrap();
+
+        let critique = read_last_critique_for_retry(&conn, "task-c7r2").unwrap();
+        assert_eq!(
+            critique.as_deref(),
+            Some("round-0 reviewer feedback"),
+            "review-rejection retry MUST surface tasks.last_critique"
+        );
+    }
+
+    /// Validation-rejection retries (`validation_reject_count > 0`)
+    /// MUST also surface `last_critique` — the spec requires it
+    /// alongside review rejections.
+    #[test]
+    fn last_critique_projection_returns_critique_when_validation_rejected() {
+        let (store, _td) = fresh_store();
+        let conn = store.lock_sync();
+        conn.execute_batch(
+            "INSERT INTO initiatives \
+                (initiative_id, state, terminal_criteria_json, \
+                 plan_artifact_sha256, created_at) \
+             VALUES ('init-c7r3', 'Executing', '{}', 'deadbeef', 1); \
+             INSERT INTO tasks \
+                (task_id, initiative_id, lane_id, state, actor, \
+                 policy_epoch, admitted_at, transitioned_at, \
+                 actual_cost, last_critique) \
+             VALUES ('task-c7r3', 'init-c7r3', 'default', \
+                     'Admitted', 'kernel', 1, 1, 1, 0, \
+                     'kernel: empty diff at head ABCD'); \
+             INSERT INTO subtask_activations \
+                (activation_id, task_id, initiative_id, \
+                 activation_state, session_id, \
+                 crash_retry_count, review_reject_count, \
+                 validation_reject_count, created_at) \
+             VALUES ('act-c7r3', 'task-c7r3', 'init-c7r3', \
+                     'PendingActivation', NULL, \
+                     0, 0, 1, 1);",
+        )
+        .unwrap();
+
+        let critique = read_last_critique_for_retry(&conn, "task-c7r3").unwrap();
+        assert_eq!(
+            critique.as_deref(),
+            Some("kernel: empty diff at head ABCD"),
+            "validation-rejection retry MUST surface tasks.last_critique"
+        );
     }
 }

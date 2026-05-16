@@ -271,6 +271,23 @@ pub struct KsbSnapshot {
     /// Non-breaking addition (per the field-shape contract above).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub capabilities: Option<Capabilities>,
+
+    /// iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01`. The most-
+    /// recent reviewer critique attached to this task (mirror of
+    /// `tasks.last_critique`), surfaced into the executor / reviewer
+    /// KSB on retry rounds (`attempt > 1` OR
+    /// `review_reject_count > 0` OR `validation_reject_count > 0`).
+    /// Pre-iter62 the persisted column was correct but never
+    /// projected into the KSB, so a retried executor produced the
+    /// same flawed diff round after round — the round-N+1 turn
+    /// could not reference the round-N reviewer feedback because
+    /// it never reached the prompt.
+    ///
+    /// `None` on the round-1 path (no prior critique to surface)
+    /// and on roles for which it has no semantic (orchestrator).
+    /// Non-breaking addition (per the field-shape contract above).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_critique: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -810,6 +827,16 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
     if let Some(caps) = &snapshot.capabilities {
         check_capabilities_delimiter(caps)?;
     }
+    // iter62 — defend the `last_critique` block against
+    // delimiter injection (the critique is operator/LLM-supplied
+    // text and could embed `]] ksb` literally).
+    if let Some(critique) = &snapshot.last_critique {
+        if critique.contains(KSB_DELIMITER_CLOSE) {
+            return Err(KsbError::DelimiterInjection {
+                field: "last_critique",
+            });
+        }
+    }
 
     let mut buf = String::with_capacity(512 + snapshot.task_description.len());
     buf.push_str(KSB_DELIMITER_OPEN);
@@ -980,6 +1007,25 @@ pub fn render_ksb(snapshot: &KsbSnapshot) -> Result<String, KsbError> {
 
     if let Some(caps) = &snapshot.capabilities {
         push_capabilities(&mut buf, caps);
+    }
+
+    // iter62 — `INV-RETRY-LAST-CRITIQUE-IN-KSB-01`. The most-
+    // recent reviewer critique attached to this task is rendered
+    // as a multi-line block keyed `last_critique=` so the LLM
+    // can reliably re-orient on retry rounds. Omitted on the
+    // round-1 path so the byte prefix stays stable for tasks
+    // that have not yet been reviewed.
+    if let Some(critique) = &snapshot.last_critique {
+        buf.push_str("last_critique=\n");
+        if critique.is_empty() {
+            buf.push_str("  <empty>\n");
+        } else {
+            for line in critique.lines() {
+                buf.push_str("  ");
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
     }
 
     buf.push_str(KSB_DELIMITER_CLOSE);
@@ -1259,6 +1305,7 @@ mod tests {
             pending_escalations: vec![],
             credential_ports: vec![],
             capabilities: None,
+            last_critique: None,
         }
     }
 
