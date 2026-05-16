@@ -4,6 +4,19 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[features]
+# Forward-looking opt-in for a future `raxis-test-support` crate that
+# will re-export `reset_lock_sync_from_async_count_for_tests` and
+# friends. Today only `cfg(test)` consumers (the in-crate tests under
+# `async_runtime_safety`) reach those helpers; declaring the feature
+# here keeps the `#[cfg(any(test, feature = "test-support"))]` gates
+# in `src/db.rs` honest under `-D warnings` (`unexpected_cfgs` lint)
+# without prematurely expanding the public API. See
+# `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` and
+# RETURN_NOTE_TO_PARENT_iter66_async_store_lock_sweep.md §"Test-only
+# helpers" for the spec.
+test-support = []
+
 [dependencies]
 rusqlite    = { workspace = true }
 serde       = { workspace = true }

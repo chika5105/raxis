@@ -154,6 +154,16 @@ pub fn reset_lock_sync_from_async_count_for_tests() {
 /// eprintln + bumps the counter and additionally logs
 /// `KernelStoreLockSyncTelemetryUnavailable` (once per process) so
 /// the operator can spot the gap.
+//
+// `clippy::result_unit_err` is silenced intentionally: this seam
+// has exactly ONE failure mode (the `OnceLock` already holds a
+// value), the call site (`kernel/src/main.rs`) discards the
+// result with `let _ =`, and the idempotency contract is
+// witness-tested by
+// `async_runtime_safety::install_emitter_is_idempotent_first_install_wins`.
+// A custom error type would add ceremony without any new
+// information for callers.
+#[allow(clippy::result_unit_err)]
 pub fn install_lock_sync_from_async_emitter(emitter: LockSyncFromAsyncEmitter) -> Result<(), ()> {
     LOCK_SYNC_FROM_ASYNC_EMITTER.set(emitter).map_err(|_| ())
 }
@@ -270,9 +280,9 @@ impl Store {
     ///       Use `blocking_lock()` directly — legal, no telemetry fires.
     ///     - If `Ok`, the caller is inside a tokio runtime. Emit the
     ///       structured `KernelStoreLockSyncFromAsyncDetected`
-    ///       eprintln + bump the
-    ///       `raxis_kernel_store_lock_sync_from_async_total` counter
-    ///       + best-effort emit the audit event, THEN recover via
+    ///       eprintln, bump the
+    ///       `raxis_kernel_store_lock_sync_from_async_total` counter,
+    ///       and best-effort emit the audit event, THEN recover via
     ///       `tokio::task::block_in_place(|| mutex.blocking_lock())`.
     ///       The daemon survives; the operator sees the bug telemetry.
     ///
@@ -578,6 +588,18 @@ mod async_runtime_safety {
     /// The lookup completes without panicking AND the boundary
     /// counter is NOT bumped (we are off the runtime worker
     /// thanks to `spawn_blocking`).
+    //
+    // `clippy::await_holding_lock` is silenced intentionally here:
+    // `TEST_LOCK` is a std::sync::Mutex held across `.await` ON
+    // PURPOSE — the boundary counter and emitter slot are
+    // process-global, so async witnesses MUST serialise against
+    // each other. The lock has zero in-test contention (one
+    // witness per test, and the runtime is multi-thread with two
+    // workers, so the lock-holding task is never starved). The
+    // alternative — a tokio::sync::Mutex held across .await —
+    // would silence the lint but adds runtime ceremony around a
+    // serialisation primitive that is otherwise correct.
+    #[allow(clippy::await_holding_lock)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lock_sync_via_spawn_blocking_is_ok() {
         let _serialise = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
@@ -632,6 +654,10 @@ mod async_runtime_safety {
     /// recovers via `tokio::task::block_in_place`. The call
     /// returns a valid guard and the counter increments by
     /// exactly the number of detections.
+    // `clippy::await_holding_lock`: see the parallel allow on
+    // `lock_sync_via_spawn_blocking_is_ok` above for the
+    // rationale. Same `TEST_LOCK` serialisation contract.
+    #[allow(clippy::await_holding_lock)]
     #[cfg(not(debug_assertions))]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn lock_sync_release_build_recovers_and_counts() {
