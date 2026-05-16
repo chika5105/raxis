@@ -3245,11 +3245,10 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
     // a broken kernel to Round-2.
     let staged_kernel = args.install_dir.join("kernel").join("vmlinux");
     if staged_kernel.exists() {
-        trust_anchor::verify_kernel_binary_at_path(&staged_kernel, &pk_hex_for_children)
-            .context(
-                "post-bake trust-anchor verification of the staged kernel \
+        trust_anchor::verify_kernel_binary_at_path(&staged_kernel, &pk_hex_for_children).context(
+            "post-bake trust-anchor verification of the staged kernel \
                  binary failed (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
-            )?;
+        )?;
         eprintln!(
             "{}",
             serde_json::json!({
@@ -3655,8 +3654,7 @@ impl VerifyTrustAnchorArgs {
             .or_else(|| std::env::var_os("RAXIS_INSTALL_DIR").map(PathBuf::from))
             .unwrap_or_else(|| PathBuf::from(DEFAULT_DEV_INSTALL_DIR));
 
-        let kernel_path = kernel_path
-            .unwrap_or_else(|| install_dir.join("kernel").join("vmlinux"));
+        let kernel_path = kernel_path.unwrap_or_else(|| install_dir.join("kernel").join("vmlinux"));
 
         let expected_pk_hex = match expected_pk_hex {
             Some(h) => h.trim().to_owned(),
@@ -5725,7 +5723,9 @@ mod tests {
                 )
             })
             .collect();
-        let found = envs.iter().find(|(k, _)| k == "RAXIS_KERNEL_SIGNING_KEY_HEX");
+        let found = envs
+            .iter()
+            .find(|(k, _)| k == "RAXIS_KERNEL_SIGNING_KEY_HEX");
         assert!(found.is_some(), "env var must be set; got {envs:?}");
         assert_eq!(found.unwrap().1.as_deref(), Some(pk_hex.as_str()));
 

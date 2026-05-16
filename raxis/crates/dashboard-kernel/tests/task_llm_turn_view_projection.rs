@@ -77,11 +77,7 @@ fn projection_lifts_anthropic_model_role_and_usage_into_wire_view() {
     let view = record_to_view(anthropic_record(), 1);
 
     assert_eq!(view.turn_number, 1, "1-indexed monotonic per-task");
-    assert_eq!(
-        view.ts_unix,
-        1_778_908_309,
-        "ts_unix MUST be at_ms / 1000",
-    );
+    assert_eq!(view.ts_unix, 1_778_908_309, "ts_unix MUST be at_ms / 1000",);
     assert_eq!(
         view.model, "claude-sonnet-4-5-20250929",
         "model MUST be lifted from response body.model",
@@ -101,7 +97,10 @@ fn projection_lifts_anthropic_model_role_and_usage_into_wire_view() {
 
     // The full parsed response payload MUST flow through so the
     // operator can read tool_use / content blocks in the panel.
-    let resp = view.response.as_object().expect("response MUST be an object");
+    let resp = view
+        .response
+        .as_object()
+        .expect("response MUST be an object");
     assert_eq!(
         resp.get("model").and_then(|v| v.as_str()),
         Some("claude-sonnet-4-5-20250929"),
@@ -122,7 +121,10 @@ fn projection_lifts_anthropic_model_role_and_usage_into_wire_view() {
     // cross-task views can merge across tasks without another wire
     // bump.
     assert_eq!(view.task_id, "allowlist-positive-codegen");
-    assert_eq!(view.session_id.as_deref(), Some("c6648d42-f758-436e-ab6a-66ce9e627373"));
+    assert_eq!(
+        view.session_id.as_deref(),
+        Some("c6648d42-f758-436e-ab6a-66ce9e627373")
+    );
     assert_eq!(view.fetch_id, "d6f061c9-d27f-40b4-97b2-ff9ff2b9a41c");
     assert_eq!(view.status_code, Some(200));
     assert_eq!(view.latency_ms, Some(22_356));
@@ -151,8 +153,14 @@ fn projection_falls_back_to_value_string_on_response_parse_failure() {
         serde_json::Value::String("not json".into()),
         "non-JSON body MUST surface as Value::String(raw)",
     );
-    assert_eq!(view.model, "", "model defaults to empty when body is non-JSON");
-    assert_eq!(view.role, "", "role defaults to empty when body is non-JSON");
+    assert_eq!(
+        view.model, "",
+        "model defaults to empty when body is non-JSON"
+    );
+    assert_eq!(
+        view.role, "",
+        "role defaults to empty when body is non-JSON"
+    );
     assert_eq!(view.input_tokens, None);
     assert_eq!(view.output_tokens, None);
     assert_eq!(view.cache_creation_input_tokens, None);

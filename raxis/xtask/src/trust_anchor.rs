@@ -271,10 +271,7 @@ pub fn resolve_signing_key_pk_hex(
             canonical_pk_path(workspace_root),
             nested_pk_path(workspace_root),
         ],
-        env_vars_checked: vec![
-            RAXIS_KERNEL_SIGNING_KEY_HEX,
-            RAXIS_KERNEL_SIGNING_KEY_PATH,
-        ],
+        env_vars_checked: vec![RAXIS_KERNEL_SIGNING_KEY_HEX, RAXIS_KERNEL_SIGNING_KEY_PATH],
     })
 }
 
@@ -310,9 +307,7 @@ fn read_pk_hex_file(path: &Path) -> Option<String> {
 }
 
 fn is_lowercase_hex64(s: &str) -> bool {
-    s.len() == KEY_LEN_HEX
-        && s.bytes()
-            .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
+    s.len() == KEY_LEN_HEX && s.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'))
 }
 
 // ---------------------------------------------------------------------------
@@ -443,10 +438,7 @@ pub(crate) fn contains_subslice(haystack: &[u8], needle: &[u8]) -> bool {
 /// for the operator-facing `cargo xtask images verify-trust-anchor`
 /// subcommand. Loads the kernel binary off disk and produces a
 /// fail-loud anyhow Result.
-pub fn verify_kernel_binary_at_path(
-    kernel_path: &Path,
-    expected_pk_hex: &str,
-) -> Result<()> {
+pub fn verify_kernel_binary_at_path(kernel_path: &Path, expected_pk_hex: &str) -> Result<()> {
     let bytes = std::fs::read(kernel_path)
         .with_context(|| format!("read kernel binary {}", kernel_path.display()))?;
     let verdict = verify_kernel_binary_trust_anchor(&bytes, expected_pk_hex)?;
@@ -608,12 +600,14 @@ mod tests {
         assert_eq!(r.pk_hex, PK_C);
         assert_eq!(
             r.source_path.as_ref(),
-            Some(&tmp.path()
-                .join("raxis")
-                .join(".git")
-                .join("info")
-                .join("raxis-signing-key")
-                .join("pk.hex")),
+            Some(
+                &tmp.path()
+                    .join("raxis")
+                    .join(".git")
+                    .join("info")
+                    .join("raxis-signing-key")
+                    .join("pk.hex")
+            ),
         );
     }
 
@@ -693,8 +687,7 @@ mod tests {
     fn verify_accepts_binary_with_expected_fingerprint_embedded() {
         let pk_bytes = decode_pk_hex_bytes(PK_A).unwrap();
         let kernel = synth_kernel_with_bytes(&pk_bytes);
-        let verdict =
-            verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
+        let verdict = verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
         assert_eq!(verdict, TrustAnchorVerdict::Populated);
         assert!(verdict.is_ok());
     }
@@ -703,8 +696,7 @@ mod tests {
     fn verify_rejects_binary_with_only_placeholder_embedded() {
         let placeholder = [0u8; 32];
         let kernel = synth_kernel_with_bytes(&placeholder);
-        let verdict =
-            verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
+        let verdict = verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
         assert_eq!(verdict, TrustAnchorVerdict::PlaceholderEmbedded);
         assert!(!verdict.is_ok());
     }
@@ -717,16 +709,15 @@ mod tests {
         // promise "no 32-byte zero run" — manually use a bytestring
         // that mixes non-zero values throughout.
         let kernel: Vec<u8> = (0..4096u32).map(|i| ((i % 251) + 1) as u8).collect();
-        let verdict =
-            verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
+        let verdict = verify_kernel_binary_trust_anchor(&kernel, PK_A).expect("verify");
         assert_eq!(verdict, TrustAnchorVerdict::FingerprintMissing);
     }
 
     #[test]
     fn verify_rejects_malformed_expected_pk_hex() {
         let bytes = vec![0u8; 64];
-        let err = verify_kernel_binary_trust_anchor(&bytes, "not-hex")
-            .expect_err("malformed input");
+        let err =
+            verify_kernel_binary_trust_anchor(&bytes, "not-hex").expect_err("malformed input");
         let msg = format!("{err:#}");
         assert!(msg.contains("invalid expected_pk_hex"), "got: {msg}");
     }
@@ -782,7 +773,9 @@ mod tests {
         let bytes = decode_pk_hex_bytes(PK_A).expect("64 lowercase hex chars");
         assert_eq!(bytes.len(), 32);
         assert!(bytes.iter().all(|b| *b == 0x11));
-        assert!(decode_pk_hex_bytes("not-hex-but-64-chars-long-........................").is_none());
+        assert!(
+            decode_pk_hex_bytes("not-hex-but-64-chars-long-........................").is_none()
+        );
         assert!(decode_pk_hex_bytes(&"a".repeat(63)).is_none());
         assert!(decode_pk_hex_bytes(&"a".repeat(65)).is_none());
         // Uppercase hex must be rejected — the kernel build script's

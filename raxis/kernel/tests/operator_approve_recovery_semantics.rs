@@ -177,9 +177,7 @@ fn schema_approve_logical_deadlock(
 
     let approved: String = conn
         .query_row(
-            &format!(
-                "SELECT status FROM {escalations} WHERE escalation_id = ?1"
-            ),
+            &format!("SELECT status FROM {escalations} WHERE escalation_id = ?1"),
             params![escalation_id],
             |r| r.get(0),
         )
@@ -196,9 +194,7 @@ fn schema_approve_logical_deadlock(
         .expect("read counter");
     let state: String = conn
         .query_row(
-            &format!(
-                "SELECT state FROM {initiatives} WHERE initiative_id = ?1"
-            ),
+            &format!("SELECT state FROM {initiatives} WHERE initiative_id = ?1"),
             params![&initiative_id],
             |r| r.get(0),
         )
@@ -303,9 +299,7 @@ fn refailure_after_approve_inserts_new_escalation_row_not_dedup() {
 
     let count: i64 = conn
         .query_row(
-            &format!(
-                "SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"
-            ),
+            &format!("SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"),
             params!["init-refail"],
             |r| r.get(0),
         )

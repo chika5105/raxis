@@ -247,9 +247,9 @@ impl PermanentFailureCause {
     /// (same remote + same refspec) dedup's against the first.
     pub fn cause_seq(&self) -> String {
         match self {
-            Self::SessionVmFailedFinal {
-                total_attempts, ..
-            } => format!("attempts={total_attempts}"),
+            Self::SessionVmFailedFinal { total_attempts, .. } => {
+                format!("attempts={total_attempts}")
+            }
             Self::PlanRejected { reason } => {
                 format!("reason_sha={}", short_hash(reason))
             }
@@ -284,22 +284,22 @@ impl PermanentFailureCause {
             Self::SessionVmFailedFinal {
                 final_reason,
                 total_attempts,
-            } => format!("VM spawn permanent failure after {total_attempts} attempts: {final_reason}"),
+            } => format!(
+                "VM spawn permanent failure after {total_attempts} attempts: {final_reason}"
+            ),
             Self::PlanRejected { reason } => {
                 format!("plan admission rejected: {reason}")
             }
             Self::EscalationTimedOut {
                 original_escalation_id,
-            } => format!(
-                "escalation {original_escalation_id} timed out before operator response"
-            ),
+            } => format!("escalation {original_escalation_id} timed out before operator response"),
             Self::EscalationRateLimitExceeded { lineage_id } => format!(
                 "escalation rate limit exceeded on lineage {lineage_id}; \
                  underlying escalations are muted"
             ),
-            Self::SessionEgressStallDetected { session_id, reason } => format!(
-                "session {session_id} egress stalled on critical path: {reason}"
-            ),
+            Self::SessionEgressStallDetected { session_id, reason } => {
+                format!("session {session_id} egress stalled on critical path: {reason}")
+            }
             Self::MergeFastForwardFailed {
                 target_ref,
                 category,

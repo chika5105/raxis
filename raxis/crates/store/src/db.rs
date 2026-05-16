@@ -561,8 +561,8 @@ mod tests {
 #[cfg(test)]
 mod async_runtime_safety {
     use super::*;
-    use std::sync::Arc;
     use std::sync::atomic::Ordering;
+    use std::sync::Arc;
 
     /// Mutex shared by every test in this module — the counter and
     /// emitter slot are process-global, so serialising the tests
@@ -709,18 +709,16 @@ mod async_runtime_safety {
         let counted: Arc<std::sync::atomic::AtomicU64> =
             Arc::new(std::sync::atomic::AtomicU64::new(0));
         let counted_first = Arc::clone(&counted);
-        let _ignored = install_lock_sync_from_async_emitter(Arc::new(
-            move |_file, _line, _thread, _cum| {
+        let _ignored =
+            install_lock_sync_from_async_emitter(Arc::new(move |_file, _line, _thread, _cum| {
                 counted_first.fetch_add(1, Ordering::Relaxed);
-            },
-        ));
+            }));
         // The second install MUST fail — `OnceLock::set` returns
         // `Err` once a value is present.
-        let second = install_lock_sync_from_async_emitter(Arc::new(
-            move |_file, _line, _thread, _cum| {
+        let second =
+            install_lock_sync_from_async_emitter(Arc::new(move |_file, _line, _thread, _cum| {
                 counted.fetch_add(1, Ordering::Relaxed);
-            },
-        ));
+            }));
         assert!(
             second.is_err(),
             "second emitter install MUST fail per OnceLock contract",

@@ -1608,8 +1608,7 @@ pub fn spawn_planner_dispatcher(
             // Mode B — but keeping the read non-consuming preserves
             // the invariant that any post-exit reader can observe
             // the activity until the session_id is fully drained.)
-            let last_activity_for_classify =
-                ctx.session_activity.get(&session_id);
+            let last_activity_for_classify = ctx.session_activity.get(&session_id);
             let cleanliness = crate::session_activity::classify_planner_exit(
                 exit_notice_for_post_exit.as_ref(),
                 last_activity_for_classify.as_ref(),
@@ -1711,8 +1710,7 @@ pub fn spawn_planner_dispatcher(
         // respawn, and we do NOT want the operator-driven revoke
         // to be treated as a capacity-pressure event.
         let predecessor_was_capacity_pressure = if revoke_committed {
-            let last_activity =
-                ctx.session_activity.get(&session_id);
+            let last_activity = ctx.session_activity.get(&session_id);
             crate::session_activity::classify_planner_exit(
                 exit_notice_for_post_exit.as_ref(),
                 last_activity.as_ref(),
@@ -2281,12 +2279,7 @@ pub fn spawn_planner_dispatcher(
                 // reviewer) intent isn't subject to the orchestrator's
                 // VM-concurrency cap; only the orchestrator-spawn path
                 // is. Always pass `false`.
-                respawn_orchestrator_for_initiative(
-                    &initiative_id,
-                    Arc::clone(&ctx),
-                    false,
-                )
-                .await;
+                respawn_orchestrator_for_initiative(&initiative_id, Arc::clone(&ctx), false).await;
             }
             Ok(None) => { /* nothing to do */ }
             Err(e) => {
@@ -2738,8 +2731,8 @@ pub async fn respawn_orchestrator_for_initiative(
                 // itself carries them).
                 let store_for_lookup = Arc::clone(&ctx.store);
                 let escalation_id_for_lookup = escalation_id.clone();
-                let escalation_meta = tokio::task::spawn_blocking(
-                    move || -> Option<(String, String, String)> {
+                let escalation_meta =
+                    tokio::task::spawn_blocking(move || -> Option<(String, String, String)> {
                         let conn = store_for_lookup.lock_sync();
                         conn.query_row(
                             &format!(
@@ -2757,11 +2750,10 @@ pub async fn respawn_orchestrator_for_initiative(
                             },
                         )
                         .ok()
-                    },
-                )
-                .await
-                .ok()
-                .flatten();
+                    })
+                    .await
+                    .ok()
+                    .flatten();
                 if let Some((task_id, lineage_id, class)) = escalation_meta {
                     if let Err(e) = ctx.audit.emit(
                         raxis_audit_tools::AuditEventKind::EscalationSubmitted {

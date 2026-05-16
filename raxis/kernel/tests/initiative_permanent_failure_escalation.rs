@@ -166,9 +166,8 @@ fn schema_paired_write_permanent_failure_escalation(
         )
         .expect("anchor task present in seed");
 
-    let idempotency_key = format!(
-        "kernel-initiative-permanent-failure:{initiative_id}:{cause_kind}:{cause_seq}",
-    );
+    let idempotency_key =
+        format!("kernel-initiative-permanent-failure:{initiative_id}:{cause_kind}:{cause_seq}",);
 
     let scope_json = serde_json::json!({
         "LogicalDeadlock": {
@@ -238,9 +237,7 @@ fn schema_paired_write_permanent_failure_escalation(
 fn count_escalations_for_initiative(conn: &Connection, initiative_id: &str) -> i64 {
     let escalations = Table::Escalations.as_str();
     conn.query_row(
-        &format!(
-            "SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"
-        ),
+        &format!("SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"),
         params![initiative_id],
         |r| r.get(0),
     )
@@ -250,9 +247,7 @@ fn count_escalations_for_initiative(conn: &Connection, initiative_id: &str) -> i
 fn read_state(conn: &Connection, initiative_id: &str) -> String {
     let initiatives = Table::Initiatives.as_str();
     conn.query_row(
-        &format!(
-            "SELECT state FROM {initiatives} WHERE initiative_id = ?1"
-        ),
+        &format!("SELECT state FROM {initiatives} WHERE initiative_id = ?1"),
         params![initiative_id],
         |r| r.get(0),
     )
@@ -273,13 +268,7 @@ fn read_state(conn: &Connection, initiative_id: &str) -> String {
 #[test]
 fn idempotency_dedup_on_same_cause_seq() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    seed_initiative_with_anchor(
-        &conn,
-        "init-perm-fail-1",
-        "sess-1",
-        "task-1",
-        "lin-1",
-    );
+    seed_initiative_with_anchor(&conn, "init-perm-fail-1", "sess-1", "task-1", "lin-1");
 
     let first = schema_paired_write_permanent_failure_escalation(
         &mut conn,
@@ -329,13 +318,7 @@ fn idempotency_dedup_on_same_cause_seq() {
 #[test]
 fn distinct_causes_each_get_their_own_escalation() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    seed_initiative_with_anchor(
-        &conn,
-        "init-multi-cause",
-        "sess-1",
-        "task-1",
-        "lin-1",
-    );
+    seed_initiative_with_anchor(&conn, "init-multi-cause", "sess-1", "task-1", "lin-1");
 
     let push_id = schema_paired_write_permanent_failure_escalation(
         &mut conn,
@@ -369,13 +352,7 @@ fn distinct_causes_each_get_their_own_escalation() {
 #[test]
 fn escalation_row_class_is_logical_deadlock_kernel_initiated() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    seed_initiative_with_anchor(
-        &conn,
-        "init-class-pin",
-        "sess-1",
-        "task-1",
-        "lin-1",
-    );
+    seed_initiative_with_anchor(&conn, "init-class-pin", "sess-1", "task-1", "lin-1");
     let _ = schema_paired_write_permanent_failure_escalation(
         &mut conn,
         "init-class-pin",
@@ -471,13 +448,7 @@ fn audit_anchor_carries_cause_kind_and_recoverability() {
 #[test]
 fn skips_when_initiative_is_already_terminal() {
     let (_tmp, mut conn) = fresh_disk_conn();
-    seed_initiative_with_anchor(
-        &conn,
-        "init-already-aborted",
-        "sess-1",
-        "task-1",
-        "lin-1",
-    );
+    seed_initiative_with_anchor(&conn, "init-already-aborted", "sess-1", "task-1", "lin-1");
     // Operator-driven abort lands first.
     let initiatives = Table::Initiatives.as_str();
     conn.execute(

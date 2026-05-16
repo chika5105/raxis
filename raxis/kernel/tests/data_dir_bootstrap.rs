@@ -179,10 +179,8 @@ fn ensure_is_idempotent_against_pre_existing_dirs() {
     for name in &["keys", "policy", "audit", "providers", "runtime"] {
         fs::create_dir_all(tmp.path().join(name)).unwrap();
     }
-    ensure_data_dir_layout(tmp.path())
-        .expect("first call must accept pre-existing genesis dirs");
-    ensure_data_dir_layout(tmp.path())
-        .expect("second call must be a no-op");
+    ensure_data_dir_layout(tmp.path()).expect("first call must accept pre-existing genesis dirs");
+    ensure_data_dir_layout(tmp.path()).expect("second call must be a no-op");
 
     for name in DATA_DIR_SUBDIRS {
         assert!(

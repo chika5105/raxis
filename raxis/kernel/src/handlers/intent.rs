@@ -2122,16 +2122,19 @@ fn run_phase_c(
                     let category_for_escalation = category.to_owned();
                     let reason_for_escalation = reason.clone();
                     tokio::spawn(async move {
-                        let _ = crate::initiative_escalation::escalate_initiative_on_permanent_failure(
-                            ctx_for_escalation,
-                            init_for_escalation,
-                            crate::initiative_escalation::PermanentFailureCause::PushFailed {
-                                remote: remote_for_escalation,
-                                refspec: refspec_for_escalation,
-                                reason: format!("{category_for_escalation}: {reason_for_escalation}"),
-                            },
-                        )
-                        .await;
+                        let _ =
+                            crate::initiative_escalation::escalate_initiative_on_permanent_failure(
+                                ctx_for_escalation,
+                                init_for_escalation,
+                                crate::initiative_escalation::PermanentFailureCause::PushFailed {
+                                    remote: remote_for_escalation,
+                                    refspec: refspec_for_escalation,
+                                    reason: format!(
+                                        "{category_for_escalation}: {reason_for_escalation}"
+                                    ),
+                                },
+                            )
+                            .await;
                     });
                 }
             }

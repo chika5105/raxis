@@ -225,7 +225,12 @@ pub fn fatal_safety_critical(invariant_id: &'static str, detail: impl Display) -
     if let Some(sink) = SAFETY_AUDIT_SINK.get() {
         let event = AuditEventKind::KernelSafetyInvariantViolated {
             invariant_id: invariant_id.to_owned(),
-            location: format!("{}:{}:{}", location.file(), location.line(), location.column()),
+            location: format!(
+                "{}:{}:{}",
+                location.file(),
+                location.line(),
+                location.column()
+            ),
             detail: detail_str,
         };
         let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -242,7 +247,10 @@ mod tests {
 
     #[test]
     fn category_as_str_is_pinned() {
-        assert_eq!(KernelPanicCategory::SafetyCritical.as_str(), "SafetyCritical");
+        assert_eq!(
+            KernelPanicCategory::SafetyCritical.as_str(),
+            "SafetyCritical"
+        );
         assert_eq!(
             KernelPanicCategory::FatalForInitiative.as_str(),
             "FatalForInitiative"

@@ -692,9 +692,9 @@ mod tests {
         };
         match classify_planner_exit(Some(&notice), Some(&activity)) {
             ExitCleanliness::Clean => {}
-            other => panic!(
-                "MaxTurnsReached must classify as Clean (Mode-B handles it); got {other:?}",
-            ),
+            other => {
+                panic!("MaxTurnsReached must classify as Clean (Mode-B handles it); got {other:?}",)
+            }
         }
     }
 

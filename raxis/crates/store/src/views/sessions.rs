@@ -121,9 +121,7 @@ pub fn active_counts(conn: &RoConn) -> Result<SessionStateCounts, SessionViewErr
 /// that requires updating the matching invariant + the cap-
 /// admission test in
 /// `kernel/tests/session_spawn_cap_uses_db_truth.rs`.
-pub fn count_unrevoked_sessions(
-    conn: &rusqlite::Connection,
-) -> Result<u64, SessionViewError> {
+pub fn count_unrevoked_sessions(conn: &rusqlite::Connection) -> Result<u64, SessionViewError> {
     let count: i64 = conn.query_row(
         &format!(
             "SELECT COUNT(*) FROM {} WHERE revoked = 0",

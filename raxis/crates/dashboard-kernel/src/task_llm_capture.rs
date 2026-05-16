@@ -541,7 +541,10 @@ mod tests {
                           \"original_body_bytes\":1}";
         let parsed: LlmTurnRecord =
             serde_json::from_str(pre_iter64).expect("legacy line MUST parse");
-        assert_eq!(parsed.request_body, "", "missing field MUST default to empty string");
+        assert_eq!(
+            parsed.request_body, "",
+            "missing field MUST default to empty string"
+        );
         assert_eq!(parsed.body, "x");
         assert_eq!(parsed.at_ms, 7);
     }
@@ -686,9 +689,8 @@ mod tests {
     fn record_turn_survives_process_exit_101() {
         // Child path: write one turn then exit non-zero.
         if let Ok(dir) = std::env::var("RAXIS_TEST_LLM_DURABLE_CHILD_DIR") {
-            let cap =
-                TaskLlmCapture::new(std::path::Path::new(&dir), TaskCaptureConfig::default())
-                    .expect("child: capture init");
+            let cap = TaskLlmCapture::new(std::path::Path::new(&dir), TaskCaptureConfig::default())
+                .expect("child: capture init");
             cap.append("task-fsync", rec(99, "post-mortem-line"))
                 .expect("child: append");
             // `process::exit(101)` runs no Rust destructors;

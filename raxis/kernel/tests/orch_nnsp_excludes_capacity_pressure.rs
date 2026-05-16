@@ -221,10 +221,15 @@ fn ceiling_only_trips_on_structural_increments() {
 
     let mut structural = 0u32;
     let interleaved: &[&str] = &[
-        "cap", "cap", "structural", // counter → 1
-        "cap", "structural", // counter → 2
+        "cap",
+        "cap",
+        "structural", // counter → 1
+        "cap",
+        "structural", // counter → 2
         "structural", // counter → 3 (== MAX, still permitted)
-        "cap", "cap", "cap",
+        "cap",
+        "cap",
+        "cap",
         "structural", // counter → 4 (== MAX + 1, trips)
     ];
     for kind in interleaved {
@@ -239,5 +244,8 @@ fn ceiling_only_trips_on_structural_increments() {
         }
     }
     assert_eq!(structural, MAX_ORCH_NO_PROGRESS_RESPAWNS + 1);
-    assert_eq!(read_count(&conn, "init-iter65-ceiling"), MAX_ORCH_NO_PROGRESS_RESPAWNS + 1);
+    assert_eq!(
+        read_count(&conn, "init-iter65-ceiling"),
+        MAX_ORCH_NO_PROGRESS_RESPAWNS + 1
+    );
 }

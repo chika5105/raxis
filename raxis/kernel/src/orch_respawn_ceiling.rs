@@ -957,11 +957,7 @@ mod tests {
         .expect("seed orch session");
     }
 
-    fn seed_worker_session(
-        conn: &Connection,
-        session_id: &str,
-        lineage_id: &str,
-    ) {
+    fn seed_worker_session(conn: &Connection, session_id: &str, lineage_id: &str) {
         let sessions = Table::Sessions.as_str();
         conn.execute(
             &format!(
@@ -1005,9 +1001,7 @@ mod tests {
         let escalations = Table::Escalations.as_str();
         let n: i64 = conn
             .query_row(
-                &format!(
-                    "SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"
-                ),
+                &format!("SELECT COUNT(*) FROM {escalations} WHERE initiative_id = ?1"),
                 rusqlite::params![initiative_id],
                 |r| r.get(0),
             )
@@ -1073,8 +1067,7 @@ mod tests {
 
         let escalation_id = res.expect("tier-1 anchor MUST resolve when worker exists");
         assert_eq!(count_escalations(&conn, "init-tier1"), 1);
-        let (class, initiator, status, idem) =
-            read_escalation_meta(&conn, &escalation_id);
+        let (class, initiator, status, idem) = read_escalation_meta(&conn, &escalation_id);
         assert_eq!(class, "LogicalDeadlock");
         assert_eq!(initiator, "Kernel");
         assert_eq!(status, "Pending");
@@ -1111,8 +1104,7 @@ mod tests {
         let escalation_id =
             res.expect("tier-2 fallback MUST resolve when only orch session exists");
         assert_eq!(count_escalations(&conn, "init-tier2"), 1);
-        let (class, initiator, status, idem) =
-            read_escalation_meta(&conn, &escalation_id);
+        let (class, initiator, status, idem) = read_escalation_meta(&conn, &escalation_id);
         assert_eq!(class, "LogicalDeadlock");
         assert_eq!(initiator, "Kernel");
         assert_eq!(status, "Pending");
@@ -1178,13 +1170,7 @@ mod tests {
         let conn = fresh_conn_with_initiative("init-retrip");
         let lineage = "lin-retrip".to_owned();
         seed_orch_session(&conn, "sess-orch-1", "init-retrip", &lineage);
-        seed_task_with_session(
-            &conn,
-            "task-pending-1",
-            "init-retrip",
-            "Admitted",
-            None,
-        );
+        seed_task_with_session(&conn, "task-pending-1", "init-retrip", "Admitted", None);
 
         let now = 1_715_700_000_i64;
         let tx = conn.unchecked_transaction().expect("begin1");
