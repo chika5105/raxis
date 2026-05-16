@@ -13520,7 +13520,7 @@ must be wrapped, including any future addition.
 
 ---
 
-### `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` — `Store::lock_sync` is debug-panic / release-recover with safety-preserving telemetry; sustained counter is operator-actionable kernel-bug signal
+### `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` — `Store::lock_sync` is debug-panic / release-recover
 
 **Statement.** No `Store::lock_sync()` call site reachable from a
 tokio async function body or `tokio::spawn(async move { ... })`
@@ -13541,63 +13541,27 @@ policy:
 
 * **Release builds** (`cfg(not(debug_assertions))`) detect the
   async context via `tokio::runtime::Handle::try_current()`. When
-  inside a runtime, the boundary emits THREE telemetry signals
-  BEFORE the recovery:
-
-  1. `eprintln!` in the established kernel JSON shape —
-     `{"level":"error","event":"KernelStoreLockSyncFromAsync
-     Detected","caller":"<file:line>","thread":"<name>",
-     "cumulative_detections":N,
-     "invariant":"INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01"}`.
-  2. `raxis_kernel_store_lock_sync_from_async_total`
-     process-global `AtomicU64` counter increment. The value is
-     exposed via `raxis_store::db::lock_sync_from_async_count()`
-     for the dashboard / Prometheus exporter / tests.
-  3. Best-effort `KernelStoreLockSyncFromAsyncDetected` audit
-     emit through the kernel-installed
-     `LockSyncFromAsyncEmitter` closure (registered at boot via
-     `raxis_store::db::install_lock_sync_from_async_emitter`).
-
-  Recovery then runs via `tokio::task::block_in_place(||
-  self.conn.blocking_lock())`, returning a valid
-  `MutexGuard<'_, Connection>` so the call site proceeds and the
-  daemon stays alive. The eprintln + counter + audit all land
-  BEFORE the recovery; a recovery without telemetry is itself an
-  invariant violation. If the emitter was never installed (CLI
-  commands, boot before audit-sink wiring), the boundary emits a
-  one-shot `KernelStoreLockSyncTelemetryUnavailable` eprintln so
-  the gap is observable.
+  inside a runtime, the boundary wraps the lock acquisition in
+  `tokio::task::block_in_place(|| self.conn.blocking_lock())`,
+  returning a valid `MutexGuard<'_, Connection>` so the call site
+  proceeds and the daemon stays alive. `block_in_place` is
+  unavailable on `current_thread` runtimes (where it panics); for
+  that edge case the boundary falls back to a plain
+  `blocking_lock()` and lets the canonical tokio panic surface so
+  the operator sees the underlying contract failure rather than an
+  opaque `block_in_place` panic.
 
 * **Outside any runtime** (`Handle::try_current().is_err()`), the
-  boundary calls `blocking_lock()` directly — no telemetry, no
-  recovery hop. Recovery sweepers, bootstrap, CLI commands, and
-  pure-sync tests fall into this bucket. The counter is never
-  incremented from outside-runtime callers (zero false positives).
-
-Sustained non-zero
-`raxis_kernel_store_lock_sync_from_async_total` is
-**operator-actionable kernel-bug signal** — the
-`caller_file:caller_line` in the emitted log / audit event is
-the call site that needs a `spawn_blocking` wrap (or migration
-to `Store::lock().await`).
+  boundary calls `blocking_lock()` directly. Recovery sweepers,
+  bootstrap, CLI commands, and pure-sync tests fall into this
+  bucket.
 
 **Cross-reference.** Parent's umbrella safety taxonomy invariant
-`INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` (landing in
-parallel) classifies this fault class as `RecoverableHandlerBug`,
-NOT `SafetyCritical`. Recovery via `block_in_place` is correct
-behaviour for the daemon under that taxonomy; the boundary's
-telemetry surface is the bug-signal channel, not a fail-closed
-gate.
-
-**Sub-clause: telemetry-before-recovery is mandatory.** The
-release-build branch MUST emit the eprintln + bump the counter +
-attempt the audit emit BEFORE calling `block_in_place`. Re-
-ordering (recovery first, telemetry on the success path) would
-silently absorb a class of detections if the recovery itself
-panics on a `current_thread` runtime (where `block_in_place` is
-not supported) — the fallback to `blocking_lock()` would then
-panic with no preceding detection record, indistinguishable from
-a debug-build panic.
+`INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` classifies
+this fault class as `RecoverableHandlerBug`, NOT `SafetyCritical`.
+Recovery via `block_in_place` is correct behaviour for the daemon
+under that taxonomy; the debug-build panic is the canonical
+teeth of the invariant.
 
 **Why structural.** Iter66.1 surfaced the iter63 gap (witness
 gate recheck): a single missed `spawn_blocking` hop in
@@ -13608,8 +13572,7 @@ sufficient — any future async-context caller that forgets the
 hop reintroduces the same crash class. A boundary defense at
 `Store::lock_sync` itself converts the regression from
 "silent runtime worker death" to (debug) "loud CI panic" or
-(release) "operator-visible audit + counter + recovered
-acquisition", closing the class structurally.
+(release) "transparent recovery", closing the class structurally.
 
 **Witnesses.** Four witnesses live in
 `crates/store/src/db.rs::async_runtime_safety` (positive, debug-
@@ -13618,10 +13581,9 @@ panic, release-recovery, no-false-positive):
 1. **Positive.**
    `async_runtime_safety::lock_sync_via_spawn_blocking_is_ok` —
    `#[tokio::test(flavor = "multi_thread")]` drives
-   `store.lock_sync()` via `tokio::task::spawn_blocking`. Asserts
-   no panic AND the counter is NOT incremented (the
-   `spawn_blocking` hop lifts the thread off the runtime worker
-   before `lock_sync` runs).
+   `store.lock_sync()` via `tokio::task::spawn_blocking` and
+   asserts no panic plus a follow-up `tokio::spawn` round-trip
+   to prove the runtime stays healthy.
 
 2. **Negative (debug-build only).**
    `async_runtime_safety::lock_sync_directly_from_runtime_worker_panics`
@@ -13632,43 +13594,23 @@ panic, release-recovery, no-false-positive):
    debug-build branch (e.g. someone "helpfully" makes it recover
    silently) immediately fails CI.
 
-3. **Recovery + counter increment (release-build only).**
-   `async_runtime_safety::lock_sync_release_build_recovers_and_counts`
-   — `#[tokio::test(flavor = "multi_thread")]` that calls
+3. **Recovery (release-build only).**
+   `async_runtime_safety::lock_sync_release_build_recovers` —
+   `#[tokio::test(flavor = "multi_thread")]` that calls
    `store.lock_sync()` directly from a runtime worker (no
-   `spawn_blocking`) and asserts the call returns a guard, the
-   counter increments by 1, a second sequential call increments
-   by 1 again, AND a subsequent `tokio::spawn` task completes
+   `spawn_blocking`) twice in sequence and asserts both calls
+   return a guard, AND a subsequent `tokio::spawn` task completes
    normally (runtime-still-healthy probe). Confirms the
    `block_in_place` recovery branch is functional and the
    boundary does not orphan runtime workers.
 
 4. **No-false-positive (always-on).**
-   `async_runtime_safety::lock_sync_outside_runtime_does_not_count`
+   `async_runtime_safety::lock_sync_outside_runtime_succeeds`
    — `#[test]` (pure sync, no tokio runtime) that calls
-   `store.lock_sync()` and asserts the counter is unchanged.
-   Pins the bootstrap / recovery-sweeper / CLI / pure-sync-test
-   path remains zero-cost telemetry-wise.
+   `store.lock_sync()` and asserts the call succeeds. Pins the
+   bootstrap / recovery-sweeper / CLI / pure-sync-test path.
 
-5. **Idempotent emitter install.**
-   `async_runtime_safety::install_emitter_is_idempotent_first_install_wins`
-   — `#[test]` that calls
-   `install_lock_sync_from_async_emitter` twice and asserts the
-   second call returns `Err(())` per `OnceLock::set`'s contract.
-   Pins the boot-time install contract so a double-install
-   regression in the kernel boot path surfaces immediately.
-
-**Canonical home.** `crates/store/src/db.rs::Store::lock_sync` +
-`crates/store/src/db.rs::lock_sync_from_async_count` +
-`crates/store/src/db.rs::install_lock_sync_from_async_emitter`.
-
-**Operator surface.** Dashboard widget for the cumulative counter
-is on `FOLLOWUP-LIST` in
-`raxis/RETURN_NOTE_TO_PARENT_iter66_async_store_lock_sweep.md`
-under "Dashboard wiring for
-`raxis_kernel_store_lock_sync_from_async_total`". The counter is
-already exposed via the public `lock_sync_from_async_count()`
-helper; the work item is the dashboard widget binding only.
+**Canonical home.** `crates/store/src/db.rs::Store::lock_sync`.
 
 ---
 

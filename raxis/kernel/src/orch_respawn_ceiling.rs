@@ -416,7 +416,27 @@ pub fn insert_logical_deadlock_escalation_in_tx(
 
     let initiative_uuid = match raxis_types::InitiativeId::parse(initiative_id) {
         Ok(id) => id,
-        Err(_) => return Ok(None),
+        Err(parse_err) => {
+            // Production initiative ids always come from the kernel
+            // store and are guaranteed to be hyphenated UUIDs; a
+            // parse failure here means the caller passed a
+            // non-UUID literal (most likely a unit-test seed that
+            // forgot to use `uuid_for_slot`). Log the regression
+            // before falling closed so a silent `Ok(None)` cannot
+            // mask a real bug at runtime.
+            eprintln!(
+                "{{\"level\":\"error\",\
+                 \"event\":\"OrchRespawnCeilingNonUuidInitiativeId\",\
+                 \"initiative_id\":{init_json},\
+                 \"reason\":{reason_json},\
+                 \"invariant\":\"INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01\"}}",
+                init_json = serde_json::to_string(initiative_id)
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+                reason_json = serde_json::to_string(&parse_err.to_string())
+                    .unwrap_or_else(|_| "\"<unserialisable>\"".to_owned()),
+            );
+            return Ok(None);
+        }
     };
 
     let last_intent_kind_trunc = truncate_for_scope(last_intent_kind);
@@ -1032,19 +1052,35 @@ mod tests {
         .expect("read escalation meta")
     }
 
+    /// Helper: produce a deterministic but distinct hyphenated UUID
+    /// for each named slot. `insert_logical_deadlock_escalation_in_tx`
+    /// runs `raxis_types::InitiativeId::parse` on the input and
+    /// silently returns `Ok(None)` if the string is not a UUID, so
+    /// every test that exercises the insert path MUST seed real
+    /// UUIDs. The seed bytes encode the slot name so a failing
+    /// assertion still points back to which seed was used.
+    fn uuid_for_slot(slot: u8) -> String {
+        let mut bytes = [0u8; 16];
+        bytes[15] = slot;
+        // `Uuid::from_bytes` does no random ceremony — the result is
+        // a stable RFC 4122 hyphenated string the parser accepts.
+        uuid::Uuid::from_bytes(bytes).hyphenated().to_string()
+    }
+
     /// Tier-1 path: a worker session + a task bound to it. The
     /// helper anchors on the worker (the natural deadlock subject)
     /// and a single LogicalDeadlock row lands.
     #[test]
     fn tier_1_worker_anchored_insert_lands_one_row() {
-        let conn = fresh_conn_with_initiative("init-tier1");
+        let init_id = uuid_for_slot(1);
+        let conn = fresh_conn_with_initiative(&init_id);
         let lineage = "lin-tier1".to_owned();
-        seed_orch_session(&conn, "sess-orch-1", "init-tier1", &lineage);
+        seed_orch_session(&conn, "sess-orch-1", &init_id, &lineage);
         seed_worker_session(&conn, "sess-worker-1", &lineage);
         seed_task_with_session(
             &conn,
             "task-running-1",
-            "init-tier1",
+            &init_id,
             "Running",
             Some("sess-worker-1"),
         );
@@ -1053,7 +1089,7 @@ mod tests {
         let now = 1_715_700_000_i64;
         let res = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-tier1",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1066,12 +1102,12 @@ mod tests {
         tx.commit().expect("commit");
 
         let escalation_id = res.expect("tier-1 anchor MUST resolve when worker exists");
-        assert_eq!(count_escalations(&conn, "init-tier1"), 1);
+        assert_eq!(count_escalations(&conn, &init_id), 1);
         let (class, initiator, status, idem) = read_escalation_meta(&conn, &escalation_id);
         assert_eq!(class, "LogicalDeadlock");
         assert_eq!(initiator, "Kernel");
         assert_eq!(status, "Pending");
-        assert_eq!(idem, "kernel-orch-respawn-ceiling:init-tier1:4");
+        assert_eq!(idem, format!("kernel-orch-respawn-ceiling:{init_id}:4"));
     }
 
     /// Tier-2 fallback: orchestrator session + a task with no
@@ -1080,16 +1116,17 @@ mod tests {
     /// iter65 falls back to the orchestrator session.
     #[test]
     fn tier_2_fallback_lands_when_no_worker_session_exists() {
-        let conn = fresh_conn_with_initiative("init-tier2");
+        let init_id = uuid_for_slot(2);
+        let conn = fresh_conn_with_initiative(&init_id);
         let lineage = "lin-tier2".to_owned();
-        seed_orch_session(&conn, "sess-orch-1", "init-tier2", &lineage);
-        seed_task_with_session(&conn, "task-pending-1", "init-tier2", "Admitted", None);
+        seed_orch_session(&conn, "sess-orch-1", &init_id, &lineage);
+        seed_task_with_session(&conn, "task-pending-1", &init_id, "Admitted", None);
 
         let tx = conn.unchecked_transaction().expect("begin");
         let now = 1_715_700_000_i64;
         let res = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-tier2",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1103,12 +1140,12 @@ mod tests {
 
         let escalation_id =
             res.expect("tier-2 fallback MUST resolve when only orch session exists");
-        assert_eq!(count_escalations(&conn, "init-tier2"), 1);
+        assert_eq!(count_escalations(&conn, &init_id), 1);
         let (class, initiator, status, idem) = read_escalation_meta(&conn, &escalation_id);
         assert_eq!(class, "LogicalDeadlock");
         assert_eq!(initiator, "Kernel");
         assert_eq!(status, "Pending");
-        assert_eq!(idem, "kernel-orch-respawn-ceiling:init-tier2:4");
+        assert_eq!(idem, format!("kernel-orch-respawn-ceiling:{init_id}:4"));
     }
 
     /// Idempotency on the same `(initiative_id, attempts)` pair:
@@ -1117,16 +1154,17 @@ mod tests {
     /// short-circuits; the helper returns `Ok(None)`.
     #[test]
     fn same_attempts_count_does_not_double_insert() {
-        let conn = fresh_conn_with_initiative("init-idem");
+        let init_id = uuid_for_slot(3);
+        let conn = fresh_conn_with_initiative(&init_id);
         let lineage = "lin-idem".to_owned();
-        seed_orch_session(&conn, "sess-orch-1", "init-idem", &lineage);
-        seed_task_with_session(&conn, "task-pending-1", "init-idem", "Admitted", None);
+        seed_orch_session(&conn, "sess-orch-1", &init_id, &lineage);
+        seed_task_with_session(&conn, "task-pending-1", &init_id, "Admitted", None);
 
         let now = 1_715_700_000_i64;
         let tx = conn.unchecked_transaction().expect("begin1");
         let first = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-idem",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1142,7 +1180,7 @@ mod tests {
         let tx = conn.unchecked_transaction().expect("begin2");
         let second = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-idem",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1157,7 +1195,7 @@ mod tests {
             second.is_none(),
             "second insert with same (initiative_id, attempts) MUST be deduped"
         );
-        assert_eq!(count_escalations(&conn, "init-idem"), 1);
+        assert_eq!(count_escalations(&conn, &init_id), 1);
     }
 
     /// Distinct `attempts` value (the operator approved + reset,
@@ -1167,16 +1205,17 @@ mod tests {
     /// silently deduplicated this re-trip.
     #[test]
     fn distinct_attempts_count_inserts_a_separate_row() {
-        let conn = fresh_conn_with_initiative("init-retrip");
+        let init_id = uuid_for_slot(4);
+        let conn = fresh_conn_with_initiative(&init_id);
         let lineage = "lin-retrip".to_owned();
-        seed_orch_session(&conn, "sess-orch-1", "init-retrip", &lineage);
-        seed_task_with_session(&conn, "task-pending-1", "init-retrip", "Admitted", None);
+        seed_orch_session(&conn, "sess-orch-1", &init_id, &lineage);
+        seed_task_with_session(&conn, "task-pending-1", &init_id, "Admitted", None);
 
         let now = 1_715_700_000_i64;
         let tx = conn.unchecked_transaction().expect("begin1");
         let first = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-retrip",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1192,7 +1231,7 @@ mod tests {
         let tx = conn.unchecked_transaction().expect("begin2");
         let second = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-retrip",
+            &init_id,
             8,
             360,
             "RetrySubTask",
@@ -1207,7 +1246,7 @@ mod tests {
             second.is_some(),
             "distinct attempts value MUST land a fresh row"
         );
-        assert_eq!(count_escalations(&conn, "init-retrip"), 2);
+        assert_eq!(count_escalations(&conn, &init_id), 2);
     }
 
     /// Empty initiative — neither orchestrator session nor task
@@ -1216,13 +1255,14 @@ mod tests {
     /// log emit.
     #[test]
     fn no_anchor_returns_none_without_inserting() {
-        let conn = fresh_conn_with_initiative("init-empty");
+        let init_id = uuid_for_slot(5);
+        let conn = fresh_conn_with_initiative(&init_id);
 
         let tx = conn.unchecked_transaction().expect("begin");
         let now = 1_715_700_000_i64;
         let res = insert_logical_deadlock_escalation_in_tx(
             &tx,
-            "init-empty",
+            &init_id,
             4,
             180,
             "RetrySubTask",
@@ -1238,6 +1278,6 @@ mod tests {
             res.is_none(),
             "no anchor MUST surface as Ok(None) — caller fail-closes the path"
         );
-        assert_eq!(count_escalations(&conn, "init-empty"), 0);
+        assert_eq!(count_escalations(&conn, &init_id), 0);
     }
 }

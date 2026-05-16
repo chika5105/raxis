@@ -226,6 +226,21 @@ impl TaskLlmCapture {
     /// don't lose the event) and the function returns `Err` so
     /// the caller can decide whether to retry or surface.
     pub fn append(&self, task_id: &str, mut record: LlmTurnRecord) -> std::io::Result<()> {
+        // Normalise the record's `task_id` to match the routing key
+        // before we persist or broadcast. The routing key picks the
+        // per-task JSONL file we write into, and any divergence
+        // between that key and the record's internal `task_id` field
+        // would surface in post-mortem readers as "tail("task-A")
+        // returns records claiming to be from task-B" — a confusing
+        // mismatch that violates the post-mortem surface's implicit
+        // round-trip contract. Caller code in the gateway pump
+        // already supplies the right id; this normalisation is a
+        // defence-in-depth pin against future refactors that build
+        // a record with a placeholder id and route it under the
+        // canonical key.
+        if record.task_id != task_id {
+            record.task_id = task_id.to_owned();
+        }
         // Enforce per-record body cap BEFORE serializing so the
         // file ring can never balloon from a single response.
         let max = self.cfg.max_body_bytes;

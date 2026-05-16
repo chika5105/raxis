@@ -171,15 +171,16 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // arm in `notification_priority`; both surfaces MUST classify
         // it as `Critical` per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
         | "InitiativePermanentFailureEscalated"
-        // `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` (iter66) —
-        // a `Store::lock_sync` boundary detection fires on a release
-        // build whenever a kernel call site is missing a
-        // `spawn_blocking` hop. The recovery via `block_in_place`
-        // keeps the daemon alive, but the persistent counter
-        // (`raxis_kernel_store_lock_sync_from_async_total`) is
-        // operator-actionable kernel-bug signal — same Critical band
-        // as the deadlock detector, distinct cause class.
-        | "KernelStoreLockSyncFromAsyncDetected" => Some(Critical),
+        // Mirror arms for the typed `K::VerifierImageDigestMismatch`
+        // / `K::WitnessOperatorHintSpoofingDetected` => `Critical`
+        // classifications below. Without them the typed wrapper
+        // emits a Critical-priority audit row but
+        // `notifications::dispatch` re-filters against the string
+        // table and drops the inbox / SSE delivery — leaving the
+        // most-severe verifier-substrate events visible only in
+        // the audit chain. INV-NOTIFICATION-PRIORITY-PARITY-01.
+        | "VerifierImageDigestMismatch"
+        | "WitnessOperatorHintSpoofingDetected" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -207,7 +208,22 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         | "PlanRejected"
         | "InitiativeAborted"
         | "OperatorRevealedCredential"
-        | "KernelRestartInitiated" => Some(High),
+        | "KernelRestartInitiated"
+        // Mirror arms for the iter62/iter63 verifier-bounded-runtime
+        // family: every typed arm below classifies as `High`, and
+        // `notifications::dispatch` enforces parity against the
+        // string table — without these arms the operator inbox
+        // silently drops every verifier-timeout / artifact-reject /
+        // wallclock-timeout / idle-timeout / budget-exhausted /
+        // forced-shutdown / witness-handler-timeout event.
+        // INV-NOTIFICATION-PRIORITY-PARITY-01.
+        | "VerifierTimeout"
+        | "VerifierArtifactRejected"
+        | "VerifierWallClockTimeout"
+        | "VerifierIdleTimeout"
+        | "VerifierBudgetExhausted"
+        | "VerifierVmForcedShutdown"
+        | "WitnessHandlerTimeout" => Some(High),
 
         // Medium
         "KernelStarted"
@@ -696,12 +712,6 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // `notification_priority_for_kind_str` keeps the surfaces
         // in lockstep per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
         K::InitiativePermanentFailureEscalated { .. } => Some(Critical),
-        // `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` (iter66) —
-        // see the `KernelStoreLockSyncFromAsyncDetected` event docs
-        // in `crates/audit/src/event.rs`. Critical to mirror the
-        // `notification_priority_for_kind_str` arm per
-        // `INV-NOTIFICATION-PRIORITY-PARITY-01`.
-        K::KernelStoreLockSyncFromAsyncDetected { .. } => Some(Critical),
     }
 }
 
@@ -1330,9 +1340,10 @@ mod tests {
             ("KernelRestartHaltedCircuitOpen", Critical),
             ("OrchestratorRespawnCeilingExceeded", Critical),
             ("InitiativePermanentFailureEscalated", Critical),
-            ("KernelStoreLockSyncFromAsyncDetected", Critical),
             ("KernelPanicCaught", Critical),
             ("KernelSafetyInvariantViolated", Critical),
+            ("VerifierImageDigestMismatch", Critical),
+            ("WitnessOperatorHintSpoofingDetected", Critical),
             // High
             ("EscalationSubmitted", High),
             ("EscalationRateLimitExceeded", High),
@@ -1360,6 +1371,13 @@ mod tests {
             ("InitiativeAborted", High),
             ("OperatorRevealedCredential", High),
             ("KernelRestartInitiated", High),
+            ("VerifierTimeout", High),
+            ("VerifierArtifactRejected", High),
+            ("VerifierWallClockTimeout", High),
+            ("VerifierIdleTimeout", High),
+            ("VerifierBudgetExhausted", High),
+            ("VerifierVmForcedShutdown", High),
+            ("WitnessHandlerTimeout", High),
             // Medium
             ("KernelStarted", Medium),
             ("KernelStopped", Medium),
