@@ -1,0 +1,88 @@
+[package]
+name        = "raxis-verifier"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Production V2 verifier PID-1 binary baked into both the
+# `verifier-starter` and `verifier-symbol-index` guest images
+# (see `images/verifier-starter/Containerfile` and
+# `images/verifier-symbol-index/Containerfile`).
+#
+# Spawn contract per `peripherals.md §3.3 + verifier-processes.md §6`:
+#
+#   * Kernel `gates::verifier_runner::spawn_verifier` execve()s this
+#     binary with a scrubbed env containing the spawn envelope
+#     (`RAXIS_VERIFIER_*`, `RAXIS_TASK_ID`, `RAXIS_KERNEL_SOCKET`, …)
+#     and `RAXIS_VERIFIER_COMMAND` carrying the verifier-supplied
+#     shell command.
+#   * The binary runs `sh -lc $RAXIS_VERIFIER_COMMAND`, captures
+#     `(stdout, stderr, exit_code)` (size-capped), and maps the exit
+#     code to a `WitnessResultClass` per the §6 table.
+#   * Wall-clock timeout from `RAXIS_VERIFIER_TIMEOUT_SECONDS`; on
+#     expiry the verifier self-terminates with `Inconclusive` +
+#     `failure_reason = "timeout"`.
+#   * Optional artefact file read from `RAXIS_VERIFIER_ARTIFACT_PATH`
+#     (size-capped at `RAXIS_VERIFIER_ARTIFACT_MAX_BYTES`), bytes +
+#     `sha256` attached to `WitnessSubmission.artifact`.
+#   * One `WitnessSubmission` written + one `WitnessAck` read over
+#     the UDS path in `RAXIS_KERNEL_SOCKET`, then exit.
+description = "V2 production verifier PID-1 binary — runs RAXIS_VERIFIER_COMMAND, captures the witness, submits one WitnessSubmission to the kernel, and exits."
+
+[lib]
+# Library half — env parser, exit-code mapper, command-execution
+# helper, artifact-loader, and submission builder. Pure functions
+# where possible; the command-execution helper does I/O but is
+# parameterised over a `tokio::process::Command` factory so tests
+# can exercise the timeout / output-cap paths without spawning real
+# subprocesses.
+path = "src/lib.rs"
+
+[[bin]]
+# Binary half — the entry point `gates::verifier_runner::spawn_verifier`
+# execve()s. Minimal shim over `lib.rs` so unit tests cover the
+# whole behavioural surface without spawning subprocesses.
+name = "raxis-verifier"
+path = "src/main.rs"
+
+[dependencies]
+# Wire types — same crate the kernel-side `handlers::witness::handle`
+# consumes the inbound `WitnessSubmission` through, so the verifier's
+# wire shape is byte-for-byte what the kernel expects.
+raxis-types = { workspace = true }
+
+# Frame codec — `read_frame` / `write_frame` (4-byte LE length prefix
+# + `bincode::config::standard()` body) + `IpcMessage`. Same crate
+# the kernel's planner accept loop uses, so the verifier's emit path
+# matches production exactly.
+raxis-ipc   = { workspace = true }
+
+# Async runtime — the verifier connects to the UDS via
+# `tokio::net::UnixStream` and shells out via `tokio::process::Command`
+# so the wall-clock timeout, the child-wait, and the kernel
+# round-trip can all share one runtime.
+tokio       = { workspace = true }
+
+# `WitnessSubmission.body` and `.artifact` carry structured JSON;
+# the verifier builds them via `serde_json::json!` so the producer
+# side cannot drift from what the kernel parses.
+serde_json  = { workspace = true }
+
+# SHA-256 of the captured artefact bytes — the kernel side re-checks
+# the digest at admission time (per `verifier-processes.md §6`).
+sha2        = { workspace = true }
+
+# Hex encoding for the artifact's `sha256` field on the wire.
+hex         = { workspace = true }
+
+# Typed error variants (`VerifierEnvError`, `BuildError`,
+# `RunError`) so unit-test assertions can match on the variant
+# rather than grep into error strings.
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+# Tempfile-backed fixtures for artefact-size-cap + path-escape
+# tests so the unit suite never touches a real `/raxis/` path.
+tempfile    = "3"
