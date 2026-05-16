@@ -3715,6 +3715,18 @@ mod tests {
             Role::Orchestrator => "planner-orchestrator",
             Role::Reviewer => "planner-reviewer",
             Role::ExecutorStarter => "planner-executor",
+            // The freshness-guard scaffold pins the planner-role
+            // src layout (`crates/planner-<role>/src/main.rs`); the
+            // iter62 verifier roles live at `crates/verifier` and
+            // do not participate in the planner-side freshness
+            // taxonomy. No existing witness drives this scaffold
+            // with a verifier role; refuse loudly if a future test
+            // tries to.
+            Role::Verifier | Role::VerifierSymbolIndex => unreachable!(
+                "build_freshness_scaffold does not model the verifier roles; \
+                 they live at crates/verifier and have a different \
+                 freshness contract"
+            ),
         };
         let role_src = workspace.join("crates").join(role_subdir).join("src");
         let core_src = workspace.join("crates").join("planner-core").join("src");

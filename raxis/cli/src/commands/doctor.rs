@@ -623,6 +623,9 @@ fn kind_tag(kind: CanonicalImageKind) -> &'static str {
         CanonicalImageKind::Reviewer => "reviewer",
         CanonicalImageKind::Orchestrator => "orchestrator",
         CanonicalImageKind::ExecutorStarter => "executor-starter",
+        // === iter62 verifier-runtime ===
+        CanonicalImageKind::Verifier => "verifier-starter",
+        CanonicalImageKind::VerifierSymbolIndex => "verifier-symbol-index",
     }
 }
 

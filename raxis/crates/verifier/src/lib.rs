@@ -678,20 +678,20 @@ async fn wait_for_child_with_timeout(
     let stdout_task = tokio::spawn(read_capped(stdout_pipe, stdout_max));
     let stderr_task = tokio::spawn(read_capped(stderr_pipe, stderr_max));
 
-    let wait_fut = child.wait();
-    tokio::pin!(wait_fut);
-
-    let (status_opt, timed_out) = tokio::select! {
-        res = &mut wait_fut => match res {
-            Ok(s) => (Some(s), false),
-            Err(e) => return Err(RunError::Wait(e)),
-        },
-        _ = tokio::time::sleep(timeout) => {
+    // Use `tokio::time::timeout` rather than a pinned `select!` over
+    // `child.wait()` + `child.start_kill()` — the latter holds a `&mut`
+    // borrow on `child` for the lifetime of the wait future, which the
+    // borrow checker rejects when we want to issue `start_kill` from
+    // the timeout arm.
+    let (status_opt, timed_out) = match tokio::time::timeout(timeout, child.wait()).await {
+        Ok(Ok(s)) => (Some(s), false),
+        Ok(Err(e)) => return Err(RunError::Wait(e)),
+        Err(_) => {
             let _ = child.start_kill();
             // Best-effort drain; if the child ignores the kill, we
             // still return Timeout and the substrate tears down the
             // VM after the binary exits.
-            let _ = (&mut wait_fut).await;
+            let _ = child.wait().await;
             (None, true)
         }
     };
@@ -1144,7 +1144,7 @@ fn base64_encode(bytes: &[u8]) -> String {
             out.push(CHARS[((n >> 6) & 0x3f) as usize] as char);
             out.push('=');
         }
-        _ => unreachable!("chunks_exact remainder ∈ {0, 1, 2}"),
+        _ => unreachable!("chunks_exact remainder in 0..=2"),
     }
     out
 }

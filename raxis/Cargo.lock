@@ -4108,6 +4108,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "raxis-verifier"
+version = "0.1.0"
+dependencies = [
+ "hex",
+ "raxis-ipc",
+ "raxis-types",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "raxis-verifier-no-secrets"
+version = "0.1.0"
+dependencies = [
+ "raxis-ipc",
+ "raxis-types",
+ "serde_json",
+ "tempfile",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
 name = "raxis-verifier-stub"
 version = "0.1.0"
 dependencies = [

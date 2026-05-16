@@ -584,6 +584,42 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         //     unblock the task, the eventual `TaskFailed*` /
         //     `TaskBlockedForRecovery` arm above is the operator-
         //     attention surface.
+        // ── iter62 verifier-runtime + intent-validation additions ──
+        //
+        // Wired in at integration time when these variants landed
+        // from `worker/iter62-verifier-runtime` and
+        // `worker/iter62-fixes-kernel`. The match in
+        // `notification_priority` is intentionally exhaustive (see
+        // the test-module banner below); these arms keep that
+        // contract while routing each variant to the priority that
+        // matches its sibling-event taxonomy.
+        //
+        // `IntentValidationRejected` mirrors the existing
+        // `IntentRejected => None` classification — a single
+        // validation reject is observability-only; persistent
+        // rejection surfaces via the already-classified
+        // `TaskBlockedForRecovery` / `TaskFailed*` arms above.
+        K::IntentValidationRejected { .. } => None,
+        // Verifier VM lifecycle events are observability-only. The
+        // operator-attention surface is the witness verdict, not
+        // the spawn/exit envelope.
+        K::VerifierVmSpawned { .. } => None,
+        K::VerifierVmExited { .. } => None,
+        // Witness-received is a success path — verifier ran and
+        // returned a verdict. The verdict itself surfaces via
+        // `WitnessRejected => High` for the negative case.
+        K::VerifierWitnessReceived { .. } => None,
+        // Image-digest mismatch on a verifier image is a substrate
+        // integrity violation in the same family as
+        // `IsolationSubstrateRefused` — Critical, operator MUST
+        // act before further verifier work runs.
+        K::VerifierImageDigestMismatch { .. } => Some(Critical),
+        // Verifier timeout / artifact-rejection are sibling to the
+        // existing `VerifierProcessFailed => High` classification:
+        // the verifier failed to produce a usable witness, so the
+        // gate cannot clear and operator attention is required.
+        K::VerifierTimeout { .. } => Some(High),
+        K::VerifierArtifactRejected { .. } => Some(High),
         K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
     }
 }
