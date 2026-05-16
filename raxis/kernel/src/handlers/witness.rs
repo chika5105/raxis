@@ -803,7 +803,10 @@ mod tests {
         };
         match ack {
             WitnessAck::Rejected { reason } => {
-                assert!(matches!(reason, WitnessRejectionReason::SpoofedOperatorHints));
+                assert!(matches!(
+                    reason,
+                    WitnessRejectionReason::SpoofedOperatorHints
+                ));
             }
             _ => panic!("wrong variant"),
         }

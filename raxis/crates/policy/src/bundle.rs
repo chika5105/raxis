@@ -3504,11 +3504,7 @@ fn validate_integration_merge_verifiers_operator_side(
         // Mirrors the env-key discipline above; deferred to
         // `validate_verifier_hints` so the gate-side validator
         // (`validate_gates_hints`) reuses the exact same rule set.
-        validate_verifier_hints(
-            "[[integration_merge_verifiers]]",
-            &entry.name,
-            &entry.hints,
-        )?;
+        validate_verifier_hints("[[integration_merge_verifiers]]", &entry.name, &entry.hints)?;
 
         // Rule 8 — required_for_environments coherence (resolution
         // deferred until the environments-section lands).
@@ -4492,8 +4488,7 @@ impl Default for VerifierRuntimeConfig {
             max_verifier_wall_seconds: DEFAULT_MAX_VERIFIER_WALL_SECONDS,
             verifier_idle_timeout_seconds: DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS,
             task_verifier_total_budget_seconds: DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS,
-            verifier_force_shutdown_grace_seconds:
-                DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS,
+            verifier_force_shutdown_grace_seconds: DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS,
         }
     }
 }
@@ -4569,8 +4564,7 @@ pub(crate) fn validate_verifier_runtime_section(
             "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
              [verifier_runtime] task_verifier_total_budget_seconds = {} \
              exceeds hard cap of {} seconds (8 hours).",
-            cfg.task_verifier_total_budget_seconds,
-            VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS,
+            cfg.task_verifier_total_budget_seconds, VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS,
         )));
     }
     if cfg.verifier_force_shutdown_grace_seconds > VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS {
@@ -4578,8 +4572,7 @@ pub(crate) fn validate_verifier_runtime_section(
             "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
              [verifier_runtime] verifier_force_shutdown_grace_seconds = {} \
              exceeds hard cap of {} seconds (5 minutes).",
-            cfg.verifier_force_shutdown_grace_seconds,
-            VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS,
+            cfg.verifier_force_shutdown_grace_seconds, VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS,
         )));
     }
     if cfg.verifier_idle_timeout_seconds > cfg.max_verifier_wall_seconds {
@@ -9086,7 +9079,10 @@ mod integration_merge_verifiers_tests {
     #[test]
     fn validate_verifier_hints_reserved_prefix_is_rejected() {
         let mut hints: BTreeMap<String, serde_json::Value> = BTreeMap::new();
-        hints.insert("RAXIS_VERIFIER_TOKEN".to_owned(), serde_json::json!("pwned"));
+        hints.insert(
+            "RAXIS_VERIFIER_TOKEN".to_owned(),
+            serde_json::json!("pwned"),
+        );
         let err = validate_verifier_hints("[[gates]]", "x", &hints)
             .expect_err("RAXIS_-prefixed key must be rejected");
         assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_RESERVED_KEY"));
@@ -9098,10 +9094,8 @@ mod integration_merge_verifiers_tests {
     #[test]
     fn validate_imerge_with_valid_hints_is_accepted() {
         let mut e = entry("ok");
-        e.hints.insert(
-            "language".to_owned(),
-            serde_json::json!("rust"),
-        );
+        e.hints
+            .insert("language".to_owned(), serde_json::json!("rust"));
         e.hints.insert(
             "toolchain".to_owned(),
             serde_json::json!({"channel": "stable", "version": "1.79"}),
@@ -9115,10 +9109,8 @@ mod integration_merge_verifiers_tests {
     #[test]
     fn validate_imerge_with_reserved_hint_key_is_rejected() {
         let mut e = entry("ok");
-        e.hints.insert(
-            "RAXIS_ESCAPE_VECTOR".to_owned(),
-            serde_json::json!("yes"),
-        );
+        e.hints
+            .insert("RAXIS_ESCAPE_VECTOR".to_owned(), serde_json::json!("yes"));
         let err = validate_integration_merge_verifiers_operator_side(&[e])
             .expect_err("reserved-prefix hint key must be rejected");
         assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_RESERVED_KEY"));
@@ -9131,8 +9123,14 @@ mod integration_merge_verifiers_tests {
     #[test]
     fn verifier_runtime_section_omitted_yields_spec_defaults() {
         let cfg = validate_verifier_runtime_section(None).expect("defaults must validate");
-        assert_eq!(cfg.max_verifier_wall_seconds, DEFAULT_MAX_VERIFIER_WALL_SECONDS);
-        assert_eq!(cfg.verifier_idle_timeout_seconds, DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS);
+        assert_eq!(
+            cfg.max_verifier_wall_seconds,
+            DEFAULT_MAX_VERIFIER_WALL_SECONDS
+        );
+        assert_eq!(
+            cfg.verifier_idle_timeout_seconds,
+            DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS
+        );
         assert_eq!(
             cfg.task_verifier_total_budget_seconds,
             DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS

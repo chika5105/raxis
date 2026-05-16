@@ -330,11 +330,9 @@ pub async fn spawn_verifier_with_audit(
     // `WitnessSubmission.body.operator_hints`. The `BTreeMap`
     // ordering on `config.hints` (validated at policy-load time) is
     // what gives us determinism without a separate canonicaliser.
-    let hints_json = serde_json::to_string(&config.hints).map_err(|e| {
-        GateError::SpawnFailed {
-            gate_type: gate_type.to_owned(),
-            reason: format!("serialise operator hints to JSON: {e}"),
-        }
+    let hints_json = serde_json::to_string(&config.hints).map_err(|e| GateError::SpawnFailed {
+        gate_type: gate_type.to_owned(),
+        reason: format!("serialise operator hints to JSON: {e}"),
     })?;
 
     // Step 4: Build spawn envelope environment (scrubbed — env_clear() first).
@@ -373,8 +371,9 @@ pub async fn spawn_verifier_with_audit(
     let declared = config.verifier_max_wall_secs;
     let policy_max = config.verifier_runtime.max_verifier_wall_seconds as u64;
     let wall_seconds = declared.min(policy_max);
-    let grace_seconds =
-        config.verifier_runtime.verifier_force_shutdown_grace_seconds as u64;
+    let grace_seconds = config
+        .verifier_runtime
+        .verifier_force_shutdown_grace_seconds as u64;
     let audit_for_watcher = audit.clone();
 
     // Step 6: Increment counter. Register completion watcher.
@@ -414,8 +413,7 @@ pub async fn spawn_verifier_with_audit(
                 // API and bound it with the grace window.
                 let _ = child.start_kill();
                 let _ =
-                    tokio::time::timeout(Duration::from_secs(grace_seconds), child.wait())
-                        .await;
+                    tokio::time::timeout(Duration::from_secs(grace_seconds), child.wait()).await;
                 // Belt-and-braces SIGKILL if start_kill / wait did
                 // not collect within the grace window.
                 let _ = child.kill().await;
@@ -1001,14 +999,10 @@ mod integration {
         // order (the BTreeMap will reorder to lex order before serde
         // emits JSON; that's the property we're pinning).
         let mut cfg = config_for(&script);
-        cfg.hints.insert(
-            "language".to_owned(),
-            serde_json::json!("rust"),
-        );
-        cfg.hints.insert(
-            "coverage_min_pct".to_owned(),
-            serde_json::json!(85),
-        );
+        cfg.hints
+            .insert("language".to_owned(), serde_json::json!("rust"));
+        cfg.hints
+            .insert("coverage_min_pct".to_owned(), serde_json::json!(85));
         cfg.hints.insert(
             "toolchain".to_owned(),
             serde_json::json!({"channel": "stable", "version": "1.79"}),
@@ -1038,10 +1032,7 @@ mod integration {
             serde_json::from_str(&payload).expect("hints env var must be valid JSON");
         assert_eq!(parsed["language"], serde_json::json!("rust"));
         assert_eq!(parsed["coverage_min_pct"], serde_json::json!(85));
-        assert_eq!(
-            parsed["toolchain"]["channel"],
-            serde_json::json!("stable")
-        );
+        assert_eq!(parsed["toolchain"]["channel"], serde_json::json!("stable"));
 
         // Determinism witness: the exact byte sequence must be the
         // lex-sorted compact JSON, because the `BTreeMap` iterator
@@ -1126,9 +1117,16 @@ mod integration {
         seed_task_for(&store, &task_id).await;
         record_task_verifier_seconds(&task_id, 2); // already past
 
-        let err = spawn_verifier(&task_id, "TestCoverage", "deadbeef", tmp.path(), &cfg, &store)
-            .await
-            .expect_err("budget should block the next spawn");
+        let err = spawn_verifier(
+            &task_id,
+            "TestCoverage",
+            "deadbeef",
+            tmp.path(),
+            &cfg,
+            &store,
+        )
+        .await
+        .expect_err("budget should block the next spawn");
 
         match err {
             GateError::VerifierBudgetExhausted {

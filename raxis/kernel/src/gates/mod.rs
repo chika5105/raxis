@@ -322,7 +322,11 @@ pub async fn evaluate_claims(
                      \"task_id\":\"{task_id}\",\"gate_type\":\"{gate_type}\"}}",
                 );
             }
-            Err(GateError::VerifierBudgetExhausted { cumulative_seconds, budget_seconds, .. }) => {
+            Err(GateError::VerifierBudgetExhausted {
+                cumulative_seconds,
+                budget_seconds,
+                ..
+            }) => {
                 // iter63-followups.md Item 2 #3 —
                 // INV-VERIFIER-CUMULATIVE-BUDGET-01. The spawn was
                 // refused because the task already burnt through its

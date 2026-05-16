@@ -3216,34 +3216,34 @@ fn parse_plan_integration_merge_verifiers(
         // shape. Cap validation is deferred to
         // `validate_plan_integration_merge_verifiers` (cross-source)
         // so the diagnostic mentions which source overflowed.
-        let hints: std::collections::BTreeMap<String, serde_json::Value> =
-            match table.get("hints") {
-                None => std::collections::BTreeMap::new(),
-                Some(toml::Value::Table(t)) => {
-                    let mut map = std::collections::BTreeMap::new();
-                    for (k, v) in t {
-                        // Convert the TOML value to a JSON value
-                        // verbatim so operators can express
-                        // arrays / nested objects / numbers in their
-                        // hint shapes without a TOML-side coercion
-                        // step. `toml::Value -> serde_json::Value`
-                        // round-trips losslessly for the value
-                        // shapes operators are expected to author
-                        // (the cap validator catches the pathological
-                        // cases that bloat the payload).
-                        let jv = toml_to_json(v.clone());
-                        map.insert(k.clone(), jv);
-                    }
-                    map
+        let hints: std::collections::BTreeMap<String, serde_json::Value> = match table.get("hints")
+        {
+            None => std::collections::BTreeMap::new(),
+            Some(toml::Value::Table(t)) => {
+                let mut map = std::collections::BTreeMap::new();
+                for (k, v) in t {
+                    // Convert the TOML value to a JSON value
+                    // verbatim so operators can express
+                    // arrays / nested objects / numbers in their
+                    // hint shapes without a TOML-side coercion
+                    // step. `toml::Value -> serde_json::Value`
+                    // round-trips losslessly for the value
+                    // shapes operators are expected to author
+                    // (the cap validator catches the pathological
+                    // cases that bloat the payload).
+                    let jv = toml_to_json(v.clone());
+                    map.insert(k.clone(), jv);
                 }
-                Some(_) => {
-                    return Err(LifecycleError::PlanInvalid {
-                        reason: format!(
-                            "[[plan.integration_merge_verifiers]][{i}].hints must be a TOML table"
-                        ),
-                    })
-                }
-            };
+                map
+            }
+            Some(_) => {
+                return Err(LifecycleError::PlanInvalid {
+                    reason: format!(
+                        "[[plan.integration_merge_verifiers]][{i}].hints must be a TOML table"
+                    ),
+                })
+            }
+        };
 
         entries.push(IntegrationMergeVerifierEntry {
             name,

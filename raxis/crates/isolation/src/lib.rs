@@ -843,10 +843,7 @@ pub trait Session: Send + 'static {
     ///
     /// MUST be idempotent. Pinned by
     /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`.
-    fn shutdown_grace_then_force(
-        &mut self,
-        grace: Duration,
-    ) -> Result<ExitStatus, IsolationError> {
+    fn shutdown_grace_then_force(&mut self, grace: Duration) -> Result<ExitStatus, IsolationError> {
         self.shutdown(grace)
     }
 

@@ -408,10 +408,7 @@ impl Session for AppleVzSession {
     /// without ambiguity about whether the graceful path was even
     /// attempted (it always is, on this substrate). Pinned by
     /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`.
-    fn shutdown_grace_then_force(
-        &mut self,
-        grace: Duration,
-    ) -> Result<ExitStatus, IsolationError> {
+    fn shutdown_grace_then_force(&mut self, grace: Duration) -> Result<ExitStatus, IsolationError> {
         if self.terminated {
             return Ok(ExitStatus::GracefulExit { code: 0 });
         }
