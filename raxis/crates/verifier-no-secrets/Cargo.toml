@@ -1,0 +1,104 @@
+[package]
+name        = "raxis-verifier-no-secrets"
+version.workspace     = true
+edition.workspace     = true
+license.workspace     = true
+authors.workspace     = true
+repository.workspace  = true
+
+# Real, fast worktree-scanning verifier (iter62 / iter63).
+#
+# Why this crate exists
+# ─────────────────────
+# Iter63 introduced a paired-write at the gate-recheck-clear edge in
+# `kernel/src/scheduler/dag.rs::transition_to_admitted` (commit 31177d5
+# on `worker/iter62-deep-sweep`). That paired-write only fires when the
+# kernel's gate-evaluation pipeline crosses
+# `GatesPending → Admitted` after a `Pass` witness lands — which in
+# turn requires at least one real `[[gates]]` entry in the loaded
+# policy AND a matching verifier subprocess that the kernel can spawn,
+# run to completion, and observe a witness from. Without a verifier
+# wired into the live-e2e bootstrap, the recheck-clear edge is never
+# reached and the new audit row is never emitted in production runs.
+#
+# This crate provides ONE such verifier: it scans the executor
+# worktree for known credential / secret prefixes (AWS access keys,
+# GitHub PATs, Anthropic API keys, Slack bot tokens) and emits a
+# `Pass` witness when none are found, `Fail` otherwise. Crucially:
+#
+#   - The check is a real correctness property (a leaked secret IS a
+#     security defect), not a tautology.
+#   - The check is fast: it walks the worktree once with hard caps on
+#     file count + per-file byte budget, so even pathological seeds
+#     finish well under one second.
+#   - The check is deterministic and offline: no network, no clock
+#     dependency, no external binaries.
+#   - The check is high-signal for iter63: the live-e2e seeds
+#     (`rich-multilang-001`, `out/postgres/*.json`, etc.) contain no
+#     real credentials, so the witness lands `Pass` deterministically
+#     and the gate-recheck-clear edge fires every iter.
+#
+# Crate split mirrors `raxis-verifier-stub`:
+#   - `lib.rs` — the env parser, scanner, exit-code mapper, submission
+#     builder. Pure functions (except scanner I/O); unit-tested in
+#     isolation without spawning a subprocess.
+#   - `main.rs` — the binary entry point. Thin `#[tokio::main]` shim
+#     that reads the spawn envelope, drives the scanner, opens the
+#     UDS, sends one `WitnessSubmission`, reads one `WitnessAck`, and
+#     exits with the lib-supplied code.
+#
+# Wire shape
+# ──────────
+# Identical to every other verifier: 4-byte LE length prefix +
+# bincode 2.0.1 standard() body via `raxis_ipc::write_frame`. Same
+# `IpcMessage::WitnessSubmission` discriminant. The kernel does not
+# distinguish this verifier from any operator-supplied one — it
+# routes through the SAME `handlers::witness::handle` pipeline.
+#
+# Spawn-envelope contract
+# ───────────────────────
+# Honours the production spawn envelope set by
+# `kernel/src/gates/verifier_runner.rs::spawn_verifier`:
+#
+#   RAXIS_VERIFIER_TOKEN     ← the single-use token
+#   RAXIS_TASK_ID            ← echo into WitnessSubmission.task_id
+#   RAXIS_GATE_TYPE          ← echo into WitnessSubmission.gate_type
+#   RAXIS_EVALUATION_SHA     ← echo into WitnessSubmission.evaluation_sha
+#   RAXIS_KERNEL_SOCKET      ← path to the UDS we connect to
+#   RAXIS_WORKTREE_ROOT      ← directory we scan
+#
+# This crate is INTENDED for production use as a kernel-bundled
+# verifier — unlike `raxis-verifier-stub` (which is `publish = false`
+# and test-only), this one is shipped.
+description = "Fast, real worktree-scanning verifier that emits a Pass/Fail witness based on whether known secret prefixes appear in any tracked file."
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "raxis-verifier-no-secrets"
+path = "src/main.rs"
+
+[dependencies]
+# Wire types — same crate the kernel side uses. Guarantees byte-stable
+# wire shape between this verifier and any other.
+raxis-types = { workspace = true }
+
+# Frame codec — `read_frame` / `write_frame` and `IpcMessage`.
+raxis-ipc   = { workspace = true }
+
+# Async runtime — UDS connect + frame I/O are async-only.
+tokio       = { workspace = true }
+
+# `WitnessSubmission.body` is `serde_json::Value`; we emit a small
+# structured body listing which secret pattern matched (if any) so
+# operators reading audit have actionable forensics.
+serde_json  = { workspace = true }
+
+# Typed error variants so test assertions can `matches!(...)` rather
+# than grepping into stringified errors.
+thiserror   = { workspace = true }
+
+[dev-dependencies]
+# Build a fixture worktree on disk for the lib unit tests.
+tempfile    = "3"

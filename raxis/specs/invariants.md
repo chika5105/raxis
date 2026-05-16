@@ -12337,3 +12337,110 @@ audit-chain reader path.
 asserts the post-abort audit chain carries exactly one
 `InitiativeAborted` row keyed on the offending
 initiative_id.
+---
+
+## §14 — Iter62 / iter63 deep-sweep additions (append-only)
+
+The invariants below were added during the iter62 deep-sweep merge
+window (parent branch `worker/iter62-deep-sweep`) and the
+iter62-witness-verifier worker that lands the live coverage path
+for the new audit edge in
+`kernel/src/scheduler/dag.rs::transition_to_admitted`. They are
+clustered here at the END of the file rather than threaded into
+the topical sections above so concurrent merge work resolves
+trivially; once the merge window closes, future iterations should
+relocate each entry into its proper section (verifier processes
+for `INV-WITNESS-*`, audit-paired-writes for `INV-AUDIT-*`, etc.)
+and renumber the §11 / §12 composition rows accordingly.
+
+### INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01 — Live e2e MUST exercise at least one verifier-driven gate
+
+**Statement.** Every successful run of the live-e2e harness (the
+`extended_session_lifecycle` test gated on `RAXIS_LIVE_E2E=1`, and
+its sibling realistic-scenario / single-task lifecycle slices)
+MUST land at least one `witness_records` row whose
+`gate_type = "NoSecretStrings"` (or any other operator-supplied
+`[[gates]]` entry whose `verifier_command` resolves to an existing
+binary at policy-write time) AND whose `result_class = "Pass"`.
+That witness Pass MUST cause the kernel's gate-recheck path to
+transition the owning task `GatesPending → Admitted`, which in
+turn fires the iter63 paired-write at
+`kernel/src/scheduler/dag.rs::transition_to_admitted`. The
+combination produces ONE `AuditEventKind::TaskStateChanged` row
+with `actor = "kernel"` and `from_state = "GatesPending"` /
+`to_state = "Admitted"`, paired in the same SQLite transaction
+with the corresponding `tasks.state` mutation per
+`INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`.
+
+**Why structural.** The recheck-clear edge is the only place the
+kernel writes the `GatesPending → Admitted` transition; nothing
+else in the FSM exercises the same code path. Without an active
+gate in the loaded policy that verifier subprocesses can resolve
+at spawn time, the live-e2e harness sails past admission via the
+fast-path branch in `gates::evaluate_claims` (the
+`required_claims.is_empty() && policy.gates().is_empty()` short-
+circuit), and the paired-write in `dag.rs::transition_to_admitted`
+has no production witness — its correctness becomes a property of
+unit tests only. A unit-only invariant is brittle against silent
+regressions of the surrounding orchestration (e.g. a future
+refactor that bypasses `transition_to_admitted` for "fast"
+admissions would not break any kernel unit test but would void
+the audit guarantee in production). Pinning live-e2e coverage
+forces the whole pipeline — policy load → claim evaluation →
+verifier spawn → witness submission → recheck → paired-write — to
+stay byte-stable across iterations.
+
+**Why the verifier choice matters.** The witness verifier picked
+to anchor this invariant (`raxis-verifier-no-secrets`, source at
+`crates/verifier-no-secrets/`) was deliberately selected to be
+fast, deterministic, and high-signal:
+
+  * **Fast** — sub-second on every realistic seed (it walks the
+    worktree once with hard caps on file count and per-file byte
+    budget). Slow verifiers would inflate live-e2e wall-clock time
+    and pressure operators to disable the gate, defeating the
+    invariant.
+  * **Deterministic** — same input always produces the same
+    `result_class` and the same `witness_body_json`. The audit
+    chain's `blob_sha256` index is content-addressed and depends
+    on this property.
+  * **Real** — checks an actual security defect (leaked secret
+    prefixes in tracked files), not a tautology like "worktree
+    has at least one file". A tautological gate would accept any
+    diff and silently mask a future bug where the kernel's gate
+    machinery itself stops re-evaluating.
+
+**Witness.** Two layers:
+
+  1. **Unit witness** — `crates/verifier-no-secrets/src/lib.rs::tests`
+     pins the scanner's Pass / Fail / Inconclusive classification
+     against a tempdir worktree fixture, including the negative
+     pin that planting an `AKIA…` byte sequence produces a
+     `Found` report with the exact pattern name and byte offset.
+  2. **Live coverage** — `kernel/tests/extended_e2e_concurrent_lifecycle.rs`'s
+     local `enable_gateway_in_policy` appends a `[[gates]]
+     gate_type = "NoSecretStrings"` block to the bootstrapped
+     `policy.toml` whenever the
+     `target/<profile>/raxis-verifier-no-secrets` binary exists
+     on disk. The conditional injection means a CI configuration
+     that did not build the verifier degrades gracefully (the
+     gate is simply absent and the live-e2e run takes the
+     fast-path admission), while a properly-configured live-e2e
+     environment exercises the full recheck-clear pipeline on
+     every run.
+
+**Canonical home.** [`v2/verifier-processes.md`](v2/verifier-processes.md) §13
+(verifier subsystem invariants) and
+[`v2/audit-paired-writes.md`](v2/audit-paired-writes.md)
+(`INV-AUDIT-TASK-STATE-CHANGED-PAIRED-WRITE-01`).
+
+**Operator escape hatch.** An operator who wants to disable this
+gate (for a deeply-nested fixture where the secret-prefix scanner
+produces a known false positive — say, a test fixture that
+intentionally embeds a token-shaped string for an unrelated
+purpose) MUST instead replace the verifier binary with a
+operator-supplied alternative that returns Pass on their fixture.
+Removing the `[[gates]]` block entirely while leaving live-e2e
+"green" would be an
+`INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` violation; no
+short-cut is provided.

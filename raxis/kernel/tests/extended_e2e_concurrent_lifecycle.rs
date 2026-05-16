@@ -680,8 +680,82 @@ fn enable_gateway_in_policy(data_dir: &Path, gateway_binary: &Path) {
         gw = gateway_binary.display(),
     );
     body.push_str(&injected);
+
+    // ── iter62/iter63: real witness verifier (additive) ────────────────────
+    //
+    // INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01 (specs/invariants.md):
+    // every live-e2e run MUST drive at least one verifier-backed gate
+    // through the kernel's recheck-clear edge so the iter63
+    // paired-write at `kernel/src/scheduler/dag.rs::transition_to_admitted`
+    // (commit 31177d5 on `worker/iter62-deep-sweep`) gets active
+    // production coverage. We append a single `[[gates]]` block that
+    // points at `raxis-verifier-no-secrets`, the kernel-bundled
+    // worktree-scanning verifier from `crates/verifier-no-secrets/`.
+    //
+    // Conditional on the verifier binary actually existing on disk:
+    // if the operator did not build it (`cargo build -p
+    // raxis-verifier-no-secrets --release`) we skip the gate
+    // injection rather than installing a `[[gates]]` entry pointed at
+    // a non-existent binary — a missing-binary spawn would land the
+    // task in PendingWitness forever and hang the test. The path is
+    // derived from the gateway binary's parent directory because both
+    // are workspace binaries built into the same `target/<profile>/`
+    // tree.
+    if let Some(verifier_bin) = sibling_verifier_binary(gateway_binary) {
+        let gate_block = format!(
+            "\n# ── [[gates]] — witness verifier (iter62 / iter63) ──\n\
+             # Real, fast worktree-scanning gate. Source:\n\
+             # `crates/verifier-no-secrets/`.\n\
+             # See `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` for\n\
+             # the rationale (this is the live coverage point for the\n\
+             # iter63 recheck-clear paired-write audit row).\n\
+             [[gates]]\n\
+             gate_type        = \"NoSecretStrings\"\n\
+             verifier_command = \"{vb}\"\n\
+             max_wall_seconds = 30\n\
+             max_memory_bytes = 268435456\n\
+             network_allowed  = false\n",
+            vb = verifier_bin.display(),
+        );
+        body.push_str(&gate_block);
+        eprintln!(
+            "[ext-e2e] enabling NoSecretStrings gate; verifier={}",
+            verifier_bin.display()
+        );
+    } else {
+        eprintln!(
+            "[ext-e2e] skipping NoSecretStrings gate injection — \
+             raxis-verifier-no-secrets binary not found alongside \
+             {} (build with `cargo build -p raxis-verifier-no-secrets --release` \
+             to enable iter63 recheck-clear coverage)",
+            gateway_binary.display(),
+        );
+    }
+
     std::fs::write(&policy_path, body)
         .unwrap_or_else(|e| panic!("rewrite {}: {e}", policy_path.display()));
+}
+
+/// Resolve the absolute path of the `raxis-verifier-no-secrets`
+/// binary built into the same `target/<profile>/` tree as
+/// `gateway_binary`. Returns `None` when the binary has not been
+/// built — callers MUST short-circuit gate injection in that case.
+///
+/// The discovery is deliberately strict-by-existence: we do NOT fall
+/// back to `which` or to a generic `target/release/...` glob.
+/// Operators who want a different verifier binary should ship a
+/// different operator policy; the live-e2e harness is opinionated
+/// about which verifier it uses precisely so the iter63 audit
+/// invariant (`INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01`) has a
+/// single, deterministic enforcement target.
+fn sibling_verifier_binary(gateway_binary: &Path) -> Option<PathBuf> {
+    let parent = gateway_binary.parent()?;
+    let candidate = parent.join("raxis-verifier-no-secrets");
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 fn write_credentials(data_dir: &Path) {
