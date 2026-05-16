@@ -39,8 +39,20 @@ pub use bundle::{
 // timeout parsing, and the env-cap / reserved-prefix rules.
 pub use bundle::{
     is_valid_verifier_name, parse_verifier_timeout_secs, validate_target_ref_format,
-    RAXIS_RESERVED_ENV_PREFIX, VERIFIER_ARTIFACT_MAX_PATH_CHARS, VERIFIER_ENV_MAX_ENTRIES,
-    VERIFIER_ENV_MAX_TOTAL_BYTES, VERIFIER_TIMEOUT_MIN_SECS,
+    validate_verifier_hints, RAXIS_RESERVED_ENV_PREFIX, VERIFIER_ARTIFACT_MAX_PATH_CHARS,
+    VERIFIER_ENV_MAX_ENTRIES, VERIFIER_ENV_MAX_TOTAL_BYTES, VERIFIER_TIMEOUT_MIN_SECS,
+};
+
+// iter63-followups.md — bounded-runtime guard defaults + resolved
+// shape. Re-exported so kernel callers (`gates::verifier_runner`,
+// `isolation-apple-vz`) can read the canonical defaults without
+// depending on `crate::bundle` directly.
+pub use bundle::{
+    VerifierRuntimeConfig, DEFAULT_MAX_VERIFIER_WALL_SECONDS,
+    DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS,
+    DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS, DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS,
+    VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS, VERIFIER_RUNTIME_HARD_CAP_IDLE_SECONDS,
+    VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS, VERIFIER_RUNTIME_HARD_CAP_WALL_SECONDS,
 };
 
 // === iter62 verifier-runtime: general-verifier alias re-export ===

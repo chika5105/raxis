@@ -3209,6 +3209,42 @@ fn parse_plan_integration_merge_verifiers(
                     .collect::<Vec<String>>()
             });
 
+        // iter63-followups.md — plan-side operator-authored hints.
+        // Parsed identically to the operator-side
+        // `[[integration_merge_verifiers]]` surface so both sources
+        // converge on the same validated `IntegrationMergeVerifierEntry`
+        // shape. Cap validation is deferred to
+        // `validate_plan_integration_merge_verifiers` (cross-source)
+        // so the diagnostic mentions which source overflowed.
+        let hints: std::collections::BTreeMap<String, serde_json::Value> =
+            match table.get("hints") {
+                None => std::collections::BTreeMap::new(),
+                Some(toml::Value::Table(t)) => {
+                    let mut map = std::collections::BTreeMap::new();
+                    for (k, v) in t {
+                        // Convert the TOML value to a JSON value
+                        // verbatim so operators can express
+                        // arrays / nested objects / numbers in their
+                        // hint shapes without a TOML-side coercion
+                        // step. `toml::Value -> serde_json::Value`
+                        // round-trips losslessly for the value
+                        // shapes operators are expected to author
+                        // (the cap validator catches the pathological
+                        // cases that bloat the payload).
+                        let jv = toml_to_json(v.clone());
+                        map.insert(k.clone(), jv);
+                    }
+                    map
+                }
+                Some(_) => {
+                    return Err(LifecycleError::PlanInvalid {
+                        reason: format!(
+                            "[[plan.integration_merge_verifiers]][{i}].hints must be a TOML table"
+                        ),
+                    })
+                }
+            };
+
         entries.push(IntegrationMergeVerifierEntry {
             name,
             image,
@@ -3222,10 +3258,45 @@ fn parse_plan_integration_merge_verifiers(
             env,
             allowed_egress,
             required_for_environments,
+            hints,
         });
     }
 
     Ok(entries)
+}
+
+/// iter63-followups.md — lossless TOML → JSON value conversion
+/// for plan-side `[[plan.integration_merge_verifiers.hints]]`
+/// entries. Operators express hints as a TOML table; the kernel
+/// stores them as a `BTreeMap<String, serde_json::Value>` for
+/// deterministic JSON serialisation onto the verifier spawn
+/// envelope (`RAXIS_VERIFIER_OPERATOR_HINTS_JSON`) and into the
+/// witness body's `operator_hints` field.
+///
+/// The conversion is straightforward because TOML's primitive
+/// value space (string / int / float / bool / datetime / array /
+/// table) is a strict subset of JSON's. Datetimes are coerced to
+/// their RFC 3339 string form (matches `toml`'s `Display` impl).
+fn toml_to_json(v: toml::Value) -> serde_json::Value {
+    match v {
+        toml::Value::String(s) => serde_json::Value::String(s),
+        toml::Value::Integer(i) => serde_json::Value::Number(i.into()),
+        toml::Value::Float(f) => serde_json::Number::from_f64(f)
+            .map(serde_json::Value::Number)
+            .unwrap_or(serde_json::Value::Null),
+        toml::Value::Boolean(b) => serde_json::Value::Bool(b),
+        toml::Value::Datetime(dt) => serde_json::Value::String(dt.to_string()),
+        toml::Value::Array(arr) => {
+            serde_json::Value::Array(arr.into_iter().map(toml_to_json).collect())
+        }
+        toml::Value::Table(table) => {
+            let mut map = serde_json::Map::with_capacity(table.len());
+            for (k, val) in table {
+                map.insert(k, toml_to_json(val));
+            }
+            serde_json::Value::Object(map)
+        }
+    }
 }
 
 /// Helper for `parse_plan_integration_merge_verifiers`: extract a
@@ -3461,6 +3532,26 @@ fn validate_plan_integration_merge_verifiers(
                 suggestion: format!(
                     "env entries sum to {env_byte_total} bytes; max is \
                      {VERIFIER_ENV_MAX_TOTAL_BYTES} bytes."
+                ),
+            });
+        }
+
+        // iter63-followups.md — hints cap + reserved-prefix.
+        // Mirrors the operator-side validator
+        // (`validate_integration_merge_verifiers_operator_side`)
+        // so plan-source and policy-source entries land in the
+        // same shape after admission. INV-VERIFIER-HINTS-PAYLOAD-CAP-01.
+        if let Err(e) = raxis_policy::validate_verifier_hints(
+            "[[plan.integration_merge_verifiers]]",
+            &entry.name,
+            &entry.hints,
+        ) {
+            return Err(LifecycleError::PlanIntegrationMergeVerifierInvalid {
+                rule: "hints_invalid",
+                offending_verifier: entry.name.clone(),
+                suggestion: format!(
+                    "hints validation rejected this entry: {e} \
+                     (see INV-VERIFIER-HINTS-PAYLOAD-CAP-01)."
                 ),
             });
         }
@@ -6409,6 +6500,7 @@ description = "do thing"
             env: std::collections::HashMap::new(),
             allowed_egress: Vec::new(),
             required_for_environments: None,
+            hints: std::collections::BTreeMap::new(),
         }
     }
 

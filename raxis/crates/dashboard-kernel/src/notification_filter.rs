@@ -620,6 +620,22 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // gate cannot clear and operator attention is required.
         K::VerifierTimeout { .. } => Some(High),
         K::VerifierArtifactRejected { .. } => Some(High),
+        // === iter63 bounded-runtime + operator-hint variants ===
+        // Same `High` priority as the iter62 timeout / rejection
+        // family: every kill-path here represents an
+        // operator-actionable verifier failure, not a routine
+        // status update. `VerifierVmForcedShutdown` is itself a
+        // signal that the graceful kill window was insufficient
+        // for the substrate — worth surfacing for tuning.
+        // `WitnessOperatorHintSpoofingDetected` is a security
+        // signal (operator-published hints diverge from the
+        // verifier's claimed body) — `Critical`.
+        K::VerifierWallClockTimeout { .. } => Some(High),
+        K::VerifierIdleTimeout { .. } => Some(High),
+        K::VerifierBudgetExhausted { .. } => Some(High),
+        K::VerifierVmForcedShutdown { .. } => Some(High),
+        K::WitnessHandlerTimeout { .. } => Some(High),
+        K::WitnessOperatorHintSpoofingDetected { .. } => Some(Critical),
         K::PlannerMaxTurnsProgressivelyScaled { .. } => None,
     }
 }

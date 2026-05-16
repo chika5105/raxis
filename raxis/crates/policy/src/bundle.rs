@@ -21,7 +21,7 @@
 use raxis_credentials::CredentialBackendKind;
 use raxis_types::operator_cert::{CertKind, OperatorCert};
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::time::Duration;
 
 use crate::PolicyError;
@@ -129,6 +129,23 @@ pub(crate) struct RawPolicy {
     /// `PolicyBundle::validate`.
     #[serde(default, rename = "integration_merge_verifiers")]
     pub(crate) integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
+
+    /// `[verifier_runtime]` — iter63-followups.md bounded-runtime
+    /// guard for verifier execution. **Optional**: a kernel that
+    /// omits the section uses the spec defaults
+    /// (`max_verifier_wall_seconds = 300`,
+    /// `verifier_idle_timeout_seconds = 60`,
+    /// `task_verifier_total_budget_seconds = 900`,
+    /// `verifier_force_shutdown_grace_seconds = 10`). Each field
+    /// has its own `#[serde(default)]` accessor on
+    /// [`VerifierRuntimeSection`] so an operator can override one
+    /// without restating the others. Pinned by
+    /// `INV-VERIFIER-WALL-CLOCK-KILL-01`,
+    /// `INV-VERIFIER-IDLE-TIMEOUT-01`,
+    /// `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
+    /// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`.
+    #[serde(default)]
+    pub(crate) verifier_runtime: Option<VerifierRuntimeSection>,
 
     /// `[git]` — operator-side defaults for git-domain configuration.
     /// **Optional**: a kernel that omits the section gets the
@@ -1720,6 +1737,28 @@ pub struct GateEntry {
     pub max_memory_bytes: u64,
     /// Advisory only in v1 — not enforced at the OS level (kernel-store.md §2.5.6).
     pub network_allowed: bool,
+
+    /// `iter63-followups.md` — Operator-authored, schema-validated
+    /// hints surfaced to the verifier as the
+    /// `RAXIS_VERIFIER_OPERATOR_HINTS_JSON` env var AND echoed into
+    /// the resulting `WitnessSubmission.body.operator_hints` field
+    /// by the kernel (NOT by the verifier — see
+    /// `INV-WITNESS-OPERATOR-HINTS-ECHOED-01`).
+    ///
+    /// `BTreeMap` (not `HashMap`) so the JSON serialisation is
+    /// deterministic — the kernel’s body-hash check would
+    /// otherwise drift between runs.
+    ///
+    /// Caps enforced at `PolicyBundle::validate` time
+    /// (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
+    ///   * `hints.len() <= 32`
+    ///   * `serde_json::to_vec(&hints).len() <= 4096` (4 KiB)
+    ///   * no key may start with the reserved `RAXIS_` prefix
+    ///     (prevents operator-spoofing of kernel-injected envs).
+    ///
+    /// Default `BTreeMap::new()`; field is optional in TOML.
+    #[serde(default)]
+    pub hints: BTreeMap<String, serde_json::Value>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1863,7 +1902,100 @@ pub struct IntegrationMergeVerifierEntry {
     /// to a declared environment label.
     #[serde(default)]
     pub required_for_environments: Option<Vec<String>>,
+
+    /// `iter63-followups.md` — Operator-authored hints injected into
+    /// the verifier spawn envelope as
+    /// `RAXIS_VERIFIER_OPERATOR_HINTS_JSON` AND echoed by the
+    /// kernel into `WitnessSubmission.body.operator_hints`.
+    ///
+    /// `BTreeMap` for deterministic JSON ordering (verifier
+    /// callers depend on a stable env-var byte sequence for the
+    /// hash check on `RAXIS_VERIFIER_OPERATOR_HINTS_JSON`).
+    ///
+    /// Cap discipline (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
+    ///   * ≤ 32 entries
+    ///   * total JSON payload ≤ 4096 bytes
+    ///   * no key may start with `RAXIS_` (reserved for
+    ///     kernel-injected scope keys)
+    ///
+    /// Default empty; field is optional in TOML.
+    #[serde(default)]
+    pub hints: BTreeMap<String, serde_json::Value>,
 }
+
+// ---------------------------------------------------------------------------
+// `[verifier_runtime]` — iter63 bounded-runtime guard fields.
+// ---------------------------------------------------------------------------
+
+/// `[verifier_runtime]` TOML section — operator-tunable knobs for
+/// the iter63 bounded-runtime guard (`iter63-followups.md`,
+/// invariants `INV-VERIFIER-WALL-CLOCK-KILL-01`,
+/// `INV-VERIFIER-IDLE-TIMEOUT-01`,
+/// `INV-VERIFIER-CUMULATIVE-BUDGET-01`,
+/// `INV-VERIFIER-VM-FORCE-SHUTDOWN-01`).
+///
+/// Every field is optional in TOML; omitted values fall back to
+/// the per-field constants on [`PolicyBundle`]
+/// (`DEFAULT_MAX_VERIFIER_WALL_SECONDS` and friends below). The
+/// section itself is also optional — a kernel without the section
+/// gets the spec defaults across the board.
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub(crate) struct VerifierRuntimeSection {
+    /// Hard wall-clock ceiling for a single verifier execution.
+    /// The kernel enforces
+    /// `min(declared_timeout, max_verifier_wall_seconds)`.
+    /// Default 300 s (5 minutes).
+    #[serde(default)]
+    pub(crate) max_verifier_wall_seconds: Option<u32>,
+
+    /// Idle-stream ceiling: if the verifier's UDS sees no I/O for
+    /// this many seconds, the kernel kills it and emits
+    /// `VerifierIdleTimeout`. Default 60 s.
+    #[serde(default)]
+    pub(crate) verifier_idle_timeout_seconds: Option<u32>,
+
+    /// Per-task cumulative-time ceiling: sum of every verifier
+    /// run (across retries) on a single `task_id` must not exceed
+    /// this many seconds. When exceeded, the gate fails with
+    /// `TimeBudgetExhausted` and the kernel emits
+    /// `VerifierBudgetExhausted`. Default 900 s (15 minutes).
+    #[serde(default)]
+    pub(crate) task_verifier_total_budget_seconds: Option<u32>,
+
+    /// VM force-shutdown grace seconds passed to
+    /// `shutdown_grace_then_force`. After a graceful kill request
+    /// the kernel waits up to this many seconds before issuing the
+    /// forced-kill API call. Default 10 s.
+    #[serde(default)]
+    pub(crate) verifier_force_shutdown_grace_seconds: Option<u32>,
+}
+
+// Spec defaults (`iter63-followups.md`, Item 2 Specific Guards):
+//   * `max_verifier_wall_seconds = 300` (5 minutes)
+//   * `verifier_idle_timeout_seconds = 60`
+//   * `task_verifier_total_budget_seconds = 900` (15 minutes)
+//   * `verifier_force_shutdown_grace_seconds = 10`
+//
+// Exposed `pub` so the kernel's verifier-runner can reference the
+// canonical defaults instead of duplicating the literals.
+pub const DEFAULT_MAX_VERIFIER_WALL_SECONDS: u32 = 300;
+pub const DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS: u32 = 60;
+pub const DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS: u32 = 900;
+pub const DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS: u32 = 10;
+
+// Hard caps enforced at validate-time on
+// `[verifier_runtime]`. The kernel cannot allow operators to set a
+// wall-clock ceiling so high that a stuck verifier could stall the
+// gate evaluator past a single operator shift.
+//
+// 4 hours wall-clock + 8 hours per-task cumulative leaves room for
+// pathological CI workloads (a slow systemd-on-microvm boot + a
+// 90-minute build) without admitting an "effectively unbounded"
+// declaration.
+pub const VERIFIER_RUNTIME_HARD_CAP_WALL_SECONDS: u32 = 4 * 3600;
+pub const VERIFIER_RUNTIME_HARD_CAP_IDLE_SECONDS: u32 = 30 * 60;
+pub const VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS: u32 = 8 * 3600;
+pub const VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS: u32 = 5 * 60;
 
 // ---------------------------------------------------------------------------
 // Role entries
@@ -3368,6 +3500,16 @@ fn validate_integration_merge_verifiers_operator_side(
             )));
         }
 
+        // Rule 7b (iter63-followups.md) — hints cap + reserved-prefix.
+        // Mirrors the env-key discipline above; deferred to
+        // `validate_verifier_hints` so the gate-side validator
+        // (`validate_gates_hints`) reuses the exact same rule set.
+        validate_verifier_hints(
+            "[[integration_merge_verifiers]]",
+            &entry.name,
+            &entry.hints,
+        )?;
+
         // Rule 8 — required_for_environments coherence (resolution
         // deferred until the environments-section lands).
         if let Some(envs) = entry.required_for_environments.as_ref() {
@@ -3406,6 +3548,107 @@ fn validate_integration_merge_verifiers_operator_side(
 /// (`approve_plan` Step 2) can apply the same shape rule to
 /// plan-source `[[plan.integration_merge_verifiers]]` entries
 /// without duplicating the literal.
+/// iter63-followups.md — operator-authored hints validator.
+/// Shared by the gate-side validator (`validate_gates_hints`) and
+/// the integration-merge verifier validator
+/// (`validate_integration_merge_verifiers_operator_side`).
+///
+/// Enforced rules (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`):
+///
+/// 1. `hints.len() ≤ 32` — cap on key count.
+/// 2. `serde_json::to_vec(&hints).len() ≤ 4096` — cap on
+///    serialised JSON byte payload.
+/// 3. No key may start with the reserved `RAXIS_` prefix
+///    (`RAXIS_RESERVED_ENV_PREFIX`); operator-spoofing of
+///    kernel-injected envs is rejected at policy load.
+/// 4. Per-gate-type schema validation is deferred to iter64; for
+///    iter63 any well-formed JSON value is accepted as long as the
+///    caps and reserved-prefix rule hold.
+///
+/// `section` is a human-readable section name (`"[[gates]]"` or
+/// `"[[integration_merge_verifiers]]"`) used in the diagnostic
+/// string; `subject` is the entry's name (gate_type / verifier
+/// name) so operators can pinpoint the offending row.
+///
+/// `pub` because `kernel/src/initiatives/lifecycle.rs` can call
+/// the same routine for plan-side
+/// `[[plan.integration_merge_verifiers]]` entries (which reuse
+/// the same `IntegrationMergeVerifierEntry` struct).
+// TODO(iter64): introduce a per-gate-type hint schema layer so
+// `path_glob`, `min_coverage_pct`, etc. are typed at validation
+// time per gate kind. iter63 keeps the validator schema-free
+// past the structural caps; see specs/iter63-followups.md
+// "Open questions".
+pub fn validate_verifier_hints(
+    section: &str,
+    subject: &str,
+    hints: &BTreeMap<String, serde_json::Value>,
+) -> Result<(), PolicyError> {
+    /// Cap on the count of operator-authored hint entries.
+    /// Mirrors the env-entry cap discipline (`VERIFIER_ENV_MAX_ENTRIES`)
+    /// per `iter63-followups.md` Item 1 (B).
+    const VERIFIER_HINTS_MAX_ENTRIES: usize = 32;
+    /// Cap on the serialised JSON byte size of the hints map.
+    /// 4 KiB per `iter63-followups.md` Item 1 (B).
+    const VERIFIER_HINTS_MAX_BYTES: usize = 4096;
+
+    if hints.len() > VERIFIER_HINTS_MAX_ENTRIES {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_HINTS_TOO_MANY_ENTRIES: \
+             {section} `{subject}` declared {} hint entries; max is {} \
+             (INV-VERIFIER-HINTS-PAYLOAD-CAP-01).",
+            hints.len(),
+            VERIFIER_HINTS_MAX_ENTRIES,
+        )));
+    }
+    // Reserved-prefix rule: hints with `RAXIS_*` keys would let an
+    // operator inject env vars under the same namespace as the
+    // kernel-supplied envelope (RAXIS_VERIFIER_TOKEN, RAXIS_TASK_ID,
+    // …). The verifier-runner ALSO scrubs these at spawn time;
+    // this rejection is the early-warning so operators see the
+    // mistake at policy-load, not at the first verifier spawn.
+    for k in hints.keys() {
+        if k.starts_with(RAXIS_RESERVED_ENV_PREFIX) {
+            return Err(PolicyError::MalformedArtifact(format!(
+                "FAIL_POLICY_VERIFIER_HINTS_RESERVED_KEY: \
+                 {section} `{subject}` hint key `{}` collides with the \
+                 reserved `{}*` prefix (kernel-injected scope keys).",
+                k, RAXIS_RESERVED_ENV_PREFIX,
+            )));
+        }
+    }
+    // Compute serialised size last — if the map is small we never
+    // pay for the to_vec walk above the threshold.
+    let serialised = serde_json::to_vec(hints).map_err(|e| {
+        PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_HINTS_SERIALISE_FAILED: \
+             {section} `{subject}` hints could not be serialised to JSON: {e}",
+        ))
+    })?;
+    if serialised.len() > VERIFIER_HINTS_MAX_BYTES {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_HINTS_TOO_LARGE: \
+             {section} `{subject}` hints serialise to {} bytes; max is {} \
+             (INV-VERIFIER-HINTS-PAYLOAD-CAP-01).",
+            serialised.len(),
+            VERIFIER_HINTS_MAX_BYTES,
+        )));
+    }
+    Ok(())
+}
+
+/// iter63-followups.md — operator-side `[[gates]]` validator.
+/// Today this only enforces the hints discipline (the rest of the
+/// gate schema is parsed via serde with its own per-field defaults).
+///
+/// Called from `PolicyBundle::validate`.
+pub(crate) fn validate_gates_hints(raw_gates: &[GateEntry]) -> Result<(), PolicyError> {
+    for g in raw_gates {
+        validate_verifier_hints("[[gates]]", &g.gate_type, &g.hints)?;
+    }
+    Ok(())
+}
+
 pub fn is_valid_verifier_name(s: &str) -> bool {
     let bytes = s.as_bytes();
     if bytes.is_empty() || bytes.len() > 32 {
@@ -4071,6 +4314,16 @@ pub struct PolicyBundle {
     /// the section (the default).
     integration_merge_verifiers: Vec<IntegrationMergeVerifierEntry>,
 
+    /// iter63-followups.md — bounded-runtime guard for verifier
+    /// execution. Resolved at validate time with the spec defaults
+    /// (`DEFAULT_MAX_VERIFIER_WALL_SECONDS` and friends) when the
+    /// operator omits the section. Read by
+    /// `kernel/src/gates/verifier_runner.rs` for the wall-clock /
+    /// idle / cumulative-budget enforcement and by
+    /// `crates/isolation-apple-vz/` for the VM force-shutdown
+    /// grace.
+    verifier_runtime: VerifierRuntimeConfig,
+
     /// Resolved `[git] default_target_ref` — the fully-qualified ref
     /// the kernel's IntegrationMerge handler advances when the plan
     /// omits `[workspace] target_ref`. Always non-empty; defaults to
@@ -4199,6 +4452,146 @@ pub struct PermittedCredentialConfig {
 
     /// Optional human-readable description.
     pub description: Option<String>,
+}
+
+/// iter63-followups.md — validated, public-API shape of the
+/// `[verifier_runtime]` section. Returned by
+/// [`PolicyBundle::verifier_runtime`]. Every field carries the
+/// resolved (default-substituted, hard-cap-checked) value the
+/// kernel reads at every verifier spawn.
+///
+/// **Spec defaults** (used when the operator omits the field):
+///   * `max_verifier_wall_seconds = 300` (5 minutes)
+///   * `verifier_idle_timeout_seconds = 60`
+///   * `task_verifier_total_budget_seconds = 900` (15 minutes)
+///   * `verifier_force_shutdown_grace_seconds = 10`
+///
+/// **Hard caps** (rejected at validate time):
+///   * `max_verifier_wall_seconds ≤ 4 hours`
+///   * `verifier_idle_timeout_seconds ≤ 30 minutes`
+///   * `task_verifier_total_budget_seconds ≤ 8 hours`
+///   * `verifier_force_shutdown_grace_seconds ≤ 5 minutes`
+///
+/// **Coherence rules**:
+///   * Every field MUST be `> 0` (a zero-valued bound would mean
+///     "kill on first tick", which is an obvious operator typo).
+///   * `verifier_idle_timeout_seconds ≤ max_verifier_wall_seconds`
+///     (an idle timeout longer than the wall-clock bound is
+///     dead code).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VerifierRuntimeConfig {
+    pub max_verifier_wall_seconds: u32,
+    pub verifier_idle_timeout_seconds: u32,
+    pub task_verifier_total_budget_seconds: u32,
+    pub verifier_force_shutdown_grace_seconds: u32,
+}
+
+impl Default for VerifierRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_verifier_wall_seconds: DEFAULT_MAX_VERIFIER_WALL_SECONDS,
+            verifier_idle_timeout_seconds: DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS,
+            task_verifier_total_budget_seconds: DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS,
+            verifier_force_shutdown_grace_seconds:
+                DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS,
+        }
+    }
+}
+
+/// Validate a [`VerifierRuntimeSection`] into a
+/// [`VerifierRuntimeConfig`] applying spec defaults, hard caps,
+/// and coherence rules. Used at `PolicyBundle::validate`.
+pub(crate) fn validate_verifier_runtime_section(
+    section: Option<&VerifierRuntimeSection>,
+) -> Result<VerifierRuntimeConfig, PolicyError> {
+    let s = section.cloned().unwrap_or_default();
+    let cfg = VerifierRuntimeConfig {
+        max_verifier_wall_seconds: s
+            .max_verifier_wall_seconds
+            .unwrap_or(DEFAULT_MAX_VERIFIER_WALL_SECONDS),
+        verifier_idle_timeout_seconds: s
+            .verifier_idle_timeout_seconds
+            .unwrap_or(DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS),
+        task_verifier_total_budget_seconds: s
+            .task_verifier_total_budget_seconds
+            .unwrap_or(DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS),
+        verifier_force_shutdown_grace_seconds: s
+            .verifier_force_shutdown_grace_seconds
+            .unwrap_or(DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS),
+    };
+    if cfg.max_verifier_wall_seconds == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_VERIFIER_RUNTIME_INVALID: \
+             [verifier_runtime] max_verifier_wall_seconds must be > 0 \
+             (iter63-followups.md §2 Specific Guards #1)."
+                .to_owned(),
+        ));
+    }
+    if cfg.verifier_idle_timeout_seconds == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_VERIFIER_RUNTIME_INVALID: \
+             [verifier_runtime] verifier_idle_timeout_seconds must be > 0."
+                .to_owned(),
+        ));
+    }
+    if cfg.task_verifier_total_budget_seconds == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_VERIFIER_RUNTIME_INVALID: \
+             [verifier_runtime] task_verifier_total_budget_seconds must be > 0."
+                .to_owned(),
+        ));
+    }
+    if cfg.verifier_force_shutdown_grace_seconds == 0 {
+        return Err(PolicyError::MalformedArtifact(
+            "FAIL_POLICY_VERIFIER_RUNTIME_INVALID: \
+             [verifier_runtime] verifier_force_shutdown_grace_seconds must be > 0."
+                .to_owned(),
+        ));
+    }
+    if cfg.max_verifier_wall_seconds > VERIFIER_RUNTIME_HARD_CAP_WALL_SECONDS {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
+             [verifier_runtime] max_verifier_wall_seconds = {} exceeds \
+             hard cap of {} seconds (4 hours).",
+            cfg.max_verifier_wall_seconds, VERIFIER_RUNTIME_HARD_CAP_WALL_SECONDS,
+        )));
+    }
+    if cfg.verifier_idle_timeout_seconds > VERIFIER_RUNTIME_HARD_CAP_IDLE_SECONDS {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
+             [verifier_runtime] verifier_idle_timeout_seconds = {} exceeds \
+             hard cap of {} seconds (30 minutes).",
+            cfg.verifier_idle_timeout_seconds, VERIFIER_RUNTIME_HARD_CAP_IDLE_SECONDS,
+        )));
+    }
+    if cfg.task_verifier_total_budget_seconds > VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
+             [verifier_runtime] task_verifier_total_budget_seconds = {} \
+             exceeds hard cap of {} seconds (8 hours).",
+            cfg.task_verifier_total_budget_seconds,
+            VERIFIER_RUNTIME_HARD_CAP_TASK_BUDGET_SECONDS,
+        )));
+    }
+    if cfg.verifier_force_shutdown_grace_seconds > VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING: \
+             [verifier_runtime] verifier_force_shutdown_grace_seconds = {} \
+             exceeds hard cap of {} seconds (5 minutes).",
+            cfg.verifier_force_shutdown_grace_seconds,
+            VERIFIER_RUNTIME_HARD_CAP_GRACE_SECONDS,
+        )));
+    }
+    if cfg.verifier_idle_timeout_seconds > cfg.max_verifier_wall_seconds {
+        return Err(PolicyError::MalformedArtifact(format!(
+            "FAIL_POLICY_VERIFIER_RUNTIME_INVALID: \
+             [verifier_runtime] verifier_idle_timeout_seconds = {} > \
+             max_verifier_wall_seconds = {} (an idle window longer than \
+             the wall-clock bound is unreachable; lower idle or raise wall).",
+            cfg.verifier_idle_timeout_seconds, cfg.max_verifier_wall_seconds,
+        )));
+    }
+    Ok(cfg)
 }
 
 /// Test-only escalation rate-limit / quarantine / timeout overrides for
@@ -4633,6 +5026,11 @@ impl PolicyBundle {
 
         validate_integration_merge_verifiers_operator_side(&raw.integration_merge_verifiers)?;
 
+        // iter63-followups.md — operator-side `[[gates]] hints`
+        // structural validation (INV-VERIFIER-HINTS-PAYLOAD-CAP-01,
+        // INV-VERIFIER-HINTS-SCHEMA-VALIDATED-01).
+        validate_gates_hints(&raw.gates)?;
+
         // V2 — validate `[egress] deny_provider` against the
         // `[[providers]]` array. Every entry MUST resolve to a
         // declared `provider_id`; an unresolved entry is almost
@@ -4754,6 +5152,7 @@ impl PolicyBundle {
             bypassed_cert_misconfigs,
             credential_backend: raw.credential_backend.map(|s| s.kind).unwrap_or_default(),
             integration_merge_verifiers: raw.integration_merge_verifiers,
+            verifier_runtime: validate_verifier_runtime_section(raw.verifier_runtime.as_ref())?,
             git_default_target_ref: {
                 let raw_value = raw
                     .git
@@ -4868,6 +5267,17 @@ impl PolicyBundle {
     /// surfaces only operator-side entries.
     pub fn integration_merge_verifiers(&self) -> &[IntegrationMergeVerifierEntry] {
         &self.integration_merge_verifiers
+    }
+
+    /// iter63-followups.md — resolved bounded-runtime guard
+    /// configuration. Always populated; spec defaults apply when
+    /// the operator omits `[verifier_runtime]` from `policy.toml`.
+    /// Read by `kernel/src/gates/verifier_runner.rs` for the
+    /// wall-clock / idle / cumulative-budget enforcement and by
+    /// `crates/isolation-apple-vz/` for the VM force-shutdown
+    /// grace.
+    pub fn verifier_runtime(&self) -> VerifierRuntimeConfig {
+        self.verifier_runtime
     }
 
     /// V2_GAPS.md §12.8 — operator-side `[git] default_target_ref`.
@@ -5228,6 +5638,7 @@ impl PolicyBundle {
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
             git_auto_push: false,
@@ -5871,6 +6282,7 @@ mod tests {
             bypassed_cert_misconfigs: Vec::new(),
             credential_backend: CredentialBackendKind::default(),
             integration_merge_verifiers: Vec::new(),
+            verifier_runtime: VerifierRuntimeConfig::default(),
             git_default_target_ref: "refs/heads/main".to_owned(),
             git_target_ref_locked: false,
             git_auto_push: false,
@@ -8614,6 +9026,7 @@ mod integration_merge_verifiers_tests {
             env: HashMap::new(),
             allowed_egress: Vec::new(),
             required_for_environments: None,
+            hints: BTreeMap::new(),
         }
     }
 
@@ -8630,6 +9043,148 @@ mod integration_merge_verifiers_tests {
         let entries = vec![entry("production_deploy_smoke")];
         validate_integration_merge_verifiers_operator_side(&entries)
             .expect("single canonical entry must validate");
+    }
+
+    /// iter63-followups.md — hints validator witnesses.
+
+    /// Happy path — empty hints map is the default and validates.
+    #[test]
+    fn validate_verifier_hints_empty_map_is_valid() {
+        validate_verifier_hints("[[gates]]", "x", &BTreeMap::new())
+            .expect("empty hints must validate");
+    }
+
+    /// Cap rule (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`) — 33 entries
+    /// must be rejected.
+    #[test]
+    fn validate_verifier_hints_too_many_entries_is_rejected() {
+        let mut hints: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        for i in 0..33 {
+            hints.insert(format!("k{i}"), serde_json::json!(i));
+        }
+        let err = validate_verifier_hints("[[gates]]", "x", &hints)
+            .expect_err("33 entries must exceed the 32-cap");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_TOO_MANY_ENTRIES"));
+    }
+
+    /// Cap rule (`INV-VERIFIER-HINTS-PAYLOAD-CAP-01`) — 4 KiB+1
+    /// must be rejected. We craft a single-key map whose value
+    /// crosses the byte threshold once JSON-encoded.
+    #[test]
+    fn validate_verifier_hints_payload_exceeding_4kib_is_rejected() {
+        let big = "x".repeat(5000);
+        let mut hints: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        hints.insert("k".to_owned(), serde_json::json!(big));
+        let err = validate_verifier_hints("[[gates]]", "x", &hints)
+            .expect_err("5 KiB hints payload must exceed the 4 KiB cap");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_TOO_LARGE"));
+    }
+
+    /// Reserved-prefix rule (`INV-VERIFIER-HINTS-SCHEMA-VALIDATED-01`,
+    /// `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01` at the policy
+    /// layer) — any `RAXIS_*` key must be rejected.
+    #[test]
+    fn validate_verifier_hints_reserved_prefix_is_rejected() {
+        let mut hints: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+        hints.insert("RAXIS_VERIFIER_TOKEN".to_owned(), serde_json::json!("pwned"));
+        let err = validate_verifier_hints("[[gates]]", "x", &hints)
+            .expect_err("RAXIS_-prefixed key must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_RESERVED_KEY"));
+    }
+
+    /// Hints survive a round-trip through the
+    /// `validate_integration_merge_verifiers_operator_side` path
+    /// when populated within the caps.
+    #[test]
+    fn validate_imerge_with_valid_hints_is_accepted() {
+        let mut e = entry("ok");
+        e.hints.insert(
+            "language".to_owned(),
+            serde_json::json!("rust"),
+        );
+        e.hints.insert(
+            "toolchain".to_owned(),
+            serde_json::json!({"channel": "stable", "version": "1.79"}),
+        );
+        validate_integration_merge_verifiers_operator_side(&[e])
+            .expect("hints inside caps must validate");
+    }
+
+    /// Reserved-prefix rule rejection comes from
+    /// `validate_verifier_hints` on the IMV path too.
+    #[test]
+    fn validate_imerge_with_reserved_hint_key_is_rejected() {
+        let mut e = entry("ok");
+        e.hints.insert(
+            "RAXIS_ESCAPE_VECTOR".to_owned(),
+            serde_json::json!("yes"),
+        );
+        let err = validate_integration_merge_verifiers_operator_side(&[e])
+            .expect_err("reserved-prefix hint key must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_HINTS_RESERVED_KEY"));
+    }
+
+    // ── [verifier_runtime] section witnesses ────────────────────────
+
+    /// Spec defaults survive when the operator omits
+    /// `[verifier_runtime]`.
+    #[test]
+    fn verifier_runtime_section_omitted_yields_spec_defaults() {
+        let cfg = validate_verifier_runtime_section(None).expect("defaults must validate");
+        assert_eq!(cfg.max_verifier_wall_seconds, DEFAULT_MAX_VERIFIER_WALL_SECONDS);
+        assert_eq!(cfg.verifier_idle_timeout_seconds, DEFAULT_VERIFIER_IDLE_TIMEOUT_SECONDS);
+        assert_eq!(
+            cfg.task_verifier_total_budget_seconds,
+            DEFAULT_TASK_VERIFIER_TOTAL_BUDGET_SECONDS
+        );
+        assert_eq!(
+            cfg.verifier_force_shutdown_grace_seconds,
+            DEFAULT_VERIFIER_FORCE_SHUTDOWN_GRACE_SECONDS
+        );
+    }
+
+    /// Zero is structurally invalid (operator typo guard).
+    #[test]
+    fn verifier_runtime_zero_wall_is_rejected() {
+        let section = VerifierRuntimeSection {
+            max_verifier_wall_seconds: Some(0),
+            verifier_idle_timeout_seconds: None,
+            task_verifier_total_budget_seconds: None,
+            verifier_force_shutdown_grace_seconds: None,
+        };
+        let err = validate_verifier_runtime_section(Some(&section))
+            .expect_err("zero wall-clock must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_RUNTIME_INVALID"));
+    }
+
+    /// Hard cap kicks at 4 hours + 1.
+    #[test]
+    fn verifier_runtime_wall_above_hard_cap_is_rejected() {
+        let section = VerifierRuntimeSection {
+            max_verifier_wall_seconds: Some(VERIFIER_RUNTIME_HARD_CAP_WALL_SECONDS + 1),
+            verifier_idle_timeout_seconds: None,
+            task_verifier_total_budget_seconds: None,
+            verifier_force_shutdown_grace_seconds: None,
+        };
+        let err = validate_verifier_runtime_section(Some(&section))
+            .expect_err("wall above hard cap must be rejected");
+        assert!(format!("{err}").contains("FAIL_POLICY_VERIFIER_RUNTIME_ABOVE_CEILING"));
+    }
+
+    /// Coherence rule: idle timeout cannot exceed wall-clock budget.
+    #[test]
+    fn verifier_runtime_idle_above_wall_is_rejected() {
+        let section = VerifierRuntimeSection {
+            max_verifier_wall_seconds: Some(30),
+            verifier_idle_timeout_seconds: Some(60),
+            task_verifier_total_budget_seconds: None,
+            verifier_force_shutdown_grace_seconds: None,
+        };
+        let err = validate_verifier_runtime_section(Some(&section))
+            .expect_err("idle > wall must be rejected");
+        let msg = format!("{err}");
+        assert!(msg.contains("FAIL_POLICY_VERIFIER_RUNTIME_INVALID"));
+        assert!(msg.contains("verifier_idle_timeout_seconds"));
     }
 
     /// Names must match `[a-z][a-z0-9_]{0,31}`.
