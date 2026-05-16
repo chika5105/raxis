@@ -3232,33 +3232,22 @@ fn run_bake_inner(args: &BakeArgs) -> Result<()> {
         bake_one_role_full(*role, args, &outcome, &vmlinux_sha, &pk_hex_for_children)?;
     }
 
-    // 5. Post-bake trust-anchor verification.
-    //
-    // Read the staged `<install_dir>/kernel/vmlinux` and scan its
-    // bytes for the 32-byte fingerprint of `pk_hex_for_children`.
-    // Absence (or, worse, an all-zero 32-byte run with the
-    // fingerprint missing) means the kernel was built without
-    // `RAXIS_KERNEL_SIGNING_KEY_HEX` in its env — the very
-    // failure mode this iter66 fix exists to catch. The verifier
-    // bails with the `INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01
-    // VIOLATED` remediation message so a Round-1 bake never ships
-    // a broken kernel to Round-2.
-    let staged_kernel = args.install_dir.join("kernel").join("vmlinux");
-    if staged_kernel.exists() {
-        trust_anchor::verify_kernel_binary_at_path(&staged_kernel, &pk_hex_for_children).context(
-            "post-bake trust-anchor verification of the staged kernel \
-                 binary failed (INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01)",
-        )?;
-        eprintln!(
-            "{}",
-            serde_json::json!({
-                "level": "info",
-                "event": "bake_trust_anchor_verified",
-                "kernel": staged_kernel.display().to_string(),
-                "pk_hex_prefix": &pk_hex_for_children[..16.min(pk_hex_for_children.len())],
-            })
-        );
-    }
+    // Post-bake trust-anchor verification is intentionally NOT
+    // performed against `<install_dir>/kernel/vmlinux`: that file is
+    // the Linux *guest* kernel that boots inside the microVM, not the
+    // `raxis-kernel` *host daemon* binary. The trust anchor
+    // (`EXPECTED_KERNEL_SIGNING_KEY_BYTES`) only ever lands in the
+    // host daemon — injected at compile time by
+    // `crates/canonical-images/build.rs` from
+    // `RAXIS_KERNEL_SIGNING_KEY_HEX`. The bake already threaded that
+    // env var through every cargo subprocess it spawned via
+    // `apply_trust_anchor_env`, and `cargo install --path kernel`
+    // is the canonical way operators rebuild the host binary
+    // afterwards. Operators wanting an explicit audit of the host
+    // daemon's embedded fingerprint should run
+    // `cargo xtask images verify-trust-anchor
+    //     --kernel "$(command -v raxis-kernel)"`
+    // and not infer host-daemon health from the guest vmlinux.
 
     let roles_json: Vec<&str> = args.roles.iter().map(|r| r.workspace_crate()).collect();
     let payload = serde_json::json!({
