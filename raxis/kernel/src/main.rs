@@ -681,12 +681,53 @@ async fn main() {
     // The Layer 1 boundary defense at `Store::lock_sync` lives in
     // `crates/store/src/db.rs` (delivered by the parallel
     // worker/iter66-async-store-lock-sweep work) and is wired via
-    // its own `install_lock_sync_from_async_emitter` call at boot;
-    // see `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` for the
+    // its own `install_lock_sync_from_async_emitter` call at boot
+    // (immediately below `install_kernel_panic_hook`); see
+    // `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` for the
     // boundary contract. Both lanes share the same `inner_audit`
     // sink so all kernel-recovery telemetry lands on one chain.
     safety::install_safety_audit_sink(Arc::clone(&inner_audit));
     panic_hook::install_kernel_panic_hook(Arc::clone(&inner_audit), None);
+
+    // Wire the Layer 1 `Store::lock_sync` async-context boundary
+    // emitter to the same `inner_audit` chain as the panic hook
+    // and the safety audit sink. The boundary in
+    // `crates/store/src/db.rs` increments
+    // `raxis_kernel_store_lock_sync_from_async_total` and
+    // (release) `block_in_place`-recovers regardless of whether
+    // an emitter is installed, but a wired emitter upgrades the
+    // detection to a structured
+    // `KernelStoreLockSyncFromAsyncDetected` audit row so the
+    // operator surface (dashboard kernel-health widget,
+    // `last_chain_state`, post-mortem chain) can see WHICH call
+    // site the violation came from. We wrap the emit in
+    // `catch_unwind(AssertUnwindSafe(...))` so a downstream sink
+    // failure cannot re-enter the `lock_sync` boundary (which
+    // would risk a re-entrant emit storm and itself become a
+    // panic source the Layer 3 hook would have to catch).
+    //
+    // Pinned by both
+    //   INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01 (the
+    //   detection contract this emitter completes) and
+    //   INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01 (the
+    //   umbrella that says recovery telemetry chains all flow
+    //   through `inner_audit`).
+    {
+        let emitter_audit = Arc::clone(&inner_audit);
+        let _ = raxis_store::db::install_lock_sync_from_async_emitter(Arc::new(
+            move |caller_file, caller_line, thread_name, cumulative| {
+                let event = AuditEventKind::KernelStoreLockSyncFromAsyncDetected {
+                    caller_file: caller_file.to_owned(),
+                    caller_line,
+                    thread_name: thread_name.to_owned(),
+                    cumulative_detections: cumulative,
+                };
+                let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    let _ = emitter_audit.emit(event, None, None, None);
+                }));
+            },
+        ));
+    }
 
     // Per-session lifecycle capture (`SessionCapture`) — sibling
     // of `TaskLlmCapture` for the post-mortem surface. The
