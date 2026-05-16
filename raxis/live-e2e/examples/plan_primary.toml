@@ -278,6 +278,43 @@ do not silently swallow it.
   proxy_type = "mongodb"
   mount_as   = "MONGO_URL"
 
+# === iter62 verifier-runtime D10 — additive symbol-index verifier ===
+#
+# Wires the kernel-canonical `raxis-verifier-symbol-index` image
+# to the materialize-records Executor task so the live-e2e harness
+# exercises the V2 production verifier path end-to-end (image-bake
+# → digest-verify → VM-spawn → built-in symbol-index pipeline →
+# witness submission). See `specs/v2/iter62-verifier-runtime-live-e2e.md`
+# for the full wiring contract + audit-chain assertion shape.
+#
+# `on_failure = "warn_only"` so a transient verifier failure does
+# NOT break the existing materialize-records flow (the realistic
+# scenario already covers the unhappy paths via dedicated failure-
+# mode tasks; the symbol-index verifier is additive coverage of the
+# verifier runtime itself, not the gate FSM). The harness asserts
+# `verdict = Pass` for the happy path; failure surfaces as a
+# distinct VerifierVm* audit event the harness audit-chain assertion
+# pins.
+
+  [[tasks.verifiers]]
+  name        = "symbol_index"
+  image       = "raxis-verifier-symbol-index"
+  # `RAXIS_VERIFIER_BUILTIN = "symbol-index"` (env below) bypasses
+  # `sh -lc <command>` and runs the in-process pipeline; the
+  # command field is still required by the schema and surfaces as
+  # `<builtin>` in the audit summary.
+  command     = ["true"]
+  timeout_ms  = 30000
+  on_failure  = "warn_only"
+  artifact    = "/raxis/symbol_index.json"
+
+    [tasks.verifiers.env]
+    RAXIS_VERIFIER_BUILTIN       = "symbol-index"
+    RAXIS_BASE_SYMBOL_INDEX_PATH = "/raxis/base_index/symbol_index.json"
+    # Cap the parallel ctags fan-out so harness behaviour is
+    # deterministic across CI hardware shapes.
+    RAXIS_VERIFIER_PARALLELISM   = "4"
+
 # ── Cross-file refactor Executor (P3-2) ─────────────────
 [[tasks]]
 task_id            = "xfile-refactor"
