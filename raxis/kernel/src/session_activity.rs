@@ -313,6 +313,7 @@ pub enum ExitCleanliness {
     ///   * the planner did not ship a `CleanCompletion` notice
     ///     (the Mode-B premature-exit synthesiser handles that
     ///     case via the structured `PlannerExitOutcome` already).
+    ///
     /// In both cases the orchestrator post-exit hook treats the
     /// exit as a normal clean disconnect.
     Clean,

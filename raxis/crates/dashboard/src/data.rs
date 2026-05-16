@@ -694,8 +694,16 @@ pub struct TaskLlmTurnView {
     /// remain `None`. Absent / non-JSON bodies leave all four
     /// fields `None`.
     pub input_tokens: Option<u32>,
+    /// Output-token count for this turn (see `input_tokens`
+    /// for the per-provider mapping).
     pub output_tokens: Option<u32>,
+    /// Anthropic-only cache-write tokens (`body.usage.cache_creation_input_tokens`).
+    /// `None` for OpenAI bodies and for absent / non-JSON
+    /// bodies; see `input_tokens` for the cross-provider rule.
     pub cache_creation_input_tokens: Option<u32>,
+    /// Anthropic-only cache-read tokens (`body.usage.cache_read_input_tokens`).
+    /// `None` for OpenAI bodies and for absent / non-JSON
+    /// bodies; see `input_tokens` for the cross-provider rule.
     pub cache_read_input_tokens: Option<u32>,
     /// Wall-clock latency from gateway outbound write to first
     /// response byte. Optional only because future capture
@@ -710,14 +718,26 @@ pub struct TaskLlmTurnView {
     /// another wire bump (global "recent LLM activity" cross-
     /// task views are the canonical consumer).
     pub task_id: String,
+    /// Owning session id for this turn; `None` when the turn
+    /// fired before a session was bound (e.g. early bootstrap
+    /// fetches the kernel issues to the planner endpoint).
     pub session_id: Option<String>,
+    /// Per-fetch correlation id (`raxis_gateway::FetchId` hex)
+    /// linking this dashboard row to the audit chain's
+    /// `LlmFetchStarted` / `LlmFetchCompleted` pair.
     pub fetch_id: String,
+    /// HTTP status from the upstream provider response.
+    /// `None` for transport-level failures that never produced
+    /// a status (DNS, connect, TLS handshake errors).
     pub status_code: Option<u16>,
     /// Original response body length, before per-record body
     /// cap truncation. `body_truncated` flips when the
     /// projection saw the kernel-side truncation marker.
     #[serde(default, skip_serializing_if = "is_zero_u64")]
     pub original_body_bytes: u64,
+    /// `true` when the projection truncated the response body
+    /// (`response` is shorter than `original_body_bytes`); the
+    /// dashboard surfaces a "[truncated]" badge in that case.
     #[serde(default, skip_serializing_if = "is_false")]
     pub body_truncated: bool,
     /// Structured upstream error category from the gateway

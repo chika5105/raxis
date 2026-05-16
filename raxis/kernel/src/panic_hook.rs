@@ -23,12 +23,12 @@
 //!    panic that escaped Layers 1 + 2. Synchronously emits:
 //!
 //!    a. Structured stderr (`KernelPanicCaught` JSON line) — the
-//!       durable signal that the log aggregator + supervisor see.
+//!    durable signal that the log aggregator + supervisor see.
 //!    b. Best-effort audit row via the captured audit sink.
 //!    c. Best-effort Critical operator notification.
 //!    d. Chains to the previously installed panic hook (which
-//!       ultimately reaches the Rust default hook so the standard
-//!       panic banner prints + the unwind continues).
+//!    ultimately reaches the Rust default hook so the standard
+//!    panic banner prints + the unwind continues).
 //!
 //!    The hook does NOT swallow panics. Unwinding proceeds; the
 //!    daemon eventually reaches `process::exit` (panic = "unwind"

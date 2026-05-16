@@ -4450,7 +4450,7 @@ pub enum AuditEventKind {
         /// causes whose underlying condition the operator cannot
         /// clear via the kernel (e.g. plan schema errors); the
         /// approve handler still resets the orch-respawn counter
-        /// + transitions Failed → Executing, but the documented
+        /// and transitions Failed → Executing, but the documented
         /// expectation is that the next orchestrator decision
         /// cycle will hit the same condition and trip a fresh
         /// permanent failure. Surfaced in the inbox so operators

@@ -9038,7 +9038,7 @@ mod integration_merge_verifiers_tests {
             .expect("single canonical entry must validate");
     }
 
-    /// iter63-followups.md — hints validator witnesses.
+    // iter63-followups.md — hints validator witnesses.
 
     /// Happy path — empty hints map is the default and validates.
     #[test]
