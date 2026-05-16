@@ -440,6 +440,22 @@ async fn main() {
                         result.folded_integration_merge_attempts
                     );
                 }
+                if result.orphan_lane_reservations_freed > 0 {
+                    // iter62 deep-sweep D1 backstop
+                    // (INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01).
+                    // A non-zero count means the previous kernel left
+                    // one or more `lane_budget_reservations` rows
+                    // attached to terminal tasks — the recovery sweep
+                    // freed them so subsequent admission decisions on
+                    // the same lane see the corrected aggregate.
+                    eprintln!(
+                        "{{\"level\":\"warn\",\
+                         \"message\":\"recovery freed orphan lane reservations\",\
+                         \"count\":{},\
+                         \"invariant\":\"INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01\"}}",
+                        result.orphan_lane_reservations_freed
+                    );
+                }
                 result.swept_tasks_detail
             }
             Err(e) => exit_with_code(e),

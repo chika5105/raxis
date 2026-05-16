@@ -11762,6 +11762,153 @@ that differ only by punctuation) keep their tails disjoint.
 
 ---
 
+## §12.62 — iter62 deep-sweep additions (deep-sweep-2)
+
+> Appended by `worker/iter62-deep-sweep-2` after the parent's
+> dimension #1 + dimension #2 sweep landed on
+> `worker/iter62-deep-sweep`. Entries below are scoped to the
+> remaining nine sweep dimensions and a few net-new findings.
+> Each entry is single-file and self-contained so merge-time
+> conflict resolution is trivial.
+
+### INV-DEEP-SWEEP-D1-LANE-RESERVATION-LEAK-01 — Terminal task implies no `lane_budget_reservations` row
+
+**Statement.** For every row `t` in `tasks` with `t.state IN
+('Completed','Failed','Aborted','Cancelled')`, there MUST NOT
+exist a row in `lane_budget_reservations` with
+`task_id = t.task_id`. Boot-time
+`recovery::reconcile_orphan_lane_reservations` enforces this
+as a backstop and reports any rows it deleted via
+`ReconciliationResult.orphan_lane_reservations_freed`.
+
+**Why structural.** `lane_budget_reservations.reserved_cost`
+is aggregated by `SUM` per lane and compared against
+`max_cost_per_epoch` on every admission. A row attached to a
+terminal task would double-book the cap forever, eventually
+starving the lane of admission slots — operators would see
+intents rejected with `BudgetExceeded` while every visibly
+in-flight task fits well under the cap.
+
+**Witness (kernel/src/recovery.rs::tests).**
+`lane_reservation_sweep_frees_terminal_orphans_and_preserves_in_flight`
+seeds one reservation per FSM state and pins that exactly the
+four terminal-state reservations are deleted;
+`lane_reservation_sweep_releases_aggregate_cost` pins the
+post-sweep `SUM(reserved_cost)` (the operator-facing outcome);
+`lane_reservation_sweep_is_idempotent` pins the
+INV-STORE-02 re-crash-mid-recovery contract.
+
+**Canonical home.** `specs/v1/kernel-store.md §2.5.1`
+(INV-STORE-02 paired-write) + `specs/invariants.md §12`.
+
+**iter62 forensic.** Task
+`019e2dc0-3160-7a52-919b-e18785a3ec1e` on lane
+`e2e-realistic-sibling-lane` was found `Completed` with a
+100-unit reservation row still attached. The canonical
+in-tx `release_budget_in_tx` did not run (the terminal-state
+flip was committed without the paired DELETE, or the
+DELETE-then-flip transaction crashed between statements);
+either way, no operator action ever clears the row without
+this sweep.
+
+---
+
+### INV-DEEP-SWEEP-D6-CRITICAL-AUDIT-EMIT-NEVER-SILENT-01 — Critical audit emits log on failure
+
+**Statement.** Every `AuditSink::emit` call site that emits a
+**critical** operator-facing state-change event (disk-full
+halt, gateway quarantine/spawn/crash, git-consistency
+repaired/verified/inconsistent) MUST surface the audit-emit
+failure on the structured-stderr log instead of silently
+discarding the error with `let _ = audit.emit(...)`. The log
+line MUST include `audit_emit_failed` and the event-kind tag
+so the operator can correlate the missing chain entry with
+the structured-stderr fallback.
+
+**Why structural.** These events are the only durable record
+of the kernel-level state change — there is no SQL row, no
+metric, no operator IPC echo. When audit emission fails (chain
+broken, segment rotation deadlock, disk-full racing the
+disk-full event itself), a silent drop strands the operator
+with no signal at all. Pre-fix, three classes of events
+(`DiskFullHaltEntered`, `OperatorAttentionRequired`,
+`DiskHealthyAfterFull`; `GatewaySpawned`, `GatewayCrashed`,
+`GatewayQuarantined`; `GitConsistencyRepaired`,
+`GitConsistencyVerified`, `GitStateInconsistent`) silently
+discarded their `emit` Result. Post-fix, every site logs
+`{"level":"error", "event":"<kind>", "audit_emit_failed":"<err>"}`
+so the operator's structured-stderr ingest catches the gap.
+
+**Witness.** Per-site unit tests are not added because
+emit-failure is unreachable from in-memory fakes; the witness
+is the source-level enforcement (no `let _ = audit.emit(...)`
+sites remain in `recovery.rs::emit_repaired/_verified/
+_inconsistent`, `capacity::disk_watchdog::poll_once`, or
+`gateway::supervisor::run_supervisor`). A `git grep` for that
+pattern in those three files is the structural witness.
+
+**Canonical home.** `specs/v2/audit-paired-writes.md §1`
+(audit-emit failure handling).
+
+---
+
+### INV-DEEP-SWEEP-D9-OPERATOR-REVOKE-SESSION-AUDIT-EMIT-01 — `RevokeSession` operator handler must emit `SessionRevoked`
+
+**Statement.** `kernel::ipc::operator::handle_revoke_session`,
+when its `authority::session::revoke_session` SQL `UPDATE
+sessions SET revoked=1, revoked_at=?` flips a row from
+`revoked=0` to `revoked=1`, MUST emit a paired
+`AuditEventKind::SessionRevoked` event post-commit. The
+current code returns `OperatorResponse::SessionRevoked` to
+the operator but does NOT emit the audit-chain event,
+leaving the SQL state change without a durable audit anchor.
+
+**Why structural.** `SessionRevoked` is the kernel's only
+audit-chain anchor a downstream forensic auditor can use to
+reconstruct "operator revoked this session at this time".
+The SQL row alone cannot be cross-correlated to operator
+identity (`AuthenticatedOperator.fingerprint`) because the
+`sessions` table does not record who revoked.
+
+**Witness.** Deferred — `kernel/src/ipc/operator.rs` is the
+parent's territory on `worker/iter62-deep-sweep`. See
+`RETURN_NOTE_TO_PARENT.md` for the cross-worker routing
+request.
+
+**Canonical home.** `specs/v2/audit-paired-writes.md §1`.
+
+---
+
+### INV-DEEP-SWEEP-D9-LOGICAL-DEADLOCK-APPROVE-EMITS-INITIATIVE-STATE-CHANGED-01 — Operator approval of LogicalDeadlock emits `InitiativeStateChanged`
+
+**Statement.** When
+`kernel::ipc::operator::handle_approve_logical_deadlock`'s
+in-tx fold (`approve_logical_deadlock_escalation_in_tx`)
+transitions an initiative from `Failed → Executing` via
+`UPDATE initiatives SET state='Executing', completed_at=NULL`,
+the kernel MUST emit a paired
+`AuditEventKind::InitiativeStateChanged { from='Failed',
+to='Executing', ... }` event post-commit alongside the
+existing `OperatorApprovedRespawnEscalation` event. The
+`OperatorApproved*` event records the operator action; the
+`InitiativeStateChanged` event records the FSM transition —
+both are required by the paired-write contract.
+
+**Why structural.** Dashboards and post-mortem auditors index
+initiative FSM transitions on the `InitiativeStateChanged`
+stream. A silent `Failed → Executing` flip would leave the
+dashboard's initiative-state timeline with an unexplained
+gap (last event: `InitiativeStateChanged{to=Failed}`; next:
+some task transition under a now-`Executing` initiative).
+
+**Witness.** Deferred — `kernel/src/ipc/operator.rs` is the
+parent's territory; the fix belongs alongside the operator
+handler. See `RETURN_NOTE_TO_PARENT.md`.
+
+**Canonical home.** `specs/v2/audit-paired-writes.md §1`.
+
+---
+
 ## §13 — When this file is wrong
 
 This file is a navigational consolidation. The canonical homes
