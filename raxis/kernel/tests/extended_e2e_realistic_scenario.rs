@@ -628,6 +628,22 @@ fn realistic_session_lifecycle() {
         // appended to, so the structural walk would race the
         // live writer.
         let final_chain = walk_chain_or_panic(kernel.data_dir());
+
+        // FOLLOWUP-G — INV-VERIFIER-AUDIT-PAIRED-WRITE-01 + the audit
+        // chain pin from `specs/v2/iter62-verifier-runtime-live-e2e.md`:
+        // when the chain shows even one
+        // `VerifierVmSpawned { image_alias = "raxis-verifier-symbol-index" }`
+        // event, the same `verifier_run_id` MUST also surface a
+        // matching `VerifierWitnessReceived { verdict = "Pass" }`. The
+        // assertion is SOFT — if no spawn was observed (e.g. the bake
+        // step did not populate the digest envs, or the operator did
+        // not build `raxis-verifier-no-secrets`) we just skip it. The
+        // canonical coverage anchor for "did we exercise the verifier
+        // at all?" lives in
+        // `INV-WITNESS-VERIFIER-LIVE-E2E-EXERCISED-01` (the gate-
+        // injection conditional in `enable_gateway_in_policy`).
+        assert_verifier_symbol_index_paired_write(&final_chain);
+
         let audit_witness = AuditChainWitness::for_data_dir(kernel.data_dir());
         let structural_report = audit_witness.assert_structural();
         eprintln!(
@@ -1016,3 +1032,77 @@ fn seed_minimal_tasks_db(tmpdir: &Path, executor_task: &str, critique: &str) -> 
 // (SIGTERM-then-SIGKILL on drop, no leaked processes) is now
 // owned by [`extended_e2e_support::otel_pusher::OtelPusherSupervisor`]
 // per `INV-LIVE-E2E-OTEL-PUSHER-PRESENT-01`.
+
+// ---------------------------------------------------------------------------
+// FOLLOWUP-G — VerifierVmSpawned → VerifierWitnessReceived paired-write
+// soft assertion. Sits at the file end (rather than in
+// `extended_e2e_support/`) because the realistic-scenario test owns its
+// own audit assertions; promoting this helper into the shared support
+// crate is iter63 territory once a second slice exercises the verifier.
+// ---------------------------------------------------------------------------
+
+fn assert_verifier_symbol_index_paired_write(chain: &[raxis_audit_tools::AuditEvent]) {
+    // `AuditEvent` carries a string-tagged `event_kind` plus a free-form
+    // `payload: serde_json::Value`; the typed `AuditEventKind` lives only
+    // on the emit side. We pivot on the string tags pinned in
+    // `crates/audit/src/event.rs::AuditEventKind::as_str()` and read the
+    // payload fields directly.
+    let mut spawned_runs: Vec<String> = Vec::new();
+    for ev in chain {
+        if ev.event_kind == "VerifierVmSpawned" {
+            let image_alias = ev
+                .payload
+                .get("image_alias")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            if image_alias == "raxis-verifier-symbol-index" {
+                if let Some(run_id) = ev
+                    .payload
+                    .get("verifier_run_id")
+                    .and_then(|v| v.as_str())
+                {
+                    spawned_runs.push(run_id.to_owned());
+                }
+            }
+        }
+    }
+    if spawned_runs.is_empty() {
+        eprintln!(
+            "[realism-e2e] FOLLOWUP-G: no `VerifierVmSpawned {{ image_alias = \"raxis-verifier-symbol-index\" }}` \
+             observed; skipping paired-write assertion. The bake step + verifier image are required \
+             to exercise this path; see specs/v2/iter62-verifier-runtime-live-e2e.md."
+        );
+        return;
+    }
+
+    for run_id in &spawned_runs {
+        let matched = chain.iter().any(|ev| {
+            if ev.event_kind != "VerifierWitnessReceived" {
+                return false;
+            }
+            let candidate_run_id = ev
+                .payload
+                .get("verifier_run_id")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            let verdict = ev
+                .payload
+                .get("verdict")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default();
+            candidate_run_id == run_id && verdict == "Pass"
+        });
+        assert!(
+            matched,
+            "FOLLOWUP-G: VerifierVmSpawned for `raxis-verifier-symbol-index` \
+             (verifier_run_id={run_id}) has no matching \
+             VerifierWitnessReceived {{ verdict = \"Pass\" }} in the audit chain. \
+             Pinned by INV-VERIFIER-AUDIT-PAIRED-WRITE-01 + the audit-chain \
+             contract in specs/v2/iter62-verifier-runtime-live-e2e.md.",
+        );
+    }
+    eprintln!(
+        "[realism-e2e] FOLLOWUP-G: {} symbol-index spawn(s) all paired with VerifierWitnessReceived(verdict=Pass)",
+        spawned_runs.len(),
+    );
+}
