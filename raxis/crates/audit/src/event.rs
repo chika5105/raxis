@@ -4369,6 +4369,62 @@ pub enum AuditEventKind {
         /// can prefer Deny on non-recoverable causes.
         recoverable_via_approve: bool,
     },
+
+    /// iter66 `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01`
+    /// — a `Store::lock_sync` call landed on a thread that
+    /// is currently inside a tokio runtime context. The
+    /// boundary defense in `raxis_store::Store::lock_sync`
+    /// emits this event BEFORE recovering via
+    /// `tokio::task::block_in_place` so the audit chain
+    /// captures the bug even though the daemon survives. In
+    /// debug builds the boundary panics instead of emitting
+    /// (tests trip loudly); only release builds reach this
+    /// emit path.
+    ///
+    /// **Operator action.** A sustained non-zero
+    /// `raxis_kernel_store_lock_sync_from_async_total` counter
+    /// is a kernel-bug signal — the offending call site is in
+    /// `caller_file:caller_line` and SHOULD be wrapped in
+    /// `tokio::task::spawn_blocking` (or migrated to the new
+    /// async `Store::lock` API). Recovery is correct (the
+    /// `block_in_place` hop is safe on multi-thread runtimes),
+    /// but the path is bug telemetry, not a normal operation
+    /// mode.
+    ///
+    /// **Audit shape.** Best-effort emit from
+    /// `raxis_store::Store::lock_sync`'s release-build
+    /// detection branch. The store crate registers a
+    /// kernel-installed closure via
+    /// `install_lock_sync_from_async_emitter` at boot; if the
+    /// closure was never installed (CLI / boot before the
+    /// audit sink is wired) the emit is skipped and the
+    /// eprintln + counter remain the durable surface.
+    ///
+    /// Routes at `Critical` notification priority — this is a
+    /// recoverable kernel bug whose presence indicates a
+    /// missing `spawn_blocking` hop somewhere in the kernel /
+    /// crates. Parent's umbrella safety taxonomy
+    /// `INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01`
+    /// (landing in parallel) classifies this fault class as
+    /// `RecoverableHandlerBug` — recovery is correct, not a
+    /// `SafetyCritical` violation.
+    KernelStoreLockSyncFromAsyncDetected {
+        /// Source file of the offending `lock_sync` call as
+        /// reported by `#[track_caller]`. May be a relative
+        /// path under the kernel workspace (e.g.
+        /// `kernel/src/handlers/intent.rs`).
+        caller_file: String,
+        /// Source line of the offending `lock_sync` call.
+        caller_line: u32,
+        /// Best-effort thread name (e.g. `"tokio-rt-worker"`).
+        /// `"<unknown>"` if the thread had no name.
+        thread_name: String,
+        /// Cumulative count of detections in this kernel
+        /// process at the time of emit (read from the
+        /// boundary's `AtomicU64` counter immediately after
+        /// the increment that triggered this event).
+        cumulative_detections: u64,
+    },
 }
 
 impl AuditEventKind {
@@ -4565,6 +4621,10 @@ impl AuditEventKind {
             }
             Self::InitiativePermanentFailureEscalated { .. } => {
                 "InitiativePermanentFailureEscalated"
+            }
+            // === iter66 store-lock-sync-from-async boundary telemetry ===
+            Self::KernelStoreLockSyncFromAsyncDetected { .. } => {
+                "KernelStoreLockSyncFromAsyncDetected"
             }
         }
     }

@@ -164,7 +164,16 @@ pub fn notification_priority_for_kind_str(kind_str: &str) -> Option<Notification
         // Mirror of the typed `K::InitiativePermanentFailureEscalated`
         // arm in `notification_priority`; both surfaces MUST classify
         // it as `Critical` per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
-        | "InitiativePermanentFailureEscalated" => Some(Critical),
+        | "InitiativePermanentFailureEscalated"
+        // `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` (iter66) —
+        // a `Store::lock_sync` boundary detection fires on a release
+        // build whenever a kernel call site is missing a
+        // `spawn_blocking` hop. The recovery via `block_in_place`
+        // keeps the daemon alive, but the persistent counter
+        // (`raxis_kernel_store_lock_sync_from_async_total`) is
+        // operator-actionable kernel-bug signal — same Critical band
+        // as the deadlock detector, distinct cause class.
+        | "KernelStoreLockSyncFromAsyncDetected" => Some(Critical),
 
         // High
         "EscalationSubmitted"
@@ -668,6 +677,12 @@ pub fn notification_priority(kind: &AuditEventKind) -> Option<NotificationPriori
         // `notification_priority_for_kind_str` keeps the surfaces
         // in lockstep per `INV-NOTIFICATION-PRIORITY-PARITY-01`.
         K::InitiativePermanentFailureEscalated { .. } => Some(Critical),
+        // `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` (iter66) —
+        // see the `KernelStoreLockSyncFromAsyncDetected` event docs
+        // in `crates/audit/src/event.rs`. Critical to mirror the
+        // `notification_priority_for_kind_str` arm per
+        // `INV-NOTIFICATION-PRIORITY-PARITY-01`.
+        K::KernelStoreLockSyncFromAsyncDetected { .. } => Some(Critical),
     }
 }
 
@@ -1296,6 +1311,7 @@ mod tests {
             ("KernelRestartHaltedCircuitOpen", Critical),
             ("OrchestratorRespawnCeilingExceeded", Critical),
             ("InitiativePermanentFailureEscalated", Critical),
+            ("KernelStoreLockSyncFromAsyncDetected", Critical),
             // High
             ("EscalationSubmitted", High),
             ("EscalationRateLimitExceeded", High),

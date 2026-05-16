@@ -296,7 +296,15 @@ pub async fn dispatch_blocking_for_tests_with_registry(
     }
 
     if let Some(s) = store {
-        let conn = s.lock_sync();
+        // INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01: this is a
+        // `pub async fn` body — calling `lock_sync()` directly would
+        // hit the iter66.1 boundary-defense `block_in_place`
+        // detection on release builds and panic on debug. Migrated
+        // to the async-preferred `Store::lock().await` surface as
+        // the canonical migration example for the new API (the rest
+        // of the kernel still uses the `spawn_blocking + lock_sync`
+        // pattern; both are correct under the invariant).
+        let conn = s.lock().await;
         let sql = format!(
             "INSERT OR IGNORE INTO {} \
              (notification_id, event_kind, initiative_id, task_id, \

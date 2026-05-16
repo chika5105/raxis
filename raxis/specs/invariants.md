@@ -107,7 +107,8 @@
 | iter65 fail-closed VM cap + planner clean-completion + auto-LogicalDeadlock + notification parity — V3 (iter65) | INV-KERNEL-STATELESS-VM-CONCURRENCY-CAP-01, INV-PLANNER-CLEAN-COMPLETION-MUST-NOT-WRAP-REJECTED-INTENT-01, INV-ORCHESTRATOR-NNSP-COUNTER-EXCLUDES-CAPACITY-PRESSURE-01, INV-ESCALATION-AUTO-LOGICAL-DEADLOCK-PAIRED-WRITE-01, INV-NOTIFICATION-PRIORITY-PARITY-01 | 5 |
 | iter65-review generalised permanent-failure escalation + recovery semantics — V3 (iter65-review) | INV-INITIATIVE-PERMANENT-FAILURE-ESCALATION-COVERAGE-01, INV-OPERATOR-APPROVE-RECOVERY-SEMANTICS-01 | 2 |
 | Bake-pipeline kernel trust anchor injection + post-build verification — V3 (iter66) | INV-IMAGE-BAKE-KERNEL-TRUST-ANCHOR-POPULATED-01 | 1 |
-| **Total** | | **154** |
+| iter66 store-lock-sync async boundary defense — V3 (iter66) | INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01 | 1 |
+| **Total** | | **155** |
 
 ---
 
@@ -13515,6 +13516,159 @@ must be wrapped, including any future addition.
    back to `data_dir` without panicking (canonical safe call
    pattern that production `gate_recheck` now uses).
 
+
+
+---
+
+### `INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01` — `Store::lock_sync` is debug-panic / release-recover with safety-preserving telemetry; sustained counter is operator-actionable kernel-bug signal
+
+**Statement.** No `Store::lock_sync()` call site reachable from a
+tokio async function body or `tokio::spawn(async move { ... })`
+closure is invoked without an intervening
+`tokio::task::spawn_blocking` hop (or, equivalently, a migration
+to the new async `Store::lock().await` API). The
+`Store::lock_sync` boundary in `crates/store/src/db.rs` enforces
+the contract structurally with a debug-panic / release-recover
+policy:
+
+* **Debug builds** (`cfg(debug_assertions)`) call
+  `tokio::sync::Mutex::blocking_lock()` directly. The canonical
+  tokio panic `"Cannot block the current thread from within a
+  runtime"` fires on any async-context regression; CI catches it
+  loudly. `#[track_caller]` propagates the offending call site
+  into the panic location so the operator / triage reader lands
+  on the bug, not on `lock_sync`.
+
+* **Release builds** (`cfg(not(debug_assertions))`) detect the
+  async context via `tokio::runtime::Handle::try_current()`. When
+  inside a runtime, the boundary emits THREE telemetry signals
+  BEFORE the recovery:
+
+  1. `eprintln!` in the established kernel JSON shape —
+     `{"level":"error","event":"KernelStoreLockSyncFromAsync
+     Detected","caller":"<file:line>","thread":"<name>",
+     "cumulative_detections":N,
+     "invariant":"INV-KERNEL-STORE-LOCK-SYNC-NEVER-FROM-ASYNC-01"}`.
+  2. `raxis_kernel_store_lock_sync_from_async_total`
+     process-global `AtomicU64` counter increment. The value is
+     exposed via `raxis_store::db::lock_sync_from_async_count()`
+     for the dashboard / Prometheus exporter / tests.
+  3. Best-effort `KernelStoreLockSyncFromAsyncDetected` audit
+     emit through the kernel-installed
+     `LockSyncFromAsyncEmitter` closure (registered at boot via
+     `raxis_store::db::install_lock_sync_from_async_emitter`).
+
+  Recovery then runs via `tokio::task::block_in_place(||
+  self.conn.blocking_lock())`, returning a valid
+  `MutexGuard<'_, Connection>` so the call site proceeds and the
+  daemon stays alive. The eprintln + counter + audit all land
+  BEFORE the recovery; a recovery without telemetry is itself an
+  invariant violation. If the emitter was never installed (CLI
+  commands, boot before audit-sink wiring), the boundary emits a
+  one-shot `KernelStoreLockSyncTelemetryUnavailable` eprintln so
+  the gap is observable.
+
+* **Outside any runtime** (`Handle::try_current().is_err()`), the
+  boundary calls `blocking_lock()` directly — no telemetry, no
+  recovery hop. Recovery sweepers, bootstrap, CLI commands, and
+  pure-sync tests fall into this bucket. The counter is never
+  incremented from outside-runtime callers (zero false positives).
+
+Sustained non-zero
+`raxis_kernel_store_lock_sync_from_async_total` is
+**operator-actionable kernel-bug signal** — the
+`caller_file:caller_line` in the emitted log / audit event is
+the call site that needs a `spawn_blocking` wrap (or migration
+to `Store::lock().await`).
+
+**Cross-reference.** Parent's umbrella safety taxonomy invariant
+`INV-KERNEL-RECOVERY-PRESERVES-SAFETY-INVARIANTS-01` (landing in
+parallel) classifies this fault class as `RecoverableHandlerBug`,
+NOT `SafetyCritical`. Recovery via `block_in_place` is correct
+behaviour for the daemon under that taxonomy; the boundary's
+telemetry surface is the bug-signal channel, not a fail-closed
+gate.
+
+**Sub-clause: telemetry-before-recovery is mandatory.** The
+release-build branch MUST emit the eprintln + bump the counter +
+attempt the audit emit BEFORE calling `block_in_place`. Re-
+ordering (recovery first, telemetry on the success path) would
+silently absorb a class of detections if the recovery itself
+panics on a `current_thread` runtime (where `block_in_place` is
+not supported) — the fallback to `blocking_lock()` would then
+panic with no preceding detection record, indistinguishable from
+a debug-build panic.
+
+**Why structural.** Iter66.1 surfaced the iter63 gap (witness
+gate recheck): a single missed `spawn_blocking` hop in
+`handlers/witness.rs::gate_recheck` panicked the tokio runtime
+worker mid-IntegrationMerge, blacked out the planner stream, and
+took the dashboard down. Per-site fixes are necessary but not
+sufficient — any future async-context caller that forgets the
+hop reintroduces the same crash class. A boundary defense at
+`Store::lock_sync` itself converts the regression from
+"silent runtime worker death" to (debug) "loud CI panic" or
+(release) "operator-visible audit + counter + recovered
+acquisition", closing the class structurally.
+
+**Witnesses.** Four witnesses live in
+`crates/store/src/db.rs::async_runtime_safety` (positive, debug-
+panic, release-recovery, no-false-positive):
+
+1. **Positive.**
+   `async_runtime_safety::lock_sync_via_spawn_blocking_is_ok` —
+   `#[tokio::test(flavor = "multi_thread")]` drives
+   `store.lock_sync()` via `tokio::task::spawn_blocking`. Asserts
+   no panic AND the counter is NOT incremented (the
+   `spawn_blocking` hop lifts the thread off the runtime worker
+   before `lock_sync` runs).
+
+2. **Negative (debug-build only).**
+   `async_runtime_safety::lock_sync_directly_from_runtime_worker_panics`
+   — `#[tokio::test(flavor = "multi_thread")] #[should_panic(expected
+   = "Cannot block the current thread from within a runtime")]`
+   that calls `store.lock_sync()` directly from the test body.
+   Pins the canonical tokio panic so a future change to the
+   debug-build branch (e.g. someone "helpfully" makes it recover
+   silently) immediately fails CI.
+
+3. **Recovery + counter increment (release-build only).**
+   `async_runtime_safety::lock_sync_release_build_recovers_and_counts`
+   — `#[tokio::test(flavor = "multi_thread")]` that calls
+   `store.lock_sync()` directly from a runtime worker (no
+   `spawn_blocking`) and asserts the call returns a guard, the
+   counter increments by 1, a second sequential call increments
+   by 1 again, AND a subsequent `tokio::spawn` task completes
+   normally (runtime-still-healthy probe). Confirms the
+   `block_in_place` recovery branch is functional and the
+   boundary does not orphan runtime workers.
+
+4. **No-false-positive (always-on).**
+   `async_runtime_safety::lock_sync_outside_runtime_does_not_count`
+   — `#[test]` (pure sync, no tokio runtime) that calls
+   `store.lock_sync()` and asserts the counter is unchanged.
+   Pins the bootstrap / recovery-sweeper / CLI / pure-sync-test
+   path remains zero-cost telemetry-wise.
+
+5. **Idempotent emitter install.**
+   `async_runtime_safety::install_emitter_is_idempotent_first_install_wins`
+   — `#[test]` that calls
+   `install_lock_sync_from_async_emitter` twice and asserts the
+   second call returns `Err(())` per `OnceLock::set`'s contract.
+   Pins the boot-time install contract so a double-install
+   regression in the kernel boot path surfaces immediately.
+
+**Canonical home.** `crates/store/src/db.rs::Store::lock_sync` +
+`crates/store/src/db.rs::lock_sync_from_async_count` +
+`crates/store/src/db.rs::install_lock_sync_from_async_emitter`.
+
+**Operator surface.** Dashboard widget for the cumulative counter
+is on `FOLLOWUP-LIST` in
+`raxis/RETURN_NOTE_TO_PARENT_iter66_async_store_lock_sweep.md`
+under "Dashboard wiring for
+`raxis_kernel_store_lock_sync_from_async_total`". The counter is
+already exposed via the public `lock_sync_from_async_count()`
+helper; the work item is the dashboard widget binding only.
 
 ---
 
