@@ -99,6 +99,23 @@ pub enum WitnessRejectionReason {
     /// The task is not in GatesPending state — the submission arrived too late
     /// (task already recovered/aborted) or for the wrong task state.
     TaskNotGatesPending { current_state: String },
+    /// iter63-followups.md Item 1 (D) — the verifier’s claimed
+    /// `body.operator_hints` collides with the kernel-reserved
+    /// echo key, which the kernel populates from policy-declared
+    /// hints rather than trusting the verifier. Submission rejected,
+    /// token NOT consumed, `WitnessOperatorHintSpoofingDetected`
+    /// audit emitted. Pinned by
+    /// `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01`.
+    SpoofedOperatorHints,
+    /// iter63-followups.md Item 2 #3 — the task’s cumulative
+    /// verifier-time budget has been exhausted before this
+    /// submission. The verifier’s claim is dropped on the
+    /// floor; token NOT consumed (since validation never reached
+    /// the consume step in the spawn-side budget check). Held
+    /// here as a typed wire variant so the upstream gate path
+    /// can fail the gate uniformly when a budget-exhausted task
+    /// still races a witness through.
+    TimeBudgetExhausted,
 }
 
 // ---------------------------------------------------------------------------
@@ -121,7 +138,30 @@ pub enum HandlerError {
 
     #[error("store error: {0}")]
     Store(String),
+
+    /// iter63-followups.md Item 2 #5 — the witness handler exceeded
+    /// the bounded `WITNESS_HANDLER_TIMEOUT_SECS` window. The kernel
+    /// emits `WitnessHandlerTimeout` and returns this error so the
+    /// caller frees the dispatcher slot for other gate evaluations.
+    /// Pinned by `INV-WITNESS-HANDLER-BOUNDED-01`.
+    #[error("witness handler exceeded {WITNESS_HANDLER_TIMEOUT_SECS}s bound")]
+    HandlerTimedOut,
 }
+
+/// iter63-followups.md Item 2 #5 — bounded handler budget.
+/// The witness handler’s entire body MUST complete within this
+/// many seconds for any well-formed submission, so a slow blob
+/// write cannot stall the dispatcher and starve other gate
+/// evaluations. Pinned by `INV-WITNESS-HANDLER-BOUNDED-01`.
+pub const WITNESS_HANDLER_TIMEOUT_SECS: u64 = 5;
+
+/// iter63-followups.md Item 1 (D) — reserved key in
+/// `WitnessSubmission.body` for the kernel’s policy-declared
+/// operator hints. The verifier MUST NOT set this key; if it
+/// does, the kernel rejects the submission with
+/// `SpoofedOperatorHints` and emits
+/// `WitnessOperatorHintSpoofingDetected`.
+pub const WITNESS_BODY_OPERATOR_HINTS_KEY: &str = "operator_hints";
 
 // ---------------------------------------------------------------------------
 // handle — public entry point
@@ -151,6 +191,118 @@ pub async fn handle(
     sub: WitnessSubmission,
     ctx: &HandlerContext,
 ) -> Result<WitnessAck, HandlerError> {
+    // iter63-followups.md Item 2 #5 — bounded handler timeout.
+    // Wraps the entire inner handle path in a 5-second budget so a
+    // slow blob write cannot stall other gate evaluations. On timeout
+    // we emit `WitnessHandlerTimeout` and return a typed error to the
+    // caller; the dispatcher frees its slot. Pinned by
+    // `INV-WITNESS-HANDLER-BOUNDED-01`.
+    let task_id_for_audit = sub.task_id.as_str().to_owned();
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(WITNESS_HANDLER_TIMEOUT_SECS),
+        handle_inner(sub, ctx),
+    )
+    .await
+    {
+        Ok(result) => result,
+        Err(_elapsed) => {
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::WitnessHandlerTimeout {
+                    task_id: Some(task_id_for_audit.clone()),
+                    budget_seconds: WITNESS_HANDLER_TIMEOUT_SECS,
+                },
+                None,
+                Some(&task_id_for_audit),
+                None,
+            );
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"WitnessHandlerTimeout\",\
+                 \"task_id\":\"{task_id_for_audit}\",\
+                 \"budget_seconds\":{WITNESS_HANDLER_TIMEOUT_SECS}}}",
+            );
+            Err(HandlerError::HandlerTimedOut)
+        }
+    }
+}
+
+/// Inner witness-submission processing. Wrapped in `handle()` for the
+/// iter63 bounded 5-second handler budget
+/// (`INV-WITNESS-HANDLER-BOUNDED-01`). All earlier handler
+/// invariants (single-transaction Pattern C commit,
+/// blob-before-tx ordering, spawn_blocking discipline) continue to
+/// apply here.
+async fn handle_inner(
+    mut sub: WitnessSubmission,
+    ctx: &HandlerContext,
+) -> Result<WitnessAck, HandlerError> {
+    // iter63-followups.md Item 1 (D) — operator-hint spoofing
+    // detection + echo. Run BEFORE blob hashing so the body bytes
+    // we hash + persist already include the kernel-supplied
+    // `operator_hints` value (the verifier never sees this
+    // mutation, but the witness-as-stored is the canonical
+    // surface for reviewer inspection and the body hash is what
+    // gets used everywhere downstream).
+    //
+    // Rules:
+    //   * If the verifier’s body is a JSON object AND already
+    //     contains the reserved key, REJECT and emit the spoofing
+    //     audit row. Token is NOT consumed.
+    //   * If the verifier’s body is a JSON object and the gate
+    //     has policy-declared hints, inject the policy hints under
+    //     the reserved key. The kernel is the only source of truth
+    //     for what the operator declared — we never trust the
+    //     verifier to echo hints back faithfully.
+    //   * If the body is not a JSON object, hints are not injected
+    //     today (operators relying on hints in this gate-type
+    //     should structure their verifier to emit an object body).
+    //     TODO(iter64): decide on operator-hints surfacing for
+    //     non-Object witness bodies.
+    if let serde_json::Value::Object(map) = &sub.body {
+        if map.contains_key(WITNESS_BODY_OPERATOR_HINTS_KEY) {
+            // Spoofing attempt — emit audit + reject. Token not
+            // consumed (we have not validated it yet).
+            let _ = ctx.audit.emit(
+                raxis_audit_tools::AuditEventKind::WitnessOperatorHintSpoofingDetected {
+                    task_id: sub.task_id.as_str().to_owned(),
+                    gate_type: sub.gate_type.as_str().to_owned(),
+                },
+                None,
+                Some(sub.task_id.as_str()),
+                None,
+            );
+            eprintln!(
+                "{{\"level\":\"warn\",\"event\":\"WitnessOperatorHintSpoofingDetected\",\
+                 \"task_id\":\"{}\",\"gate_type\":\"{}\"}}",
+                sub.task_id.as_str(),
+                sub.gate_type.as_str(),
+            );
+            return Ok(WitnessAck::Rejected {
+                reason: WitnessRejectionReason::SpoofedOperatorHints,
+            });
+        }
+    }
+
+    // Look up the gate’s policy-declared hints. Empty if the gate is
+    // not declared in policy (e.g. integration-merge verifiers whose
+    // hints are echoed via a separate channel) or if the operator
+    // declared no hints.
+    let policy_hints = lookup_policy_hints(sub.gate_type.as_str(), ctx);
+    if !policy_hints.is_empty() {
+        if let serde_json::Value::Object(ref mut map) = sub.body {
+            // Convert the BTreeMap into a JSON object value. Order
+            // is preserved by the BTreeMap (lex by key).
+            let mut obj = serde_json::Map::with_capacity(policy_hints.len());
+            for (k, v) in &policy_hints {
+                obj.insert(k.clone(), v.clone());
+            }
+            map.insert(
+                WITNESS_BODY_OPERATOR_HINTS_KEY.to_owned(),
+                serde_json::Value::Object(obj),
+            );
+        }
+        // Non-Object body: see TODO(iter64) above.
+    }
+
     // Hash the raw JSON body bytes to get the content-address for the blob.
     // Pure compute — no SQL, runs on the async thread.
     let body_bytes = serde_json::to_vec(&sub.body).unwrap_or_default();
@@ -571,6 +723,33 @@ fn resolve_worktree_root(task_row: &TaskRowData, ctx: &HandlerContext) -> PathBu
     ctx.data_dir.clone()
 }
 
+/// iter63-followups.md Item 1 (D) — resolve the policy-declared
+/// operator hints for the `(gate_type)` pair. Returns an owned
+/// `BTreeMap` so callers can mutate the witness body in place
+/// without holding a borrow against `PolicyBundle`.
+///
+/// The kernel ALWAYS reads the hints from the policy snapshot,
+/// never from the verifier’s claimed body — that’s the
+/// `INV-WITNESS-OPERATOR-HINTS-ECHOED-01` guarantee.
+///
+/// Returns empty when:
+///   * The gate isn’t declared in `[[gates]]` (e.g. integration-
+///     merge verifiers route through `[[integration_merge_verifiers]]`
+///     instead; their hints surface via a different code path).
+///   * The gate is declared but its `hints` table is empty.
+fn lookup_policy_hints(
+    gate_type: &str,
+    ctx: &HandlerContext,
+) -> std::collections::BTreeMap<String, serde_json::Value> {
+    let policy = ctx.policy.load();
+    policy
+        .gates()
+        .iter()
+        .find(|g| g.gate_type == gate_type)
+        .map(|g| g.hints.clone())
+        .unwrap_or_default()
+}
+
 fn map_result_class(rc: raxis_types::WitnessResultClass) -> ResultClass {
     match rc {
         raxis_types::WitnessResultClass::Pass => ResultClass::Pass,
@@ -606,6 +785,65 @@ mod tests {
             }
             _ => panic!("wrong variant"),
         }
+    }
+
+    /// iter63-followups.md Item 1 (D) —
+    /// `INV-WITNESS-OPERATOR-HINT-SPOOFING-REJECTED-01` rejection
+    /// reason is a typed wire variant with a stable shape so the
+    /// dashboard/operator can route on it.
+    #[test]
+    fn spoofed_operator_hints_reason_is_distinct_wire_variant() {
+        let reason = WitnessRejectionReason::SpoofedOperatorHints;
+        let other = WitnessRejectionReason::TaskNotGatesPending {
+            current_state: "GatesPending".to_owned(),
+        };
+        assert_ne!(reason, other);
+        let ack = WitnessAck::Rejected {
+            reason: WitnessRejectionReason::SpoofedOperatorHints,
+        };
+        match ack {
+            WitnessAck::Rejected { reason } => {
+                assert!(matches!(reason, WitnessRejectionReason::SpoofedOperatorHints));
+            }
+            _ => panic!("wrong variant"),
+        }
+    }
+
+    /// iter63-followups.md Item 2 #3 —
+    /// `WitnessRejectionReason::TimeBudgetExhausted` is a typed
+    /// rejection so the gate-evaluation orchestrator can fail the
+    /// gate uniformly when a budget-exhausted task races a witness
+    /// through.
+    #[test]
+    fn time_budget_exhausted_reason_is_distinct_wire_variant() {
+        let reason = WitnessRejectionReason::TimeBudgetExhausted;
+        let other = WitnessRejectionReason::SpoofedOperatorHints;
+        assert_ne!(reason, other);
+    }
+
+    /// iter63-followups.md Item 2 #5 — the bounded-handler
+    /// budget MUST be 5 seconds (pinned by
+    /// `INV-WITNESS-HANDLER-BOUNDED-01`).
+    #[test]
+    fn witness_handler_timeout_constant_is_pinned_at_5_seconds() {
+        assert_eq!(WITNESS_HANDLER_TIMEOUT_SECS, 5);
+    }
+
+    /// iter63-followups.md Item 1 (D) — the reserved key is the
+    /// stable wire string `"operator_hints"`.
+    #[test]
+    fn witness_body_operator_hints_key_is_pinned() {
+        assert_eq!(WITNESS_BODY_OPERATOR_HINTS_KEY, "operator_hints");
+    }
+
+    /// `HandlerError::HandlerTimedOut` carries the configured
+    /// budget seconds in its display surface for operator
+    /// triage.
+    #[test]
+    fn handler_error_timed_out_displays_budget_seconds() {
+        let err = HandlerError::HandlerTimedOut;
+        let msg = err.to_string();
+        assert!(msg.contains("5s"), "got: {msg}");
     }
 
     #[test]
